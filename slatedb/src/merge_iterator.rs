@@ -58,8 +58,13 @@ impl Ord for MergeIteratorHeapEntry<'_> {
 }
 
 pub(crate) struct MergeIterator<'a> {
+    /// The current entry popped from the heap.
     current: Option<MergeIteratorHeapEntry<'a>>,
+    /// Use a heap to perform merge sort.
     iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>,
+    /// Whether to deduplicate entries of multiple versions with the same key. It's enabled by
+    /// default, but it is useful to disable when we want to have some merge logics during
+    /// compaction.
     dedup: bool,
 }
 
