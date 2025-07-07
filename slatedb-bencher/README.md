@@ -1,7 +1,7 @@
 # SlateDB Benchmarking Tool
 
-Bencher is a tool for benchmarking SlateDB. The tool currently has only one
-subcommand: `db`.
+Bencher is a tool for benchmarking SlateDB. The tool currently has two
+subcommands: `db` and `compaction`.
 
 ## `db` Subcommand
 

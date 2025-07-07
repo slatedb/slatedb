@@ -30,6 +30,8 @@ log = { workspace = true, features = ["std"] }
 lz4_flex = { workspace = true, optional = true }
 moka = { workspace = true, features = ["future"], optional = true }
 object_store = { workspace = true }
+object_store_opendal = { workspace = true, optional = true }
+opendal = { workspace = true, optional = true }
 once_cell = { workspace = true }
 ouroboros = { workspace = true }
 parking_lot = { workspace = true }
@@ -73,6 +75,7 @@ aws = ["object_store/aws"]
 azure = ["object_store/azure"]
 bencher = ["aws", "azure", "wal_disable", "foyer"]
 compression = ["snappy"]
+opendal = ["dep:opendal", "dep:object_store_opendal"]
 snappy = ["dep:snap"]
 zlib = ["dep:flate2"]
 lz4 = ["dep:lz4_flex"]
