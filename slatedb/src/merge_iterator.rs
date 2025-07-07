@@ -379,4 +379,31 @@ mod tests {
         )
         .await;
     }
+
+    #[tokio::test]
+    async fn test_dedup_disabled() {
+        let iter1 = TestIterator::new()
+            .with_entry(b"key1", b"value1", 1)
+            .with_entry(b"key2", b"value2", 2);
+        let iter2 = TestIterator::new()
+            .with_entry(b"key1", b"value1_updated", 3)
+            .with_entry(b"key3", b"value3", 4);
+
+        let mut merge_iter = MergeIterator::new([iter1, iter2])
+            .await
+            .unwrap()
+            .with_dedup(false);
+
+        // With dedup disabled, should return all entries in order
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"key1", b"value1", 1), // first occurrence
+                RowEntry::new_value(b"key1", b"value1_updated", 3), // second occurrence
+                RowEntry::new_value(b"key2", b"value2", 2),
+                RowEntry::new_value(b"key3", b"value3", 4),
+            ],
+        )
+        .await;
+    }
 }
