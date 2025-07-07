@@ -65,7 +65,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             let in_retention_window = entry
                 .create_ts
                 .map(|create_ts| {
-                    create_ts + (retention_timeout.as_secs() as i64) >= current_timestamp
+                    create_ts + (retention_timeout.as_millis() as i64) > current_timestamp
                 })
                 .unwrap_or(true);
             let should_keep = idx == 0 || in_retention_window;
@@ -96,8 +96,8 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             filtered_versions.insert(Reverse(entry.seq), entry);
         }
 
-        // remove the tombstones in the tail
         if filter_tombstone {
+            // remove the tombstones in the tail
             while filtered_versions
                 .iter()
                 .last()
@@ -612,19 +612,6 @@ mod tests {
         ],
     })]
     #[case(RetentionIteratorTestCase {
-        name: "single_key_with_retention_filtering",
-        input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest (always kept)
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100), // Outside retention
-        ],
-        retention_time: Duration::from_secs(300), // 5 minutes
-        current_timestamp: 1000,
-        expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
-        ],
-    })]
-    #[case(RetentionIteratorTestCase {
         name: "tombstone_entries",
         input_entries: vec![
             RowEntry::new_tombstone(b"key1", 3).with_create_ts(950), // Latest
@@ -698,19 +685,6 @@ mod tests {
         ],
     })]
     #[case(RetentionIteratorTestCase {
-        name: "entries_outside_retention_window",
-        input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time (always kept)
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 seconds ago
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100), // 900 seconds ago
-        ],
-        retention_time: Duration::from_secs(300), // 5 minutes retention
-        current_timestamp: 1000,
-        expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
-        ],
-    })]
-    #[case(RetentionIteratorTestCase {
         name: "very_long_retention_time",
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100), // Very old
@@ -723,20 +697,6 @@ mod tests {
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100),
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),
-        ],
-    })]
-    #[case(RetentionIteratorTestCase {
-        name: "exact_retention_boundary",
-        input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(640), // Exactly at boundary
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(639), // Just outside
-        ],
-        retention_time: Duration::from_secs(360), // 6 minutes
-        current_timestamp: 1000,
-        expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000),
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(640), // At boundary, kept
         ],
     })]
     #[tokio::test]

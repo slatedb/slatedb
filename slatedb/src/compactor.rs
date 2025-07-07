@@ -657,6 +657,11 @@ mod tests {
         let mut options = db_options(Some(compactor_options()));
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
+        options
+            .compactor_options
+            .as_mut()
+            .unwrap()
+            .retention_timeout = Duration::from_secs(0);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
