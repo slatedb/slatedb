@@ -174,7 +174,7 @@ impl TokioCompactionExecutorInner {
         let mut output_ssts = Vec::new();
         let mut current_writer = self
             .table_store
-            .table_writer(SsTableId::Compacted(self.rand.thread_rng().gen_ulid()));
+            .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid()));
         let mut current_size = 0usize;
         let mut total_bytes_processed = 0u64;
         let mut last_progress_report = self.clock.now();
@@ -236,7 +236,7 @@ impl TokioCompactionExecutorInner {
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store
-                        .table_writer(SsTableId::Compacted(self.rand.thread_rng().gen_ulid())),
+                        .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid())),
                 );
                 output_ssts.push(finished_writer.close().await?);
                 self.stats.bytes_compacted.add(current_size as u64);

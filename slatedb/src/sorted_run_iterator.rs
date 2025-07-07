@@ -162,7 +162,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use proptest::test_runner::TestRng;
-    use rand::distributions::uniform::SampleRange;
+    use rand::distr::uniform::SampleRange;
     use rand::Rng;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -388,7 +388,7 @@ mod tests {
 
         let mut rng = proptest_util::rng::new_test_rng(None);
         let table = sample::table(&mut rng, 400, 10);
-        let max_entries_per_sst = 20;
+        let max_entries_per_sst = 20u64;
         let entries_per_sst = 1..max_entries_per_sst;
         let sr =
             build_sorted_run_from_table(&table, table_store.clone(), entries_per_sst, &mut rng)
@@ -403,16 +403,16 @@ mod tests {
         .unwrap();
         let mut table_iter = table.iter();
         loop {
-            let skip = rng.gen::<usize>() % (max_entries_per_sst * 2);
-            let run = rng.gen::<usize>() % (max_entries_per_sst * 2);
+            let skip = rng.random::<u64>() % (max_entries_per_sst * 2);
+            let run = rng.random::<u64>() % (max_entries_per_sst * 2);
 
-            let Some((k, _)) = table_iter.nth(skip) else {
+            let Some((k, _)) = table_iter.nth(skip as usize) else {
                 break;
             };
             let seek_key = increment_length(k);
             sr_iter.seek(&seek_key).await.unwrap();
 
-            for (key, value) in table_iter.by_ref().take(run) {
+            for (key, value) in table_iter.by_ref().take(run as usize) {
                 let kv = sr_iter.next().await.unwrap().unwrap();
                 assert_eq!(*key, kv.key);
                 assert_eq!(*value, kv.value);
@@ -426,7 +426,7 @@ mod tests {
         buf.freeze()
     }
 
-    async fn build_sorted_run_from_table<R: SampleRange<usize> + Clone>(
+    async fn build_sorted_run_from_table<R: SampleRange<u64> + Clone>(
         table: &BTreeMap<Bytes, Bytes>,
         table_store: Arc<TableStore>,
         entries_per_sst: R,
@@ -435,10 +435,10 @@ mod tests {
         let mut ssts = Vec::new();
         let mut entries = table.iter();
         loop {
-            let sst_len = rng.gen_range(entries_per_sst.clone());
+            let sst_len = rng.random_range(entries_per_sst.clone());
             let mut builder = table_store.table_builder();
 
-            let sst_kvs: Vec<(&Bytes, &Bytes)> = entries.by_ref().take(sst_len).collect();
+            let sst_kvs: Vec<(&Bytes, &Bytes)> = entries.by_ref().take(sst_len as usize).collect();
             if sst_kvs.is_empty() {
                 break;
             }

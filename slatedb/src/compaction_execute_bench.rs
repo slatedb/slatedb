@@ -76,7 +76,7 @@ impl CompactionExecuteBench {
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
-        self.rand.thread_rng().fill_bytes(key_start.as_mut_slice());
+        self.rand.rng().fill_bytes(key_start.as_mut_slice());
         let mut futures = FuturesUnordered::<JoinHandle<Result<(), SlateDBError>>>::new();
         for i in 0..num_ssts {
             while futures.len() >= 4 {
@@ -158,7 +158,7 @@ impl CompactionExecuteBench {
         let mut sst_writer = table_store.table_writer(CompactionExecuteBench::sst_id(i));
         for _ in 0..num_keys {
             let mut val = vec![0u8; val_bytes];
-            rand.thread_rng().fill_bytes(val.as_mut_slice());
+            rand.rng().fill_bytes(val.as_mut_slice());
             let key = key_gen.next();
             let row_entry = RowEntry::new(key, ValueDeletable::Value(val.into()), 0, None, None);
             sst_writer.add(row_entry).await?;
@@ -233,7 +233,7 @@ impl CompactionExecuteBench {
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
         Ok(CompactionJob {
-            id: rand.thread_rng().gen_uuid(),
+            id: rand.rng().gen_uuid(),
             destination: 0,
             ssts,
             sorted_runs: vec![],
@@ -266,7 +266,7 @@ impl CompactionExecuteBench {
             .collect();
         info!("loaded compaction job");
         CompactionJob {
-            id: rand.thread_rng().gen_uuid(),
+            id: rand.rng().gen_uuid(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,

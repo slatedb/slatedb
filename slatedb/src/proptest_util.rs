@@ -194,8 +194,8 @@ pub(crate) mod rng {
 
     pub(crate) fn new_test_rng(seed: Option<[u8; 32]>) -> TestRng {
         let seed = seed.unwrap_or_else(|| {
-            let mut thread_rng = rand::thread_rng();
-            let random_bytes: [u8; 32] = thread_rng.gen();
+            let mut thread_rng = rand::rng();
+            let random_bytes: [u8; 32] = thread_rng.random();
             random_bytes
         });
         TestRng::from_seed(RngAlgorithm::ChaCha, &seed)
@@ -216,7 +216,7 @@ pub(crate) mod sample {
     use crate::{bytes_range, test_utils};
     use bytes::{BufMut, Bytes, BytesMut};
     use proptest::test_runner::TestRng;
-    use rand::distributions::uniform::SampleRange;
+    use rand::distr::uniform::SampleRange;
     use rand::prelude::SliceRandom;
     use rand::Rng;
     use std::cmp::max;
@@ -225,10 +225,10 @@ pub(crate) mod sample {
     use std::ops::{Bound, RangeBounds};
 
     pub(crate) fn bytes<T: SampleRange<usize>>(rng: &mut TestRng, len_range: T) -> Bytes {
-        let len = rng.gen_range(len_range);
+        let len = rng.random_range(len_range);
         let mut v: Vec<u8> = Vec::with_capacity(len);
         for _ in 0..len {
-            v.push(rng.gen());
+            v.push(rng.random());
         }
         v.into()
     }
@@ -257,7 +257,7 @@ pub(crate) mod sample {
         let mut res = BytesMut::new();
         let mut start_bound_satisfied = false;
         let mut end_bound_satisfied = false;
-        let min_len = rng.gen_range(0..=start.len());
+        let min_len = rng.random_range(0..=start.len());
 
         for i in 0..start.len() {
             let next_val_lb = if !start_bound_satisfied {
@@ -275,7 +275,7 @@ pub(crate) mod sample {
                 next_val_lb
             } else {
                 let next_bound_range_diff = next_val_ub - next_val_lb;
-                next_val_lb + (rng.gen::<u8>() % next_bound_range_diff)
+                next_val_lb + (rng.random::<u8>() % next_bound_range_diff)
             };
             res.put_u8(next_val);
 
@@ -343,7 +343,7 @@ pub(crate) mod sample {
             Excluded(len) => len - 1,
         };
 
-        let len = rng.gen_range(min_len..=max_len);
+        let len = rng.random_range(min_len..=max_len);
         Bytes::from(vec![u8::MIN; len])
     }
 
