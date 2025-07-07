@@ -161,7 +161,9 @@ impl TokioCompactionExecutorInner {
         }
         let sr_merge_iter = MergeIterator::new(sr_iters).await?.with_dedup(false);
 
-        let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter]).await?;
+        let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])
+            .await?
+            .with_dedup(false);
         let retention_iter = RetentionIterator::new(
             merge_iter,
             self.options.retention_timeout,
