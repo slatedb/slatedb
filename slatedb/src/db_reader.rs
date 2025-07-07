@@ -172,7 +172,7 @@ impl DbReaderInner {
                 lifetime: Some(options.checkpoint_lifetime),
                 ..CheckpointOptions::default()
             };
-            let checkpoint_id = rand.thread_rng().gen_uuid();
+            let checkpoint_id = rand.rng().gen_uuid();
             manifest.write_checkpoint(checkpoint_id, &options).await?
         };
         Ok(checkpoint)
@@ -219,7 +219,7 @@ impl DbReaderInner {
             lifetime: Some(self.options.checkpoint_lifetime),
             ..CheckpointOptions::default()
         };
-        let new_checkpoint_id = self.rand.thread_rng().gen_uuid();
+        let new_checkpoint_id = self.rand.rng().gen_uuid();
         stored_manifest
             .replace_checkpoint(current_checkpoint_id, new_checkpoint_id, &options)
             .await

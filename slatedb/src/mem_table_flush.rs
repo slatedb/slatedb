@@ -45,7 +45,7 @@ impl MemtableFlusher {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().manifest.clone()
         };
-        let id = self.db_inner.rand.thread_rng().gen_uuid();
+        let id = self.db_inner.rand.rng().gen_uuid();
         let checkpoint = self.manifest.new_checkpoint(id, options)?;
         let manifest_id = checkpoint.manifest_id;
         dirty.core.checkpoints.push(checkpoint);
@@ -104,7 +104,7 @@ impl MemtableFlusher {
                 rguard.state().imm_memtable.back().cloned()
             }
         } {
-            let id = SsTableId::Compacted(self.db_inner.rand.thread_rng().gen_ulid());
+            let id = SsTableId::Compacted(self.db_inner.rand.rng().gen_ulid());
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)

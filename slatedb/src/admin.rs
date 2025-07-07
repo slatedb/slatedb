@@ -182,7 +182,7 @@ impl Admin {
             .validate_no_wal_object_store_configured()
             .await?;
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
-        let checkpoint_id = self.rand.thread_rng().gen_uuid();
+        let checkpoint_id = self.rand.rng().gen_uuid();
         let checkpoint = stored_manifest
             .write_checkpoint(checkpoint_id, options)
             .await?;

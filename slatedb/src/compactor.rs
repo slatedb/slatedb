@@ -337,7 +337,7 @@ impl CompactorEventHandler {
     async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
         // write the checkpoint first so that it points to the manifest with the ssts
         // being removed
-        let checkpoint_id = self.rand.thread_rng().gen_uuid();
+        let checkpoint_id = self.rand.rng().gen_uuid();
         self.manifest
             .write_checkpoint(
                 checkpoint_id,
@@ -470,7 +470,7 @@ impl CompactorEventHandler {
 
     #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
     async fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
-        let id = self.rand.thread_rng().gen_uuid();
+        let id = self.rand.rng().gen_uuid();
         tracing::Span::current().record("id", tracing::field::display(&id));
         let result = self.state.submit_compaction(id, compaction.clone());
         match result {
