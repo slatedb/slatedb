@@ -71,7 +71,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 .unwrap_or(false);
             let should_keep = idx == 0 || in_retention_window;
             if !should_keep {
-                continue;
+                break;
             }
 
             // filter out any expired entries -- eventually we can consider
@@ -640,27 +640,23 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2), // No create_ts
             RowEntry::new_value(b"key1", b"value1", 1), // No create_ts
         ],
-        retention_time: Duration::from_secs(3600), // 1 hour
+        retention_time: Duration::from_secs(3600),
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3),
-            RowEntry::new_value(b"key1", b"value2", 2),
-            RowEntry::new_value(b"key1", b"value1", 1),
         ],
     })]
     #[case(RetentionIteratorTestCase {
         name: "mixed_create_ts_presence",
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // With create_ts
-            RowEntry::new_value(b"key1", b"value2", 2),                     // No create_ts
+            RowEntry::new_value(b"key1", b"value2", 2), // No create_ts
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // Outside retention
         ],
-        retention_time: Duration::from_secs(3600), // 1 hour
+        retention_time: Duration::from_secs(3600),
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
-            RowEntry::new_value(b"key1", b"value2", 2), // No create_ts, always kept
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
         ],
     })]
     #[case(RetentionIteratorTestCase {
