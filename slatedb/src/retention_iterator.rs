@@ -276,32 +276,24 @@ impl RetentionBuffer {
     /// This method handles key transitions by detecting when a new key is encountered.
     /// It maintains the invariant that all versions of the current key are collected
     /// before moving to the next key.
-    ///
-    /// # Arguments
-    /// * `entry` - The row entry to add to the buffer
-    ///
-    /// # Returns
-    /// - `true` if the entry has the same key as current versions (or current versions are empty)
-    /// - `false` if the key is different, indicating a key transition
-    fn push(&mut self, entry: RowEntry) -> bool {
+    fn push(&mut self, entry: RowEntry) {
         let current_key = match self.current_versions.values().next() {
             Some(entry) => entry.key.clone(),
             None => {
                 // If current versions are empty, this is the first entry
                 self.current_versions.insert(Reverse(entry.seq), entry);
-                return true;
+                return;
             }
         };
 
         // Different key detected - store as next entry and signal key transition
         if entry.key != current_key {
             self.next_entry = Some(entry);
-            return false;
+            return;
         }
 
         // Same key - append to current versions
         self.current_versions.insert(Reverse(entry.seq), entry);
-        true
     }
 
     /// Applies retention filtering to the collected versions
