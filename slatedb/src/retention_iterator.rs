@@ -49,10 +49,10 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
 
     /// Applies retention filtering to a collection of versions for the same key
     ///
-    /// This function implements the core retention logic:
-    /// - Always preserves the latest version (highest sequence number)
-    /// - Filters out older versions that exceed the retention period
-    /// - Uses `create_ts` to determine if a version should be retained
+    /// This function implements the following retention logic:
+    ///
+    /// - Filters out older versions that exceed the retention period, but keep the latest version (unless tombstone is filtered out)
+    /// - Transform expired entries into tombstones, and recycle the tombstones in the tail if filter_tombstone is true.
     fn apply_retention_filter(
         versions: BTreeMap<Reverse<u64>, RowEntry>,
         current_timestamp: i64,
