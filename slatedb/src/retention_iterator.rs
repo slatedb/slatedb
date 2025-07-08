@@ -71,6 +71,9 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 .unwrap_or(false);
             let should_keep = idx == 0 || in_retention_window;
             if !should_keep {
+                // if an entry is filtered out in retention, we should not
+                // continue have the earlier versions of the same key still
+                // included in the iterator.
                 break;
             }
 
