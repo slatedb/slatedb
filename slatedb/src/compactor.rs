@@ -831,8 +831,10 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        // should be tombstone for key 'a' because it was filtered
-        // out of the last run
+        // should be tombstone for key 'a', it should not be filtered out
+        // because there're still earlier versions of the key in the SST.
+        // when the tombstone is recycled, it should be the the earliest
+        // version of the key, and at the bottom tier of the SST.
         let next = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(next.key.as_ref(), &[b'a'; 16]);
         assert!(next.value.is_tombstone());
