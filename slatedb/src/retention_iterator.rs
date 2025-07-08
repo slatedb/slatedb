@@ -328,8 +328,7 @@ impl RetentionBuffer {
                     None
                 } else {
                     // No next entry but not at end of input - this shouldn't happen
-                    // but we need to handle it gracefully
-                    None
+                    unreachable!("No next entry but not at end of input - this shouldn't happen");
                 }
             }
         }
