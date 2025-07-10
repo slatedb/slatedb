@@ -68,7 +68,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 .map(|create_ts| {
                     create_ts + (retention_timeout.as_millis() as i64) > current_timestamp
                 })
-                .unwrap_or(false);
+                .expect("a record with no create_ts should not happen");
             let should_keep = idx == 0 || in_retention_window;
             if !should_keep {
                 // if an entry is filtered out in retention, we should not
