@@ -93,6 +93,18 @@ def test_scan(db):
     assert list(db.scan(b"key1", None)) == [(b"key1", b"value1")]
     assert list(db.scan(b"key")) == [(b"key1", b"value1"), (b"key2", b"value2"), (b"key3", b"value3")]
 
+def test_scan_iterator(db):
+    """Test scan iterator."""
+    db.put(b"key1", b"value1")
+    db.put(b"key2", b"value2")
+    db.put(b"key3", b"value3")
+    iterator = db.scan_iter(b"key1", b"key4")
+    assert next(iterator) == (b"key1", b"value1")
+    assert next(iterator) == (b"key2", b"value2")
+    assert next(iterator) == (b"key3", b"value3")
+    with pytest.raises(StopIteration):
+        next(iterator)
+
 def test_invalid_inputs(db):
     """Test invalid inputs."""
     with pytest.raises(TypeError):
