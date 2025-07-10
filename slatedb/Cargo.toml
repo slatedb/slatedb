@@ -1,0 +1,94 @@
+[package]
+name = "slatedb"
+description = "A cloud native embedded storage engine built on object storage."
+readme = "../README.md"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+atomic = { workspace = true }
+bitflags = { workspace = true }
+bytemuck = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
+chrono = { workspace = true, features = ["serde"] }
+crc32fast = { workspace = true }
+crossbeam-channel = { workspace = true }
+crossbeam-skiplist = { workspace = true }
+dotenvy = { workspace = true }
+duration-str = { workspace = true, features = ["serde", "time"], default-features = false }
+fail-parallel = { workspace = true }
+figment = { workspace = true, features = ["env", "json", "toml", "yaml"] }
+flate2 = { workspace = true, optional = true }
+flatbuffers = { workspace = true }
+foyer = { workspace = true, features = ["serde"], optional = true }
+futures = { workspace = true }
+log = { workspace = true, features = ["std"] }
+lz4_flex = { workspace = true, optional = true }
+moka = { workspace = true, features = ["future"], optional = true }
+object_store = { workspace = true }
+object_store_opendal = { workspace = true, optional = true }
+opendal = { workspace = true, optional = true }
+once_cell = { workspace = true }
+ouroboros = { workspace = true }
+parking_lot = { workspace = true }
+radix_trie = { workspace = true }
+rand = { workspace = true }
+rand_xorshift = { workspace = true }
+rand_xoshiro = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+siphasher = { workspace = true }
+snap = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
+tracing = { workspace = true, features = ["log"] }
+ulid = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+walkdir = { workspace = true }
+zstd = { workspace = true, optional = true }
+tokio-util = { workspace = true, default-features = false, features = ["rt"] }
+thread_local = { workspace = true }
+
+[dev-dependencies]
+bincode = { workspace = true }
+criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
+ctor = { workspace = true }
+fail-parallel = { workspace = true, features = ["failpoints"] }
+figment = { workspace = true, features = ["test"] }
+filetime = { workspace = true }
+insta = { workspace = true }
+pprof = { workspace = true, features = ["criterion", "protobuf-codec"] }
+proptest = { workspace = true }
+rstest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-test = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+[features]
+default = ["aws", "foyer"]
+aws = ["object_store/aws"]
+azure = ["object_store/azure"]
+bencher = ["aws", "azure", "wal_disable", "foyer"]
+compression = ["snappy"]
+opendal = ["dep:opendal", "dep:object_store_opendal"]
+snappy = ["dep:snap"]
+zlib = ["dep:flate2"]
+lz4 = ["dep:lz4_flex"]
+zstd = ["dep:zstd"]
+wal_disable = []
+moka = ["dep:moka"]
+foyer = ["dep:foyer"]
+
+[lib]
+# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
+# See https://bheisler.github.io/criterion.rs/book/faq.html
+bench = false
+
+[[bench]]
+name = "db_operations"
+harness = false

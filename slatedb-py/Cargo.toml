@@ -1,0 +1,24 @@
+[package]
+name = "slatedb-py"
+description = "A Python binding for SlateDB"
+publish = false
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "slatedb"
+crate-type = ["cdylib"]
+doc = false
+
+[dependencies]
+# See .cargo/config.toml for details on why pyo3/extension-module is only
+# enabled on non-macOS and non-iOS targets.
+pyo3 = { workspace = true }
+pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
+slatedb = { workspace = true }
+once_cell = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
+uuid = { workspace = true, features = ["v4", "serde"] }

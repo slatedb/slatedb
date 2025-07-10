@@ -2,3 +2,10 @@
 .DS_Store
 .idea
 .env
+proptest-regressions/
+tmp
+.vscode
+
+*.pyc
+*.so
+slatedb-py/dist

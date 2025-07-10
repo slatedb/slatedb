@@ -11,6 +11,16 @@ on:
 env:
   RUSTFLAGS: "-Dwarnings"
 
+permissions:
+  # Required for PR comments
+  pull-requests: write
+  # Required for storing benchmark results
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -19,7 +29,7 @@ jobs:
       - name: cargo install cargo-hack
         run: cargo +stable install cargo-hack --locked
       - name: cargo check
-        run: cargo hack check --each-feature --no-dev-deps
+        run: cargo hack check --each-feature --no-dev-deps --workspace
 
   clippy:
     runs-on: ubuntu-latest
@@ -28,7 +38,9 @@ jobs:
       - name: cargo install cargo-hack
         run: cargo +stable install cargo-hack --locked
       - name: cargo clippy
-        run: cargo hack clippy --each-feature --no-dev-deps
+        run: |
+          cargo hack clippy --each-feature --no-dev-deps --workspace &&
+          cargo hack clippy --workspace --tests
 
   style:
     runs-on: ubuntu-latest
@@ -36,6 +48,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: cargo fmt
         run: cargo fmt -- --check
+
+  # comment out for now, will added back later after typos-cli intergrated with other tools
+  # typos:
+  #   runs-on: ubuntu-latest
+  #   name: typos
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Check spelling
+  #       uses: crate-ci/typos@master
 
   flatbuffers:
     runs-on: ubuntu-latest
@@ -53,7 +74,7 @@ jobs:
       - name: Generate and validate files
         run: |
           flatc -o tmp/generated --rust --gen-all schemas/manifest.fbs
-          if ! diff -r src/generated/*.rs tmp/generated; then
+          if ! diff -r slatedb/src/generated/*.rs tmp/generated; then
             echo "Generated files do not match!"
             exit 1
           fi
@@ -62,5 +83,66 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.98
+      - name: Install gdb
+        run: sudo apt-get install -y gdb
       - name: Run Tests
-        run: cargo test --all-features --verbose
+        run: cargo nextest run --workspace --all-features --profile ci
+      - name: Run Doc Tests
+        run: cargo test --doc --all-features
+
+  bindings:
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build and install package with test dependencies
+        working-directory: ./slatedb-py
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          maturin develop
+          pip install -e .[test]
+
+      - name: Run Python tests
+        working-directory: ./slatedb-py
+        run: |
+          source .venv/bin/activate
+          pytest -xvs
+
+  microbenchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run benchmark
+        run: cargo bench -- --output-format bencher | tee output.txt
+
+      - name: Download nightly benchmark data
+        uses: actions/cache/restore@v4
+        with:
+          path: ./microbenchmarks-cache
+          key: ${{ runner.os }}-microbenchmarks
+
+      - name: Update benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: cargo bench
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
+          comment-on-alert: true
+          summary-always: true
+          max-items-in-chart: 30

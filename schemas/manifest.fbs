@@ -1,14 +1,52 @@
 include "sst.fbs";
 
 table Uuid {
-   high: uint64;
-   low: uint64;
+    high: uint64;
+    low: uint64;
+}
+
+// Reference to an external database.
+table ExternalDb {
+    // Path to root of the external database
+    path: string (required);
+
+    // Externally owned Checkpoint ID we've used to create an initial state of cloned database.
+    source_checkpoint_id: Uuid (required);
+
+    // Checkpoint ID this database has placed on the external database that prevents referenced
+    // data files from being GC'd. Both final_checkpoint_id and source_checkpoint_id should resolve
+    // to the same manifest_id as long as they both still exist.
+    final_checkpoint_id: Uuid;
+
+    // Compacted SST IDs belonging to external DB that are currently being referenced.
+    sst_ids: [CompactedSstId] (required);
+}
+
+enum BoundType : byte { Unknown = 0, Unbounded, Included, Excluded }
+
+table BytesBound {
+    // Key that represenents the boundary. Might be empty if type is Unbounded.
+    key: [ubyte];
+
+    // Whether the bound is inclusive, exclusive or unbounded.
+    bound_type: BoundType;
+}
+
+table BytesRange {
+    // Start bound of the range.
+    start_bound: BytesBound (required);
+
+    // End bound of the range.
+    end_bound: BytesBound (required);
 }
 
 // Manifest to persist state of DB.
 table ManifestV1 {
     // Id of manifest. Manifest file name will be derived from this id.
     manifest_id: ulong;
+
+    // List of external databases referenced by this manifest.
+    external_dbs: [ExternalDb];
 
     // Flag to indicate whether initialization has finished. When creating the initial manifest for
     // a root db (one that is not a clone), this flag will be set to true. When creating the initial
@@ -22,8 +60,11 @@ table ManifestV1 {
     // The current compactor's epoch.
     compactor_epoch: ulong;
 
-    // The most recent SST in the WAL that's been compacted.
-    wal_id_last_compacted: ulong;
+    // Tracks the most recent SST in the WAL that has been flushed on the last L0 is compacted. When an Immutable 
+    // Memtable (IMM) is flushed to L0, we record the recent flushed WAL ID as `replay_after_wal_id`. During recovery,
+    // we use `replay_after_wal_id + 1` as the starting point for WAL replay, and skip the WAL entries with
+    // smaller `seq` than `last_l0_seq`.
+    replay_after_wal_id: ulong;
 
     // The most recent SST in the WAL at the time manifest was updated.
     wal_id_last_seen: ulong;
@@ -37,11 +78,29 @@ table ManifestV1 {
     // A list of the sorted runs that are valid to read in the `compacted` folder.
     compacted: [SortedRun] (required);
 
-    // The last clock tick
-    last_clock_tick: long;
+    // The last L0 clock tick (the database should restore the latest
+    // tick when recovering from WAL if there are any WAL entries)
+    last_l0_clock_tick: long;
 
     // A list of checkpoints that are currently open.
     checkpoints: [Checkpoint] (required);
+
+    // The last seq number
+    last_l0_seq: ulong;
+
+    // The URI of the object store dedicated specifically for WAL, if any.
+    wal_object_store_uri: string;
+}
+
+table CompactedSstId {
+    high: uint64;
+    low: uint64;
+}
+
+table CompactedSsTable {
+    id: CompactedSstId (required);
+    info: SsTableInfo (required);
+    visible_range: BytesRange;
 }
 
 table SortedRun {
@@ -50,7 +109,7 @@ table SortedRun {
 }
 
 table WriterCheckpoint {
-   epoch: uint64;
+    epoch: uint64;
 }
 
 union CheckpointMetadata { WriterCheckpoint }

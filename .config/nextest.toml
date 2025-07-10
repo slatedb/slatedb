@@ -1,0 +1,11 @@
+experimental = ["wrapper-scripts"]
+
+[profile.ci]
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[scripts.wrapper.backtrace-on-timeout]
+command = "../scripts/backtrace-on-timeout.sh"
+
+[[profile.ci.scripts]]
+filter = "all()"
+run-wrapper = "backtrace-on-timeout"
