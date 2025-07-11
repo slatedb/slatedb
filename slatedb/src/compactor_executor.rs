@@ -228,8 +228,8 @@ impl TokioCompactionExecutorInner {
                 continue;
             }
 
-            current_writer.add(kv).await?;
-            current_size += key_len + value_len;
+            let block_len = current_writer.add(kv).await?;
+            current_size += key_len + block_len;
 
             if current_size > self.options.max_sst_size {
                 current_size = 0;
