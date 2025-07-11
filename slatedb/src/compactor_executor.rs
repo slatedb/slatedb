@@ -214,8 +214,12 @@ impl TokioCompactionExecutorInner {
                 last_progress_report = self.clock.now();
             }
 
-            current_writer.add(kv).await?;
-            current_size += key_len + value_len;
+            if compaction.is_dest_last_run && kv.value.is_tombstone() {
+                continue;
+            }
+
+            let block_len = current_writer.add(kv).await?;
+            current_size += key_len + block_len;
 
             if current_size > self.options.max_sst_size {
                 let finished_writer = mem::replace(
