@@ -584,6 +584,7 @@ mod tests {
                 min_compaction_sources: 1,
                 max_compaction_sources: 999,
                 include_size_threshold: 4.0,
+                ..Default::default()
             },
         ));
         let mut options = db_options(Some(compactor_options()));
@@ -750,6 +751,7 @@ mod tests {
                 min_compaction_sources: 2,
                 max_compaction_sources: 2,
                 include_size_threshold: 4.0,
+                ..Default::default()
             },
         ));
 

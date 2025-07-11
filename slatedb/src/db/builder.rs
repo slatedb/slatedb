@@ -125,6 +125,7 @@ use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
 use crate::config::CompactorOptions;
 use crate::config::GarbageCollectorOptions;
+use crate::config::SizeTieredCompactionSchedulerOptions;
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
@@ -465,7 +466,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
-                .unwrap_or_else(|| Arc::new(SizeTieredCompactionSchedulerSupplier::default()));
+                .unwrap_or_else(|| default_compaction_scheduler_supplier(&compactor_options));
             let cleanup_inner = inner.clone();
             let compactor = Compactor::new(
                 manifest_store.clone(),
@@ -675,7 +676,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     tokio_handle: Handle,
     options: CompactorOptions,
-    scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
     stat_registry: Arc<StatRegistry>,
     cancellation_token: CancellationToken,
@@ -690,7 +691,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             main_object_store,
             tokio_handle: Handle::current(),
             options: CompactorOptions::default(),
-            scheduler_supplier: Arc::new(SizeTieredCompactionSchedulerSupplier::default()),
+            scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
             stat_registry: Arc::new(StatRegistry::new()),
             cancellation_token: CancellationToken::new(),
@@ -736,6 +737,15 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the compaction scheduler supplier to use for the compactor.
+    pub fn with_scheduler_supplier(
+        mut self,
+        scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    ) -> Self {
+        self.scheduler_supplier = Some(scheduler_supplier);
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
@@ -746,15 +756,31 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             path,
             None, // no need for cache in GC
         ));
+
+        let scheduler_supplier = self
+            .scheduler_supplier
+            .unwrap_or_else(|| default_compaction_scheduler_supplier(&self.options));
+
         Compactor::new(
             manifest_store,
             table_store,
             self.options,
-            self.scheduler_supplier,
+            scheduler_supplier,
             self.rand,
             self.stat_registry,
             self.system_clock,
             self.cancellation_token,
         )
     }
+}
+
+fn default_compaction_scheduler_supplier(
+    options: &CompactorOptions,
+) -> Arc<dyn CompactionSchedulerSupplier> {
+    Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+        SizeTieredCompactionSchedulerOptions {
+            max_concurrent_compactions: options.max_concurrent_compactions,
+            ..Default::default()
+        },
+    ))
 }
