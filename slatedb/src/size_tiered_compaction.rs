@@ -8,8 +8,6 @@ use crate::compactor_state::{Compaction, CompactorState, SourceId};
 use crate::config::SizeTieredCompactionSchedulerOptions;
 use crate::db_state::CoreDbState;
 
-const MAX_IN_FLIGHT_COMPACTIONS: usize = 4;
-
 #[derive(Clone)]
 struct CompactionSource {
     source: SourceId,
@@ -178,7 +176,9 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         );
         let mut checker = CompactionChecker::new(conflict_checker, backpressure_checker);
 
-        while state.compactions().len() + compactions.len() < MAX_IN_FLIGHT_COMPACTIONS {
+        while state.compactions().len() + compactions.len()
+            < self.options.max_concurrent_compactions
+        {
             let Some(compaction) = self.pick_next_compaction(&l0, &srs, &checker) else {
                 break;
             };
