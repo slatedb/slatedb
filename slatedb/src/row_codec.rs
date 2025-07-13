@@ -365,6 +365,16 @@ mod tests {
         expire_ts: None,
         first_key: b"unicode".to_vec(),
     })]
+    #[case(CodecTestCase {
+        name: "large key",
+        key_prefix_len: 0,
+        key_suffix: vec![b'k'; 1036269],
+        seq: 1,
+        value: Some(vec![b'x'; 100]),
+        create_ts: None,
+        expire_ts: None,
+        first_key: vec![b'k'; 1036269],
+    })]
     fn test_encode_decode(#[case] test_case: CodecTestCase) {
         let mut encoded_data = Vec::new();
         let codec = SstRowCodecV0 {};
