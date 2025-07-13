@@ -151,10 +151,12 @@ impl KeyValueIterator for SortedRunIterator<'_> {
 mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
+    use crate::db_cache::DbCacheWrapper;
     use crate::db_state::SsTableId;
     use crate::proptest_util;
     use crate::proptest_util::sample;
     use crate::sst::SsTableFormat;
+    use crate::stats::StatRegistry;
     use crate::test_utils::{assert_kv, gen_attrs};
 
     use crate::object_stores::ObjectStores;
@@ -179,7 +181,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
@@ -223,7 +225,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
@@ -275,7 +277,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let mut test_case_key_gen = key_gen.clone();
@@ -319,7 +321,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let mut expected_key_gen = key_gen.clone();
@@ -357,7 +359,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
@@ -383,7 +385,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             SsTableFormat::default(),
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
 
         let mut rng = proptest_util::rng::new_test_rng(None);

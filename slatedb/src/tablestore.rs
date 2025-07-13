@@ -30,8 +30,8 @@ pub struct TableStore {
     path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
-    /// In-memory cache for blocks
-    block_cache: Option<Arc<dyn DbCache>>,
+    // In-memory cache for data blocks, indices and filters.
+    cache: Arc<dyn DbCache>,
 }
 
 struct ReadOnlyObject {
@@ -72,14 +72,14 @@ impl TableStore {
         object_stores: ObjectStores,
         sst_format: SsTableFormat,
         root_path: P,
-        block_cache: Option<Arc<dyn DbCache>>,
+        cache: Arc<dyn DbCache>,
     ) -> Self {
         Self::new_with_fp_registry(
             object_stores,
             sst_format,
             PathResolver::new(root_path),
             Arc::new(FailPointRegistry::new()),
-            block_cache,
+            cache,
         )
     }
 
@@ -88,14 +88,14 @@ impl TableStore {
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
-        block_cache: Option<Arc<dyn DbCache>>,
+        cache: Arc<dyn DbCache>,
     ) -> Self {
         Self {
             object_stores,
             sst_format,
             path_resolver,
             fp_registry,
-            block_cache,
+            cache,
         }
     }
 
@@ -216,34 +216,30 @@ impl TableStore {
                 _ => SlateDBError::from(e),
             })?;
 
-        if let Some(cache) = self.block_cache.as_ref() {
-            if write_cache {
-                for block in encoded_sst.unconsumed_blocks {
-                    let offset = block.offset;
-                    let block = Arc::new(block.block);
-                    cache
-                        .insert((*id, offset).into(), CachedEntry::with_block(block))
-                        .await;
-                }
-                cache
-                    .insert(
-                        (*id, encoded_sst.info.index_offset).into(),
-                        CachedEntry::with_sst_index(Arc::new(encoded_sst.index)),
-                    )
+        if write_cache {
+            for block in encoded_sst.unconsumed_blocks {
+                let offset = block.offset;
+                let block = Arc::new(block.block);
+                self.cache
+                    .insert((*id, offset).into(), CachedEntry::with_block(block))
                     .await;
             }
+            self.cache
+                .insert(
+                    (*id, encoded_sst.info.index_offset).into(),
+                    CachedEntry::with_sst_index(Arc::new(encoded_sst.index)),
+                )
+                .await;
         }
+
         self.cache_filter(*id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
         Ok(SsTableHandle::new(*id, encoded_sst.info))
     }
 
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
-        let Some(cache) = &self.block_cache else {
-            return;
-        };
         if let Some(filter) = filter {
-            cache
+            self.cache
                 .insert((sst, id).into(), CachedEntry::with_bloom_filter(filter))
                 .await;
         }
@@ -315,30 +311,29 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        if let Some(cache) = &self.block_cache {
-            if let Some(filter) = cache
-                .get_filter(&(handle.id, handle.info.filter_offset).into())
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.bloom_filter())
-            {
-                return Ok(Some(filter));
-            }
+        if let Some(filter) = self
+            .cache
+            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap_or(None)
+            .and_then(|e| e.bloom_filter())
+        {
+            return Ok(Some(filter));
         }
+
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
-        if let Some(cache) = &self.block_cache {
-            if let Some(filter) = filter.as_ref() {
-                cache
-                    .insert(
-                        (handle.id, handle.info.filter_offset).into(),
-                        CachedEntry::with_bloom_filter(filter.clone()),
-                    )
-                    .await;
-            }
+        if let Some(filter) = filter.as_ref() {
+            self.cache
+                .insert(
+                    (handle.id, handle.info.filter_offset).into(),
+                    CachedEntry::with_bloom_filter(filter.clone()),
+                )
+                .await;
         }
+
         Ok(filter)
     }
 
@@ -346,28 +341,27 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
-        if let Some(cache) = &self.block_cache {
-            if let Some(index) = cache
-                .get_index(&(handle.id, handle.info.index_offset).into())
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.sst_index())
-            {
-                return Ok(index);
-            }
+        if let Some(index) = self
+            .cache
+            .get_index(&(handle.id, handle.info.index_offset).into())
+            .await
+            .unwrap_or(None)
+            .and_then(|e| e.sst_index())
+        {
+            return Ok(index);
         }
+
         let object_store = self.object_stores.store_for(&handle.id);
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
-        if let Some(cache) = &self.block_cache {
-            cache
-                .insert(
-                    (handle.id, handle.info.index_offset).into(),
-                    CachedEntry::with_sst_index(index.clone()),
-                )
-                .await;
-        }
+        self.cache
+            .insert(
+                (handle.id, handle.info.index_offset).into(),
+                CachedEntry::with_sst_index(index.clone()),
+            )
+            .await;
+
         Ok(index)
     }
 
@@ -407,47 +401,42 @@ impl TableStore {
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
 
-        // If block cache is available, try to retrieve cached blocks
-        if let Some(cache) = &self.block_cache {
-            let index_borrow = index.borrow();
-            // Attempt to get all requested blocks from cache concurrently
-            let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
-                let block_meta = index_borrow.block_meta().get(block_num);
-                let offset = block_meta.offset();
-                cache
-                    .get_block(&(handle.id, offset).into())
-                    .await
-                    .unwrap_or(None)
-                    .and_then(|entry| entry.block())
-            }))
-            .await;
+        let index_borrow = index.borrow();
+        // Attempt to get all requested blocks from cache concurrently
+        let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
+            let block_meta = index_borrow.block_meta().get(block_num);
+            let offset = block_meta.offset();
+            self.cache
+                .get_block(&(handle.id, offset).into())
+                .await
+                .unwrap_or(None)
+                .and_then(|entry| entry.block())
+        }))
+        .await;
 
-            let mut last_uncached_start = None;
+        let mut last_uncached_start = None;
 
-            // Process cached block results
-            for (index, block_result) in cached_blocks.into_iter().enumerate() {
-                match block_result {
-                    Some(cached_block) => {
-                        // If a cached block is found, add it to blocks_read
-                        if let Some(start) = last_uncached_start.take() {
-                            uncached_ranges.push((blocks.start + start)..(blocks.start + index));
-                        }
-                        blocks_read.push_back(cached_block);
+        // Process cached block results
+        for (index, block_result) in cached_blocks.into_iter().enumerate() {
+            match block_result {
+                Some(cached_block) => {
+                    // If a cached block is found, add it to blocks_read
+                    if let Some(start) = last_uncached_start.take() {
+                        uncached_ranges.push((blocks.start + start)..(blocks.start + index));
                     }
-                    None => {
-                        // If a block is not in cache, mark the start of an uncached range
-                        last_uncached_start.get_or_insert(index);
-                    }
+                    blocks_read.push_back(cached_block);
+                }
+                None => {
+                    // If a block is not in cache, mark the start of an uncached range
+                    last_uncached_start.get_or_insert(index);
                 }
             }
-            // Add the last uncached range if it exists
-            if let Some(start) = last_uncached_start {
-                uncached_ranges.push((blocks.start + start)..blocks.end);
-            }
-        } else {
-            // If no cache is available, treat all blocks as uncached
-            uncached_ranges.push(blocks.clone());
         }
+        // Add the last uncached range if it exists
+        if let Some(start) = last_uncached_start {
+            uncached_ranges.push((blocks.start + start)..blocks.end);
+        }
+
         // Read uncached blocks concurrently
         let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
             let obj_ref = &obj;
@@ -476,13 +465,12 @@ impl TableStore {
         }
 
         // Cache the newly read blocks if caching is enabled
-        if let Some(cache) = &self.block_cache {
-            if !blocks_to_cache.is_empty() {
-                join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
-                    cache.insert((id, offset).into(), CachedEntry::with_block(block))
-                }))
-                .await;
-            }
+        if !blocks_to_cache.is_empty() {
+            join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
+                self.cache
+                    .insert((id, offset).into(), CachedEntry::with_block(block))
+            }))
+            .await;
         }
 
         Ok(blocks_read)
@@ -631,7 +619,7 @@ mod tests {
             ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
@@ -699,7 +687,7 @@ mod tests {
             ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let id = SsTableId::Wal(123);
 
@@ -763,7 +751,7 @@ mod tests {
             ObjectStores::new(os.clone(), None),
             format,
             Path::from(ROOT),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let wal_id = SsTableId::Wal(1);
 
@@ -806,7 +794,7 @@ mod tests {
             ObjectStores::new(os.clone(), None),
             format,
             Path::from("/root"),
-            Some(wrapper),
+            wrapper,
         ));
 
         // Create and write SST
@@ -937,7 +925,7 @@ mod tests {
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
             Path::from("/root"),
-            Some(wrapper),
+            wrapper,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3);
@@ -978,7 +966,7 @@ mod tests {
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
             Path::from("/root"),
-            Some(wrapper),
+            wrapper,
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3);
@@ -1034,7 +1022,7 @@ mod tests {
             ObjectStores::new(main_store.clone(), wal_store),
             format,
             Path::from(ROOT),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
 
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
@@ -1103,7 +1091,7 @@ mod tests {
             ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
 
         let id1 = SsTableId::Wal(1);
@@ -1181,7 +1169,7 @@ mod tests {
             ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
 
         let id1 = SsTableId::Compacted(ulid::Ulid::new());
@@ -1225,7 +1213,7 @@ mod tests {
             ObjectStores::new(main_store.clone(), wal_store.clone()),
             format,
             Path::from(ROOT),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
 
         let id1 = SsTableId::Wal(123);
@@ -1271,7 +1259,7 @@ mod tests {
             let os = Arc::new(InMemory::new());
             let format = SsTableFormat { block_size, ..SsTableFormat::default() };
             let ts = Arc::new(TableStore::new(ObjectStores::new(os.clone(), None),
-                format, Path::from(ROOT), None));
+                format, Path::from(ROOT), Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new()))));
             if let Some(bytes) = block_size.checked_mul(num_blocks) {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
             }

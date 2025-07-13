@@ -385,11 +385,6 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
-        let cache = Some(Arc::new(DbCacheWrapper::new(
-            block_cache,
-            meta_cache,
-            stat_registry.as_ref(),
-        )) as Arc<dyn DbCache>);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
@@ -398,7 +393,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
-            cache,
+            Arc::new(DbCacheWrapper::new(
+                block_cache,
+                meta_cache,
+                stat_registry.as_ref(),
+            )),
         ));
 
         // Get next WAL ID before writing manifest
@@ -464,7 +463,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_format,
             path_resolver,
             self.fp_registry.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
 
         // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
@@ -667,7 +666,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             ),
             SsTableFormat::default(), // read only SSTs can use default
             path,
-            None, // no need for cache in GC
+            Arc::new(DbCacheWrapper::new(None, None, self.stat_registry.as_ref())), // no need for cache in GC
         ));
         GarbageCollector::new(
             manifest_store,
@@ -757,7 +756,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             ObjectStores::new(self.main_object_store.clone(), None),
             SsTableFormat::default(), // read only SSTs can use default
             path,
-            None, // no need for cache in GC
+            Arc::new(DbCacheWrapper::new(None, None, self.stat_registry.as_ref())),
         ));
         Compactor::new(
             manifest_store,

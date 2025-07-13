@@ -558,6 +558,7 @@ mod tests {
         PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
+    use crate::db_cache::DbCacheWrapper;
     use crate::db_state::{CoreDbState, SortedRun};
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -1145,7 +1146,7 @@ mod tests {
             ObjectStores::new(os.clone(), None),
             sst_format,
             Path::from(PATH),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         (manifest_store, table_store)
     }

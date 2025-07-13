@@ -21,6 +21,7 @@ use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::{Compaction, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
+use crate::db_cache::DbCacheWrapper;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -72,7 +73,7 @@ impl CompactionExecuteBench {
             ObjectStores::new(self.object_store.clone(), None),
             sst_format,
             self.path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
@@ -290,7 +291,7 @@ impl CompactionExecuteBench {
             ObjectStores::new(self.object_store.clone(), None),
             sst_format,
             self.path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let compaction = source_sr_ids.map(|source_sr_ids| {
             Compaction::new(

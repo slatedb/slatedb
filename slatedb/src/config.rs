@@ -737,6 +737,9 @@ pub struct DbReaderOptions {
 
     #[serde(skip)]
     pub block_cache: Option<Arc<dyn DbCache>>,
+
+    #[serde(skip)]
+    pub meta_cache: Option<Arc<dyn DbCache>>,
 }
 
 impl Default for DbReaderOptions {
@@ -746,6 +749,7 @@ impl Default for DbReaderOptions {
             checkpoint_lifetime: Duration::from_secs(10 * 60),
             max_memtable_bytes: 64 * 1024 * 1024,
             block_cache: default_block_cache(),
+            meta_cache: default_meta_cache(),
         }
     }
 }

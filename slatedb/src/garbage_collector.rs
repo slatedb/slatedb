@@ -250,6 +250,7 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::clock::DefaultSystemClock;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
+    use crate::db_cache::DbCacheWrapper;
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
@@ -927,7 +928,7 @@ mod tests {
             ObjectStores::new(local_object_store.clone(), None),
             sst_format,
             path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
 
         (manifest_store, table_store, local_object_store)

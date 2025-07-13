@@ -1024,6 +1024,7 @@ mod tests {
         CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
         Ttl,
     };
+    use crate::db_cache::DbCacheWrapper;
     use crate::db_state::CoreDbState;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::iter::KeyValueIterator;
@@ -2107,7 +2108,7 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
     async fn test_wal_disabled() {
-        use crate::{test_utils::assert_iterator, types::RowEntry};
+        use crate::{db_cache::DbCacheWrapper, test_utils::assert_iterator, types::RowEntry};
 
         let clock = Arc::new(TestClock::new());
         let mut options = test_db_options(0, 256, None);
@@ -2119,7 +2120,7 @@ mod tests {
             ObjectStores::new(object_store.clone(), None),
             sst_format,
             path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(options)
@@ -2206,7 +2207,7 @@ mod tests {
             ObjectStores::new(object_store.clone(), None),
             sst_format,
             path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
 
         // Write data a few times such that each loop results in a memtable flush
@@ -2882,7 +2883,7 @@ mod tests {
             ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
             path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
 
         // Get the next WAL SST ID based on what's currently in the object store
