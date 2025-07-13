@@ -50,9 +50,26 @@ impl std::fmt::Debug for WriteOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WriteOp::Put(key, value, options) => {
-                write!(f, "Put({:?}, {:?}, {:?})", key, value, options)
+                let key = if key.len() > 10 {
+                    format!("{:?}...", &key[..10])
+                } else {
+                    format!("{:?}", key)
+                };
+                let value = if value.len() > 10 {
+                    format!("{:?}...", &value[..10])
+                } else {
+                    format!("{:?}", value)
+                };
+                write!(f, "Put({key}, {value}, {:?})", options)
             }
-            WriteOp::Delete(key) => write!(f, "Delete({:?})", key),
+            WriteOp::Delete(key) => {
+                let key = if key.len() > 10 {
+                    format!("{:?}...", &key[..10])
+                } else {
+                    format!("{:?}", key)
+                };
+                write!(f, "Delete({key})")
+            }
         }
     }
 }
