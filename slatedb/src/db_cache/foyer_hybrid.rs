@@ -12,6 +12,21 @@
 //! - **Flexible Configuration**: The HybridCache instance is passed to the cache, so you are free
 //!   to configure it as needed for your use case.
 //!
+//! ## Notes
+//! Foyer HybridCache manages its own memory and disk cache, so when it coexists with `CachedObjectStore`
+//! there may be some duplication of cached data. In other words, disk cache may suffer from write 
+//! amplification. If you don't want to suffer from write amplification, then we recommend that you do not 
+//! coexist Foyer HybridCache with `CachedObjectStore`.
+//! 
+//! Benefits of coexistence:
+//! `CachedObjectStore` provides prefetching, which may speed up your read performance and 
+//! reduce unnecessary object store accesses.
+//! 
+//! Drawbacks of coexistence:
+//! Disk may suffer from write amplification. Data will first be written to `CachedObjectStore`, then 
+//! flow into the memory part of Foyer HybridCache, and finally written back to the disk area managed 
+//! by Foyer HybridCache itself. slateDB cannot control Foyer HybridCache to write data to its disk area.
+//!
 //! ## Examples
 //!
 //! ```
