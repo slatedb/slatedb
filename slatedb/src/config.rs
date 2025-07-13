@@ -164,7 +164,7 @@ use uuid::Uuid;
 
 use crate::error::{SettingsError, SlateDBError};
 
-use crate::db_cache::{DbCache, DEFAULT_BLOCK_CACHE_CAPACITY, DEFAULT_META_CACHE_CAPACITY};
+use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
 /// Enum representing valid SST block sizes
@@ -758,7 +758,7 @@ pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
     {
         return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
             crate::db_cache::moka::MokaCacheOptions {
-                max_capacity: DEFAULT_BLOCK_CACHE_CAPACITY,
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
                 time_to_live: None,
                 time_to_idle: None,
             },
@@ -768,7 +768,7 @@ pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
     {
         return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
             crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: DEFAULT_BLOCK_CACHE_CAPACITY,
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
             },
         )));
     }
@@ -781,7 +781,7 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
     {
         return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
             crate::db_cache::moka::MokaCacheOptions {
-                max_capacity: DEFAULT_META_CACHE_CAPACITY,
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
                 time_to_live: None,
                 time_to_idle: None,
             },
@@ -791,7 +791,7 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
     {
         return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
             crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: DEFAULT_META_CACHE_CAPACITY,
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
             },
         )));
     }
