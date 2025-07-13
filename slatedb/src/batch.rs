@@ -40,9 +40,21 @@ impl Default for WriteBatch {
     }
 }
 
+#[derive(PartialEq)]
 pub(crate) enum WriteOp {
     Put(Bytes, Bytes, PutOptions),
     Delete(Bytes),
+}
+
+impl std::fmt::Debug for WriteOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteOp::Put(key, value, options) => {
+                write!(f, "Put({:?}, {:?}, {:?})", key, value, options)
+            }
+            WriteOp::Delete(key) => write!(f, "Delete({:?})", key),
+        }
+    }
 }
 
 impl WriteBatch {
@@ -51,6 +63,11 @@ impl WriteBatch {
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.
+    ///
+    /// # Panics
+    /// - if the key is empty
+    /// - if the key size is larger than u16::MAX
+    /// - if the value size is larger than u32::MAX
     pub fn put<K, V>(&mut self, key: K, value: V)
     where
         K: AsRef<[u8]>,
@@ -60,6 +77,11 @@ impl WriteBatch {
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.
+    ///
+    /// # Panics
+    /// - if the key is empty
+    /// - if the key size is larger than u16::MAX
+    /// - if the value size is larger than u32::MAX
     pub fn put_with_options<K, V>(&mut self, key: K, value: V, options: &PutOptions)
     where
         K: AsRef<[u8]>,
@@ -68,6 +90,14 @@ impl WriteBatch {
         let key = key.as_ref();
         let value = value.as_ref();
         assert!(!key.is_empty(), "key cannot be empty");
+        assert!(
+            key.len() <= u16::MAX as usize,
+            "key size must be <= u16::MAX"
+        );
+        assert!(
+            value.len() <= u32::MAX as usize,
+            "value size must be <= u32::MAX"
+        );
         self.ops.push(WriteOp::Put(
             Bytes::copy_from_slice(key),
             Bytes::copy_from_slice(value),
@@ -79,6 +109,82 @@ impl WriteBatch {
     pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
         let key = key.as_ref();
         assert!(!key.is_empty(), "key cannot be empty");
+        assert!(
+            key.len() <= u16::MAX as usize,
+            "key size must be <= u16::MAX"
+        );
         self.ops.push(WriteOp::Delete(Bytes::copy_from_slice(key)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    struct PutTestCase {
+        key: Vec<u8>,
+        // None is a delete and options will be ignored
+        value: Option<Vec<u8>>,
+        options: PutOptions,
+    }
+
+    #[rstest]
+    #[case(vec![PutTestCase {
+        key: b"key".to_vec(),
+        value: Some(b"value".to_vec()),
+        options: PutOptions::default(),
+    }])]
+    #[case(vec![PutTestCase {
+        key: b"key".to_vec(),
+        value: None,
+        options: PutOptions::default(),
+    }])]
+    #[should_panic(expected = "key size must be <= u16::MAX")]
+    #[case(vec![PutTestCase {
+        key: vec![b'k'; 65_536], // 2^16
+        value: None,
+        options: PutOptions::default(),
+    }])]
+    #[should_panic(expected = "value size must be <= u32::MAX")]
+    #[case(vec![PutTestCase {
+        key: b"key".to_vec(),
+        value: Some(vec![b'x'; u32::MAX as usize + 1]), // 2^32
+        options: PutOptions::default(),
+    }])]
+    #[should_panic(expected = "key cannot be empty")]
+    #[case(vec![PutTestCase {
+        key: b"".to_vec(),
+        value: Some(b"value".to_vec()),
+        options: PutOptions::default(),
+    }])]
+    #[should_panic(expected = "key cannot be empty")]
+    #[case(vec![PutTestCase {
+        key: b"".to_vec(),
+        value: None,
+        options: PutOptions::default(),
+    }])]
+    fn test_put_delete_batch(#[case] test_case: Vec<PutTestCase>) {
+        let mut batch = WriteBatch::new();
+        let mut expected_ops: Vec<WriteOp> = Vec::new();
+        for test_case in test_case {
+            if let Some(value) = test_case.value {
+                batch.put_with_options(
+                    test_case.key.as_slice(),
+                    value.as_slice(),
+                    &test_case.options,
+                );
+                expected_ops.push(WriteOp::Put(
+                    Bytes::from(test_case.key),
+                    Bytes::from(value),
+                    test_case.options,
+                ));
+            } else {
+                batch.delete(test_case.key.as_slice());
+                expected_ops.push(WriteOp::Delete(Bytes::from(test_case.key)));
+            }
+        }
+        assert_eq!(batch.ops, expected_ops);
     }
 }

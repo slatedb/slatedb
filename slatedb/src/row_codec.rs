@@ -69,6 +69,20 @@ impl SstRowEntry {
         create_ts: Option<i64>,
         expire_ts: Option<i64>,
     ) -> Self {
+        let key_suffix_len = key_suffix.len();
+        assert!(
+            key_prefix_len <= (u16::MAX as usize),
+            "key_prefix_len > u16"
+        );
+        assert!(
+            key_suffix_len <= (u16::MAX as usize),
+            "key_suffix.len() > u16"
+        );
+        assert!(
+            key_prefix_len + key_suffix_len <= (u16::MAX as usize),
+            "key_prefix_len + key_suffix.len() > u16"
+        );
+        assert!(value.len() <= (u32::MAX as usize), "value.len() > u32");
         Self {
             key_prefix_len,
             key_suffix,
@@ -142,8 +156,8 @@ impl SstRowCodecV0 {
     }
 
     pub fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntry) {
-        output.put_u16(row.key_prefix_len as u16);
-        output.put_u16(row.key_suffix.len() as u16);
+        output.put_u16(row.key_prefix_len.try_into().unwrap());
+        output.put_u16(row.key_suffix.len().try_into().unwrap());
         output.put(row.key_suffix.as_ref());
 
         // encode seq & flags
@@ -167,7 +181,8 @@ impl SstRowCodecV0 {
 
         match &row.value {
             ValueDeletable::Value(v) | ValueDeletable::Merge(v) => {
-                output.put_u32(v.len() as u32);
+                let value_len = u32::try_from(v.len()).expect("value len > u32");
+                output.put_u32(value_len);
                 output.put(v.as_ref());
             }
             ValueDeletable::Tombstone => {
@@ -200,14 +215,14 @@ impl SstRowCodecV0 {
 
         // skip decoding value for tombstone.
         if flags.contains(RowFlags::TOMBSTONE) {
-            return Ok(SstRowEntry {
+            return Ok(SstRowEntry::new(
                 key_prefix_len,
                 key_suffix,
                 seq,
-                expire_ts: None, // it does not make sense to have expire_ts for tombstone
+                ValueDeletable::Tombstone,
                 create_ts,
-                value: ValueDeletable::Tombstone,
-            });
+                None,
+            ));
         }
 
         // decode value
@@ -365,15 +380,49 @@ mod tests {
         expire_ts: None,
         first_key: b"unicode".to_vec(),
     })]
+    #[should_panic(expected = "key_suffix.len() > u16")]
     #[case(CodecTestCase {
-        name: "large key",
+        name: "large key suffix",
         key_prefix_len: 0,
-        key_suffix: vec![b'k'; 1036269],
+        key_suffix: vec![b'k'; u16::MAX as usize + 1], // 2^16
         seq: 1,
         value: Some(vec![b'x'; 100]),
         create_ts: None,
         expire_ts: None,
-        first_key: vec![b'k'; 1036269],
+        first_key: vec![b'k'; u16::MAX as usize + 1], // 2^16
+    })]
+    #[should_panic(expected = "key_prefix_len > u16")]
+    #[case(CodecTestCase {
+        name: "large key prefix",
+        key_prefix_len: u16::MAX as usize + 1, // 2^16
+        key_suffix: vec![b'k'; 1024],
+        seq: 1,
+        value: Some(vec![b'x'; 100]),
+        create_ts: None,
+        expire_ts: None,
+        first_key: vec![b'k'; 65_536], // 2^16 + 100
+    })]
+    #[should_panic(expected = "key_prefix_len + key_suffix.len() > u16")]
+    #[case(CodecTestCase {
+        name: "large key",
+        key_prefix_len: u16::MAX as usize, // 2^16 - 1
+        key_suffix: vec![b'k'; 1],
+        seq: 1,
+        value: Some(vec![b'x'; 100]),
+        create_ts: None,
+        expire_ts: None,
+        first_key: vec![b'k'; 65_536], // 2^16
+    })]
+    #[should_panic(expected = "value.len() > u32")]
+    #[case(CodecTestCase {
+        name: "large value",
+        key_prefix_len: 0,
+        key_suffix: vec![b'k'; 1024],
+        seq: 1,
+        value: Some(vec![b'x'; u32::MAX as usize + 1]), // 2^32
+        create_ts: None,
+        expire_ts: None,
+        first_key: vec![b'k'; 1024],
     })]
     fn test_encode_decode(#[case] test_case: CodecTestCase) {
         let mut encoded_data = Vec::new();
