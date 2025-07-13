@@ -35,7 +35,13 @@ pub mod moka;
 mod serde;
 
 /// The default max capacity for the cache. (64MB)
+/// used to facilitate users to directly create their
+/// own cache instances
 pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
+/// The default block cache capacity. (512MB)
+pub const DEFAULT_BLOCK_CACHE_CAPACITY: u64 = 512 * 1024 * 1024;
+/// The default meta cache capacity. (128MB)
+pub const DEFAULT_META_CACHE_CAPACITY: u64 = 128 * 1024 * 1024;
 
 /// A trait for slatedb's block cache.
 ///
@@ -239,17 +245,23 @@ impl CachedEntry {
 
 pub struct DbCacheWrapper {
     stats: DbCacheStats,
-    cache: Arc<dyn DbCache>,
+    block_cache: Option<Arc<dyn DbCache>>,
+    meta_cache: Option<Arc<dyn DbCache>>,
     // Records the last time that the wrapper logged an error from the wrapped cache at error
     // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
     last_err_log_instant: Mutex<Option<Instant>>,
 }
 
 impl DbCacheWrapper {
-    pub fn new(cache: Arc<dyn DbCache>, stats_registry: &StatRegistry) -> Self {
+    pub fn new(
+        block_cache: Option<Arc<dyn DbCache>>,
+        meta_cache: Option<Arc<dyn DbCache>>,
+        stats_registry: &StatRegistry,
+    ) -> Self {
         Self {
             stats: DbCacheStats::new(stats_registry),
-            cache,
+            block_cache,
+            meta_cache,
             last_err_log_instant: Mutex::new(None),
         }
     }
@@ -287,64 +299,114 @@ impl DbCacheWrapper {
 #[async_trait]
 impl DbCache for DbCacheWrapper {
     async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        let entry = match self.cache.get_block(key).await {
-            Ok(e) => e,
-            Err(err) => {
-                self.record_get_err("block", &err);
-                return Err(err);
+        if let Some(ref cache) = self.block_cache {
+            let entry = match cache.get_block(key).await {
+                Ok(e) => e,
+                Err(err) => {
+                    self.record_get_err("block", &err);
+                    return Err(err);
+                }
+            };
+
+            if entry.is_some() {
+                self.stats.data_block_hit.inc();
+            } else {
+                self.stats.data_block_miss.inc();
             }
-        };
-        if entry.is_some() {
-            self.stats.data_block_hit.inc();
-        } else {
-            self.stats.data_block_miss.inc();
+            return Ok(entry);
         }
-        Ok(entry)
+
+        Ok(None)
     }
 
     async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        let entry = match self.cache.get_index(key).await {
-            Ok(e) => e,
-            Err(err) => {
-                self.record_get_err("index", &err);
-                return Err(err);
+        if let Some(ref cache) = self.meta_cache {
+            let entry = match cache.get_index(key).await {
+                Ok(e) => e,
+                Err(err) => {
+                    self.record_get_err("index", &err);
+                    return Err(err);
+                }
+            };
+            if entry.is_some() {
+                self.stats.index_hit.inc();
+            } else {
+                self.stats.index_miss.inc();
             }
-        };
-        if entry.is_some() {
-            self.stats.index_hit.inc();
-        } else {
-            self.stats.index_miss.inc();
+            return Ok(entry);
         }
-        Ok(entry)
+
+        Ok(None)
     }
 
     async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        let entry = match self.cache.get_filter(key).await {
-            Ok(e) => e,
-            Err(err) => {
-                self.record_get_err("filter", &err);
-                return Err(err);
+        if let Some(ref cache) = self.meta_cache {
+            let entry = match cache.get_filter(key).await {
+                Ok(e) => e,
+                Err(err) => {
+                    self.record_get_err("filter", &err);
+                    return Err(err);
+                }
+            };
+            if entry.is_some() {
+                self.stats.filter_hit.inc();
+            } else {
+                self.stats.filter_miss.inc();
             }
-        };
-        if entry.is_some() {
-            self.stats.filter_hit.inc();
-        } else {
-            self.stats.filter_miss.inc();
+            return Ok(entry);
         }
-        Ok(entry)
+
+        Ok(None)
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
-        self.cache.insert(key, value.clamp_allocated_size()).await
+        match &value.item {
+            CachedItem::Block(_) => {
+                if let Some(ref cache) = self.block_cache {
+                    cache.insert(key, value.clamp_allocated_size()).await;
+                } else {
+                    debug!(
+                        "No block cache available, skipping insert for key: {:?}",
+                        key
+                    );
+                }
+            }
+            CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) => {
+                if let Some(ref cache) = self.meta_cache {
+                    cache.insert(key, value.clamp_allocated_size()).await;
+                } else {
+                    debug!(
+                        "No meta cache available, skipping insert for key: {:?}",
+                        key
+                    );
+                }
+            }
+        }
     }
 
     #[allow(dead_code)]
     async fn remove(&self, key: &CachedKey) {
-        self.cache.remove(key).await
+        // Because `CachedKey` is uniquely identified by (SST ID, offset), given a `CachedKey`, it
+        // will only appear in the block cache or meta cache, which is safe and will not cause duplicate
+        // deletion.
+        if let Some(ref cache) = self.block_cache {
+            cache.remove(key).await;
+        }
+        if let Some(ref cache) = self.meta_cache {
+            cache.remove(key).await;
+        }
     }
 
     fn entry_count(&self) -> u64 {
-        self.cache.entry_count()
+        self.block_cache
+            .as_ref()
+            .map(|cache| cache.entry_count())
+            .unwrap_or(0)
+            + self
+                .meta_cache
+                .as_ref()
+                .map(|cache| cache.entry_count())
+                .unwrap_or(0)
     }
 }
 
@@ -615,7 +677,11 @@ mod tests {
     #[fixture]
     fn cache() -> DbCacheWrapper {
         let registry = StatRegistry::new();
-        DbCacheWrapper::new(Arc::new(TestCache::new()), &registry)
+        DbCacheWrapper::new(
+            Some(Arc::new(TestCache::new())),
+            Some(Arc::new(TestCache::new())),
+            &registry,
+        )
     }
 
     #[fixture]

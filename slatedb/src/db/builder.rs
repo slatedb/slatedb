@@ -123,6 +123,7 @@ use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
+use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{Settings, SstBlockSize};
@@ -152,6 +153,7 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     block_cache: Option<Arc<dyn DbCache>>,
+    meta_cache: Option<Arc<dyn DbCache>>,
     logical_clock: Option<Arc<dyn LogicalClock>>,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
@@ -172,6 +174,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             settings: Settings::default(),
             wal_object_store: None,
             block_cache: None,
+            meta_cache: None,
             logical_clock: None,
             system_clock: None,
             gc_runtime: None,
@@ -203,6 +206,12 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Sets the block cache to use for the database.
     pub fn with_block_cache(mut self, block_cache: Arc<dyn DbCache>) -> Self {
         self.block_cache = Some(block_cache);
+        self
+    }
+
+    /// Sets the meta cache to use for the database.
+    pub fn with_meta_cache(mut self, meta_cache: Arc<dyn DbCache>) -> Self {
+        self.meta_cache = Some(meta_cache);
         self
     }
 
@@ -300,6 +309,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             .logical_clock
             .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
         let block_cache = self.block_cache.or_else(default_block_cache);
+        let meta_cache = self.meta_cache.or_else(default_meta_cache);
 
         let system_clock = self
             .system_clock
@@ -375,6 +385,11 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let cache = Some(Arc::new(DbCacheWrapper::new(
+            block_cache,
+            meta_cache,
+            stat_registry.as_ref(),
+        )) as Arc<dyn DbCache>);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
@@ -383,9 +398,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
-            block_cache.as_ref().map(|c| {
-                Arc::new(DbCacheWrapper::new(c.clone(), stat_registry.as_ref())) as Arc<dyn DbCache>
-            }),
+            cache,
         ));
 
         // Get next WAL ID before writing manifest

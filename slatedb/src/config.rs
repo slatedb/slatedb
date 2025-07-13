@@ -162,9 +162,11 @@ use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 
+use crate::db_cache::foyer::FoyerCacheOptions;
+use crate::db_cache::moka::MokaCacheOptions;
 use crate::error::{SettingsError, SlateDBError};
 
-use crate::db_cache::DbCache;
+use crate::db_cache::{DbCache, DEFAULT_BLOCK_CACHE_CAPACITY, DEFAULT_META_CACHE_CAPACITY};
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
 /// Enum representing valid SST block sizes
@@ -752,11 +754,44 @@ impl Default for DbReaderOptions {
 pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
     #[cfg(feature = "moka")]
     {
-        return Some(Arc::new(crate::db_cache::moka::MokaCache::new()));
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            MokaCacheOptions {
+                max_capacity: DEFAULT_BLOCK_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
     }
     #[cfg(feature = "foyer")]
     {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()));
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            FoyerCacheOptions {
+                max_capacity: DEFAULT_BLOCK_CACHE_CAPACITY,
+            },
+        )));
+    }
+    None
+}
+
+#[allow(unreachable_code)]
+pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            MokaCacheOptions {
+                max_capacity: DEFAULT_META_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
+    }
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            FoyerCacheOptions {
+                max_capacity: DEFAULT_META_CACHE_CAPACITY,
+            },
+        )));
     }
     None
 }

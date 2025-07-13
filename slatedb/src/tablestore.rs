@@ -796,7 +796,12 @@ mod tests {
 
         let stat_registry = StatRegistry::new();
         let block_cache = Arc::new(MokaCache::new());
-        let wrapper = Arc::new(DbCacheWrapper::new(block_cache.clone(), &stat_registry));
+        let meta_cache = Arc::new(MokaCache::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            Some(block_cache.clone()),
+            Some(meta_cache.clone()),
+            &stat_registry,
+        ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             format,
@@ -921,8 +926,13 @@ mod tests {
     async fn test_write_sst_should_write_cache() {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
-        let cache = Arc::new(TestCache::new());
-        let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
+        let block_cache = Arc::new(TestCache::new());
+        let meta_cache = Arc::new(TestCache::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            Some(block_cache.clone()),
+            Some(meta_cache.clone()),
+            &stat_registry,
+        ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
@@ -944,7 +954,7 @@ mod tests {
                 .sst_format
                 .read_block_raw(&sst_info, &index, i, &sst_bytes)
                 .unwrap();
-            let cached_block = cache
+            let cached_block = block_cache
                 .get_block(&(id, block_meta.offset()).into())
                 .await
                 .unwrap();
@@ -957,8 +967,13 @@ mod tests {
     async fn test_write_sst_should_not_write_cache() {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
-        let cache = Arc::new(TestCache::new());
-        let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
+        let block_cache = Arc::new(TestCache::new());
+        let meta_cache = Arc::new(TestCache::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            Some(block_cache.clone()),
+            Some(meta_cache.clone()),
+            &stat_registry,
+        ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
@@ -976,7 +991,7 @@ mod tests {
         let block_metas = index.borrow().block_meta();
         for i in 0..block_metas.len() {
             let block_meta = block_metas.get(i);
-            let cached_block = cache
+            let cached_block = block_cache
                 .get_block(&(id, block_meta.offset()).into())
                 .await
                 .unwrap();
