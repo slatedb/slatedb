@@ -517,6 +517,7 @@ pub mod stats {
     }
 
     pub const BYTES_COMPACTED: &str = compactor_stat_name!("bytes_compacted");
+    pub const BYTES_STORED: &str = compactor_stat_name!("bytes_stored");
     pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
     pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
 
@@ -524,6 +525,7 @@ pub mod stats {
         pub(crate) last_compaction_ts: Arc<Gauge<u64>>,
         pub(crate) running_compactions: Arc<Gauge<i64>>,
         pub(crate) bytes_compacted: Arc<Counter>,
+        pub(crate) bytes_stored: Arc<Counter>,
     }
 
     impl CompactionStats {
@@ -532,10 +534,12 @@ pub mod stats {
                 last_compaction_ts: Arc::new(Gauge::default()),
                 running_compactions: Arc::new(Gauge::default()),
                 bytes_compacted: Arc::new(Counter::default()),
+                bytes_stored: Arc::new(Counter::default()),
             };
             stat_registry.register(LAST_COMPACTION_TS_SEC, stats.last_compaction_ts.clone());
             stat_registry.register(RUNNING_COMPACTIONS, stats.running_compactions.clone());
             stat_registry.register(BYTES_COMPACTED, stats.bytes_compacted.clone());
+            stat_registry.register(BYTES_STORED, stats.bytes_stored.clone());
             stats
         }
     }
@@ -559,9 +563,10 @@ mod tests {
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
-    use crate::compactor_stats::LAST_COMPACTION_TS_SEC;
+    use crate::compactor_stats::{BYTES_COMPACTED, BYTES_STORED, LAST_COMPACTION_TS_SEC};
     use crate::config::{
-        PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
+        CompressionCodec, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl,
+        WriteOptions,
     };
     use crate::db::Db;
     use crate::db_state::{CoreDbState, SortedRun};
@@ -1122,6 +1127,61 @@ mod tests {
             .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
             .collect();
         assert_eq!(l0_ids, compaction.sources);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "zstd")]
+    async fn test_compactor_compressed_block_size() {
+        // given:
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+            SizeTieredCompactionSchedulerOptions {
+                min_compaction_sources: 1,
+                max_compaction_sources: 999,
+                include_size_threshold: 4.0,
+            },
+        ));
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 128;
+        options.compression_codec = Some(CompressionCodec::Zstd);
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, _) = build_test_stores(os.clone());
+        let mut expected = HashMap::<Vec<u8>, Vec<u8>>::new();
+        for i in 0..4 {
+            let k = vec![b'a' + i as u8; 16];
+            let v = vec![b'b' + i as u8; 48];
+            expected.insert(k.clone(), v.clone());
+            db.put(&k, &v).await.unwrap();
+            let k = vec![b'j' + i as u8; 16];
+            let v = vec![b'k' + i as u8; 48];
+            db.put(&k, &v).await.unwrap();
+            expected.insert(k.clone(), v.clone());
+        }
+
+        db.flush().await.unwrap();
+
+        // when:
+        await_compaction(&db, manifest_store)
+            .await
+            .expect("db was not compacted");
+
+        // then:
+        let metrics = db.metrics();
+        let bytes_stored = metrics.lookup(BYTES_STORED).unwrap().get();
+        assert!(bytes_stored > 0);
+
+        let bytes_compacted = metrics.lookup(BYTES_COMPACTED).unwrap().get();
+        assert!(bytes_compacted > 0);
+        assert!(bytes_stored < bytes_compacted);
     }
 
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>
