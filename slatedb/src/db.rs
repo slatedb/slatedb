@@ -1992,7 +1992,6 @@ mod tests {
                         max_sst_size: 256,
                         max_concurrent_compactions: 1,
                         manifest_update_timeout: Duration::from_secs(300),
-                        ..CompactorOptions::default()
                     }),
                 ))
                 .with_compaction_scheduler_supplier(compaction_scheduler)
@@ -3006,7 +3005,6 @@ mod tests {
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
                 manifest_update_timeout: Duration::from_secs(300),
-                ..CompactorOptions::default()
             }),
         ))
         .await;
@@ -3022,7 +3020,6 @@ mod tests {
                 manifest_update_timeout: Duration::from_secs(300),
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
-                ..CompactorOptions::default()
             }),
         ))
         .await
