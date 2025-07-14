@@ -26,8 +26,9 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     buffer: RetentionBuffer,
     /// Whether to filter out tombstones
     filter_tombstone: bool,
-    /// The current timestamp in seconds since Unix epoch
-    start_timestamp: i64,
+    /// The current timestamp when the compaction started. This is a local timestamp,
+    /// and is not the same as the system clock.
+    compaction_start_ts: i64,
     /// The total number of bytes processed so far
     total_bytes_processed: u64,
 }
@@ -39,14 +40,14 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         retention_timeout: Option<Duration>,
         retention_max_seq: Option<u64>,
         filter_tombstone: bool,
-        start_timestamp: i64,
+        compaction_start_ts: i64,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
             retention_timeout,
             retention_max_seq,
             filter_tombstone,
-            start_timestamp,
+            compaction_start_ts,
             buffer: RetentionBuffer::new(),
             total_bytes_processed: 0,
         })
@@ -176,7 +177,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                 }
                 RetentionBufferState::NeedProcess => {
                     // Apply retention filtering to collected versions
-                    let current_timestamp = self.start_timestamp;
+                    let current_timestamp = self.compaction_start_ts;
                     let retention_timeout = self.retention_timeout;
                     let retention_max_seq = self.retention_max_seq;
                     self.buffer.process_retention(|versions| {
