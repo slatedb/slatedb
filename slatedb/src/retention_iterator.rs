@@ -18,7 +18,10 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     inner: T,
     /// Retention time duration. Entries with create_ts older than (current_time - retention_time)
     /// will be filtered out (except the latest version)
-    retention_timeout: Duration,
+    retention_timeout: Option<Duration>,
+    /// The max sequence number to retain. It's taken from the minimum sequence number of the
+    /// active snapshots.
+    retention_max_seq: Option<u64>,
     /// Buffer for collecting and processing multiple versions of the same key
     buffer: RetentionBuffer,
     /// Whether to filter out tombstones
@@ -33,13 +36,15 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     /// Creates a new retention iterator with the specified retention policy
     pub(crate) async fn new(
         inner: T,
-        retention_timeout: Duration,
+        retention_timeout: Option<Duration>,
+        retention_max_seq: Option<u64>,
         filter_tombstone: bool,
         start_timestamp: i64,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
             retention_timeout,
+            retention_max_seq,
             filter_tombstone,
             start_timestamp,
             buffer: RetentionBuffer::new(),
@@ -56,20 +61,27 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     fn apply_retention_filter(
         versions: BTreeMap<Reverse<u64>, RowEntry>,
         current_timestamp: i64,
-        retention_timeout: Duration,
+        retention_timeout: Option<Duration>,
+        retention_max_seq: Option<u64>,
         filter_tombstone: bool,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
         for (idx, (_, entry)) in versions.into_iter().enumerate() {
             // always keep the latest version (idx == 0), for older versions, check if they are within retention window.
-            // if retention timeout is zero, only the latest version is kept.
-            let in_retention_window = entry
+            // retention window is defined by either timeout or seq, or both. if both are not set, only the latest version
+            // is kept.
+            let create_ts = entry
                 .create_ts
-                .map(|create_ts| {
-                    create_ts + (retention_timeout.as_millis() as i64) > current_timestamp
-                })
                 .expect("a record with no create_ts should not happen");
-            let should_keep = idx == 0 || in_retention_window;
+
+            let in_retention_window_by_time = retention_timeout
+                .map(|timeout| create_ts + (timeout.as_millis() as i64) > current_timestamp)
+                .unwrap_or(false);
+            let in_retention_window_by_seq = retention_max_seq
+                .map(|max_seq| entry.seq > max_seq)
+                .unwrap_or(false);
+
+            let should_keep = idx == 0 || in_retention_window_by_time || in_retention_window_by_seq;
             if !should_keep {
                 // if an entry is filtered out in retention, we should not
                 // continue have the earlier versions of the same key still
@@ -165,12 +177,14 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                 RetentionBufferState::NeedProcess => {
                     // Apply retention filtering to collected versions
                     let current_timestamp = self.start_timestamp;
-                    let retention_time = self.retention_timeout;
+                    let retention_timeout = self.retention_timeout;
+                    let retention_max_seq = self.retention_max_seq;
                     self.buffer.process_retention(|versions| {
                         Self::apply_retention_filter(
                             versions,
                             current_timestamp,
-                            retention_time,
+                            retention_timeout,
+                            retention_max_seq,
                             self.filter_tombstone,
                         )
                     })?;
@@ -540,7 +554,7 @@ mod tests {
     struct RetentionIteratorTestCase {
         name: &'static str,
         input_entries: Vec<RowEntry>,
-        retention_time: Duration,
+        retention_timeout: Duration,
         current_timestamp: i64,
         expected_entries: Vec<RowEntry>,
     }
@@ -550,7 +564,7 @@ mod tests {
     #[case(RetentionIteratorTestCase {
         name: "empty_iterator",
         input_entries: vec![],
-        retention_time: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Duration::from_secs(3600), // 1 hour
         current_timestamp: 1000,
         expected_entries: vec![],
     })]
@@ -559,7 +573,7 @@ mod tests {
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950), // 50 seconds ago
         ],
-        retention_time: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Duration::from_secs(3600), // 1 hour
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950)
@@ -570,7 +584,7 @@ mod tests {
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 seconds ago
         ],
-        retention_time: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Duration::from_secs(3600), // 1 hour
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
@@ -583,7 +597,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900), // Within retention
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
-        retention_time: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Duration::from_secs(3600), // 1 hour
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
@@ -598,7 +612,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
-        retention_time: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Duration::from_secs(3600), // 1 hour
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
@@ -613,7 +627,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
-        retention_time: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Duration::from_secs(3600), // 1 hour
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_tombstone(b"key1", 3).with_create_ts(950),
@@ -628,7 +642,7 @@ mod tests {
             RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // Outside retention
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
-        retention_time: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Duration::from_secs(3600), // 1 hour
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_merge(b"key1", b"merge3", 3).with_create_ts(950),
@@ -643,7 +657,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(999),  // 1 second ago
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(998), // 2 seconds ago
         ],
-        retention_time: Duration::from_secs(0), // No retention
+        retention_timeout: Duration::from_secs(0), // No retention
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
@@ -656,7 +670,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),  // Very old
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),  // Very old
         ],
-        retention_time: Duration::from_secs(1000), // Very long retention
+        retention_timeout: Duration::from_secs(1000), // Very long retention
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100),
@@ -677,7 +691,8 @@ mod tests {
         let filtered_versions = RetentionIterator::<TestIterator>::apply_retention_filter(
             versions,
             test_case.current_timestamp,
-            test_case.retention_time,
+            test_case.retention_timeout,
+            test_case.retention_max_seq,
             true,
         );
 
