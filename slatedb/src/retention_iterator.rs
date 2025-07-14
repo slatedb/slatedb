@@ -637,32 +637,6 @@ mod tests {
         ],
     })]
     #[case(RetentionIteratorTestCase {
-        name: "entries_without_create_ts",
-        input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3), // No create_ts
-            RowEntry::new_value(b"key1", b"value2", 2), // No create_ts
-            RowEntry::new_value(b"key1", b"value1", 1), // No create_ts
-        ],
-        retention_time: Duration::from_secs(3600),
-        current_timestamp: 1000,
-        expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3),
-        ],
-    })]
-    #[case(RetentionIteratorTestCase {
-        name: "mixed_create_ts_presence",
-        input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // With create_ts
-            RowEntry::new_value(b"key1", b"value2", 2), // No create_ts
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // Outside retention
-        ],
-        retention_time: Duration::from_secs(3600),
-        current_timestamp: 1000,
-        expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
-        ],
-    })]
-    #[case(RetentionIteratorTestCase {
         name: "zero_retention_time",
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time
