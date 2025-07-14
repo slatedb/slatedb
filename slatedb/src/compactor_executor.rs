@@ -170,6 +170,7 @@ impl TokioCompactionExecutorInner {
             None,
             compaction.is_dest_last_run,
             compaction.compaction_ts,
+            self.clock.clone(),
         )
         .await?;
         Ok(retention_iter)

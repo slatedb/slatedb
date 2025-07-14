@@ -372,7 +372,21 @@ impl RetentionBuffer {
 mod tests {
     use super::*;
     use crate::types::RowEntry;
+    use crate::{clock::SystemClock, test_utils::TestIterator};
     use rstest::rstest;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Mock SystemClock that returns the compaction_start_ts as current time
+    #[derive(Debug)]
+    struct MockSystemClock {
+        current_time: SystemTime,
+    }
+
+    impl SystemClock for MockSystemClock {
+        fn now(&self) -> SystemTime {
+            self.current_time
+        }
+    }
 
     struct RetentionBufferTestCase {
         name: &'static str,
@@ -572,7 +586,7 @@ mod tests {
         input_entries: Vec<RowEntry>,
         retention_timeout: Option<Duration>,
         retention_max_seq: Option<u64>,
-        compaction_start_ts: i64,
+        system_clock_ts: i64,
         expected_entries: Vec<RowEntry>,
     }
 
@@ -583,7 +597,7 @@ mod tests {
         input_entries: vec![],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_max_seq: None,
-        compaction_start_ts: 1000,
+        system_clock_ts: 1000,
         expected_entries: vec![],
     })]
     #[case(RetentionIteratorTestCase {
@@ -593,7 +607,7 @@ mod tests {
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_max_seq: None,
-        compaction_start_ts: 1000,
+        system_clock_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950)
         ],
@@ -605,7 +619,7 @@ mod tests {
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_max_seq: None,
-        compaction_start_ts: 1000,
+        system_clock_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
         ],
@@ -619,7 +633,7 @@ mod tests {
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_max_seq: None,
-        compaction_start_ts: 1000,
+        system_clock_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
@@ -635,7 +649,7 @@ mod tests {
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_max_seq: None,
-        compaction_start_ts: 1000,
+        system_clock_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
@@ -651,7 +665,7 @@ mod tests {
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_max_seq: None,
-        compaction_start_ts: 1000,
+        system_clock_ts: 1000,
         expected_entries: vec![
             RowEntry::new_tombstone(b"key1", 3).with_create_ts(950),
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
@@ -667,7 +681,7 @@ mod tests {
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_max_seq: None,
-        compaction_start_ts: 1000,
+        system_clock_ts: 1000,
         expected_entries: vec![
             RowEntry::new_merge(b"key1", b"merge3", 3).with_create_ts(950),
             RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
@@ -683,7 +697,7 @@ mod tests {
         ],
         retention_timeout: Some(Duration::from_secs(0)), // No retention
         retention_max_seq: None,
-        compaction_start_ts: 1000,
+        system_clock_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
         ],
@@ -697,7 +711,7 @@ mod tests {
         ],
         retention_timeout: Some(Duration::from_secs(1000)), // Very long retention
         retention_max_seq: None,
-        compaction_start_ts: 1000,
+        system_clock_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100),
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),
@@ -706,18 +720,19 @@ mod tests {
     })]
     #[tokio::test]
     async fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
-        use crate::{clock::DefaultSystemClock, test_utils::TestIterator};
-
         // Test the apply_retention_filter function directly since TestIterator doesn't support create_ts
         let mut versions = std::collections::BTreeMap::new();
         for entry in test_case.input_entries.iter() {
             versions.insert(Reverse(entry.seq), entry.clone());
         }
 
-        let system_clock = Arc::new(DefaultSystemClock::new());
+        let system_clock = Arc::new(MockSystemClock {
+            current_time: UNIX_EPOCH
+                + std::time::Duration::from_millis(test_case.system_clock_ts as u64),
+        });
         let filtered_versions = RetentionIterator::<TestIterator>::apply_retention_filter(
             versions,
-            test_case.compaction_start_ts,
+            test_case.system_clock_ts,
             system_clock,
             test_case.retention_timeout,
             test_case.retention_max_seq,
