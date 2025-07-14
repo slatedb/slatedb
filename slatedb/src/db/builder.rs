@@ -466,7 +466,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
-                .unwrap_or_else(|| default_compaction_scheduler_supplier(&compactor_options));
+                .unwrap_or_else(default_compaction_scheduler_supplier);
             let cleanup_inner = inner.clone();
             let compactor = Compactor::new(
                 manifest_store.clone(),
@@ -737,7 +737,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the compaction scheduler supplier to use for the compactor.
     pub fn with_scheduler_supplier(
         mut self,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
@@ -759,7 +758,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
         let scheduler_supplier = self
             .scheduler_supplier
-            .unwrap_or_else(|| default_compaction_scheduler_supplier(&self.options));
+            .unwrap_or_else(default_compaction_scheduler_supplier);
 
         Compactor::new(
             manifest_store,
@@ -774,13 +773,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     }
 }
 
-fn default_compaction_scheduler_supplier(
-    options: &CompactorOptions,
-) -> Arc<dyn CompactionSchedulerSupplier> {
+fn default_compaction_scheduler_supplier() -> Arc<dyn CompactionSchedulerSupplier> {
     Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-        SizeTieredCompactionSchedulerOptions {
-            max_concurrent_compactions: options.max_concurrent_compactions,
-            ..Default::default()
-        },
+        SizeTieredCompactionSchedulerOptions::default(),
     ))
 }

@@ -864,9 +864,6 @@ pub struct SizeTieredCompactionSchedulerOptions {
     /// be included in a given compaction. A sorted run S will be added to a compaction C if S's
     /// size is less than this value times the min size of the runs currently included in C.
     pub include_size_threshold: f32,
-
-    /// The maximum number of concurrent compactions to execute at once.
-    pub max_concurrent_compactions: usize,
 }
 
 impl Default for SizeTieredCompactionSchedulerOptions {
@@ -875,7 +872,6 @@ impl Default for SizeTieredCompactionSchedulerOptions {
             min_compaction_sources: 4,
             max_compaction_sources: 8,
             include_size_threshold: 4.0,
-            max_concurrent_compactions: 4,
         }
     }
 }
