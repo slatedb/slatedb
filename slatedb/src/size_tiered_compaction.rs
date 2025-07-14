@@ -160,8 +160,8 @@ impl CompactionChecker {
 /// rejects compactions that violate one of the compaction checkers defined above.
 #[derive(Default)]
 pub(crate) struct SizeTieredCompactionScheduler {
-    scheduler_options: SizeTieredCompactionSchedulerOptions,
-    compactor_options: CompactorOptions,
+    options: SizeTieredCompactionSchedulerOptions,
+    max_concurrent_compactions: usize,
 }
 
 impl CompactionScheduler for SizeTieredCompactionScheduler {
@@ -172,15 +172,13 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
 
         let conflict_checker = ConflictChecker::new(&state.compactions());
         let backpressure_checker = BackpressureChecker::new(
-            self.scheduler_options.include_size_threshold,
-            self.scheduler_options.max_compaction_sources,
+            self.options.include_size_threshold,
+            self.options.max_compaction_sources,
             &srs,
         );
         let mut checker = CompactionChecker::new(conflict_checker, backpressure_checker);
 
-        while state.compactions().len() + compactions.len()
-            < self.compactor_options.max_concurrent_compactions
-        {
+        while state.compactions().len() + compactions.len() < self.max_concurrent_compactions {
             let Some(compaction) = self.pick_next_compaction(&l0, &srs, &checker) else {
                 break;
             };
@@ -194,12 +192,12 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
 
 impl SizeTieredCompactionScheduler {
     pub(crate) fn new(
-        scheduler_options: SizeTieredCompactionSchedulerOptions,
-        compactor_options: CompactorOptions,
+        options: SizeTieredCompactionSchedulerOptions,
+        max_concurrent_compactions: usize,
     ) -> Self {
         Self {
-            scheduler_options,
-            compactor_options,
+            options,
+            max_concurrent_compactions,
         }
     }
 
@@ -226,7 +224,7 @@ impl SizeTieredCompactionScheduler {
         let mut srs_iter = srs.iter().peekable();
         while srs_iter.peek().is_some() {
             let compactable_run = Self::build_compactable_run(
-                self.scheduler_options.include_size_threshold,
+                self.options.include_size_threshold,
                 srs_iter.clone(),
                 Some(checker),
             );
@@ -246,14 +244,14 @@ impl SizeTieredCompactionScheduler {
     }
 
     fn clamp_min(&self, sources: VecDeque<CompactionSource>) -> Option<VecDeque<CompactionSource>> {
-        if sources.len() < self.scheduler_options.min_compaction_sources {
+        if sources.len() < self.options.min_compaction_sources {
             return None;
         }
         Some(sources)
     }
 
     fn clamp_max(&self, mut sources: VecDeque<CompactionSource>) -> VecDeque<CompactionSource> {
-        while sources.len() > self.scheduler_options.max_compaction_sources {
+        while sources.len() > self.options.max_compaction_sources {
             sources.pop_front();
         }
         sources
@@ -338,7 +336,7 @@ impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
     ) -> Box<dyn CompactionScheduler + Send + Sync> {
         Box::new(SizeTieredCompactionScheduler::new(
             self.options.clone(),
-            compactor_options.clone(),
+            compactor_options.max_concurrent_compactions,
         ))
     }
 }
