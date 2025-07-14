@@ -554,7 +554,8 @@ mod tests {
     struct RetentionIteratorTestCase {
         name: &'static str,
         input_entries: Vec<RowEntry>,
-        retention_timeout: Duration,
+        retention_timeout: Option<Duration>,
+        retention_max_seq: Option<u64>,
         current_timestamp: i64,
         expected_entries: Vec<RowEntry>,
     }
@@ -564,7 +565,8 @@ mod tests {
     #[case(RetentionIteratorTestCase {
         name: "empty_iterator",
         input_entries: vec![],
-        retention_timeout: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_max_seq: None,
         current_timestamp: 1000,
         expected_entries: vec![],
     })]
@@ -573,7 +575,8 @@ mod tests {
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950), // 50 seconds ago
         ],
-        retention_timeout: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_max_seq: None,
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950)
@@ -584,7 +587,8 @@ mod tests {
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 seconds ago
         ],
-        retention_timeout: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_max_seq: None,
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
@@ -597,7 +601,8 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900), // Within retention
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
-        retention_timeout: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_max_seq: None,
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
@@ -612,7 +617,8 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
-        retention_timeout: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_max_seq: None,
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
@@ -627,7 +633,8 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
-        retention_timeout: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_max_seq: None,
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_tombstone(b"key1", 3).with_create_ts(950),
@@ -642,7 +649,8 @@ mod tests {
             RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // Outside retention
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
-        retention_timeout: Duration::from_secs(3600), // 1 hour
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_max_seq: None,
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_merge(b"key1", b"merge3", 3).with_create_ts(950),
@@ -657,7 +665,8 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(999),  // 1 second ago
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(998), // 2 seconds ago
         ],
-        retention_timeout: Duration::from_secs(0), // No retention
+        retention_timeout: Some(Duration::from_secs(0)), // No retention
+        retention_max_seq: None,
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
@@ -670,7 +679,8 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),  // Very old
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),  // Very old
         ],
-        retention_timeout: Duration::from_secs(1000), // Very long retention
+        retention_timeout: Some(Duration::from_secs(1000)), // Very long retention
+        retention_max_seq: None,
         current_timestamp: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100),
