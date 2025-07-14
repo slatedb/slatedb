@@ -166,7 +166,8 @@ impl TokioCompactionExecutorInner {
             .with_dedup(false);
         let retention_iter = RetentionIterator::new(
             merge_iter,
-            self.options.retention_timeout,
+            None,
+            None,
             compaction.is_dest_last_run,
             compaction.compaction_ts,
         )
