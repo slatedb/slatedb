@@ -563,10 +563,9 @@ mod tests {
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
-    use crate::compactor_stats::{BYTES_COMPACTED, BYTES_STORED, LAST_COMPACTION_TS_SEC};
+    use crate::compactor_stats::LAST_COMPACTION_TS_SEC;
     use crate::config::{
-        CompressionCodec, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl,
-        WriteOptions,
+        PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
     use crate::db_state::{CoreDbState, SortedRun};
@@ -1132,6 +1131,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[cfg(feature = "zstd")]
     async fn test_compactor_compressed_block_size() {
+        use crate::compactor_stats::{BYTES_COMPACTED, BYTES_STORED};
+        use crate::config::CompressionCodec;
+
         // given:
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
