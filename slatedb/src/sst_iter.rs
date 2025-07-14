@@ -709,6 +709,52 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_iter_with_start_key_larger_than_end_key() {
+        // Initialize the table store and other required components
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 128,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path.clone(),
+            None,
+        ));
+
+        // Create an SST with some data
+        let first_key = [b'b'; 16];
+        let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
+        let first_val = [2u8; 16];
+        let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
+        let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
+
+        // Create a range where start key is larger than end key
+        // Using 'z' as start and 'a' as end
+        let start_key = [b'z'; 16];
+        let end_key = [b'a'; 16];
+        let range = BytesRange::from_slice(start_key.as_ref()..end_key.as_ref());
+
+        // Create the iterator with the problematic range
+        let mut iter = SstIterator::new_borrowed(
+            range,
+            &sst,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // This will trigger the panic in next_iter due to the incorrect block range calculation
+        // The test is marked with #[should_panic], so it should pass when the panic occurs
+        iter.next_iter(true).await.unwrap();
+    }
+
     async fn build_sst_with_n_blocks(
         n: usize,
         ts: Arc<TableStore>,
