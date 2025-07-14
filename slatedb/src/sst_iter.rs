@@ -292,7 +292,7 @@ impl<'a> SstIterator<'a> {
                 }
             } else {
                 assert!(self.fetch_tasks.is_empty());
-                assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
+                assert!(self.next_block_idx_to_fetch >= self.block_idx_range.end);
                 return Ok(None);
             }
         }
@@ -725,21 +725,16 @@ mod tests {
             root_path.clone(),
             None,
         ));
-
-        // Create an SST with some data
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
         let first_val = [2u8; 16];
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        // Create a range where start key is larger than end key
-        // Using 'z' as start and 'a' as end
+        // Create an iterator where start range is larger than end range
         let start_key = [b'z'; 16];
         let end_key = [b'a'; 16];
         let range = BytesRange::from_slice(start_key.as_ref()..end_key.as_ref());
-
-        // Create the iterator with the problematic range
         let mut iter = SstIterator::new_borrowed(
             range,
             &sst,
@@ -750,8 +745,7 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        // This will trigger the panic in next_iter due to the incorrect block range calculation
-        // The test is marked with #[should_panic], so it should pass when the panic occurs
+        // This should not panic in next_iter
         iter.next_iter(true).await.unwrap();
     }
 
