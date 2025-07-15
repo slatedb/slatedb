@@ -1,7 +1,7 @@
 use crate::clock::LogicalClock;
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{Compaction, CompactorState, SourceId};
-use crate::config::{PutOptions, WriteOptions};
+use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::row_codec::SstRowCodecV0;
@@ -327,7 +327,10 @@ impl OnDemandCompactionSchedulerSupplier {
 }
 
 impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
-    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync> {
+    fn compaction_scheduler(
+        &self,
+        _compactor_options: &CompactorOptions,
+    ) -> Box<dyn CompactionScheduler + Send + Sync> {
         Box::new(self.scheduler.clone())
     }
 }
