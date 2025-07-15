@@ -187,14 +187,9 @@ impl TokioCompactionExecutorInner {
         let mut current_writer = self
             .table_store
             .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid()));
-<<<<<<< HEAD
-        let mut current_size = 0usize;
-=======
 
-        let mut raw_bytes_size = 0usize;
         let mut compacted_block_size = 0usize;
         let mut total_bytes_processed = 0u64;
->>>>>>> 9136293 (Add test and new metric for compacted bytes stored.)
         let mut last_progress_report = self.clock.now();
 
         while let Some(kv) = all_iter.next_entry().await? {
@@ -225,10 +220,9 @@ impl TokioCompactionExecutorInner {
                 continue;
             }
 
-            let block_size = current_writer.add(kv).await?;
-
-            compacted_block_size += key_len + block_size;
-            raw_bytes_size += key_len + value_len;
+            if let Some(block_size) = current_writer.add(kv).await? {
+                compacted_block_size += block_size;
+            }
 
             if compacted_block_size > self.options.max_sst_size {
                 let finished_writer = mem::replace(
@@ -237,13 +231,12 @@ impl TokioCompactionExecutorInner {
                         .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid())),
                 );
                 output_ssts.push(finished_writer.close().await?);
-                self.stats.bytes_compacted.add(current_size as u64);
+                self.stats.bytes_compacted.add(compacted_block_size as u64);
                 compacted_block_size = 0;
         }
 
             output_ssts.push(current_writer.close().await?);
-            self.stats.bytes_compacted.add(raw_bytes_size as u64);
-            self.stats.bytes_stored.add(compacted_block_size as u64);
+            self.stats.bytes_compacted.add(compacted_block_size as u64);
         }
 
         Ok(SortedRun {
