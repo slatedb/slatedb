@@ -126,7 +126,12 @@ impl Dst {
             }
         }
         let future = self.db.write_with_options(write_batch, &write_option);
-        self.poll_await(future).await?;
+        // If await_durable is true, we want to flush with probability 0.01
+        // to unblock the write. This will happen even if the WAL is enabled,
+        // which isn't strictly needed. But we don't expose `is_wal_enabled()`
+        // to the public API.
+        let flush_probability = if write_option.await_durable { 0.01 } else { 0f64 };
+        self.poll_await(future, flush_probability).await?;
         Ok(())
     }
 
@@ -141,7 +146,7 @@ impl Dst {
         };
         debug!(hit_probability, is_db_hit, "run_get");
         let future = self.db.get(key);
-        let result = self.poll_await(future).await?;
+        let result = self.poll_await(future, 0f64).await?;
         let expected_val = self.state.get(key);
         let actual_val = result.map(|b| b.to_vec());
         assert_eq!(expected_val, actual_val.as_ref());
@@ -177,7 +182,7 @@ impl Dst {
             let future = self
                 .db
                 .scan(start_key_prefix.clone()..end_key_prefix.clone());
-            let mut actual_itr = self.poll_await(future).await?;
+            let mut actual_itr = self.poll_await(future, 0f64).await?;
             let expected_itr = self.state.range(start_key_prefix..end_key_prefix);
             for (expected_key, expected_val) in expected_itr {
                 let actual_key_val = actual_itr
@@ -252,9 +257,17 @@ impl Dst {
     }
 
     /// Polls a future until it is ready, advancing time if it is not ready.
+    ///
+    /// If `flush_probability` is non-zero, the future will be flushed with
+    /// probability `flush_probability`. This is to unblock `await_durable: true`
+    /// writes when the WAL is disabled. In such a case, SlateDB only flushes
+    /// when `l0_max_size_bytes` is exceeded, which never happens since we're
+    /// single threaded and the first write waits for a flush. See #680 for more
+    /// details.
     async fn poll_await<T>(
         &self,
         future: impl Future<Output = Result<T, SlateDBError>>,
+        flush_probability: f64,
     ) -> Result<T, SlateDBError> {
         use futures::task::noop_waker_ref;
         use std::task::Context;
@@ -270,6 +283,9 @@ impl Dst {
                 }
                 Poll::Pending => {
                     self.advance_time().await;
+                    if self.rand.rng().random_bool(flush_probability) {
+                        self.db.flush().await?;
+                    }
                 }
             }
         }
