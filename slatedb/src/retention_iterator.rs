@@ -70,7 +70,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         compaction_start_ts: i64,
         system_clock: Arc<dyn SystemClock>,
         retention_timeout: Option<Duration>,
-        retention_max_seq: Option<u64>,
+        retention_min_seq: Option<u64>,
         filter_tombstone: bool,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
@@ -91,8 +91,8 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                     create_ts + (timeout.as_millis() as i64) > current_system_ts as i64
                 })
                 .unwrap_or(false);
-            let in_retention_window_by_seq = retention_max_seq
-                .map(|max_seq| entry.seq > max_seq)
+            let in_retention_window_by_seq = retention_min_seq
+                .map(|min_seq| entry.seq >= min_seq)
                 .unwrap_or(false);
 
             let should_keep = idx == 0 || in_retention_window_by_time || in_retention_window_by_seq;
