@@ -34,10 +34,10 @@ pub use db::{Db, DbBuilder};
 pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
 pub use db_reader::DbReader;
-pub use rand::DbRand;
 pub use error::{SettingsError, SlateDBError};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
+pub use rand::DbRand;
 pub use types::KeyValue;
 
 pub mod admin;

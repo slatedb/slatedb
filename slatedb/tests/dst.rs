@@ -26,10 +26,6 @@ const MIB_1: usize = 1024 * 1024;
 const MIB_500: usize = 500 * MIB_1;
 const GIB_5: usize = 5 * MIB_500;
 
-const MAX_KEY_LEN: usize = u16::MAX as usize; // keys are limited to 65_535 bytes
-const MAX_VAL_LEN: usize = MIB_1;
-const MAX_WRITE_BATCH_SIZE: usize = 1024;
-
 const COMPRESSION_CODECS: [Option<&str>; 5] = [
     Some("snappy"),
     Some("zlib"),
@@ -49,7 +45,10 @@ async fn test_deterministic_simulation() -> Result<(), SlateDBError> {
     let db = build_db(&rand).await;
     let iterations = rand.rng().random_range(1..5_000_000);
     info!(seed, iterations, "test_deterministic_simulation");
-    match Dst::new(db, rand).run_simulation(iterations).await {
+    match Dst::new(db, rand, DstOptions::default())
+        .run_simulation(iterations)
+        .await
+    {
         Ok(_) => Ok(()),
         Err(e) => {
             error!(seed, ?e, "test_deterministic_simulation failed");
@@ -58,17 +57,35 @@ async fn test_deterministic_simulation() -> Result<(), SlateDBError> {
     }
 }
 
+struct DstOptions {
+    max_key_len: usize,
+    max_val_len: usize,
+    max_write_batch_size: usize,
+}
+
+impl Default for DstOptions {
+    fn default() -> Self {
+        Self {
+            max_key_len: u16::MAX as usize, // keys are limited to 65_535 bytes
+            max_val_len: MIB_1,
+            max_write_batch_size: 1024,
+        }
+    }
+}
+
 struct Dst {
     db: Db,
     rand: DbRand,
+    options: DstOptions,
     state: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 impl Dst {
-    fn new(db: Db, rand: DbRand) -> Self {
+    fn new(db: Db, rand: DbRand, options: DstOptions) -> Self {
         Self {
             db,
             rand,
+            options,
             state: BTreeMap::new(),
         }
     }
@@ -108,7 +125,10 @@ impl Dst {
 
     async fn run_write(&mut self) -> Result<(), SlateDBError> {
         let mut write_batch = WriteBatch::new();
-        let write_batch_size = self.rand.rng().random_range(1..MAX_WRITE_BATCH_SIZE);
+        let write_batch_size = self
+            .rand
+            .rng()
+            .random_range(1..self.options.max_write_batch_size);
         let write_option = self.get_write_options().await;
         let put_probability = self.rand.rng().random_range(0.0..1.0);
         debug!(write_batch_size, put_probability, "run_write");
@@ -130,7 +150,11 @@ impl Dst {
         // to unblock the write. This will happen even if the WAL is enabled,
         // which isn't strictly needed. But we don't expose `is_wal_enabled()`
         // to the public API.
-        let flush_probability = if write_option.await_durable { 0.01 } else { 0f64 };
+        let flush_probability = if write_option.await_durable {
+            0.01
+        } else {
+            0f64
+        };
         self.poll_await(future, flush_probability).await?;
         Ok(())
     }
@@ -212,7 +236,7 @@ impl Dst {
     #[inline]
     fn gen_key(&self) -> Vec<u8> {
         let mut rng = self.rand.rng();
-        let key_len = rng.random_range(1..MAX_KEY_LEN);
+        let key_len = rng.random_range(1..self.options.max_key_len);
         let mut bytes = Vec::with_capacity(key_len);
         for _ in 0..key_len {
             bytes.push(rng.random_range(0..255));
@@ -223,7 +247,7 @@ impl Dst {
     #[inline]
     fn gen_val(&self) -> Vec<u8> {
         let mut rng = self.rand.rng();
-        let val_len = rng.random_range(1..MAX_VAL_LEN);
+        let val_len = rng.random_range(1..self.options.max_val_len);
         let mut bytes = Vec::with_capacity(val_len);
         for _ in 0..val_len {
             bytes.push(rng.random_range(0..255));
