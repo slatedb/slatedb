@@ -128,10 +128,9 @@ impl DbInner {
         async fn monitor_first_write(
             mut durability_watcher: WatchableOnceCellReader<Result<(), SlateDBError>>,
         ) {
-            let mut warn_interval = tokio::time::interval(Duration::from_secs(5));
             tokio::select! {
                 _ = durability_watcher.await_value() => {}
-                _ = warn_interval.tick() => {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
                     warn!("First write not durable after 5 seconds and WAL is disabled. \
                     SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
                     is reached. If writer is single threaded or has low throughput, the \
