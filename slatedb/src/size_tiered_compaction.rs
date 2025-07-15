@@ -5,10 +5,10 @@ use std::slice::Iter;
 
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{Compaction, CompactorState, SourceId};
-use crate::config::SizeTieredCompactionSchedulerOptions;
+use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use crate::db_state::CoreDbState;
 
-const MAX_IN_FLIGHT_COMPACTIONS: usize = 4;
+const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 4;
 
 #[derive(Clone)]
 struct CompactionSource {
@@ -162,6 +162,16 @@ impl CompactionChecker {
 /// rejects compactions that violate one of the compaction checkers defined above.
 pub(crate) struct SizeTieredCompactionScheduler {
     options: SizeTieredCompactionSchedulerOptions,
+    max_concurrent_compactions: usize,
+}
+
+impl Default for SizeTieredCompactionScheduler {
+    fn default() -> Self {
+        Self::new(
+            SizeTieredCompactionSchedulerOptions::default(),
+            DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+        )
+    }
 }
 
 impl CompactionScheduler for SizeTieredCompactionScheduler {
@@ -178,7 +188,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         );
         let mut checker = CompactionChecker::new(conflict_checker, backpressure_checker);
 
-        while state.compactions().len() + compactions.len() < MAX_IN_FLIGHT_COMPACTIONS {
+        while state.compactions().len() + compactions.len() < self.max_concurrent_compactions {
             let Some(compaction) = self.pick_next_compaction(&l0, &srs, &checker) else {
                 break;
             };
@@ -191,8 +201,14 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
 }
 
 impl SizeTieredCompactionScheduler {
-    pub(crate) fn new(options: SizeTieredCompactionSchedulerOptions) -> Self {
-        Self { options }
+    pub(crate) fn new(
+        options: SizeTieredCompactionSchedulerOptions,
+        max_concurrent_compactions: usize,
+    ) -> Self {
+        Self {
+            options,
+            max_concurrent_compactions,
+        }
     }
 
     fn pick_next_compaction(
@@ -324,8 +340,14 @@ impl SizeTieredCompactionSchedulerSupplier {
 }
 
 impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
-    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync> {
-        Box::new(SizeTieredCompactionScheduler::new(self.options.clone()))
+    fn compaction_scheduler(
+        &self,
+        compactor_options: &CompactorOptions,
+    ) -> Box<dyn CompactionScheduler + Send + Sync> {
+        Box::new(SizeTieredCompactionScheduler::new(
+            self.options.clone(),
+            compactor_options.max_concurrent_compactions,
+        ))
     }
 }
 
@@ -335,7 +357,7 @@ mod tests {
 
     use crate::compactor::CompactionScheduler;
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
-    use crate::config::SizeTieredCompactionSchedulerOptions;
+
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
@@ -343,8 +365,7 @@ mod tests {
     #[test]
     fn test_should_compact_l0s_to_first_sr() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let l0 = vec![create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
         let state =
             create_compactor_state(create_db_state(l0.iter().cloned().collect(), Vec::new()));
@@ -366,8 +387,7 @@ mod tests {
     #[test]
     fn test_should_compact_l0s_to_new_sr() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let l0 = vec![create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
         let state = create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
@@ -386,8 +406,7 @@ mod tests {
     #[test]
     fn test_should_not_compact_l0s_if_fewer_than_min_threshold() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let l0 = [create_sst(1), create_sst(1), create_sst(1)];
         let state = create_compactor_state(create_db_state(l0.iter().cloned().collect(), vec![]));
 
@@ -401,8 +420,7 @@ mod tests {
     #[test]
     fn test_should_compact_srs_if_enough_with_similar_size() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let state = create_compactor_state(create_db_state(
             VecDeque::new(),
             vec![
@@ -429,8 +447,7 @@ mod tests {
     #[test]
     fn test_should_only_include_srs_if_with_similar_size() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let state = create_compactor_state(create_db_state(
             VecDeque::new(),
             vec![
@@ -454,8 +471,7 @@ mod tests {
     #[test]
     fn test_should_not_schedule_compaction_for_source_that_is_already_compacting() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let mut state = create_compactor_state(create_db_state(
             VecDeque::new(),
             vec![
@@ -480,8 +496,7 @@ mod tests {
     #[test]
     fn test_should_not_compact_srs_if_fewer_than_min_threshold() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let state = create_compactor_state(create_db_state(
             VecDeque::new(),
             vec![create_sr2(2, 2), create_sr2(1, 2), create_sr4(0, 2)],
@@ -497,8 +512,7 @@ mod tests {
     #[test]
     fn test_should_clamp_compaction_size() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let state = create_compactor_state(create_db_state(
             VecDeque::new(),
             vec![
@@ -531,8 +545,7 @@ mod tests {
     #[test]
     fn test_should_apply_backpressure() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let mut state = create_compactor_state(create_db_state(
             VecDeque::new(),
             vec![
@@ -567,8 +580,7 @@ mod tests {
     #[test]
     fn test_should_apply_backpressure_for_l0s() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let l0 = vec![create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
         let mut state = create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
@@ -600,8 +612,7 @@ mod tests {
     #[test]
     fn test_should_return_multiple_compactions() {
         // given:
-        let scheduler =
-            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default());
+        let scheduler = SizeTieredCompactionScheduler::default();
         let l0 = vec![create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
         let state = create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
