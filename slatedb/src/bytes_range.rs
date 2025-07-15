@@ -60,9 +60,9 @@ impl BytesRange {
             is_bound_non_empty(&end_bound),
             "End bound must be non-empty"
         );
-        Self {
-            inner: ComparableRange::new(start_bound, end_bound),
-        }
+        let inner = ComparableRange::new(start_bound, end_bound);
+        assert!(inner.non_empty(), "Range must be non-empty");
+        Self { inner }
     }
 
     pub(crate) fn from<T: RangeBounds<Bytes>>(range: T) -> Self {
@@ -129,7 +129,9 @@ pub(crate) mod tests {
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
 
+    use bytes::Bytes;
     use proptest::proptest;
+    use std::ops::Bound;
     use std::ops::Bound::Unbounded;
     use std::ops::RangeBounds;
 
@@ -184,5 +186,18 @@ pub(crate) mod tests {
         )| {
             assert!(non_empty_1.intersect(&non_empty_2).is_some())
         });
+    }
+
+    #[test]
+    fn test_new_with_unbounded_range_is_valid() {
+        BytesRange::new(Unbounded, Unbounded);
+    }
+
+    #[test]
+    #[should_panic(expected = "Range must be non-empty")]
+    fn test_new_with_start_larger_than_end_panics() {
+        let start = Bound::Included(Bytes::from("z"));
+        let end = Bound::Included(Bytes::from("a"));
+        BytesRange::new(start, end);
     }
 }

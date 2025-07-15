@@ -292,7 +292,7 @@ impl<'a> SstIterator<'a> {
                 }
             } else {
                 assert!(self.fetch_tasks.is_empty());
-                assert!(self.next_block_idx_to_fetch >= self.block_idx_range.end);
+                assert_eq!(self.next_block_idx_to_fetch, self.block_idx_range.end);
                 return Ok(None);
             }
         }
@@ -710,6 +710,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[should_panic(expected = "Range must be non-empty")]
     async fn test_iter_with_start_key_larger_than_end_key() {
         // Initialize the table store and other required components
         let root_path = Path::from("");
