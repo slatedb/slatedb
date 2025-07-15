@@ -140,7 +140,7 @@ mod tests {
 
     use super::*;
 
-    struct PutTestCase {
+    struct WriteOpTestCase {
         key: Vec<u8>,
         // None is a delete and options will be ignored
         value: Option<Vec<u8>>,
