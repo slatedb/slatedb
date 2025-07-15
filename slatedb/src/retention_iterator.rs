@@ -586,6 +586,7 @@ mod tests {
         system_clock_ts: i64,
         compaction_start_ts: i64,
         expected_entries: Vec<RowEntry>,
+        filter_tombstone: bool,
     }
 
     // Table-driven test for retention iterator scenarios
@@ -598,6 +599,7 @@ mod tests {
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "single_entry_within_retention",
@@ -611,6 +613,7 @@ mod tests {
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950)
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "single_entry_outside_retention",
@@ -624,6 +627,7 @@ mod tests {
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "multiple_versions_same_key_within_retention",
@@ -641,6 +645,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "multiple_versions_same_key_mixed_retention",
@@ -658,6 +663,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "tombstone_entries",
@@ -675,6 +681,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "merge_entries",
@@ -692,6 +699,7 @@ mod tests {
             RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "zero_retention_time",
@@ -707,6 +715,7 @@ mod tests {
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "very_long_retention_time",
@@ -724,6 +733,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),
         ],
+        filter_tombstone: false,
     })]
     // Test cases for expire_ts handling
     #[case(RetentionIteratorTestCase {
@@ -738,6 +748,7 @@ mod tests {
         expected_entries: vec![
             RowEntry::new_tombstone(b"key1", 1).with_create_ts(950), // Converted to tombstone
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "not_expired_entry_kept_as_is",
@@ -751,6 +762,7 @@ mod tests {
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(1100), // Kept as is
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "mixed_expired_and_not_expired_entries",
@@ -768,6 +780,7 @@ mod tests {
             RowEntry::new_tombstone(b"key1", 2).with_create_ts(900), // Converted to tombstone
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "expire_ts_equals_compaction_start_ts",
@@ -781,6 +794,7 @@ mod tests {
         expected_entries: vec![
             RowEntry::new_tombstone(b"key1", 1).with_create_ts(950), // Converted to tombstone
         ],
+        filter_tombstone: false,
     })]
     // Test cases for retention_max_seq handling
     #[case(RetentionIteratorTestCase {
@@ -798,6 +812,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest)
             // value2 and value1 filtered out because seq <= retention_max_seq and not latest
         ],
+        filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
         name: "retention_max_seq_with_timeout",
@@ -815,6 +830,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // Kept (within retention window)
             RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // Kept (within timeout window)
         ],
+        filter_tombstone: false,
     })]
     #[tokio::test]
     async fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
@@ -833,7 +849,7 @@ mod tests {
             system_clock,
             test_case.retention_timeout,
             test_case.retention_min_seq,
-            false,
+            test_case.filter_tombstone,
         );
 
         // Convert filtered versions back to expected order
