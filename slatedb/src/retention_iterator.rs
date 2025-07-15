@@ -43,7 +43,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     pub(crate) async fn new(
         inner: T,
         retention_timeout: Option<Duration>,
-        retention_max_seq: Option<u64>,
+        retention_min_seq: Option<u64>,
         filter_tombstone: bool,
         compaction_start_ts: i64,
         system_clock: Arc<dyn SystemClock>,
@@ -51,7 +51,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         Ok(Self {
             inner,
             retention_timeout,
-            retention_min_seq: retention_max_seq,
+            retention_min_seq: retention_min_seq,
             filter_tombstone,
             compaction_start_ts,
             system_clock,
@@ -189,7 +189,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                     // Apply retention filtering to collected versions
                     let compaction_start_ts = self.compaction_start_ts;
                     let retention_timeout = self.retention_timeout;
-                    let retention_max_seq = self.retention_min_seq;
+                    let retention_min_seq = self.retention_min_seq;
                     let system_clock = self.system_clock.clone();
                     self.buffer.process_retention(|versions| {
                         Self::apply_retention_filter(
@@ -197,7 +197,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                             compaction_start_ts,
                             system_clock,
                             retention_timeout,
-                            retention_max_seq,
+                            retention_min_seq,
                             self.filter_tombstone,
                         )
                     })?;
@@ -796,13 +796,13 @@ mod tests {
         ],
         filter_tombstone: false,
     })]
-    // Test cases for retention_max_seq handling
+    // Test cases for retention_min_seq handling
     #[case(RetentionIteratorTestCase {
-        name: "retention_max_seq_basic",
+        name: "retention_min_seq_basic",
         input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // seq > retention_max_seq
-            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // seq <= retention_max_seq
-            RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // seq <= retention_max_seq
+            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // seq > retention_min_seq
+            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // seq <= retention_min_seq
+            RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // seq <= retention_min_seq
         ],
         retention_timeout: None,
         retention_min_seq: Some(25),
@@ -810,16 +810,16 @@ mod tests {
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest)
-            // value2 and value1 filtered out because seq <= retention_max_seq and not latest
+            // value2 and value1 filtered out because seq <= retention_min_seq and not latest
         ],
         filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
-        name: "retention_max_seq_with_timeout",
+        name: "retention_min_seq_with_timeout",
         input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // seq > retention_max_seq, within timeout
-            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // seq > retention_max_seq, within timeout
-            RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // seq <= retention_max_seq, within timeout
+            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // seq > retention_min_seq, within timeout
+            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // seq > retention_min_seq, within timeout
+            RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // seq <= retention_min_seq, within timeout
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_min_seq: Some(25),
