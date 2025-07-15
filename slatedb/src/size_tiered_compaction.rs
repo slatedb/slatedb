@@ -8,6 +8,8 @@ use crate::compactor_state::{Compaction, CompactorState, SourceId};
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use crate::db_state::CoreDbState;
 
+const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 4;
+
 #[derive(Clone)]
 struct CompactionSource {
     source: SourceId,
@@ -158,10 +160,18 @@ impl CompactionChecker {
 ///
 /// The scheduler ensures that a compaction has at most options.max_compaction_sources. The scheduler
 /// rejects compactions that violate one of the compaction checkers defined above.
-#[derive(Default)]
 pub(crate) struct SizeTieredCompactionScheduler {
     options: SizeTieredCompactionSchedulerOptions,
     max_concurrent_compactions: usize,
+}
+
+impl Default for SizeTieredCompactionScheduler {
+    fn default() -> Self {
+        Self::new(
+            SizeTieredCompactionSchedulerOptions::default(),
+            DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+        )
+    }
 }
 
 impl CompactionScheduler for SizeTieredCompactionScheduler {
