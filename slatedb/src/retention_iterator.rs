@@ -51,7 +51,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         Ok(Self {
             inner,
             retention_timeout,
-            retention_min_seq: retention_min_seq,
+            retention_min_seq,
             filter_tombstone,
             compaction_start_ts,
             system_clock,
@@ -85,7 +85,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                         .create_ts
                         .expect("a record with no create_ts should not happen");
                     let current_system_ts = system_time_to_millis(system_clock.now());
-                    create_ts + (timeout.as_millis() as i64) > current_system_ts as i64
+                    create_ts + (timeout.as_millis() as i64) > current_system_ts
                 })
                 .unwrap_or(false);
             let in_retention_window_by_seq = retention_min_seq
