@@ -7,7 +7,6 @@ use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use rand::RngCore;
-use std::clone;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;

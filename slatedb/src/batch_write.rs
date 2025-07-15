@@ -137,7 +137,7 @@ impl DbInner {
                     applications must call `flush` to ensure durability in a timely manner.");
                 }
             }
-        };
+        }
 
         let fut = async move {
             while !(is_stopped && rx.is_empty()) {
