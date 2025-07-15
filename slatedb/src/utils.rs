@@ -7,6 +7,7 @@ use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use rand::RngCore;
+use std::clone;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
@@ -19,11 +20,13 @@ use uuid::Uuid;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
+#[derive(Clone)]
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
     tx: tokio::sync::watch::Sender<Option<T>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct WatchableOnceCellReader<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
 }
