@@ -156,8 +156,13 @@ impl SstRowCodecV0 {
     }
 
     pub fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntry) {
-        output.put_u16(row.key_prefix_len.try_into().unwrap());
-        output.put_u16(row.key_suffix.len().try_into().unwrap());
+        output.put_u16(row.key_prefix_len.try_into().expect("key_prefix_len > u16"));
+        output.put_u16(
+            row.key_suffix
+                .len()
+                .try_into()
+                .expect("key_suffix.len() > u16"),
+        );
         output.put(row.key_suffix.as_ref());
 
         // encode seq & flags
