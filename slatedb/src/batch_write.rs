@@ -25,11 +25,10 @@
 //! _Note: The `write_batch` loop still holds a lock on the db_state. There can still
 //! be contention between `get`s, which holds a lock, and the write loop._
 
-use log::{info, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tracing::instrument;
+use tracing::{info, instrument, warn};
 
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
@@ -129,9 +128,10 @@ impl DbInner {
         async fn monitor_first_write(
             mut durability_watcher: WatchableOnceCellReader<Result<(), SlateDBError>>,
         ) {
+            let mut warn_interval = tokio::time::interval(Duration::from_secs(5));
             tokio::select! {
                 _ = durability_watcher.await_value() => {}
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                _ = warn_interval.tick() => {
                     warn!("First write not durable after 5 seconds and WAL is disabled. \
                     SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
                     is reached. If writer is single threaded or has low throughput, the \
