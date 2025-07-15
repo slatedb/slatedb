@@ -21,9 +21,9 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     /// Retention time duration. Entries with create_ts older than (current_time - retention_time)
     /// will be filtered out (except the latest version)
     retention_timeout: Option<Duration>,
-    /// The max sequence number to retain. It's taken from the minimum sequence number of the
+    /// The min sequence number to retain. It's taken from the minimum sequence number of the
     /// active snapshots.
-    retention_max_seq: Option<u64>,
+    retention_min_seq: Option<u64>,
     /// Buffer for collecting and processing multiple versions of the same key
     buffer: RetentionBuffer,
     /// Whether to filter out tombstones
@@ -50,7 +50,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         Ok(Self {
             inner,
             retention_timeout,
-            retention_max_seq,
+            retention_min_seq: retention_max_seq,
             filter_tombstone,
             compaction_start_ts,
             system_clock,
@@ -192,7 +192,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                     // Apply retention filtering to collected versions
                     let compaction_start_ts = self.compaction_start_ts;
                     let retention_timeout = self.retention_timeout;
-                    let retention_max_seq = self.retention_max_seq;
+                    let retention_max_seq = self.retention_min_seq;
                     let system_clock = self.system_clock.clone();
                     self.buffer.process_retention(|versions| {
                         Self::apply_retention_filter(
@@ -585,7 +585,7 @@ mod tests {
         name: &'static str,
         input_entries: Vec<RowEntry>,
         retention_timeout: Option<Duration>,
-        retention_max_seq: Option<u64>,
+        retention_min_seq: Option<u64>,
         system_clock_ts: i64,
         compaction_start_ts: i64,
         expected_entries: Vec<RowEntry>,
@@ -597,7 +597,7 @@ mod tests {
         name: "empty_iterator",
         input_entries: vec![],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![],
@@ -608,7 +608,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950), // 50 seconds ago
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -621,7 +621,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 seconds ago
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -636,7 +636,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -653,7 +653,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -670,7 +670,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -687,7 +687,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -704,7 +704,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(998), // 2 seconds ago
         ],
         retention_timeout: Some(Duration::from_secs(0)), // No retention
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -719,7 +719,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),  // Very old
         ],
         retention_timeout: Some(Duration::from_secs(1000)), // Very long retention
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -735,7 +735,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(900), // Expired
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -748,7 +748,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(1100), // Not expired
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -763,7 +763,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -778,7 +778,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(1000), // Expired (equal)
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: None,
+        retention_min_seq: None,
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -794,7 +794,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // seq <= retention_max_seq
         ],
         retention_timeout: None,
-        retention_max_seq: Some(25),
+        retention_min_seq: Some(25),
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -810,7 +810,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // seq <= retention_max_seq, within timeout
         ],
         retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_max_seq: Some(25),
+        retention_min_seq: Some(25),
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
@@ -835,7 +835,7 @@ mod tests {
             test_case.compaction_start_ts,
             system_clock,
             test_case.retention_timeout,
-            test_case.retention_max_seq,
+            test_case.retention_min_seq,
             false,
         );
 
