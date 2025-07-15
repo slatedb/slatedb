@@ -148,41 +148,41 @@ mod tests {
     }
 
     #[rstest]
-    #[case(vec![PutTestCase {
+    #[case(vec![WriteOpTestCase {
         key: b"key".to_vec(),
         value: Some(b"value".to_vec()),
         options: PutOptions::default(),
     }])]
-    #[case(vec![PutTestCase {
+    #[case(vec![WriteOpTestCase {
         key: b"key".to_vec(),
         value: None,
         options: PutOptions::default(),
     }])]
     #[should_panic(expected = "key size must be <= u16::MAX")]
-    #[case(vec![PutTestCase {
+    #[case(vec![WriteOpTestCase {
         key: vec![b'k'; 65_536], // 2^16
         value: None,
         options: PutOptions::default(),
     }])]
     #[should_panic(expected = "value size must be <= u32::MAX")]
-    #[case(vec![PutTestCase {
+    #[case(vec![WriteOpTestCase {
         key: b"key".to_vec(),
         value: Some(vec![b'x'; u32::MAX as usize + 1]), // 2^32
         options: PutOptions::default(),
     }])]
     #[should_panic(expected = "key cannot be empty")]
-    #[case(vec![PutTestCase {
+    #[case(vec![WriteOpTestCase {
         key: b"".to_vec(),
         value: Some(b"value".to_vec()),
         options: PutOptions::default(),
     }])]
     #[should_panic(expected = "key cannot be empty")]
-    #[case(vec![PutTestCase {
+    #[case(vec![WriteOpTestCase {
         key: b"".to_vec(),
         value: None,
         options: PutOptions::default(),
     }])]
-    fn test_put_delete_batch(#[case] test_case: Vec<PutTestCase>) {
+    fn test_put_delete_batch(#[case] test_case: Vec<WriteOpTestCase>) {
         let mut batch = WriteBatch::new();
         let mut expected_ops: Vec<WriteOp> = Vec::new();
         for test_case in test_case {
