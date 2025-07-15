@@ -22,10 +22,6 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
-const MIB_1: usize = 1024 * 1024;
-const MIB_500: usize = 500 * MIB_1;
-const GIB_5: usize = 5 * MIB_500;
-
 const COMPRESSION_CODECS: [Option<&str>; 5] = [
     Some("snappy"),
     Some("zlib"),
@@ -67,8 +63,8 @@ impl Default for DstOptions {
     fn default() -> Self {
         Self {
             max_key_len: u16::MAX as usize, // keys are limited to 65_535 bytes
-            max_val_len: MIB_1,
-            max_write_batch_size: 1024,
+            max_val_len: 1024 * 1024,       // 1 MiB
+            max_write_batch_size: 1024,     // 1 KiB
         }
     }
 }
@@ -315,6 +311,10 @@ impl Dst {
         }
     }
 }
+
+const MIB_1: usize = 1024 * 1024;
+const MIB_500: usize = 500 * MIB_1;
+const GIB_5: usize = 5 * MIB_500;
 
 /// Builds a DB instance with components that are selected at random.
 async fn build_db(rand: &DbRand) -> Db {
