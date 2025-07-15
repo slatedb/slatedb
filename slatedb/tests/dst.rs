@@ -2,7 +2,9 @@ use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
 use rand::seq::IteratorRandom;
 use rand::Rng;
+use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
+use slatedb::config::GarbageCollectorOptions;
 use slatedb::config::PutOptions;
 use slatedb::config::WriteOptions;
 use slatedb::object_store::memory::InMemory;
@@ -68,7 +70,7 @@ impl Default for DstOptions {
             max_key_len: u16::MAX as usize, // keys are limited to 65_535 bytes
             max_val_len: 1024 * 1024,       // 1 MiB
             max_write_batch_len: 1000,
-            max_btree_size_bytes: 5 * 1024 * 1024 * 1024, // 5 GiB
+            max_btree_size_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB
         }
     }
 }
@@ -310,7 +312,7 @@ impl Dst {
                 // Clone so we can mutably borrow below state without
                 // holding a reference to the rand.rng here.
                 .clone();
-            self.db.delete(&key).await?;
+            self.poll_await(self.db.delete(&key), 0.01).await?;
             self.state.remove(&key);
         }
         Ok(())
@@ -425,6 +427,7 @@ const GIB_5: usize = 5 * MIB_500;
 async fn build_db(rand: &DbRand) -> Db {
     let mut builder = DbBuilder::new("test_db", Arc::new(InMemory::new()));
     builder = builder.with_settings(build_settings(rand).await);
+    builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
     builder.build().await.unwrap()
 }
 
@@ -456,10 +459,6 @@ async fn build_settings(rand: &DbRand) -> Settings {
             None
         };
 
-    // TODO: Build object store cache options
-    // TODO: Build garbage collector options
-    // TODO: Build compactor options
-
     Settings {
         flush_interval: Some(flush_interval),
         manifest_poll_interval,
@@ -471,6 +470,15 @@ async fn build_settings(rand: &DbRand) -> Settings {
         max_unflushed_bytes,
         // default_ttl,
         compression_codec,
+        // TODO: add object store filesystem cache configs
+        // TODO: add random GC configs
+        garbage_collector_options: Some(GarbageCollectorOptions {
+            manifest_options: GarbageCollectorOptions::default().manifest_options,
+            wal_options: GarbageCollectorOptions::default().wal_options,
+            compacted_options: GarbageCollectorOptions::default().compacted_options,
+        }),
+        // TODO: add random compactor configs
+        compactor_options: Some(CompactorOptions::default()),
         #[cfg(feature = "wal_disable")]
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
