@@ -2,13 +2,14 @@ use async_trait::async_trait;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::clock::SystemClock;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
+use crate::utils::system_time_to_millis;
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -83,11 +84,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                     let create_ts = entry
                         .create_ts
                         .expect("a record with no create_ts should not happen");
-                    let current_system_ts = system_clock
-                        .now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis();
+                    let current_system_ts = system_time_to_millis(system_clock.now());
                     create_ts + (timeout.as_millis() as i64) > current_system_ts as i64
                 })
                 .unwrap_or(false);
