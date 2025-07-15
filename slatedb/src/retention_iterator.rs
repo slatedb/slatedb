@@ -832,6 +832,73 @@ mod tests {
         ],
         filter_tombstone: false,
     })]
+    // Test cases for filter_tombstone: true (contrasting with existing cases)
+    #[case(RetentionIteratorTestCase {
+        name: "expired_entry_converted_to_tombstone_filter_tombstone_true",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(900), // Expired
+        ],
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            // Tombstone filtered out, so no entries remain
+        ],
+        filter_tombstone: true, // Converted tombstone filtered out
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "tombstone_tail_filtered_out",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // Latest
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900), // Middle value
+            RowEntry::new_tombstone(b"key1", 1).with_create_ts(850), // Tombstone at end (oldest)
+        ],
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+            // Tombstone at end filtered out
+        ],
+        filter_tombstone: true, // Tombstone at end filtered out
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "all_tombstones_filtered_out",
+        input_entries: vec![
+            RowEntry::new_tombstone(b"key1", 3).with_create_ts(950), // Latest is tombstone
+            RowEntry::new_tombstone(b"key1", 2).with_create_ts(900), // Second tombstone
+            RowEntry::new_tombstone(b"key1", 1).with_create_ts(850), // Third tombstone
+        ],
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            // All tombstones filtered out, so no entries remain
+        ],
+        filter_tombstone: true, // All tombstones filtered out
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "mixed_expired_and_not_expired_entries_filter_tombstone_true",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900).with_expire_ts(950), // Expired
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
+        ],
+        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
+            RowEntry::new_tombstone(b"key1", 2).with_create_ts(900), // Expired变成tombstone，且不会被移除
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
+        ],
+        filter_tombstone: true, // tombstone is not in the tail, so not filtered out
+    })]
     #[tokio::test]
     async fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
         // Test the apply_retention_filter function directly since TestIterator doesn't support create_ts
