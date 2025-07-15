@@ -378,8 +378,9 @@ where
     }
 
     fn remove(&mut self, key: &K) {
-        self.size_bytes -= key.as_ref().len();
-        self.inner.remove(key);
+        if let Some(val) = self.inner.remove(key) {
+            self.size_bytes -= key.as_ref().len() + val.as_ref().len();
+        }
     }
 
     fn get(&self, key: &K) -> Option<&V> {
@@ -487,14 +488,6 @@ fn configure_logger() {
         .with(tracing_subscriber::fmt::layer());
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 }
-
-/*
-interesting seeds:
-
-- 4828976414946781144: seems to hang on first write (polling for write to finish)
-- 6561056955098952705: range end out of bounds: 3603312325 <= 833739 (now seems to hang, too)
-
-*/
 
 fn pretty_duration(d: Duration) -> String {
     let total_secs = d.as_secs();
