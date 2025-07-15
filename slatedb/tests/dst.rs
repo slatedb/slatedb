@@ -19,6 +19,7 @@ use std::ops::RangeFull;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::Instant;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -57,7 +58,7 @@ async fn test_deterministic_simulation() -> Result<(), SlateDBError> {
 struct DstOptions {
     max_key_len: usize,
     max_val_len: usize,
-    max_write_batch_size: usize,
+    max_write_batch_len: usize,
     max_btree_size_bytes: usize,
 }
 
@@ -66,7 +67,7 @@ impl Default for DstOptions {
         Self {
             max_key_len: u16::MAX as usize, // keys are limited to 65_535 bytes
             max_val_len: 1024 * 1024,       // 1 MiB
-            max_write_batch_size: 1024,     // 1 KiB
+            max_write_batch_len: 1000,
             max_btree_size_bytes: 5 * 1024 * 1024 * 1024, // 5 GiB
         }
     }
@@ -91,7 +92,7 @@ impl Dst {
     // TODO: should we be using rng_seed (tokio_unstable) for the tokio runtime?
     async fn run_simulation(&mut self, iterations: u32) -> Result<(), SlateDBError> {
         let mut step_count = 0;
-        let start_time = tokio::time::Instant::now();
+        let start_time = Instant::now();
         let action_index = WeightedIndex::new([
             1, // write
             1, // get
@@ -106,7 +107,7 @@ impl Dst {
             info!(
                 step_count,
                 step_action,
-                simulated_time = pretty_duration(tokio::time::Instant::now().duration_since(start_time)),
+                simulated_time = pretty_duration(Instant::now().duration_since(start_time)),
                 btree_size = self.state.size_bytes_display(),
                 btree_entries = self.state.len(),
                 "run_simulation"
@@ -135,7 +136,7 @@ impl Dst {
         let write_batch_size = self
             .rand
             .rng()
-            .random_range(1..self.options.max_write_batch_size);
+            .random_range(1..self.options.max_write_batch_len);
         let write_option = self.get_write_options().await;
         let put_probability = self.rand.rng().random_range(0.0..1.0);
         debug!(write_batch_size, put_probability, "run_write");
@@ -498,19 +499,31 @@ interesting seeds:
 fn pretty_duration(d: Duration) -> String {
     let total_secs = d.as_secs();
     let weeks = total_secs / 604_800;
-    let days  = (total_secs % 604_800) / 86_400;
+    let days = (total_secs % 604_800) / 86_400;
     let hours = (total_secs % 86_400) / 3_600;
-    let mins  = (total_secs % 3_600)  / 60;
-    let secs  =  total_secs % 60;
+    let mins = (total_secs % 3_600) / 60;
+    let secs = total_secs % 60;
     let millis = d.subsec_millis();
 
     let mut parts = Vec::new();
-    if weeks   > 0 { parts.push(format!("{}w", weeks)); }
-    if days    > 0 { parts.push(format!("{}d", days)); }
-    if hours   > 0 { parts.push(format!("{}h", hours)); }
-    if mins    > 0 { parts.push(format!("{}m", mins)); }
-    if secs    > 0 { parts.push(format!("{}s", secs)); }
-    if millis > 0 { parts.push(format!("{}ms", millis)); }
+    if weeks > 0 {
+        parts.push(format!("{}w", weeks));
+    }
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+    if hours > 0 {
+        parts.push(format!("{}h", hours));
+    }
+    if mins > 0 {
+        parts.push(format!("{}m", mins));
+    }
+    if secs > 0 {
+        parts.push(format!("{}s", secs));
+    }
+    if millis > 0 {
+        parts.push(format!("{}ms", millis));
+    }
 
     if parts.is_empty() {
         // handle zero-duration specially
