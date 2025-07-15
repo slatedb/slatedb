@@ -14,6 +14,7 @@ use slatedb::SlateDBError;
 use slatedb::WriteBatch;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::ops::RangeBounds;
 use std::ops::RangeFull;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -57,6 +58,7 @@ struct DstOptions {
     max_key_len: usize,
     max_val_len: usize,
     max_write_batch_size: usize,
+    max_btree_size_bytes: usize,
 }
 
 impl Default for DstOptions {
@@ -65,6 +67,7 @@ impl Default for DstOptions {
             max_key_len: u16::MAX as usize, // keys are limited to 65_535 bytes
             max_val_len: 1024 * 1024,       // 1 MiB
             max_write_batch_size: 1024,     // 1 KiB
+            max_btree_size_bytes: 5 * 1024 * 1024 * 1024, // 5 GiB
         }
     }
 }
@@ -73,22 +76,22 @@ struct Dst {
     db: Db,
     rand: DbRand,
     options: DstOptions,
-    state: BTreeMap<Vec<u8>, Vec<u8>>,
+    state: SizedBTreeMap<Vec<u8>, Vec<u8>>,
 }
-
 impl Dst {
     fn new(db: Db, rand: DbRand, options: DstOptions) -> Self {
         Self {
             db,
             rand,
             options,
-            state: BTreeMap::new(),
+            state: SizedBTreeMap::new(),
         }
     }
 
     // TODO: should we be using rng_seed (tokio_unstable) for the tokio runtime?
     async fn run_simulation(&mut self, iterations: u32) -> Result<(), SlateDBError> {
-        let mut op_count = 0;
+        let mut step_count = 0;
+        let start_time = tokio::time::Instant::now();
         let action_index = WeightedIndex::new([
             1, // write
             1, // get
@@ -99,9 +102,16 @@ impl Dst {
         .unwrap();
 
         for _ in 0..iterations {
-            let action_type = action_index.sample(&mut self.rand.rng());
-            info!(op_count, action_type, "run_simulation");
-            match action_type {
+            let step_action = action_index.sample(&mut self.rand.rng());
+            info!(
+                step_count,
+                step_action,
+                simulated_time = pretty_duration(tokio::time::Instant::now().duration_since(start_time)),
+                btree_size = self.state.size_bytes_display(),
+                btree_entries = self.state.len(),
+                "run_simulation"
+            );
+            match step_action {
                 0 => self.run_write().await?,
                 1 => self.run_get().await?,
                 2 => self.run_scan().await?,
@@ -114,7 +124,8 @@ impl Dst {
                 // TODO: add fencing?
                 _ => unreachable!(),
             }
-            op_count += 1;
+            step_count += 1;
+            self.maybe_shrink_db().await?;
         }
         Ok(())
     }
@@ -276,6 +287,34 @@ impl Dst {
         }
     }
 
+    /// Shrinks the database and in-memory state if the in-memory state exceeds
+    /// `max_btree_size_bytes`.
+    ///
+    /// The shrink operation deletes random keys from the database and in-memory
+    /// state until the in-memory state is below a threshold. The threshold is a
+    /// random size between 80% and 100% of `max_btree_size_bytes`. If the in-memory
+    /// state is empty or below `max_btree_size_bytes`, the shrink operation is
+    /// always skipped.
+    async fn maybe_shrink_db(&mut self) -> Result<(), SlateDBError> {
+        let shrink_to_bytes = self.rand.rng().random_range(
+            (self.options.max_btree_size_bytes as f64 * 0.8) as usize
+                ..self.options.max_btree_size_bytes,
+        );
+        while self.state.size_bytes > shrink_to_bytes && self.state.len() > 0 {
+            let key = self
+                .state
+                .keys()
+                .choose(&mut self.rand.rng())
+                .unwrap()
+                // Clone so we can mutably borrow below state without
+                // holding a reference to the rand.rng here.
+                .clone();
+            self.db.delete(&key).await?;
+            self.state.remove(&key);
+        }
+        Ok(())
+    }
+
     /// Polls a future until it is ready, advancing time if it is not ready.
     ///
     /// If `flush_probability` is non-zero, the future will be flushed with
@@ -308,6 +347,70 @@ impl Dst {
                     }
                 }
             }
+        }
+    }
+}
+
+struct SizedBTreeMap<K, V>
+where
+    K: Ord,
+    V: Ord,
+{
+    inner: BTreeMap<K, V>,
+    pub(crate) size_bytes: usize,
+}
+
+impl<K, V> SizedBTreeMap<K, V>
+where
+    K: Ord + AsRef<[u8]>,
+    V: Ord + AsRef<[u8]>,
+{
+    fn new() -> Self {
+        Self {
+            inner: BTreeMap::new(),
+            size_bytes: 0,
+        }
+    }
+    fn insert(&mut self, key: K, val: V) {
+        self.size_bytes += key.as_ref().len() + val.as_ref().len();
+        self.inner.insert(key, val);
+    }
+
+    fn remove(&mut self, key: &K) {
+        self.size_bytes -= key.as_ref().len();
+        self.inner.remove(key);
+    }
+
+    fn get(&self, key: &K) -> Option<&V> {
+        self.inner.get(key)
+    }
+
+    fn range(&self, range: impl RangeBounds<K>) -> std::collections::btree_map::Range<'_, K, V> {
+        self.inner.range(range)
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn keys(&self) -> std::collections::btree_map::Keys<'_, K, V> {
+        self.inner.keys()
+    }
+
+    fn size_bytes_display(&self) -> String {
+        let size_bytes = self.size_bytes;
+        if size_bytes < 1024 {
+            format!("{}b", size_bytes)
+        } else if size_bytes < 1024 * 1024 {
+            format!("{}kb", size_bytes / 1024)
+        } else if size_bytes < 1024 * 1024 * 1024 {
+            format!("{}mb", size_bytes / (1024 * 1024))
+        } else {
+            format!("{}gb", size_bytes / (1024 * 1024 * 1024))
         }
     }
 }
@@ -391,3 +494,28 @@ interesting seeds:
 - 6561056955098952705: range end out of bounds: 3603312325 <= 833739 (now seems to hang, too)
 
 */
+
+fn pretty_duration(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    let weeks = total_secs / 604_800;
+    let days  = (total_secs % 604_800) / 86_400;
+    let hours = (total_secs % 86_400) / 3_600;
+    let mins  = (total_secs % 3_600)  / 60;
+    let secs  =  total_secs % 60;
+    let millis = d.subsec_millis();
+
+    let mut parts = Vec::new();
+    if weeks   > 0 { parts.push(format!("{}w", weeks)); }
+    if days    > 0 { parts.push(format!("{}d", days)); }
+    if hours   > 0 { parts.push(format!("{}h", hours)); }
+    if mins    > 0 { parts.push(format!("{}m", mins)); }
+    if secs    > 0 { parts.push(format!("{}s", secs)); }
+    if millis > 0 { parts.push(format!("{}ms", millis)); }
+
+    if parts.is_empty() {
+        // handle zero-duration specially
+        "0s".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
