@@ -14,12 +14,22 @@ use crate::{
     utils::{system_time_from_millis, system_time_to_millis},
     SlateDBError,
 };
+use async_trait::async_trait;
 use tracing::info;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.
+#[async_trait]
 pub trait SystemClock: Debug + Send + Sync {
     fn now(&self) -> SystemTime;
+    #[cfg(test)]
+    async fn advance(&self, duration: Duration);
+    async fn sleep(&self, duration: Duration);
+    // fn sleep_until(&self, duration: SystemTime);
+    // fn timeout(&self, duration: Duration);
+    // fn timeout_at(&self, duration: SystemTime);
+    // fn interval(&self, duration: Duration);
+    // fn interval_at(&self, duration: SystemTime);
 }
 
 /// A system clock implementation that uses tokio::time::Instant to measure time. During
@@ -52,10 +62,20 @@ impl Default for DefaultSystemClock {
     }
 }
 
+#[async_trait]
 impl SystemClock for DefaultSystemClock {
     fn now(&self) -> SystemTime {
         let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
         system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
+    }
+
+    #[cfg(test)]
+    async fn advance(&self, duration: Duration) {
+        tokio::time::advance(duration).await;
+    }
+
+    async fn sleep(&self, duration: Duration) {
+        tokio::time::sleep(duration).await;
     }
 }
 

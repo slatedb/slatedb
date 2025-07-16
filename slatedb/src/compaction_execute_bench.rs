@@ -15,7 +15,7 @@ use tracing::{error, info};
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
-use crate::clock::DefaultSystemClock;
+use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -37,6 +37,7 @@ pub struct CompactionExecuteBench {
     path: Path,
     object_store: Arc<dyn ObjectStore>,
     rand: Arc<DbRand>,
+    system_clock: Arc<dyn SystemClock>,
 }
 
 impl CompactionExecuteBench {
@@ -49,6 +50,7 @@ impl CompactionExecuteBench {
             path,
             object_store,
             rand,
+            system_clock: Arc::new(DefaultSystemClock::new()),
         }
     }
 
@@ -95,6 +97,7 @@ impl CompactionExecuteBench {
                 num_keys,
                 val_bytes,
                 self.rand.clone(),
+                self.system_clock.clone(),
             ));
             futures.push(jh)
         }
@@ -115,6 +118,7 @@ impl CompactionExecuteBench {
         num_keys: usize,
         val_bytes: usize,
         rand: Arc<DbRand>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<(), SlateDBError> {
         let mut retries = 0;
         loop {
@@ -138,7 +142,7 @@ impl CompactionExecuteBench {
                 }
             }
             retries += 1;
-            tokio::time::sleep(Duration::from_secs(retries + 1)).await;
+            system_clock.sleep(Duration::from_secs(retries + 1)).await;
         }
     }
 

@@ -62,4 +62,11 @@ disallowed-methods = [
     { path = "std::thread::spawn_blocking", reason = "Use tokio::spawn_blocking instead" },
     { path = "std::thread::sleep", reason = "Use tokio::time::sleep instead" },
     { path = "tokio::sync::mpsc::UnboundedSender::send", reason = "Use crate::utils::SendSafely instead" },
+    { path = "tokio::time::advance", reason = "Use crate::clock::SystemClock instead" },
+    { path = "tokio::time::sleep", reasonon = "Use crate::clock::SystemClock instead" },
+    { path = "tokio::time::sleep_until", reasonon = "Use crate::clock::SystemClock instead" },
+    { path = "tokio::time::timeout", reasonon = "Use crate::clock::SystemClock instead" },
+    { path = "tokio::time::timeout_at", reasonon = "Use crate::clock::SystemClock instead" },
+    { path = "tokio::time::interval", reasonon = "Use crate::clock::SystemClock instead" },
+    { path = "tokio::time::interval_at", reasonon = "Use crate::clock::SystemClock instead" },
 ]

@@ -69,6 +69,7 @@ pub(crate) struct DbInner {
     /// A clock which is guaranteed to be monotonic. it's previous value is
     /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
+    pub(crate) system_clock: Arc<dyn SystemClock>,
     pub(crate) rand: Arc<DbRand>,
     pub(crate) oracle: Arc<Oracle>,
     pub(crate) reader: Reader,
@@ -84,7 +85,7 @@ impl DbInner {
         settings: Settings,
         logical_clock: Arc<dyn LogicalClock>,
         // TODO replace all system clock usage with this
-        _system_clock: Arc<dyn SystemClock>,
+        system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
@@ -130,6 +131,7 @@ impl DbInner {
             oracle.clone(),
             table_store.clone(),
             mono_clock.clone(),
+            system_clock.clone(),
             settings.l0_sst_size_bytes,
             settings.flush_interval,
         ));
@@ -145,6 +147,7 @@ impl DbInner {
             write_notifier,
             db_stats,
             mono_clock,
+            system_clock,
             rand,
             stat_registry,
             reader,
@@ -331,7 +334,7 @@ impl DbInner {
 
                 self.flush_immutable_memtables().await?;
 
-                let timeout_fut = tokio::time::sleep(Duration::from_secs(30));
+                let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
 
                 tokio::select! {
                     result = await_flush_memtable => result?,
