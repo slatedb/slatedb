@@ -232,7 +232,6 @@ impl TokioCompactionExecutorInner {
             current_size += key_len + value_len;
 
             if current_size > self.options.max_sst_size {
-                current_size = 0;
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store
@@ -240,6 +239,7 @@ impl TokioCompactionExecutorInner {
                 );
                 output_ssts.push(finished_writer.close().await?);
                 self.stats.bytes_compacted.add(current_size as u64);
+                current_size = 0;
             }
         }
 
