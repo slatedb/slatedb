@@ -2,7 +2,7 @@ use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
 use rand::seq::IteratorRandom;
 use rand::Rng;
-use rand_distr::Geometric;
+use rand::RngCore;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
 use slatedb::config::GarbageCollectorOptions;
@@ -19,7 +19,6 @@ use slatedb::SlateDBError;
 use slatedb::WriteBatch;
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -71,7 +70,7 @@ async fn test_deterministic_simulation() -> Result<(), SlateDBError> {
 struct DstOptions {
     max_key_len: usize,
     max_val_len: usize,
-    max_write_batch_len: usize,
+    max_write_batch_bytes: usize,
     max_btree_size_bytes: usize,
 }
 
@@ -80,7 +79,7 @@ impl Default for DstOptions {
         Self {
             max_key_len: u16::MAX as usize, // keys are limited to 65_535 bytes
             max_val_len: 1024 * 1024,       // 1 MiB
-            max_write_batch_len: 1000,
+            max_write_batch_bytes: 50 * 1024 * 1024, // 50 MiB
             max_btree_size_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB
         }
     }
@@ -187,12 +186,9 @@ impl DefaultDstDistribution {
         if let Some(existing_key) = self.maybe_gen_existing_key(state) {
             return existing_key;
         }
-        let mut rng = self.rand.rng();
-        let key_len = rng.random_range(1..self.options.max_key_len);
+        let key_len = self.rand.rng().random_range(1..self.options.max_key_len);
         let mut bytes = Vec::with_capacity(key_len);
-        for _ in 0..key_len {
-            bytes.push(rng.random_range(0..255));
-        }
+        self.rand.rng().fill_bytes(&mut bytes);
         bytes
     }
 
@@ -214,12 +210,9 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_val(&self) -> Vec<u8> {
-        let mut rng = self.rand.rng();
-        let val_len = rng.random_range(1..self.options.max_val_len);
+        let val_len = self.rand.rng().random_range(1..self.options.max_val_len);
         let mut bytes = Vec::with_capacity(val_len);
-        for _ in 0..val_len {
-            bytes.push(rng.random_range(0..255));
-        }
+        self.rand.rng().fill_bytes(&mut bytes);
         bytes
     }
 
@@ -242,24 +235,6 @@ impl DefaultDstDistribution {
         // TODO: add random read options
         ReadOptions::default()
     }
-
-    fn random_range_geometric(&self, range: impl RangeBounds<u64>, p: f64) -> u64 {
-        let geometric = Geometric::new(p).expect("unable to create geometric distribution");
-        let geometric_sample = geometric.sample(&mut self.rand.rng());
-        // Clamp min
-        let geometric_sample = match range.start_bound() {
-            Bound::Included(min) => geometric_sample.max(*min),
-            Bound::Excluded(min) => geometric_sample.max(*min + 1),
-            Bound::Unbounded => geometric_sample,
-        };
-        // Clamp max
-        let geometric_sample = match range.end_bound() {
-            Bound::Included(max) => geometric_sample.min(*max),
-            Bound::Excluded(max) => geometric_sample.min(*max - 1),
-            Bound::Unbounded => geometric_sample,
-        };
-        geometric_sample
-    }
 }
 
 impl DstDistribution for DefaultDstDistribution {
@@ -279,19 +254,19 @@ impl DstDistribution for DefaultDstDistribution {
 
     fn sample_write(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
         let mut write_ops = Vec::new();
-        let write_batch_size =
-            self.random_range_geometric(1..=self.options.max_write_batch_len as u64, 0.05);
         let write_option = self.get_write_options();
-        let put_probability = self.rand.rng().random_range(0.0..1.0);
-        debug!(write_batch_size, put_probability, "run_write");
-        for _ in 0..write_batch_size {
+        let put_probability = 0.8;
+        let mut remaining_bytes = self.rand.rng().random_range(1..=self.options.max_write_batch_bytes) as i64;
+        while remaining_bytes > 0 {
             let is_put = self.rand.rng().random_bool(put_probability);
             if is_put {
                 let key = self.gen_key(state);
                 let val = self.gen_val();
+                remaining_bytes -= (key.len() + val.len()) as i64;
                 write_ops.push((key, Some(val), self.gen_put_options()));
             } else {
                 let key = self.gen_key(state);
+                remaining_bytes -= key.len() as i64;
                 write_ops.push((key, None, PutOptions::default()));
             }
         }
@@ -377,7 +352,7 @@ impl Dst {
             info!(
                 step_count,
                 simulated_time = pretty_duration(&Instant::now().duration_since(start_time)),
-                btree_size = self.state.size_bytes_display(),
+                btree_size = pretty_bytes(self.state.size_bytes),
                 btree_entries = self.state.len(),
                 step_action = %step_action,
                 "run_simulation"
@@ -605,19 +580,6 @@ where
     fn keys(&self) -> std::collections::btree_map::Keys<'_, K, V> {
         self.inner.keys()
     }
-
-    fn size_bytes_display(&self) -> String {
-        let size_bytes = self.size_bytes;
-        if size_bytes < 1024 {
-            format!("{}b", size_bytes)
-        } else if size_bytes < 1024 * 1024 {
-            format!("{}kb", size_bytes / 1024)
-        } else if size_bytes < 1024 * 1024 * 1024 {
-            format!("{}mb", size_bytes / (1024 * 1024))
-        } else {
-            format!("{}gb", size_bytes / (1024 * 1024 * 1024))
-        }
-    }
 }
 
 const MIB_1: usize = 1024 * 1024;
@@ -643,12 +605,6 @@ async fn build_settings(rand: &DbRand) -> Settings {
     let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
     let l0_max_ssts = rng.random_range(1..100);
     let max_unflushed_bytes = rng.random_range(MIB_1..GIB_5);
-    // TODO: implement ttl support
-    // let default_ttl = if rng.random_bool(0.5) {
-    //     None
-    // } else {
-    //     Some(rng.random_range(0..HOUR_1))
-    // };
     let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
     let compression_codec =
         if let Some(compression_codec) = COMPRESSION_CODECS[compression_codec_idx] {
@@ -696,6 +652,18 @@ fn configure_logger() {
         .with(filter)
         .with(tracing_subscriber::fmt::layer());
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+}
+
+fn pretty_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{}b", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{}kb", bytes / 1024)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{}mb", bytes / (1024 * 1024))
+    } else {
+        format!("{}gb", bytes / (1024 * 1024 * 1024))
+    }
 }
 
 fn pretty_duration(d: &Duration) -> String {
