@@ -49,8 +49,8 @@ async fn test_dst_is_deterministic(
                 if let Some(expected_u64) = expected_u64 {
                     assert_eq!(
                         next_u64, expected_u64,
-                        "non-determinism detected: next_u64={}, expected_u64={}",
-                        next_u64, expected_u64
+                        "non-determinism detected: seed={}, next_u64={}, expected_u64={}",
+                        seed, next_u64, expected_u64
                     );
                 }
                 expected_u64 = Some(next_u64);
