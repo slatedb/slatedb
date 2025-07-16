@@ -183,7 +183,10 @@ impl DefaultDstDistribution {
     }
 
     #[inline]
-    fn gen_key(&self) -> Vec<u8> {
+    fn gen_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
+        if let Some(existing_key) = self.maybe_gen_existing_key(state) {
+            return existing_key;
+        }
         let mut rng = self.rand.rng();
         let key_len = rng.random_range(1..self.options.max_key_len);
         let mut bytes = Vec::with_capacity(key_len);
@@ -191,6 +194,22 @@ impl DefaultDstDistribution {
             bytes.push(rng.random_range(0..255));
         }
         bytes
+    }
+
+    #[inline]
+    fn maybe_gen_existing_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Option<Vec<u8>> {
+        let hit_probability = self.rand.rng().random_range(0.0..1.0);
+        let is_db_hit = state.len() > 0 && self.rand.rng().random_bool(hit_probability);
+        if is_db_hit {
+            let existing_key = state
+                .keys()
+                .choose(&mut self.rand.rng())
+                .expect("can't pick a key for an empty state")
+                .clone();
+            Some(existing_key)
+        } else {
+            None
+        }
     }
 
     #[inline]
@@ -258,23 +277,21 @@ impl DstDistribution for DefaultDstDistribution {
         }
     }
 
-    fn sample_write(&self, _state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+    fn sample_write(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
         let mut write_ops = Vec::new();
-        let write_batch_size = self.random_range_geometric(
-            1..=self.options.max_write_batch_len as u64,
-            0.05,
-        );
+        let write_batch_size =
+            self.random_range_geometric(1..=self.options.max_write_batch_len as u64, 0.05);
         let write_option = self.get_write_options();
         let put_probability = self.rand.rng().random_range(0.0..1.0);
         debug!(write_batch_size, put_probability, "run_write");
         for _ in 0..write_batch_size {
             let is_put = self.rand.rng().random_bool(put_probability);
             if is_put {
-                let key = self.gen_key();
+                let key = self.gen_key(state);
                 let val = self.gen_val();
                 write_ops.push((key, Some(val), self.gen_put_options()));
             } else {
-                let key = self.gen_key();
+                let key = self.gen_key(state);
                 write_ops.push((key, None, PutOptions::default()));
             }
         }
@@ -282,21 +299,17 @@ impl DstDistribution for DefaultDstDistribution {
     }
 
     fn sample_get(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
-        let hit_probability = self.rand.rng().random_range(0.0..1.0);
-        let is_db_hit = state.len() > 0 && self.rand.rng().random_bool(hit_probability);
-        let key = if is_db_hit {
-            state.keys().choose(&mut self.rand.rng()).unwrap()
-        } else {
-            // Still might be in keyspace, but unlikely
-            &self.gen_key()
-        };
-        DstAction::Get(key.clone(), self.gen_read_options())
+        DstAction::Get(self.gen_key(state), self.gen_read_options())
     }
 
     // TODO: add ScanOption variation
     fn sample_scan(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
         if state.is_empty() {
-            return DstAction::Scan(self.gen_key(), self.gen_key(), ScanOptions::default());
+            return DstAction::Scan(
+                self.gen_key(state),
+                self.gen_key(state),
+                ScanOptions::default(),
+            );
         }
         // Only scan non-empty ranges since SlateDB panics otherwise (by design, see #680)
         let start_key_prefix_idx = self.rand.rng().random_range(0..state.len());
@@ -307,7 +320,10 @@ impl DstDistribution for DefaultDstDistribution {
             - start_key_prefix_idx;
         let mut keys = state.keys();
         let mut start_key_prefix = keys.nth(start_key_prefix_idx).unwrap().clone();
-        let mut end_key_prefix = keys.nth(end_key_prefix_idx).unwrap_or(&start_key_prefix).clone();
+        let mut end_key_prefix = keys
+            .nth(end_key_prefix_idx)
+            .unwrap_or(&start_key_prefix)
+            .clone();
         // TODO: only truncate sometimes
         start_key_prefix.truncate(8);
         end_key_prefix.truncate(8);
@@ -399,7 +415,6 @@ impl Dst {
                 write_batch.put_with_options(key, val, options);
                 self.state.insert(key.clone(), val.clone());
             } else {
-                eprintln!("delete");
                 write_batch.delete(key);
                 self.state.remove(key);
             }
