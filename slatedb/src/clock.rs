@@ -109,6 +109,12 @@ pub struct MockSystemClock {
     current_ts: i64,
 }
 
+impl Default for MockSystemClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockSystemClock {
     pub fn new() -> Self {
         Self { current_ts: 0 }
@@ -137,6 +143,7 @@ impl SystemClock for MockSystemClock {
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let end_time = self.current_ts + duration.as_millis() as i64;
         Box::pin(async move {
+            #[allow(clippy::while_immutable_condition)]
             while self.current_ts < end_time {
                 tokio::task::yield_now().await;
             }
