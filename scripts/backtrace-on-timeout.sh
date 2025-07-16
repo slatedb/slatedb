@@ -6,19 +6,6 @@
 # Fail on errors.
 set -eu
 
-# Install gdb if it's not already installed
-if ! command -v gdb &> /dev/null; then
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        brew install gdb
-    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        sudo apt-get update
-        sudo apt-get install -y gdb
-    else
-        echo "Error: `gdb` is not installed, please install it manually"
-        exit 1
-    fi
-fi
-
 # Run background jobs in separate process groups, so that the SIGTERM from
 # nextest doesn't hit the test job until we're ready.
 set -m
