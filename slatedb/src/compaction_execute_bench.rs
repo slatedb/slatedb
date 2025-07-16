@@ -142,7 +142,7 @@ impl CompactionExecuteBench {
                 }
             }
             retries += 1;
-            system_clock.sleep(Duration::from_secs(retries + 1)).await;
+            system_clock.clone().sleep(Duration::from_secs(retries + 1)).await;
         }
     }
 

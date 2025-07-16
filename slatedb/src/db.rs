@@ -334,7 +334,7 @@ impl DbInner {
 
                 self.flush_immutable_memtables().await?;
 
-                let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
+                let timeout_fut = self.system_clock.clone().sleep(Duration::from_secs(30));
 
                 tokio::select! {
                     result = await_flush_memtable => result?,

@@ -424,7 +424,7 @@ impl FsCacheEvictor {
 
         if let Some(scan_interval) = scan_interval {
             loop {
-                system_clock.sleep(scan_interval).await;
+                system_clock.clone().sleep(scan_interval).await;
                 inner.clone().scan_entries(true).await;
             }
         }
