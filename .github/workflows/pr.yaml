@@ -87,7 +87,9 @@ jobs:
         with:
           tool: nextest@0.9.98
       - name: Install gdb
-        run: sudo apt-get install -y gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdb
       - name: Run Tests
         run: cargo nextest run --workspace --all-features --profile ci
       - name: Run Doc Tests
