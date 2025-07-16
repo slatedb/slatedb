@@ -256,7 +256,10 @@ impl DstDistribution for DefaultDstDistribution {
         let mut write_ops = Vec::new();
         let write_option = self.get_write_options();
         let put_probability = 0.8;
-        let mut remaining_bytes = self.rand.rng().random_range(1..=self.options.max_write_batch_bytes) as i64;
+        let mut remaining_bytes =
+            self.rand
+                .rng()
+                .random_range(1..=self.options.max_write_batch_bytes) as i64;
         while remaining_bytes > 0 {
             let is_put = self.rand.rng().random_bool(put_probability);
             if is_put {
@@ -531,8 +534,8 @@ impl Dst {
 
 struct SizedBTreeMap<K, V>
 where
-    K: Ord,
-    V: Ord,
+    K: Ord + AsRef<[u8]>,
+    V: Ord + AsRef<[u8]>,
 {
     inner: BTreeMap<K, V>,
     pub(crate) size_bytes: usize,
@@ -552,7 +555,9 @@ where
 
     fn insert(&mut self, key: K, val: V) {
         self.size_bytes += key.as_ref().len() + val.as_ref().len();
-        self.inner.insert(key, val);
+        if let Some(old_value) = self.inner.insert(key, val) {
+            self.size_bytes -= old_value.as_ref().len();
+        }
     }
 
     fn remove(&mut self, key: &K) {
