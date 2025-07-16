@@ -4,6 +4,7 @@ members = [
     "slatedb",
     "slatedb-bencher",
     "slatedb-cli",
+    "slatedb-dst",
     "slatedb-py",
 ]
 

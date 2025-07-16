@@ -1,73 +1,28 @@
+use crate::utils;
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
 use rand::seq::IteratorRandom;
 use rand::Rng;
 use rand::RngCore;
-use slatedb::config::CompactorOptions;
-use slatedb::config::CompressionCodec;
-use slatedb::config::GarbageCollectorOptions;
 use slatedb::config::PutOptions;
 use slatedb::config::ReadOptions;
 use slatedb::config::ScanOptions;
 use slatedb::config::WriteOptions;
-use slatedb::object_store::memory::InMemory;
 use slatedb::Db;
-use slatedb::DbBuilder;
 use slatedb::DbRand;
-use slatedb::Settings;
 use slatedb::SlateDBError;
 use slatedb::WriteBatch;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::RangeBounds;
 use std::rc::Rc;
-use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::debug;
-use tracing::error;
 use tracing::info;
 
-const COMPRESSION_CODECS: [Option<&str>; 5] = [
-    Some("snappy"),
-    Some("zlib"),
-    Some("lz4"),
-    Some("zstd"),
-    None,
-];
-
-// TODO make test_deterministic_simulation have a seed parameter and use proptest
-#[tokio::test(start_paused = true, flavor = "current_thread")]
-async fn test_deterministic_simulation() -> Result<(), SlateDBError> {
-    configure_logger();
-    let seed = std::env::var("SLATEDB_DST_SEED")
-        .map(|s| s.parse::<u64>().unwrap())
-        .unwrap_or_else(|_| rand::random::<u64>());
-    let rand = Rc::new(DbRand::new(seed));
-    let db = build_db(&rand).await;
-    let iterations = rand.rng().random_range(1..5_000_000);
-    info!(seed, iterations, "test_deterministic_simulation");
-    let dst_opts = DstOptions::default();
-    match Dst::new(
-        db,
-        rand.clone(),
-        Box::new(DefaultDstDistribution::new(rand, dst_opts.clone())),
-        dst_opts,
-    )
-    .run_simulation(iterations)
-    .await
-    {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            error!(seed, ?e, "test_deterministic_simulation failed");
-            Err(e)
-        }
-    }
-}
-
 #[derive(Clone)]
-struct DstOptions {
+pub struct DstOptions {
     max_key_len: usize,
     max_val_len: usize,
     max_write_batch_bytes: usize,
@@ -86,9 +41,9 @@ impl Default for DstOptions {
 }
 
 // Because WriteOp is only pub(crate)
-type DstWriteOp = (Vec<u8>, Option<Vec<u8>>, PutOptions);
+pub type DstWriteOp = (Vec<u8>, Option<Vec<u8>>, PutOptions);
 
-enum DstAction {
+pub enum DstAction {
     Write(Vec<DstWriteOp>, WriteOptions),
     Get(Vec<u8>, ReadOptions),
     Scan(Vec<u8>, Vec<u8>, ScanOptions),
@@ -110,7 +65,7 @@ impl std::fmt::Display for DstAction {
             }
             DstAction::Flush => write!(f, "Flush"),
             DstAction::AdvanceTime(duration) => {
-                write!(f, "AdvanceTime({:?})", pretty_duration(duration))
+                write!(f, "AdvanceTime({:?})", utils::pretty_duration(duration))
             }
         }
     }
@@ -162,7 +117,7 @@ impl std::fmt::Debug for DstAction {
     }
 }
 
-trait DstDistribution {
+pub trait DstDistribution {
     fn sample_action(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction;
     fn sample_write(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction;
     fn sample_get(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction;
@@ -171,13 +126,13 @@ trait DstDistribution {
     fn sample_advance_time(&self) -> DstAction;
 }
 
-struct DefaultDstDistribution {
+pub struct DefaultDstDistribution {
     options: DstOptions,
     rand: Rc<DbRand>,
 }
 
 impl DefaultDstDistribution {
-    fn new(rand: Rc<DbRand>, options: DstOptions) -> Self {
+    pub fn new(rand: Rc<DbRand>, options: DstOptions) -> Self {
         Self { options, rand }
     }
 
@@ -322,7 +277,7 @@ impl DstDistribution for DefaultDstDistribution {
     }
 }
 
-struct Dst {
+pub struct Dst {
     db: Db,
     rand: Rc<DbRand>,
     action_sampler: Box<dyn DstDistribution>,
@@ -331,7 +286,7 @@ struct Dst {
 }
 
 impl Dst {
-    fn new(
+    pub fn new(
         db: Db,
         rand: Rc<DbRand>,
         action_sampler: Box<dyn DstDistribution>,
@@ -347,15 +302,15 @@ impl Dst {
     }
 
     // TODO: should we be using rng_seed (tokio_unstable) for the tokio runtime?
-    async fn run_simulation(&mut self, iterations: u32) -> Result<(), SlateDBError> {
+    pub async fn run_simulation(&mut self, iterations: u32) -> Result<(), SlateDBError> {
         let start_time = Instant::now();
         let mut step_count = 0;
         for _ in 0..iterations {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
                 step_count,
-                simulated_time = pretty_duration(&Instant::now().duration_since(start_time)),
-                btree_size = pretty_bytes(self.state.size_bytes),
+                simulated_time = utils::pretty_duration(&Instant::now().duration_since(start_time)),
+                btree_size = utils::pretty_bytes(self.state.size_bytes),
                 btree_entries = self.state.len(),
                 step_action = %step_action,
                 "run_simulation"
@@ -532,7 +487,7 @@ impl Dst {
     }
 }
 
-struct SizedBTreeMap<K, V>
+pub struct SizedBTreeMap<K, V>
 where
     K: Ord + AsRef<[u8]>,
     V: Ord + AsRef<[u8]>,
@@ -584,129 +539,5 @@ where
 
     fn keys(&self) -> std::collections::btree_map::Keys<'_, K, V> {
         self.inner.keys()
-    }
-}
-
-const MIB_1: usize = 1024 * 1024;
-const MIB_500: usize = 500 * MIB_1;
-const GIB_5: usize = 5 * MIB_500;
-
-/// Builds a DB instance with components that are selected at random.
-async fn build_db(rand: &DbRand) -> Db {
-    let mut builder = DbBuilder::new("test_db", Arc::new(InMemory::new()));
-    builder = builder.with_settings(build_settings(rand).await);
-    builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
-    builder.build().await.unwrap()
-}
-
-/// Builds a Settings instance with random values.
-async fn build_settings(rand: &DbRand) -> Settings {
-    let mut rng = rand.rng();
-    let flush_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
-    let manifest_poll_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
-    let manifest_update_timeout = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
-    let min_filter_keys = rng.random_range(100..1000);
-    let filter_bits_per_key = rng.random_range(1..20);
-    let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
-    let l0_max_ssts = rng.random_range(1..100);
-    let max_unflushed_bytes = rng.random_range(MIB_1..GIB_5);
-    let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
-    let compression_codec =
-        if let Some(compression_codec) = COMPRESSION_CODECS[compression_codec_idx] {
-            match CompressionCodec::from_str(compression_codec) {
-                Ok(codec) => Some(codec),
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
-
-    Settings {
-        flush_interval: Some(flush_interval),
-        manifest_poll_interval,
-        manifest_update_timeout,
-        min_filter_keys,
-        filter_bits_per_key,
-        l0_sst_size_bytes,
-        l0_max_ssts,
-        max_unflushed_bytes,
-        // default_ttl,
-        compression_codec,
-        // TODO: add object store filesystem cache configs
-        // TODO: add random GC configs
-        garbage_collector_options: Some(GarbageCollectorOptions {
-            manifest_options: GarbageCollectorOptions::default().manifest_options,
-            wal_options: GarbageCollectorOptions::default().wal_options,
-            compacted_options: GarbageCollectorOptions::default().compacted_options,
-        }),
-        // TODO: add random compactor configs
-        compactor_options: Some(CompactorOptions::default()),
-        #[cfg(feature = "wal_disable")]
-        wal_enabled: rng.random_bool(0.5),
-        ..Default::default()
-    }
-}
-
-fn configure_logger() {
-    use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::Registry;
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let subscriber = Registry::default()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer());
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-}
-
-fn pretty_bytes(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{}b", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{}kb", bytes / 1024)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{}mb", bytes / (1024 * 1024))
-    } else {
-        format!("{0:.2}gb", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
-fn pretty_duration(d: &Duration) -> String {
-    let total_secs = d.as_secs();
-    let weeks = total_secs / 604_800;
-    let days = (total_secs % 604_800) / 86_400;
-    let hours = (total_secs % 86_400) / 3_600;
-    let mins = (total_secs % 3_600) / 60;
-    let secs = total_secs % 60;
-    let millis = d.subsec_millis();
-    let micros = d.subsec_micros();
-
-    let mut parts = Vec::new();
-    if weeks > 0 {
-        parts.push(format!("{}w", weeks));
-    }
-    if days > 0 {
-        parts.push(format!("{}d", days));
-    }
-    if hours > 0 {
-        parts.push(format!("{}h", hours));
-    }
-    if mins > 0 {
-        parts.push(format!("{}m", mins));
-    }
-    if secs > 0 {
-        parts.push(format!("{}s", secs));
-    }
-    if millis > 0 {
-        parts.push(format!("{}ms", millis));
-    } else if micros > 0 {
-        parts.push(format!("{}μs", micros));
-    }
-
-    if parts.is_empty() {
-        // handle zero-duration specially
-        "0s".to_string()
-    } else {
-        parts.join(" ")
     }
 }
