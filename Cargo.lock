@@ -3244,9 +3244,9 @@ dependencies = [
  "futures",
  "object_store",
  "rand 0.9.1",
+ "rstest",
  "slatedb",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

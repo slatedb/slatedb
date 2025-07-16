@@ -14,7 +14,9 @@ futures = { workspace = true }
 object_store = { workspace = true }
 rand = { workspace = true }
 slatedb = { workspace = true, features = ["lz4", "snappy", "wal_disable", "zlib", "zstd"] }
-tokio = { workspace = true, features = ["macros", "time", "test-util"] }
+tokio = { workspace = true, features = ["macros", "test-util"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-tokio-util = { workspace = true, default-features = false }
+
+[dev-dependencies]
+rstest = { workspace = true }
