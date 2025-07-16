@@ -2,6 +2,7 @@ use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
 use rand::seq::IteratorRandom;
 use rand::Rng;
+use rand_distr::Geometric;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
 use slatedb::config::GarbageCollectorOptions;
@@ -18,6 +19,7 @@ use slatedb::SlateDBError;
 use slatedb::WriteBatch;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -98,8 +100,8 @@ enum DstAction {
 impl std::fmt::Display for DstAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DstAction::Write(_, _) => {
-                write!(f, "Write")
+            DstAction::Write(write_ops, _) => {
+                write!(f, "Write(ops={})", write_ops.len())
             }
             DstAction::Get(_, _) => {
                 write!(f, "Get")
@@ -221,6 +223,24 @@ impl DefaultDstDistribution {
         // TODO: add random read options
         ReadOptions::default()
     }
+
+    fn random_range_geometric(&self, range: impl RangeBounds<u64>, p: f64) -> u64 {
+        let geometric = Geometric::new(p).expect("unable to create geometric distribution");
+        let geometric_sample = geometric.sample(&mut self.rand.rng());
+        // Clamp min
+        let geometric_sample = match range.start_bound() {
+            Bound::Included(min) => geometric_sample.max(*min),
+            Bound::Excluded(min) => geometric_sample.max(*min + 1),
+            Bound::Unbounded => geometric_sample,
+        };
+        // Clamp max
+        let geometric_sample = match range.end_bound() {
+            Bound::Included(max) => geometric_sample.min(*max),
+            Bound::Excluded(max) => geometric_sample.min(*max - 1),
+            Bound::Unbounded => geometric_sample,
+        };
+        geometric_sample
+    }
 }
 
 impl DstDistribution for DefaultDstDistribution {
@@ -240,10 +260,10 @@ impl DstDistribution for DefaultDstDistribution {
 
     fn sample_write(&self, _state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
         let mut write_ops = Vec::new();
-        let write_batch_size = self
-            .rand
-            .rng()
-            .random_range(1..self.options.max_write_batch_len);
+        let write_batch_size = self.random_range_geometric(
+            1..=self.options.max_write_batch_len as u64,
+            0.05,
+        );
         let write_option = self.get_write_options();
         let put_probability = self.rand.rng().random_range(0.0..1.0);
         debug!(write_batch_size, put_probability, "run_write");
@@ -275,6 +295,9 @@ impl DstDistribution for DefaultDstDistribution {
 
     // TODO: add ScanOption variation
     fn sample_scan(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+        if state.is_empty() {
+            return DstAction::Scan(self.gen_key(), self.gen_key(), ScanOptions::default());
+        }
         // Only scan non-empty ranges since SlateDB panics otherwise (by design, see #680)
         let start_key_prefix_idx = self.rand.rng().random_range(0..state.len());
         let end_key_prefix_idx = self
@@ -284,7 +307,7 @@ impl DstDistribution for DefaultDstDistribution {
             - start_key_prefix_idx;
         let mut keys = state.keys();
         let mut start_key_prefix = keys.nth(start_key_prefix_idx).unwrap().clone();
-        let mut end_key_prefix = keys.nth(end_key_prefix_idx).unwrap().clone();
+        let mut end_key_prefix = keys.nth(end_key_prefix_idx).unwrap_or(&start_key_prefix).clone();
         // TODO: only truncate sometimes
         start_key_prefix.truncate(8);
         end_key_prefix.truncate(8);
@@ -376,6 +399,7 @@ impl Dst {
                 write_batch.put_with_options(key, val, options);
                 self.state.insert(key.clone(), val.clone());
             } else {
+                eprintln!("delete");
                 write_batch.delete(key);
                 self.state.remove(key);
             }
@@ -667,6 +691,7 @@ fn pretty_duration(d: &Duration) -> String {
     let mins = (total_secs % 3_600) / 60;
     let secs = total_secs % 60;
     let millis = d.subsec_millis();
+    let micros = d.subsec_micros();
 
     let mut parts = Vec::new();
     if weeks > 0 {
@@ -686,6 +711,8 @@ fn pretty_duration(d: &Duration) -> String {
     }
     if millis > 0 {
         parts.push(format!("{}ms", millis));
+    } else if micros > 0 {
+        parts.push(format!("{}μs", micros));
     }
 
     if parts.is_empty() {
