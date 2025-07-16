@@ -63,6 +63,7 @@ filetime = { workspace = true }
 insta = { workspace = true }
 pprof = { workspace = true, features = ["criterion", "protobuf-codec"] }
 proptest = { workspace = true }
+rand_distr = "0.5.1"
 rstest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
