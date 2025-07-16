@@ -27,7 +27,10 @@ use crate::tablestore::TableStore;
 use crate::utils::IdGenerator;
 
 pub trait CompactionSchedulerSupplier: Send + Sync {
-    fn compaction_scheduler(&self) -> Box<dyn CompactionScheduler + Send + Sync>;
+    fn compaction_scheduler(
+        &self,
+        options: &CompactorOptions,
+    ) -> Box<dyn CompactionScheduler + Send + Sync>;
 }
 
 pub trait CompactionScheduler: Send + Sync {
@@ -192,7 +195,7 @@ impl Compactor {
         let mut db_runs_log_ticker = tokio::time::interval(Duration::from_secs(10));
         let mut manifest_poll_ticker = tokio::time::interval(self.options.poll_interval);
         let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
-        let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler());
+        let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let executor = Arc::new(TokioCompactionExecutor::new(
             compactor_runtime,
             self.options.clone(),
