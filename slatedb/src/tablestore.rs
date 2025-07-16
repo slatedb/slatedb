@@ -523,9 +523,13 @@ pub(crate) struct EncodedSsTableWriter<'a> {
 }
 
 impl EncodedSsTableWriter<'_> {
-    pub async fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
-        self.builder.add(entry)?;
-        self.drain_blocks().await
+    /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
+    /// The block size is calculated after applying any compression if enabled.
+    /// The block size is None if the builder has not finished compacting a block yet.
+    pub async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
+        let block_size = self.builder.add(entry)?;
+        self.drain_blocks().await?;
+        Ok(block_size)
     }
 
     pub async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {

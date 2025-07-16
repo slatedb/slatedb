@@ -175,7 +175,8 @@ impl TokioCompactionExecutorInner {
         let mut current_writer = self
             .table_store
             .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid()));
-        let mut current_size = 0usize;
+
+        let mut compacted_block_size = 0usize;
         let mut total_bytes_processed = 0u64;
         let mut last_progress_report = self.clock.now();
 
@@ -228,25 +229,27 @@ impl TokioCompactionExecutorInner {
                 continue;
             }
 
-            current_writer.add(kv).await?;
-            current_size += key_len + value_len;
+            if let Some(block_size) = current_writer.add(kv).await? {
+                compacted_block_size += block_size;
+            }
 
-            if current_size > self.options.max_sst_size {
-                current_size = 0;
+            if compacted_block_size > self.options.max_sst_size {
+                compacted_block_size = 0;
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store
                         .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid())),
                 );
                 output_ssts.push(finished_writer.close().await?);
-                self.stats.bytes_compacted.add(current_size as u64);
+                self.stats.bytes_compacted.add(compacted_block_size as u64);
             }
         }
 
-        if current_size > 0 {
+        if compacted_block_size > 0 {
             output_ssts.push(current_writer.close().await?);
-            self.stats.bytes_compacted.add(current_size as u64);
+            self.stats.bytes_compacted.add(compacted_block_size as u64);
         }
+
         Ok(SortedRun {
             id: compaction.destination,
             ssts: output_ssts,
