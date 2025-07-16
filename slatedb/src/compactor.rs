@@ -267,9 +267,12 @@ impl CompactorEventHandler {
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
-        let manifest =
-            FenceableManifest::init_compactor(stored_manifest, options.manifest_update_timeout)
-                .await?;
+        let manifest = FenceableManifest::init_compactor(
+            stored_manifest,
+            options.manifest_update_timeout,
+            system_clock.clone(),
+        )
+        .await?;
         let state = CompactorState::new(manifest.prepare_dirty()?);
         Ok(Self {
             state,

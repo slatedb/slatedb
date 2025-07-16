@@ -313,7 +313,7 @@ impl WalBufferManager {
         loop {
             let mut flush_interval_fut: Pin<Box<dyn Future<Output = ()> + Send>> =
                 match max_flush_interval {
-                    Some(duration) => Box::pin(self.system_clock.sleep(duration)),
+                    Some(duration) => self.system_clock.sleep(duration),
                     None => Box::pin(std::future::pending()),
                 };
 

@@ -3437,9 +3437,13 @@ mod tests {
         // Fence the db by opening a new one
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
-        FenceableManifest::init_writer(stored_manifest, Duration::from_secs(300))
-            .await
-            .unwrap();
+        FenceableManifest::init_writer(
+            stored_manifest,
+            Duration::from_secs(300),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
 
         // Unpause to allow L0 SST writes to proceed
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
