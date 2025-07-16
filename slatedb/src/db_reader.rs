@@ -370,7 +370,10 @@ impl DbReaderInner {
             this: Arc<DbReaderInner>,
             thread_rx: &mut UnboundedReceiver<ManifestPollerMsg>,
         ) -> Result<(), SlateDBError> {
-            let mut ticker = tokio::time::interval(this.options.manifest_poll_interval);
+            let mut ticker = this
+                .system_clock
+                .clone()
+                .ticker(this.options.manifest_poll_interval);
             loop {
                 select! {
                     _ = ticker.tick() => {

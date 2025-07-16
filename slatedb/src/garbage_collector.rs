@@ -25,7 +25,6 @@ use manifest_gc::ManifestGcTask;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::Interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 use wal_gc::WalGcTask;
@@ -40,8 +39,7 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
 
 trait GcTask {
     fn resource(&self) -> &str;
-    fn interval(&self) -> Duration;
-    fn ticker(&self) -> Interval;
+    fn period(&self) -> Duration;
     async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
 }
 
@@ -109,16 +107,16 @@ impl GarbageCollector {
     /// The garbage collector runs until the cancellation token is cancelled.
     pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
-        let mut compacted_ticker = compacted_gc_task.ticker();
-        let mut wal_ticker = wal_gc_task.ticker();
-        let mut manifest_ticker = manifest_gc_task.ticker();
-        let mut log_ticker = tokio::time::interval(Duration::from_secs(60));
+        let mut compacted_ticker = self.system_clock.clone().ticker(compacted_gc_task.period());
+        let mut wal_ticker = self.system_clock.clone().ticker(wal_gc_task.period());
+        let mut manifest_ticker = self.system_clock.clone().ticker(manifest_gc_task.period());
+        let mut log_ticker = self.system_clock.clone().ticker(Duration::from_secs(60));
 
         info!(
             "Starting Garbage Collector with [manifest: {:#?}], [wal: {:#?}], [compacted: {:#?}]",
-            manifest_gc_task.interval(),
-            wal_gc_task.interval(),
-            compacted_gc_task.interval()
+            manifest_gc_task.period(),
+            wal_gc_task.period(),
+            compacted_gc_task.period()
         );
 
         loop {

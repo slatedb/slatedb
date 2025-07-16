@@ -162,8 +162,10 @@ impl DbInner {
             flusher: &mut MemtableFlusher,
             flush_rx: &mut UnboundedReceiver<MemtableFlushMsg>,
         ) -> Result<(), SlateDBError> {
-            let mut manifest_poll_interval =
-                tokio::time::interval(this.settings.manifest_poll_interval);
+            let mut manifest_poll_interval = this
+                .system_clock
+                .clone()
+                .ticker(this.settings.manifest_poll_interval);
             let mut err_reader = this.state.read().error_reader();
 
             // Stop the loop when the shut down has been received *and* all

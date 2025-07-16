@@ -25,6 +25,33 @@ pub trait SystemClock: Debug + Send + Sync {
     #[cfg(test)]
     fn advance(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker;
+}
+
+pub struct SystemClockTicker {
+    clock: Arc<dyn SystemClock>,
+    duration: Duration,
+    first_tick: bool,
+}
+
+impl SystemClockTicker {
+    fn new(clock: Arc<dyn SystemClock>, duration: Duration) -> Self {
+        Self {
+            clock,
+            duration,
+            first_tick: true,
+        }
+    }
+
+    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        // Emulate first tick in tokio::time::Interval::tick by skipping the sleep
+        if self.first_tick {
+            self.first_tick = false;
+            self.clock.sleep(Duration::from_millis(0))
+        } else {
+            self.clock.sleep(self.duration)
+        }
+    }
 }
 
 /// A system clock implementation that uses tokio::time::Instant to measure time. During
@@ -70,6 +97,10 @@ impl SystemClock for DefaultSystemClock {
 
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::sleep(duration))
+    }
+
+    fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker {
+        SystemClockTicker::new(self, duration)
     }
 }
 

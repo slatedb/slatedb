@@ -22,7 +22,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -112,7 +112,7 @@ impl FenceableManifest {
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let timeout_future = system_clock.sleep(manifest_update_timeout);
-        let future = async {
+        let manifest_poll_future = async {
             loop {
                 let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
                 let mut manifest = stored_manifest.prepare_dirty();
@@ -139,7 +139,7 @@ impl FenceableManifest {
         };
         tokio::select! {
             biased;
-            res = future => res,
+            res = manifest_poll_future => res,
             _ = timeout_future => {
                 return Err(SlateDBError::Timeout {
                     msg: "Manifest update".to_string(),

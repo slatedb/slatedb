@@ -368,7 +368,6 @@ impl FsCacheEvictor {
             self.root_folder.clone(),
             self.max_cache_size_bytes,
             self.stats.clone(),
-            self.system_clock.clone(),
             self.rand.clone(),
         ));
 
@@ -381,6 +380,7 @@ impl FsCacheEvictor {
             .set(tokio::spawn(Self::background_scan(
                 inner.clone(),
                 self.scan_interval,
+                self.system_clock.clone(),
             )))
             .ok();
 
@@ -415,12 +415,16 @@ impl FsCacheEvictor {
         }
     }
 
-    async fn background_scan(inner: Arc<FsCacheEvictorInner>, scan_interval: Option<Duration>) {
+    async fn background_scan(
+        inner: Arc<FsCacheEvictorInner>,
+        scan_interval: Option<Duration>,
+        system_clock: Arc<dyn SystemClock>,
+    ) {
         inner.clone().scan_entries(true).await;
 
         if let Some(scan_interval) = scan_interval {
             loop {
-                inner.system_clock.sleep(scan_interval).await;
+                system_clock.sleep(scan_interval).await;
                 inner.clone().scan_entries(true).await;
             }
         }
@@ -455,7 +459,6 @@ struct FsCacheEvictorInner {
     cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>,
     cache_size_bytes: AtomicU64,
     stats: Arc<CachedObjectStoreStats>,
-    system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
 }
 
@@ -464,7 +467,6 @@ impl FsCacheEvictorInner {
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: usize,
         stats: Arc<CachedObjectStoreStats>,
-        system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Self {
         Self {
@@ -475,7 +477,6 @@ impl FsCacheEvictorInner {
             cache_entries: Mutex::new(Trie::new()),
             cache_size_bytes: AtomicU64::new(0_u64),
             stats,
-            system_clock,
             rand,
         }
     }
@@ -707,7 +708,6 @@ mod tests {
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
-            Arc::new(DefaultSystemClock::default()),
             Arc::new(DbRand::default()),
         );
         evictor.batch_factor = 2;
@@ -748,7 +748,6 @@ mod tests {
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
-            Arc::new(DefaultSystemClock::default()),
             Arc::new(DbRand::default()),
         ));
 
@@ -777,7 +776,6 @@ mod tests {
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
-            Arc::new(DefaultSystemClock::default()),
             Arc::new(DbRand::default()),
         ));
 

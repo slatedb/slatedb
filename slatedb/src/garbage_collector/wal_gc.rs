@@ -109,14 +109,10 @@ impl GcTask for WalGcTask {
         Ok(())
     }
 
-    fn interval(&self) -> Duration {
+    fn period(&self) -> Duration {
         self.wal_options
             .and_then(|opts| opts.interval)
             .unwrap_or(DEFAULT_INTERVAL)
-    }
-
-    fn ticker(&self) -> Interval {
-        tokio::time::interval(self.interval())
     }
 
     fn resource(&self) -> &str {
