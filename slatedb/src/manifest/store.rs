@@ -22,7 +22,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -141,9 +141,9 @@ impl FenceableManifest {
             biased;
             res = manifest_poll_future => res,
             _ = timeout_future => {
-                return Err(SlateDBError::Timeout {
+                Err(SlateDBError::Timeout {
                     msg: "Manifest update".to_string(),
-                });
+                })
             }
         }
     }
