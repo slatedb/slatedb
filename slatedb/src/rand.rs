@@ -42,6 +42,7 @@ pub(crate) type RngAlg = Xoroshiro128PlusPlus;
 /// ```
 #[derive(Debug)]
 pub struct DbRand {
+    seed: u64,
     seed_counter: AtomicU64,
     thread_rng: ThreadLocal<RefCell<RngAlg>>,
 }
@@ -50,6 +51,7 @@ impl DbRand {
     /// Create a new `DbRand` with the given 64-bit seed.
     pub fn new(seed: u64) -> Self {
         DbRand {
+            seed,
             seed_counter: AtomicU64::new(seed),
             thread_rng: ThreadLocal::new(),
         }
@@ -64,6 +66,10 @@ impl DbRand {
                 RefCell::new(RngAlg::seed_from_u64(seed))
             })
             .borrow_mut()
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
     }
 }
 

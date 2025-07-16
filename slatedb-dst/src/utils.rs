@@ -7,12 +7,17 @@ use slatedb::Db;
 use slatedb::DbBuilder;
 use slatedb::DbRand;
 use slatedb::Settings;
+use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+
+use crate::DefaultDstDistribution;
+use crate::Dst;
+use crate::DstOptions;
 
 const MIB_1: usize = 1024 * 1024;
 const MIB_500: usize = 500 * MIB_1;
@@ -25,6 +30,17 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
     Some("zstd"),
     None,
 ];
+
+pub async fn build_dst(rand: Rc<DbRand>) -> Dst {
+    let db = build_db(&rand).await;
+    let dst_opts = DstOptions::default();
+    Dst::new(
+        db,
+        rand.clone(),
+        Box::new(DefaultDstDistribution::new(rand, dst_opts.clone())),
+        dst_opts,
+    )
+}
 
 /// Builds a DB instance with components that are selected at random.
 pub async fn build_db(rand: &DbRand) -> Db {
