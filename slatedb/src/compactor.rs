@@ -1149,7 +1149,7 @@ mod tests {
             .with_settings(options)
             .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(compaction_scheduler)
-            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_size(SstBlockSize::Other(128))
             .build()
             .await
             .unwrap();
