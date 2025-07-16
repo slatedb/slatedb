@@ -106,7 +106,8 @@ impl FenceableManifest {
         set_epoch: fn(&mut DirtyManifest, u64),
         manifest_update_timeout: Duration,
     ) -> Result<Self, SlateDBError> {
-        tokio::time::timeout(manifest_update_timeout, async {
+        let mut timeout_interval = tokio::time::interval(manifest_update_timeout);
+        let future = async {
             loop {
                 let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
                 let mut manifest = stored_manifest.prepare_dirty();
@@ -130,11 +131,15 @@ impl FenceableManifest {
                     }
                 }
             }
-        })
-        .await
-        .map_err(|_| SlateDBError::Timeout {
-            msg: "Manifest update".to_string(),
-        })?
+        };
+        tokio::select! {
+            _ = timeout_interval.tick() => {
+                return Err(SlateDBError::Timeout {
+                    msg: "Manifest update".to_string(),
+                });
+            }
+            res = future => res,
+        }
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {

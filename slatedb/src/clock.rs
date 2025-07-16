@@ -3,6 +3,8 @@
 use std::{
     cmp,
     fmt::Debug,
+    future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicI64, Ordering},
         Arc,
@@ -26,7 +28,6 @@ pub trait SystemClock: Debug + Send + Sync {
     async fn advance(&self, duration: Duration);
     async fn sleep(&self, duration: Duration);
     // fn sleep_until(&self, duration: SystemTime);
-    // fn timeout(&self, duration: Duration);
     // fn timeout_at(&self, duration: SystemTime);
     // fn interval(&self, duration: Duration);
     // fn interval_at(&self, duration: SystemTime);
