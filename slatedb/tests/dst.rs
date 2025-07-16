@@ -187,7 +187,7 @@ impl DefaultDstDistribution {
             return existing_key;
         }
         let key_len = self.rand.rng().random_range(1..self.options.max_key_len);
-        let mut bytes = Vec::with_capacity(key_len);
+        let mut bytes = vec![0; key_len];
         self.rand.rng().fill_bytes(&mut bytes);
         bytes
     }
@@ -211,7 +211,7 @@ impl DefaultDstDistribution {
     #[inline]
     fn gen_val(&self) -> Vec<u8> {
         let val_len = self.rand.rng().random_range(1..self.options.max_val_len);
-        let mut bytes = Vec::with_capacity(val_len);
+        let mut bytes = vec![0; val_len];
         self.rand.rng().fill_bytes(&mut bytes);
         bytes
     }
@@ -400,7 +400,7 @@ impl Dst {
         // which isn't strictly needed. But we don't expose `is_wal_enabled()`
         // to the public API.
         let flush_probability = if write_options.await_durable {
-            0.01
+            0.5
         } else {
             0f64
         };
@@ -662,7 +662,7 @@ fn pretty_bytes(bytes: usize) -> String {
     } else if bytes < 1024 * 1024 * 1024 {
         format!("{}mb", bytes / (1024 * 1024))
     } else {
-        format!("{}gb", bytes / (1024 * 1024 * 1024))
+        format!("{0:.2}gb", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
 
