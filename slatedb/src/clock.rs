@@ -23,8 +23,8 @@ use tracing::info;
 pub trait SystemClock: Debug + Send + Sync {
     fn now(&self) -> SystemTime;
     #[cfg(test)]
-    fn advance(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn advance(&mut self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker;
 }
 
@@ -47,9 +47,9 @@ impl SystemClockTicker {
         // Emulate first tick in tokio::time::Interval::tick by skipping the sleep
         if self.first_tick {
             self.first_tick = false;
-            self.clock.sleep(Duration::from_millis(0))
+            self.clock.clone().sleep(Duration::from_millis(0))
         } else {
-            self.clock.sleep(self.duration)
+            self.clock.clone().sleep(self.duration)
         }
     }
 }
@@ -91,12 +91,56 @@ impl SystemClock for DefaultSystemClock {
     }
 
     #[cfg(test)]
-    fn advance(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn advance(&mut self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::advance(duration))
     }
 
-    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::sleep(duration))
+    }
+
+    fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker {
+        SystemClockTicker::new(self, duration)
+    }
+}
+
+#[derive(Debug)]
+pub struct MockSystemClock {
+    current_ts: i64,
+}
+
+impl MockSystemClock {
+    pub fn new() -> Self {
+        Self { current_ts: 0 }
+    }
+
+    pub fn set_now(&mut self, ts_millis: i64) {
+        self.current_ts = ts_millis;
+    }
+}
+
+impl SystemClock for MockSystemClock {
+    fn now(&self) -> SystemTime {
+        if self.current_ts < 0 {
+            UNIX_EPOCH - Duration::from_millis(self.current_ts.unsigned_abs())
+        } else {
+            UNIX_EPOCH + Duration::from_millis(self.current_ts as u64)
+        }
+    }
+
+    #[cfg(test)]
+    fn advance(&mut self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.current_ts += duration.as_millis() as i64;
+        Box::pin(async move {})
+    }
+
+    fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let end_time = self.current_ts + duration.as_millis() as i64;
+        Box::pin(async move {
+            while self.current_ts < end_time {
+                tokio::task::yield_now().await;
+            }
+        })
     }
 
     fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker {
