@@ -25,11 +25,12 @@
 //! _Note: The `write_batch` loop still holds a lock on the db_state. There can still
 //! be contention between `get`s, which holds a lock, and the write loop._
 
-use log::{info, warn};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Handle;
-use tracing::instrument;
+use tracing::{info, instrument, warn};
 
+use crate::config::WriteOptions;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
 use crate::{
@@ -40,7 +41,7 @@ use crate::{
 
 pub(crate) enum WriteBatchMsg {
     Shutdown,
-    WriteBatch(WriteBatchRequest),
+    WriteBatch(WriteBatchRequest, WriteOptions),
 }
 
 pub(crate) struct WriteBatchRequest {
@@ -121,12 +122,30 @@ impl DbInner {
     ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
         let this = Arc::clone(self);
         let mut is_stopped = false;
+        let mut is_first_write = true;
+        let monitor_first_write =
+            async |mut watcher: WatchableOnceCellReader<Result<(), SlateDBError>>| {
+                tokio::select! {
+                    _ = watcher.await_value() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        warn!("First write not durable after 5 seconds and WAL is disabled. \
+                        SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
+                        is reached. If writer is single threaded or has low throughput, the \
+                        applications must call `flush` to ensure durability in a timely manner.");
+                    }
+                }
+            };
+
         let fut = async move {
             while !(is_stopped && rx.is_empty()) {
                 match rx.recv().await.expect("unexpected channel close") {
-                    WriteBatchMsg::WriteBatch(write_batch_request) => {
+                    WriteBatchMsg::WriteBatch(write_batch_request, options) => {
                         let WriteBatchRequest { batch, done } = write_batch_request;
                         let result = this.write_batch(batch).await;
+                        if is_first_write && !this.wal_enabled && options.await_durable {
+                            is_first_write = false;
+                            tokio::spawn(monitor_first_write(result.clone()?));
+                        }
                         _ = done.send(result);
                     }
                     WriteBatchMsg::Shutdown => {
