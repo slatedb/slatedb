@@ -23,6 +23,9 @@ use tracing::info;
 pub trait SystemClock: Debug + Send + Sync {
     /// Returns the current time
     fn now(&self) -> SystemTime;
+    /// Advances the clock by the specified duration
+    #[cfg(test)]
+    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     /// Sleeps for the specified duration
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     /// Returns a ticker that emits a signal every `duration` interval
@@ -95,6 +98,11 @@ impl SystemClock for DefaultSystemClock {
         system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
     }
 
+    #[cfg(test)]
+    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(tokio::time::advance(duration))
+    }
+
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::sleep(duration))
     }
@@ -125,15 +133,6 @@ impl MockSystemClock {
     pub fn set(self: Arc<Self>, ts_millis: i64) {
         self.current_ts.store(ts_millis, Ordering::SeqCst);
     }
-
-    pub fn advance(
-        self: Arc<Self>,
-        duration: Duration,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        self.current_ts
-            .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
-        Box::pin(async move {})
-    }
 }
 
 impl SystemClock for MockSystemClock {
@@ -145,6 +144,14 @@ impl SystemClock for MockSystemClock {
             UNIX_EPOCH + Duration::from_millis(self.current_ts.load(Ordering::SeqCst) as u64)
         }
     }
+
+    #[cfg(test)]
+    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.current_ts
+            .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
+        Box::pin(async move {})
+    }
+
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let end_time = self.current_ts.load(Ordering::SeqCst) + duration.as_millis() as i64;
         Box::pin(async move {
@@ -418,6 +425,21 @@ mod tests {
             new_now,
             initial_now + sleep_duration,
             "DefaultSystemClock now() should advance with time"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_default_system_clock_advance() {
+        let clock = Arc::new(DefaultSystemClock::new());
+        let start = clock.now();
+        let duration = Duration::from_millis(500);
+        clock.clone().advance(duration).await;
+
+        // Check that time advanced correctly
+        assert_eq!(
+            start + duration,
+            clock.now(),
+            "DefaultSystemClock should advance time by the specified duration"
         );
     }
 
