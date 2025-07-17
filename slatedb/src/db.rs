@@ -237,7 +237,8 @@ impl DbInner {
         self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let batch_msg = WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx });
+        let batch_msg =
+            WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx }, options.clone());
 
         self.maybe_apply_backpressure().await?;
         self.write_notifier

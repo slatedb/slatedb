@@ -19,11 +19,13 @@ use uuid::Uuid;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
+#[derive(Clone)]
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
     tx: tokio::sync::watch::Sender<Option<T>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct WatchableOnceCellReader<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
 }
