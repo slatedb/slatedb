@@ -52,7 +52,7 @@ impl SystemClockTicker {
         // Let's emulate that behavior in our ticker.
         if self.first_tick {
             self.first_tick = false;
-            Box::pin(async { () })
+            Box::pin(async { })
         } else {
             self.clock.clone().sleep(self.duration)
         }
