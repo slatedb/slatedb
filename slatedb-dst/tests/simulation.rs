@@ -90,12 +90,6 @@ async fn test_dst_is_deterministic(
                 }
                 expected_u64 = Some(next_u64);
                 expected_time = Some(next_time);
-                eprintln!("seed {} passed", seed);
-                eprintln!("expected_u64: {}", expected_u64.unwrap());
-                eprintln!(
-                    "expected_time: {:?}",
-                    expected_time.unwrap().duration_since(UNIX_EPOCH).unwrap()
-                );
             }
             Err(e) => {
                 error!("simulation failed with seed {}: {}", seed, e);
