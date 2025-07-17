@@ -98,10 +98,9 @@ where
 }
 
 pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
-    if system_time < UNIX_EPOCH {
-        -(UNIX_EPOCH.duration_since(system_time).unwrap().as_millis() as i64)
-    } else {
-        system_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+    match system_time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
+        Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
     }
 }
 

@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    utils::{system_time_from_millis, system_time_to_millis},
+    utils::{self, system_time_from_millis, system_time_to_millis},
     SlateDBError,
 };
 use tracing::info;
@@ -75,12 +75,8 @@ pub struct DefaultSystemClock {
 
 impl DefaultSystemClock {
     pub fn new() -> Self {
-        let ts_millis = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
-            Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
-        };
         Self {
-            initial_ts: ts_millis,
+            initial_ts: utils::system_time_to_millis(SystemTime::now()),
             initial_instant: tokio::time::Instant::now(),
         }
     }
