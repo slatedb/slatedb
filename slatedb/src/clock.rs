@@ -24,7 +24,7 @@ pub trait SystemClock: Debug + Send + Sync {
     /// Returns the current time
     fn now(&self) -> SystemTime;
     /// Advances the clock by the specified duration
-    #[cfg(test)]
+    #[cfg(feature = "test-utils")]
     fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     /// Sleeps for the specified duration
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -52,7 +52,7 @@ impl SystemClockTicker {
         // Let's emulate that behavior in our ticker.
         if self.first_tick {
             self.first_tick = false;
-            Box::pin(async { })
+            Box::pin(async {})
         } else {
             self.clock.clone().sleep(self.duration)
         }
@@ -98,7 +98,7 @@ impl SystemClock for DefaultSystemClock {
         system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "test-utils")]
     fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::advance(duration))
     }
@@ -112,17 +112,25 @@ impl SystemClock for DefaultSystemClock {
     }
 }
 
+/// A mock system clock implementation that uses an atomic i64 to track time.
+/// The clock always starts at 0 (the Unix epoch). Time only advances when the
+/// `advance` method is called.
 #[derive(Debug)]
+#[cfg(feature = "test-utils")]
 pub struct MockSystemClock {
+    /// The current timestamp in milliseconds since the Unix epoch.
+    /// Can be negative to represent a time before the epoch.
     current_ts: AtomicI64,
 }
 
+#[cfg(feature = "test-utils")]
 impl Default for MockSystemClock {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "test-utils")]
 impl MockSystemClock {
     pub fn new() -> Self {
         Self {
@@ -135,6 +143,7 @@ impl MockSystemClock {
     }
 }
 
+#[cfg(feature = "test-utils")]
 impl SystemClock for MockSystemClock {
     fn now(&self) -> SystemTime {
         if self.current_ts.load(Ordering::SeqCst) < 0 {
@@ -145,7 +154,6 @@ impl SystemClock for MockSystemClock {
         }
     }
 
-    #[cfg(test)]
     fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         self.current_ts
             .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
@@ -278,6 +286,7 @@ mod tests {
     use tokio::time::timeout;
 
     #[tokio::test]
+    #[cfg(feature = "test-utils")]
     async fn test_mock_system_clock_default() {
         let clock = MockSystemClock::default();
         assert_eq!(
@@ -288,6 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-utils")]
     async fn test_mock_system_clock_set_now() {
         let clock = Arc::new(MockSystemClock::new());
 
@@ -311,6 +321,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-utils")]
     async fn test_mock_system_clock_advance() {
         let clock = Arc::new(MockSystemClock::new());
         let initial_ts = 1000;
@@ -331,6 +342,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-utils")]
     async fn test_mock_system_clock_sleep() {
         let clock = Arc::new(MockSystemClock::new());
         let initial_ts = 2000;
@@ -372,6 +384,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-utils")]
     async fn test_mock_system_clock_ticker() {
         let clock = Arc::new(MockSystemClock::new());
         let tick_duration = Duration::from_millis(100);
@@ -429,6 +442,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(feature = "test-utils")]
     async fn test_default_system_clock_advance() {
         let clock = Arc::new(DefaultSystemClock::new());
         let start = clock.now();
