@@ -1,5 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
+#[cfg(feature = "test-util")]
+use std::time::UNIX_EPOCH;
 use std::{
     cmp,
     fmt::Debug,
@@ -9,7 +11,7 @@ use std::{
         atomic::{AtomicI64, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use crate::{

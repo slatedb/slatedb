@@ -302,19 +302,17 @@ impl<R: RngCore> IdGenerator for R {
 
 /// A timeout wrapper for futures that returns a SlateDBError::Timeout if the future
 /// does not complete within the specified duration.
-pub fn timeout<T>(
+pub async fn timeout<T>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
     future: impl Future<Output = Result<T, SlateDBError>> + Send,
-) -> impl Future<Output = Result<T, SlateDBError>> + Send {
-    async move {
-        tokio::select! {
-            biased;
-            res = future => res,
-            _ = clock.sleep(duration) => Err(SlateDBError::Timeout {
-                msg: "Timeout".to_string(),
-            })
-        }
+) -> Result<T, SlateDBError> {
+    tokio::select! {
+        biased;
+        res = future => res,
+        _ = clock.sleep(duration) => Err(SlateDBError::Timeout {
+            msg: "Timeout".to_string(),
+        })
     }
 }
 
