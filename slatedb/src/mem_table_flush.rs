@@ -164,7 +164,6 @@ impl DbInner {
         ) -> Result<(), SlateDBError> {
             let mut manifest_poll_interval = this
                 .system_clock
-                .clone()
                 .ticker(this.settings.manifest_poll_interval);
             let mut err_reader = this.state.read().error_reader();
 

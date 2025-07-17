@@ -25,21 +25,21 @@ pub trait SystemClock: Debug + Send + Sync {
     fn now(&self) -> SystemTime;
     /// Advances the clock by the specified duration
     #[cfg(feature = "test-util")]
-    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
     /// Sleeps for the specified duration
-    fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
     /// Returns a ticker that emits a signal every `duration` interval
-    fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker;
+    fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a>;
 }
 
-pub struct SystemClockTicker {
-    clock: Arc<dyn SystemClock>,
+pub struct SystemClockTicker<'a> {
+    clock: &'a dyn SystemClock,
     duration: Duration,
     first_tick: bool,
 }
 
-impl SystemClockTicker {
-    fn new(clock: Arc<dyn SystemClock>, duration: Duration) -> Self {
+impl<'a> SystemClockTicker<'a> {
+    fn new(clock: &'a dyn SystemClock, duration: Duration) -> Self {
         Self {
             clock,
             duration,
@@ -47,14 +47,14 @@ impl SystemClockTicker {
         }
     }
 
-    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         // Tokio's ticker ticks immediately when the first tick() is called.
         // Let's emulate that behavior in our ticker.
         if self.first_tick {
             self.first_tick = false;
             Box::pin(async {})
         } else {
-            self.clock.clone().sleep(self.duration)
+            self.clock.sleep(self.duration)
         }
     }
 }
@@ -99,15 +99,15 @@ impl SystemClock for DefaultSystemClock {
     }
 
     #[cfg(feature = "test-util")]
-    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(tokio::time::advance(duration))
     }
 
-    fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(tokio::time::sleep(duration))
     }
 
-    fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker {
+    fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a> {
         SystemClockTicker::new(self, duration)
     }
 }
@@ -138,7 +138,7 @@ impl MockSystemClock {
         }
     }
 
-    pub fn set(self: Arc<Self>, ts_millis: i64) {
+    pub fn set(&self, ts_millis: i64) {
         self.current_ts.store(ts_millis, Ordering::SeqCst);
     }
 }
@@ -154,13 +154,13 @@ impl SystemClock for MockSystemClock {
         }
     }
 
-    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         self.current_ts
             .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
         Box::pin(async move {})
     }
 
-    fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         let end_time = self.current_ts.load(Ordering::SeqCst) + duration.as_millis() as i64;
         Box::pin(async move {
             #[allow(clippy::while_immutable_condition)]
@@ -170,7 +170,7 @@ impl SystemClock for MockSystemClock {
         })
     }
 
-    fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker {
+    fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a> {
         SystemClockTicker::new(self, duration)
     }
 }
@@ -352,9 +352,9 @@ mod tests {
 
         // Start sleep for 1000ms
         let sleep_duration = Duration::from_millis(1000);
-        let sleep_handle1 = clock.clone().sleep(sleep_duration);
-        let sleep_handle2 = clock.clone().sleep(sleep_duration);
-        let sleep_handle3 = clock.clone().sleep(sleep_duration);
+        let sleep_handle1 = clock.sleep(sleep_duration);
+        let sleep_handle2 = clock.sleep(sleep_duration);
+        let sleep_handle3 = clock.sleep(sleep_duration);
 
         // Verify sleep doesn't complete immediately
         assert!(
@@ -365,7 +365,7 @@ mod tests {
         );
 
         // Advance clock by 500ms (not enough to complete sleep)
-        clock.clone().set(initial_ts + 500);
+        clock.set(initial_ts + 500);
         assert!(
             timeout(Duration::from_millis(10), sleep_handle2)
                 .await
@@ -390,7 +390,7 @@ mod tests {
         let tick_duration = Duration::from_millis(100);
 
         // Create a ticker
-        let mut ticker = clock.clone().ticker(tick_duration);
+        let mut ticker = clock.ticker(tick_duration);
 
         // First tick should complete immediately
         assert!(
@@ -463,7 +463,7 @@ mod tests {
         let tick_duration = Duration::from_millis(10);
 
         // Create a ticker
-        let mut ticker = clock.clone().ticker(tick_duration);
+        let mut ticker = clock.ticker(tick_duration);
 
         // First tick should complete immediately
         assert!(

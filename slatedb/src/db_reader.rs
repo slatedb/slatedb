@@ -372,7 +372,6 @@ impl DbReaderInner {
         ) -> Result<(), SlateDBError> {
             let mut ticker = this
                 .system_clock
-                .clone()
                 .ticker(this.options.manifest_poll_interval);
             loop {
                 select! {

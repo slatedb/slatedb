@@ -107,10 +107,10 @@ impl GarbageCollector {
     /// The garbage collector runs until the cancellation token is cancelled.
     pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
-        let mut compacted_ticker = self.system_clock.clone().ticker(compacted_gc_task.period());
-        let mut wal_ticker = self.system_clock.clone().ticker(wal_gc_task.period());
-        let mut manifest_ticker = self.system_clock.clone().ticker(manifest_gc_task.period());
-        let mut log_ticker = self.system_clock.clone().ticker(Duration::from_secs(60));
+        let mut compacted_ticker = self.system_clock.ticker(compacted_gc_task.period());
+        let mut wal_ticker = self.system_clock.ticker(wal_gc_task.period());
+        let mut manifest_ticker = self.system_clock.ticker(manifest_gc_task.period());
+        let mut log_ticker = self.system_clock.ticker(Duration::from_secs(60));
 
         info!(
             "Starting Garbage Collector with [manifest: {:#?}], [wal: {:#?}], [compacted: {:#?}]",
