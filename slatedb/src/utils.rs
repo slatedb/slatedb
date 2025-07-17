@@ -98,7 +98,11 @@ where
 }
 
 pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
-    system_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+    if system_time < UNIX_EPOCH {
+        return -(UNIX_EPOCH.duration_since(system_time).unwrap().as_millis() as i64);
+    } else {
+        return system_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+    }
 }
 
 pub(crate) fn system_time_from_millis(ms: i64) -> SystemTime {

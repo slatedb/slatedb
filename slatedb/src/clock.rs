@@ -46,7 +46,7 @@ impl SystemClockTicker {
         // Emulate first tick in tokio::time::Interval::tick by skipping the sleep
         if self.first_tick {
             self.first_tick = false;
-            self.clock.clone().sleep(Duration::from_millis(0))
+            Box::pin(async { () }) // noop since first tick executes immediately
         } else {
             self.clock.clone().sleep(self.duration)
         }
@@ -121,7 +121,7 @@ impl MockSystemClock {
         }
     }
 
-    pub fn set_now(&mut self, ts_millis: i64) {
+    pub fn set_now(self: Arc<Self>, ts_millis: i64) {
         self.current_ts.store(ts_millis, Ordering::SeqCst);
     }
 }
@@ -259,5 +259,142 @@ impl MonotonicClock {
         }
 
         Ok(tick)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn test_mock_system_clock_default() {
+        let clock = MockSystemClock::default();
+        assert_eq!(
+            system_time_to_millis(clock.now()),
+            0,
+            "Default MockSystemClock should start at timestamp 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_system_clock_set_now() {
+        let clock = Arc::new(MockSystemClock::new());
+
+        // Test positive timestamp
+        let positive_ts = 1625097600000i64; // 2021-07-01T00:00:00Z in milliseconds
+        clock.clone().set_now(positive_ts);
+        assert_eq!(
+            system_time_to_millis(clock.now()),
+            positive_ts,
+            "MockSystemClock should return the timestamp set with set_now"
+        );
+
+        // Test negative timestamp (before Unix epoch)
+        let negative_ts = -1625097600000; // Before Unix epoch
+        clock.clone().set_now(negative_ts);
+        assert_eq!(
+            system_time_to_millis(clock.now()),
+            negative_ts,
+            "MockSystemClock should handle negative timestamps correctly"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_system_clock_advance() {
+        let clock = Arc::new(MockSystemClock::new());
+        let initial_ts = 1000;
+
+        // Set initial time
+        clock.clone().set_now(initial_ts);
+
+        // Advance by 500ms
+        let duration = Duration::from_millis(500);
+        clock.clone().advance(duration).await;
+
+        // Check that time advanced correctly
+        assert_eq!(
+            system_time_to_millis(clock.now()),
+            initial_ts + 500,
+            "MockSystemClock should advance time by the specified duration"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_system_clock_sleep() {
+        let clock = Arc::new(MockSystemClock::new());
+        let initial_ts = 2000;
+
+        // Set initial time
+        clock.clone().set_now(initial_ts);
+
+        // Start sleep for 1000ms
+        let sleep_duration = Duration::from_millis(1000);
+        let sleep_handle1 = clock.clone().sleep(sleep_duration);
+        let sleep_handle2 = clock.clone().sleep(sleep_duration);
+        let sleep_handle3 = clock.clone().sleep(sleep_duration);
+
+        // Verify sleep doesn't complete immediately
+        assert!(
+            timeout(Duration::from_millis(10), sleep_handle1)
+                .await
+                .is_err(),
+            "Sleep should not complete until time advances"
+        );
+
+        // Advance clock by 500ms (not enough to complete sleep)
+        clock.clone().set_now(initial_ts + 500);
+        assert!(
+            timeout(Duration::from_millis(10), sleep_handle2)
+                .await
+                .is_err(),
+            "Sleep should not complete when time has advanced by less than sleep duration"
+        );
+
+        // Advance clock by enough to complete sleep
+        clock.set_now(initial_ts + 1000);
+        assert!(
+            timeout(Duration::from_millis(100), sleep_handle3)
+                .await
+                .is_ok(),
+            "Sleep should complete when time has advanced by at least sleep duration"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_system_clock_ticker() {
+        let clock = Arc::new(MockSystemClock::new());
+        let tick_duration = Duration::from_millis(100);
+
+        // Create a ticker
+        let mut ticker = clock.clone().ticker(tick_duration);
+
+        // First tick should complete immediately
+        assert!(
+            timeout(Duration::from_millis(100), ticker.tick())
+                .await
+                .is_ok(),
+            "First tick should complete immediately"
+        );
+
+        // Next tick should not complete because time hasn't advanced
+        assert!(
+            timeout(Duration::from_millis(100), ticker.tick())
+                .await
+                .is_err(),
+            "Second tick should not complete until time advances"
+        );
+
+        // The the ticker future before we advance the clock so it's end time is 
+        // now + 100. Then advance the clock by 100ms and verify the tick 
+        // completes.
+        let tick_handle = ticker.tick();
+        clock.clone().set_now(100);
+        assert!(
+            timeout(Duration::from_millis(100), tick_handle)
+                .await
+                .is_ok(),
+            "Tick should complete when time has advanced by at least tick duration"
+        );
     }
 }
