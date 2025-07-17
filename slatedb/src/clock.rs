@@ -23,9 +23,6 @@ use tracing::info;
 pub trait SystemClock: Debug + Send + Sync {
     /// Returns the current time
     fn now(&self) -> SystemTime;
-    /// Advances the clock by the specified duration. This should panic except in
-    /// tests. It's public so end-users can run tests with a mock clock.
-    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     /// Sleeps for the specified duration
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     /// Returns a ticker that emits a signal every `duration` interval
@@ -59,11 +56,14 @@ impl SystemClockTicker {
     }
 }
 
-/// A system clock implementation that uses tokio::time::Instant to measure time. During
-/// normal usage, this is equivalent to SystemTime::now().
+/// A system clock implementation that uses tokio::time::Instant to measure time duration.
+/// SystemTime::now() is used to track the initial timestamp (ms since Unix epoch). This
+/// timestamp is used to convert the tokio::time::Instant to a SystemTime when now() is
+/// called.
 ///
-/// In test cases, it is possible to advance the clock manually with
-/// `#[tokio::test(start_paused = true)]` and `tokio::time::sleep`.
+/// Note that, becasue we're using tokio::time::Instant, manipulating tokio's clock with
+/// tokio::time::pause(), tokio::time::advance(), and so on will affect the
+/// DefaultSystemClock's time as well.
 #[derive(Debug)]
 pub struct DefaultSystemClock {
     initial_ts: i64,
@@ -95,11 +95,6 @@ impl SystemClock for DefaultSystemClock {
         system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
     }
 
-    #[allow(clippy::panic)]
-    fn advance(self: Arc<Self>, _duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        panic!("Advance is not allowed in DefaultSystemClock. Use MockSystemClock instead.");
-    }
-
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::sleep(duration))
     }
@@ -127,8 +122,17 @@ impl MockSystemClock {
         }
     }
 
-    pub fn set_now(self: Arc<Self>, ts_millis: i64) {
+    pub fn set(self: Arc<Self>, ts_millis: i64) {
         self.current_ts.store(ts_millis, Ordering::SeqCst);
+    }
+
+    pub fn advance(
+        self: Arc<Self>,
+        duration: Duration,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.current_ts
+            .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
+        Box::pin(async move {})
     }
 }
 
@@ -141,13 +145,6 @@ impl SystemClock for MockSystemClock {
             UNIX_EPOCH + Duration::from_millis(self.current_ts.load(Ordering::SeqCst) as u64)
         }
     }
-
-    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        self.current_ts
-            .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
-        Box::pin(async move {})
-    }
-
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let end_time = self.current_ts.load(Ordering::SeqCst) + duration.as_millis() as i64;
         Box::pin(async move {
@@ -289,7 +286,7 @@ mod tests {
 
         // Test positive timestamp
         let positive_ts = 1625097600000i64; // 2021-07-01T00:00:00Z in milliseconds
-        clock.clone().set_now(positive_ts);
+        clock.clone().set(positive_ts);
         assert_eq!(
             system_time_to_millis(clock.now()),
             positive_ts,
@@ -298,7 +295,7 @@ mod tests {
 
         // Test negative timestamp (before Unix epoch)
         let negative_ts = -1625097600000; // Before Unix epoch
-        clock.clone().set_now(negative_ts);
+        clock.clone().set(negative_ts);
         assert_eq!(
             system_time_to_millis(clock.now()),
             negative_ts,
@@ -312,7 +309,7 @@ mod tests {
         let initial_ts = 1000;
 
         // Set initial time
-        clock.clone().set_now(initial_ts);
+        clock.clone().set(initial_ts);
 
         // Advance by 500ms
         let duration = Duration::from_millis(500);
@@ -332,7 +329,7 @@ mod tests {
         let initial_ts = 2000;
 
         // Set initial time
-        clock.clone().set_now(initial_ts);
+        clock.clone().set(initial_ts);
 
         // Start sleep for 1000ms
         let sleep_duration = Duration::from_millis(1000);
@@ -349,7 +346,7 @@ mod tests {
         );
 
         // Advance clock by 500ms (not enough to complete sleep)
-        clock.clone().set_now(initial_ts + 500);
+        clock.clone().set(initial_ts + 500);
         assert!(
             timeout(Duration::from_millis(10), sleep_handle2)
                 .await
@@ -358,7 +355,7 @@ mod tests {
         );
 
         // Advance clock by enough to complete sleep
-        clock.set_now(initial_ts + 1000);
+        clock.set(initial_ts + 1000);
         assert!(
             timeout(Duration::from_millis(100), sleep_handle3)
                 .await
@@ -395,7 +392,7 @@ mod tests {
         // now + 100. Then advance the clock by 100ms and verify the tick
         // completes.
         let tick_handle = ticker.tick();
-        clock.clone().set_now(100);
+        clock.clone().set(100);
         assert!(
             timeout(Duration::from_millis(10000), tick_handle)
                 .await
@@ -422,18 +419,6 @@ mod tests {
             initial_now + sleep_duration,
             "DefaultSystemClock now() should advance with time"
         );
-    }
-
-    #[tokio::test]
-    async fn test_default_system_clock_advance_panics() {
-        let clock = Arc::new(DefaultSystemClock::new());
-
-        // The advance method panics, so we need to catch that
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = clock.clone().advance(Duration::from_millis(100));
-        }));
-
-        assert!(result.is_err(), "DefaultSystemClock advance() should panic");
     }
 
     #[tokio::test(start_paused = true)]
