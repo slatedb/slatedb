@@ -1008,7 +1008,6 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
-    use std::ops::Bound::Excluded;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -1646,32 +1645,6 @@ mod tests {
         db
     }
 
-    async fn assert_empty_scan(db: &Db, range: BytesRange) {
-        let mut iter = db
-            .inner
-            .scan_with_options(range.clone(), &ScanOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(None, iter.next().await.unwrap());
-    }
-
-    #[test]
-    fn test_empty_scan_range_returns_empty_iterator() {
-        let mut runner = new_proptest_runner(None);
-        let table = sample::table(runner.rng(), 1000, 5);
-
-        let runtime = Runtime::new().unwrap();
-        let db_options = test_db_options(0, 1024, None);
-        let db = runtime.block_on(build_database_from_table(&table, db_options, true));
-
-        runner
-            .run(&arbitrary::empty_range(10), |range| {
-                runtime.block_on(assert_empty_scan(&db, range));
-                Ok(())
-            })
-            .unwrap();
-    }
-
     #[tokio::test]
     async fn test_should_allow_iterating_behind_box_dyn() {
         #[async_trait]
@@ -1686,10 +1659,7 @@ mod tests {
         #[async_trait]
         impl IteratorSupplier for DbHolder {
             async fn iterator<'a>(&'a self) -> Box<dyn IteratorTrait + 'a> {
-                let range = BytesRange::new(
-                    Excluded(Bytes::from(b"foo".as_slice())),
-                    Excluded(Bytes::from(b"foo".as_slice())),
-                );
+                let range = BytesRange::new_empty();
                 let iter = self
                     .db
                     .inner

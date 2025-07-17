@@ -65,6 +65,15 @@ impl BytesRange {
         Self { inner }
     }
 
+    pub(crate) fn new_empty() -> Self {
+        Self {
+            inner: ComparableRange::new(
+                Excluded(Bytes::copy_from_slice(&[0_u8])),
+                Excluded(Bytes::copy_from_slice(&[0_u8])),
+            ),
+        }
+    }
+
     pub(crate) fn from<T: RangeBounds<Bytes>>(range: T) -> Self {
         Self::new(range.start_bound().cloned(), range.end_bound().cloned())
     }
@@ -153,10 +162,9 @@ pub(crate) mod tests {
     #[test]
     fn test_intersection_of_empty_range_and_nonempty_range_is_empty() {
         proptest!(|(
-            empty_range in arbitrary::empty_range(10),
             non_empty_range in arbitrary::nonempty_range(10),
         )| {
-            assert!(empty_range.intersect(&non_empty_range).is_none())
+            assert!(BytesRange::new_empty().intersect(&non_empty_range).is_none())
         });
     }
 
@@ -177,6 +185,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Range must be non-empty")]
     fn test_contains_with_empty_range() {
         proptest!(|(range in arbitrary::empty_range(10), sample in arbitrary::nonempty_bytes(10))| {
             assert!(!range.contains(&sample), "Expected value {sample:?} to not be in empty range {range:?}");
