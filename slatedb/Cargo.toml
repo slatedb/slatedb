@@ -70,7 +70,7 @@ tokio-test = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [features]
-default = ["aws", "foyer", "test-util"]
+default = ["aws", "foyer"]
 aws = ["object_store/aws"]
 azure = ["object_store/azure"]
 bencher = ["aws", "azure", "wal_disable", "foyer"]
