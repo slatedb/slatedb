@@ -420,8 +420,6 @@ impl Dst {
 
     async fn advance_time(&self, duration: Duration) {
         debug!(?duration, "advance_time");
-        // TODO: should use system_clock.advance();
-        tokio::time::advance(duration).await;
         self.system_clock.clone().advance(duration).await;
     }
 

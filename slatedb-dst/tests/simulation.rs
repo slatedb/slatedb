@@ -32,7 +32,7 @@ async fn test_dst_quickly(
 }
 
 /// Verifies that SlateDB is deterministic when we seed the random number
-/// generator and system clock appropriately. DST tests are not meaningful
+/// generator, system clock, and runtime appropriately. DSTs are not meaningful
 /// if SlateDB is not deterministic when configured for DSTs.
 ///
 /// The test runs multiple simulations with the same seed. After each simulation,
