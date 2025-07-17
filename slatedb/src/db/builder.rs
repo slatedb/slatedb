@@ -385,7 +385,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             path_resolver.clone(),
             self.fp_registry.clone(),
             block_cache.as_ref().map(|c| {
-                Arc::new(DbCacheWrapper::new(c.clone(), stat_registry.as_ref())) as Arc<dyn DbCache>
+                Arc::new(DbCacheWrapper::new(
+                    c.clone(),
+                    stat_registry.as_ref(),
+                    system_clock.clone(),
+                )) as Arc<dyn DbCache>
             }),
         ));
 

@@ -89,8 +89,9 @@ impl SystemClock for DefaultSystemClock {
         system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
     }
 
-    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(tokio::time::advance(duration))
+    #[allow(clippy::panic)]
+    fn advance(self: Arc<Self>, _duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        panic!("Advance is not allowed in DefaultSystemClock. Use MockSystemClock instead.");
     }
 
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {

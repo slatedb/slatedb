@@ -575,6 +575,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
+    use crate::clock::DefaultSystemClock;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
@@ -796,7 +797,11 @@ mod tests {
 
         let stat_registry = StatRegistry::new();
         let block_cache = Arc::new(MokaCache::new());
-        let wrapper = Arc::new(DbCacheWrapper::new(block_cache.clone(), &stat_registry));
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            block_cache.clone(),
+            &stat_registry,
+            Arc::new(DefaultSystemClock::default()),
+        ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             format,
@@ -922,7 +927,11 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
         let cache = Arc::new(TestCache::new());
-        let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            cache.clone(),
+            &stat_registry,
+            Arc::new(DefaultSystemClock::default()),
+        ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
@@ -958,7 +967,11 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
         let cache = Arc::new(TestCache::new());
-        let wrapper = Arc::new(DbCacheWrapper::new(cache.clone(), &stat_registry));
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            cache.clone(),
+            &stat_registry,
+            Arc::new(DefaultSystemClock::default()),
+        ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
