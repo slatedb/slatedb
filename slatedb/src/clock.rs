@@ -22,8 +22,7 @@ use tracing::info;
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.
 pub trait SystemClock: Debug + Send + Sync {
     fn now(&self) -> SystemTime;
-    #[cfg(test)]
-    fn advance(&mut self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker;
 }
@@ -90,8 +89,7 @@ impl SystemClock for DefaultSystemClock {
         system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
     }
 
-    #[cfg(test)]
-    fn advance(&mut self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::advance(duration))
     }
 
@@ -106,7 +104,7 @@ impl SystemClock for DefaultSystemClock {
 
 #[derive(Debug)]
 pub struct MockSystemClock {
-    current_ts: i64,
+    current_ts: AtomicI64,
 }
 
 impl Default for MockSystemClock {
@@ -117,34 +115,37 @@ impl Default for MockSystemClock {
 
 impl MockSystemClock {
     pub fn new() -> Self {
-        Self { current_ts: 0 }
+        Self {
+            current_ts: AtomicI64::new(0),
+        }
     }
 
     pub fn set_now(&mut self, ts_millis: i64) {
-        self.current_ts = ts_millis;
+        self.current_ts.store(ts_millis, Ordering::SeqCst);
     }
 }
 
 impl SystemClock for MockSystemClock {
     fn now(&self) -> SystemTime {
-        if self.current_ts < 0 {
-            UNIX_EPOCH - Duration::from_millis(self.current_ts.unsigned_abs())
+        if self.current_ts.load(Ordering::SeqCst) < 0 {
+            UNIX_EPOCH
+                - Duration::from_millis(self.current_ts.load(Ordering::SeqCst).unsigned_abs())
         } else {
-            UNIX_EPOCH + Duration::from_millis(self.current_ts as u64)
+            UNIX_EPOCH + Duration::from_millis(self.current_ts.load(Ordering::SeqCst) as u64)
         }
     }
 
-    #[cfg(test)]
-    fn advance(&mut self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        self.current_ts += duration.as_millis() as i64;
+    fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.current_ts
+            .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
         Box::pin(async move {})
     }
 
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let end_time = self.current_ts + duration.as_millis() as i64;
+        let end_time = self.current_ts.load(Ordering::SeqCst) + duration.as_millis() as i64;
         Box::pin(async move {
             #[allow(clippy::while_immutable_condition)]
-            while self.current_ts < end_time {
+            while self.current_ts.load(Ordering::SeqCst) < end_time {
                 tokio::task::yield_now().await;
             }
         })
