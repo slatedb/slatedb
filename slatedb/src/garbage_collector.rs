@@ -39,7 +39,7 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
 
 trait GcTask {
     fn resource(&self) -> &str;
-    fn period(&self) -> Duration;
+    fn interval(&self) -> Duration;
     async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
 }
 
@@ -107,16 +107,16 @@ impl GarbageCollector {
     /// The garbage collector runs until the cancellation token is cancelled.
     pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
-        let mut compacted_ticker = self.system_clock.ticker(compacted_gc_task.period());
-        let mut wal_ticker = self.system_clock.ticker(wal_gc_task.period());
-        let mut manifest_ticker = self.system_clock.ticker(manifest_gc_task.period());
+        let mut compacted_ticker = self.system_clock.ticker(compacted_gc_task.interval());
+        let mut wal_ticker = self.system_clock.ticker(wal_gc_task.interval());
+        let mut manifest_ticker = self.system_clock.ticker(manifest_gc_task.interval());
         let mut log_ticker = self.system_clock.ticker(Duration::from_secs(60));
 
         info!(
             "Starting Garbage Collector with [manifest: {:#?}], [wal: {:#?}], [compacted: {:#?}]",
-            manifest_gc_task.period(),
-            wal_gc_task.period(),
-            compacted_gc_task.period()
+            manifest_gc_task.interval(),
+            wal_gc_task.interval(),
+            compacted_gc_task.interval()
         );
 
         loop {

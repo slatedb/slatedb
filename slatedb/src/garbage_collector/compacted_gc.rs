@@ -93,7 +93,7 @@ impl GcTask for CompactedGcTask {
         Ok(())
     }
 
-    fn period(&self) -> Duration {
+    fn interval(&self) -> Duration {
         self.compacted_options
             .and_then(|opts| opts.interval)
             .unwrap_or(DEFAULT_INTERVAL)

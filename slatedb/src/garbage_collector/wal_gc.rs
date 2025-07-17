@@ -108,7 +108,7 @@ impl GcTask for WalGcTask {
         Ok(())
     }
 
-    fn period(&self) -> Duration {
+    fn interval(&self) -> Duration {
         self.wal_options
             .and_then(|opts| opts.interval)
             .unwrap_or(DEFAULT_INTERVAL)

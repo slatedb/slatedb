@@ -89,7 +89,7 @@ impl GcTask for ManifestGcTask {
         Ok(())
     }
 
-    fn period(&self) -> Duration {
+    fn interval(&self) -> Duration {
         self.manifest_options
             .and_then(|opts| opts.interval)
             .unwrap_or(DEFAULT_INTERVAL)
