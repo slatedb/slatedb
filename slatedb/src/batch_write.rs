@@ -122,6 +122,18 @@ impl DbInner {
         let this = Arc::clone(self);
         let mut is_stopped = false;
         let mut is_first_write = true;
+        let monitor_first_write =
+            async |mut watcher: WatchableOnceCellReader<Result<(), SlateDBError>>| {
+                tokio::select! {
+                    _ = watcher.await_value() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        warn!("First write not durable after 5 seconds and WAL is disabled. \
+                        SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
+                        is reached. If writer is single threaded or has low throughput, the \
+                        applications must call `flush` to ensure durability in a timely manner.");
+                    }
+                }
+            };
 
         let fut = async move {
             while !(is_stopped && rx.is_empty()) {
@@ -130,19 +142,8 @@ impl DbInner {
                         let WriteBatchRequest { batch, done } = write_batch_request;
                         let result = this.write_batch(batch).await;
                         if is_first_write && !this.wal_enabled {
-                            let mut this_watcher = result.clone()?;
                             is_first_write = false;
-                            tokio::spawn(async move {
-                                tokio::select! {
-                                    _ = this_watcher.await_value() => {}
-                                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                                        warn!("First write not durable after 5 seconds and WAL is disabled. \
-                                        SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
-                                        is reached. If writer is single threaded or has low throughput, the \
-                                        applications must call `flush` to ensure durability in a timely manner.");
-                                    }
-                                }
-                            });
+                            tokio::spawn(monitor_first_write(result.clone()?));
                         }
                         _ = done.send(result);
                     }
