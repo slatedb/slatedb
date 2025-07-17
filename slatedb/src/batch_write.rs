@@ -30,6 +30,7 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tracing::{info, instrument, warn};
 
+use crate::config::WriteOptions;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
 use crate::{
@@ -40,7 +41,7 @@ use crate::{
 
 pub(crate) enum WriteBatchMsg {
     Shutdown,
-    WriteBatch(WriteBatchRequest),
+    WriteBatch(WriteBatchRequest, WriteOptions),
 }
 
 pub(crate) struct WriteBatchRequest {
@@ -138,10 +139,10 @@ impl DbInner {
         let fut = async move {
             while !(is_stopped && rx.is_empty()) {
                 match rx.recv().await.expect("unexpected channel close") {
-                    WriteBatchMsg::WriteBatch(write_batch_request) => {
+                    WriteBatchMsg::WriteBatch(write_batch_request, options) => {
                         let WriteBatchRequest { batch, done } = write_batch_request;
                         let result = this.write_batch(batch).await;
-                        if is_first_write && !this.wal_enabled {
+                        if is_first_write && !this.wal_enabled && options.await_durable {
                             is_first_write = false;
                             tokio::spawn(monitor_first_write(result.clone()?));
                         }
