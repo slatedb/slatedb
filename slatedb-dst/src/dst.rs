@@ -4,6 +4,7 @@ use rand::distr::Distribution;
 use rand::seq::IteratorRandom;
 use rand::Rng;
 use rand::RngCore;
+use slatedb::clock::SystemClock;
 use slatedb::config::PutOptions;
 use slatedb::config::ReadOptions;
 use slatedb::config::ScanOptions;
@@ -16,6 +17,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::RangeBounds;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::debug;
@@ -279,6 +281,7 @@ impl DstDistribution for DefaultDstDistribution {
 
 pub struct Dst {
     db: Db,
+    system_clock: Arc<dyn SystemClock>,
     rand: Rc<DbRand>,
     action_sampler: Box<dyn DstDistribution>,
     options: DstOptions,
@@ -288,16 +291,18 @@ pub struct Dst {
 impl Dst {
     pub fn new(
         db: Db,
+        system_clock: Arc<dyn SystemClock>,
         rand: Rc<DbRand>,
         action_sampler: Box<dyn DstDistribution>,
         options: DstOptions,
     ) -> Self {
         Self {
             db,
+            state: SizedBTreeMap::new(),
             rand,
             action_sampler,
             options,
-            state: SizedBTreeMap::new(),
+            system_clock,
         }
     }
 
@@ -417,6 +422,7 @@ impl Dst {
         debug!(?duration, "advance_time");
         // TODO: should use system_clock.advance();
         tokio::time::advance(duration).await;
+        self.system_clock.clone().advance(duration).await;
     }
 
     /// Shrinks the database and in-memory state if the in-memory state exceeds

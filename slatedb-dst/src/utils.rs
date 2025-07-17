@@ -1,4 +1,5 @@
 use rand::Rng;
+use slatedb::clock::SystemClock;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
 use slatedb::config::GarbageCollectorOptions;
@@ -31,11 +32,12 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
     None,
 ];
 
-pub async fn build_dst(rand: Rc<DbRand>) -> Dst {
-    let db = build_db(&rand).await;
+pub async fn build_dst(system_clock: Arc<dyn SystemClock>, rand: Rc<DbRand>) -> Dst {
+    let db = build_db(&rand, system_clock.clone()).await;
     let dst_opts = DstOptions::default();
     Dst::new(
         db,
+        system_clock,
         rand.clone(),
         Box::new(DefaultDstDistribution::new(rand, dst_opts.clone())),
         dst_opts,
@@ -43,10 +45,11 @@ pub async fn build_dst(rand: Rc<DbRand>) -> Dst {
 }
 
 /// Builds a DB instance with components that are selected at random.
-pub async fn build_db(rand: &DbRand) -> Db {
+pub async fn build_db(rand: &DbRand, system_clock: Arc<dyn SystemClock>) -> Db {
     let mut builder = DbBuilder::new("test_db", Arc::new(InMemory::new()));
     builder = builder.with_settings(build_settings(rand).await);
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
+    builder = builder.with_system_clock(system_clock.clone());
     builder.build().await.unwrap()
 }
 
