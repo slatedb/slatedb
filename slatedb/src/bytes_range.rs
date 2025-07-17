@@ -140,7 +140,11 @@ pub(crate) mod tests {
         proptest!(|(range in arbitrary::nonempty_range(10))| {
             assert!(range.non_empty());
         });
+    }
 
+    #[should_panic(expected = "Range must be non-empty")]
+    #[test]
+    fn test_arbitrary_empty_range() {
         proptest!(|(range in arbitrary::empty_range(10))| {
             assert!(range.empty());
         });
