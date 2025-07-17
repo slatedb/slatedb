@@ -12,6 +12,7 @@ use crate::rand::DbRand;
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
+use crate::utils;
 use crate::SlateDBError::ManifestVersionExists;
 use chrono::Utc;
 use futures::StreamExt;
@@ -111,8 +112,7 @@ impl FenceableManifest {
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        let timeout_future = system_clock.sleep(manifest_update_timeout);
-        let manifest_poll_future = async {
+        utils::timeout(system_clock, manifest_update_timeout, async {
             loop {
                 let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
                 let mut manifest = stored_manifest.prepare_dirty();
@@ -136,16 +136,11 @@ impl FenceableManifest {
                     }
                 }
             }
-        };
-        tokio::select! {
-            biased;
-            res = manifest_poll_future => res,
-            _ = timeout_future => {
-                Err(SlateDBError::Timeout {
-                    msg: "Manifest update".to_string(),
-                })
-            }
-        }
+        })
+        .await
+        .map_err(|_| SlateDBError::Timeout {
+            msg: "Manifest update".to_string(),
+        })
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
