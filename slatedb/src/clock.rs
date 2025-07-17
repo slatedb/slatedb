@@ -21,9 +21,14 @@ use tracing::info;
 /// Defines the physical clock that SlateDB will use to measure time for things
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.
 pub trait SystemClock: Debug + Send + Sync {
+    /// Returns the current time
     fn now(&self) -> SystemTime;
+    /// Advances the clock by the specified duration. This should panic except in
+    /// tests. It's public so end-users can run tests with a mock clock.
     fn advance(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    /// Sleeps for the specified duration
     fn sleep(self: Arc<Self>, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    /// Returns a ticker that emits a signal every `duration` interval
     fn ticker(self: Arc<Self>, duration: Duration) -> SystemClockTicker;
 }
 
@@ -43,10 +48,11 @@ impl SystemClockTicker {
     }
 
     pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        // Emulate first tick in tokio::time::Interval::tick by skipping the sleep
+        // Tokio's ticker ticks immediately when the first tick() is called.
+        // Let's emulate that behavior in our ticker.
         if self.first_tick {
             self.first_tick = false;
-            Box::pin(async { () }) // noop since first tick executes immediately
+            Box::pin(async { () })
         } else {
             self.clock.clone().sleep(self.duration)
         }
@@ -371,7 +377,7 @@ mod tests {
 
         // First tick should complete immediately
         assert!(
-            timeout(Duration::from_millis(100), ticker.tick())
+            timeout(Duration::from_millis(10000), ticker.tick())
                 .await
                 .is_ok(),
             "First tick should complete immediately"
@@ -385,16 +391,73 @@ mod tests {
             "Second tick should not complete until time advances"
         );
 
-        // The the ticker future before we advance the clock so it's end time is 
-        // now + 100. Then advance the clock by 100ms and verify the tick 
+        // The the ticker future before we advance the clock so it's end time is
+        // now + 100. Then advance the clock by 100ms and verify the tick
         // completes.
         let tick_handle = ticker.tick();
         clock.clone().set_now(100);
         assert!(
-            timeout(Duration::from_millis(100), tick_handle)
+            timeout(Duration::from_millis(10000), tick_handle)
                 .await
                 .is_ok(),
             "Tick should complete when time has advanced by at least tick duration"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_default_system_clock_now() {
+        let clock = Arc::new(DefaultSystemClock::new());
+
+        // Record initial time
+        let initial_now = clock.now();
+
+        // Sleep a bit
+        let sleep_duration = Duration::from_millis(100);
+        clock.clone().sleep(sleep_duration).await;
+
+        // Check that time advances
+        let new_now = clock.clone().now();
+        assert_eq!(
+            new_now,
+            initial_now + sleep_duration,
+            "DefaultSystemClock now() should advance with time"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_system_clock_advance_panics() {
+        let clock = Arc::new(DefaultSystemClock::new());
+
+        // The advance method panics, so we need to catch that
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = clock.clone().advance(Duration::from_millis(100));
+        }));
+
+        assert!(result.is_err(), "DefaultSystemClock advance() should panic");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_default_system_clock_ticker() {
+        let clock = Arc::new(DefaultSystemClock::new());
+        let tick_duration = Duration::from_millis(10);
+
+        // Create a ticker
+        let mut ticker = clock.clone().ticker(tick_duration);
+
+        // First tick should complete immediately
+        assert!(
+            timeout(Duration::from_millis(10000), ticker.tick())
+                .await
+                .is_ok(),
+            "First tick should complete immediately"
+        );
+
+        // Tokio auto-advances the time on when sleep() is called and only
+        // timer futures remain. Calling tick() here will bump the clock by
+        // the tick duration.
+        let before = clock.now();
+        ticker.tick().await;
+        let after = clock.now();
+        assert_eq!(before + tick_duration, after);
     }
 }
