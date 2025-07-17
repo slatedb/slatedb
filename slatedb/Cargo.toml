@@ -83,7 +83,7 @@ zstd = ["dep:zstd"]
 wal_disable = []
 moka = ["dep:moka"]
 foyer = ["dep:foyer"]
-test-utils = []
+test-util = ["tokio/test-util"]
 
 [lib]
 # Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
