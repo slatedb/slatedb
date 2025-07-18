@@ -336,7 +336,7 @@ impl Default for WriteOptions {
 /// Configuration for client put operations. `PutOptions` is supplied for each
 /// row inserted. This differs from [`WriteOptions`] in that a write may encompass
 /// multiple puts (such as the case with batched writes)
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Debug)]
 pub struct PutOptions {
     /// The time-to-live (ttl) for this insertion. If this insert overwrites an existing
     /// database entry, the TTL for the most recent entry will be canonical.
@@ -372,7 +372,7 @@ impl PutOptions {
 }
 
 #[non_exhaustive]
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Debug)]
 pub enum Ttl {
     #[default]
     Default,

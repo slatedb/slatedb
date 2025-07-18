@@ -4,6 +4,7 @@ use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
+use ::slatedb::{KeyValue, SlateDBError};
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -13,6 +14,7 @@ use std::backtrace::Backtrace;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::runtime::Runtime;
+use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
@@ -47,6 +49,7 @@ fn slatedb(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySlateDB>()?;
     m.add_class::<PySlateDBReader>()?;
     m.add_class::<PySlateDBAdmin>()?;
+    m.add_class::<PyDbIterator>()?;
     Ok(())
 }
 
@@ -153,6 +156,20 @@ impl PySlateDB {
             }
             Ok(tuples)
         })
+    }
+
+    #[pyo3(signature = (start, end = None))]
+    fn scan_iter(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
+        if start.is_empty() {
+            return Err(create_value_error("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+
+        Ok(PyDbIterator::new_from_db(self.inner.clone(), start, end))
     }
 
     #[pyo3(signature = (key))]
@@ -314,6 +331,24 @@ impl PySlateDBReader {
         })
     }
 
+    #[pyo3(signature = (start, end = None))]
+    fn scan_iter(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
+        if start.is_empty() {
+            return Err(create_value_error("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+
+        Ok(PyDbIterator::new_from_reader(
+            self.inner.clone(),
+            start,
+            end,
+        ))
+    }
+
     fn close(&self) -> PyResult<()> {
         let db_reader = self.inner.clone();
         let rt = get_runtime();
@@ -379,5 +414,133 @@ impl PySlateDBAdmin {
                 Ok(dict)
             })
             .collect::<PyResult<Vec<Bound<PyDict>>>>()
+    }
+}
+
+type IteratorReceiver = Arc<Mutex<mpsc::UnboundedReceiver<Result<Option<KeyValue>, SlateDBError>>>>;
+
+#[pyclass(name = "DbIterator")]
+pub struct PyDbIterator {
+    receiver: Option<IteratorReceiver>,
+    db: Option<Arc<Db>>,
+    reader: Option<Arc<DbReader>>,
+    start: Vec<u8>,
+    end: Vec<u8>,
+    _task_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl PyDbIterator {
+    fn new_from_db(db: Arc<Db>, start: Vec<u8>, end: Vec<u8>) -> Self {
+        Self {
+            receiver: None,
+            db: Some(db),
+            reader: None,
+            start,
+            end,
+            _task_handle: None,
+        }
+    }
+
+    fn new_from_reader(reader: Arc<DbReader>, start: Vec<u8>, end: Vec<u8>) -> Self {
+        Self {
+            receiver: None,
+            db: None,
+            reader: Some(reader),
+            start,
+            end,
+            _task_handle: None,
+        }
+    }
+
+    fn ensure_initialized(&mut self) -> PyResult<()> {
+        if self.receiver.is_some() {
+            return Ok(());
+        }
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let receiver = Arc::new(Mutex::new(receiver));
+
+        let task_handle = if let Some(db) = &self.db {
+            let db = db.clone();
+            let start = self.start.clone();
+            let end = self.end.clone();
+            get_runtime().spawn(async move {
+                let result = async {
+                    let mut iter = db.scan(start..end).await?;
+                    while let Some(kv) = iter.next().await? {
+                        if sender.send(Ok(Some(kv))).is_err() {
+                            break; // Receiver dropped
+                        }
+                    }
+                    let _ = sender.send(Ok(None)); // End of iteration
+                    Ok::<(), SlateDBError>(())
+                }
+                .await;
+
+                if let Err(e) = result {
+                    let _ = sender.send(Err(e));
+                }
+            })
+        } else if let Some(reader) = &self.reader {
+            let reader = reader.clone();
+            let start = self.start.clone();
+            let end = self.end.clone();
+            get_runtime().spawn(async move {
+                let result = async {
+                    let mut iter = reader.scan(start..end).await?;
+                    while let Some(kv) = iter.next().await? {
+                        if sender.send(Ok(Some(kv))).is_err() {
+                            break; // Receiver dropped
+                        }
+                    }
+                    let _ = sender.send(Ok(None)); // End of iteration
+                    Ok::<(), SlateDBError>(())
+                }
+                .await;
+
+                if let Err(e) = result {
+                    let _ = sender.send(Err(e));
+                }
+            })
+        } else {
+            return Err(create_value_error("Iterator not properly initialized"));
+        };
+
+        self.receiver = Some(receiver);
+        self._task_handle = Some(task_handle);
+        Ok(())
+    }
+}
+
+#[pymethods]
+impl PyDbIterator {
+    fn __iter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        self.ensure_initialized()?;
+
+        let receiver = self.receiver.as_ref().unwrap().clone();
+        let rt = get_runtime();
+
+        let kv_result = rt.block_on(async {
+            let mut guard = receiver.lock().await;
+            guard.recv().await
+        });
+
+        match kv_result {
+            Some(Ok(Some(kv))) => {
+                let key = PyBytes::new(py, &kv.key);
+                let value = PyBytes::new(py, &kv.value);
+                let tuple = PyTuple::new(py, vec![key, value])?;
+                Ok(tuple.into())
+            }
+            Some(Ok(None)) | None => {
+                // End of iteration or channel closed - raise StopIteration
+                Err(pyo3::exceptions::PyStopIteration::new_err(""))
+            }
+            Some(Err(e)) => Err(create_value_error(e)),
+        }
     }
 }
