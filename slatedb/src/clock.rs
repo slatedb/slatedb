@@ -131,11 +131,17 @@ impl Default for MockSystemClock {
 #[cfg(feature = "test-util")]
 impl MockSystemClock {
     pub fn new() -> Self {
+        Self::with_time(0)
+    }
+
+    /// Creates a new mock system clock with the specified timestamp
+    pub fn with_time(ts_millis: i64) -> Self {
         Self {
-            current_ts: AtomicI64::new(0),
+            current_ts: AtomicI64::new(ts_millis),
         }
     }
 
+    /// Sets the current timestamp of the mock system clock
     pub fn set(&self, ts_millis: i64) {
         self.current_ts.store(ts_millis, Ordering::SeqCst);
     }
