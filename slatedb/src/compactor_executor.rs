@@ -17,13 +17,12 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::rand::DbRand;
+use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
-use crate::types::RowEntry;
-use crate::types::ValueDeletable::Tombstone;
 use crate::utils::{spawn_bg_task, IdGenerator};
 use tracing::{debug, error, instrument};
 use uuid::Uuid;
@@ -134,7 +133,7 @@ impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         compaction: &'a CompactionJob,
-    ) -> Result<MergeIterator<'a>, SlateDBError> {
+    ) -> Result<RetentionIterator<MergeIterator<'a>>, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,
@@ -151,7 +150,7 @@ impl TokioCompactionExecutorInner {
                 l0_iters.push_back(iter);
             }
         }
-        let l0_merge_iter = MergeIterator::new(l0_iters).await?;
+        let l0_merge_iter = MergeIterator::new(l0_iters).await?.with_dedup(false);
 
         let mut sr_iters = VecDeque::new();
         for sr in compaction.sorted_runs.iter() {
@@ -160,8 +159,21 @@ impl TokioCompactionExecutorInner {
                     .await?;
             sr_iters.push_back(iter);
         }
-        let sr_merge_iter = MergeIterator::new(sr_iters).await?;
-        MergeIterator::new([l0_merge_iter, sr_merge_iter]).await
+        let sr_merge_iter = MergeIterator::new(sr_iters).await?.with_dedup(false);
+
+        let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])
+            .await?
+            .with_dedup(false);
+        let retention_iter = RetentionIterator::new(
+            merge_iter,
+            None,
+            None,
+            compaction.is_dest_last_run,
+            compaction.compaction_ts,
+            self.clock.clone(),
+        )
+        .await?;
+        Ok(retention_iter)
     }
 
     #[instrument(level = "debug", skip_all, fields(id = %compaction.id))]
@@ -176,34 +188,12 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid()));
         let mut current_size = 0usize;
-        let mut total_bytes_processed = 0u64;
         let mut last_progress_report = self.clock.now();
 
-        while let Some(raw_kv) = all_iter.next_entry().await? {
-            // filter out any expired entries -- eventually we can consider
-            // abstracting this away into generic, pluggable compaction filters
-            // but for now we do it inline
-            let kv = match raw_kv.expire_ts {
-                Some(expire_ts) if expire_ts <= compaction.compaction_ts => {
-                    // insert a tombstone instead of just filtering out the
-                    // value in the iterator because this may otherwise "revive"
-                    // an older version of the KV pair that has a larger TTL in
-                    // a lower level of the LSM tree
-                    RowEntry {
-                        key: raw_kv.key,
-                        value: Tombstone,
-                        seq: raw_kv.seq,
-                        expire_ts: None,
-                        create_ts: raw_kv.create_ts,
-                    }
-                }
-                _ => raw_kv,
-            };
-
+        while let Some(kv) = all_iter.next_entry().await? {
             let key_len = kv.key.len();
             let value_len = kv.value.len();
 
-            total_bytes_processed += key_len as u64 + value_len as u64;
             let duration_since_last_report = self
                 .clock
                 .now()
@@ -218,14 +208,10 @@ impl TokioCompactionExecutorInner {
                 self.worker_tx
                     .send(WorkerToOrchestratorMsg::CompactionProgress {
                         id: compaction.id,
-                        bytes_processed: total_bytes_processed,
+                        bytes_processed: all_iter.total_bytes_processed(),
                     })
                     .expect("failed to send compaction progress");
                 last_progress_report = self.clock.now();
-            }
-
-            if compaction.is_dest_last_run && kv.value.is_tombstone() {
-                continue;
             }
 
             current_writer.add(kv).await?;
