@@ -5,7 +5,6 @@ use crate::{
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::{sync::Arc, time::Duration};
-use tokio::time::Interval;
 use tracing::error;
 
 use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
@@ -98,10 +97,6 @@ impl GcTask for CompactedGcTask {
         self.compacted_options
             .and_then(|opts| opts.interval)
             .unwrap_or(DEFAULT_INTERVAL)
-    }
-
-    fn ticker(&self) -> Interval {
-        tokio::time::interval(self.interval())
     }
 
     fn resource(&self) -> &str {

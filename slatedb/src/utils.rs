@@ -1,4 +1,4 @@
-use crate::clock::MonotonicClock;
+use crate::clock::{MonotonicClock, SystemClock};
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::error::SlateDBError;
@@ -100,7 +100,10 @@ where
 }
 
 pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
-    system_time.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+    match system_time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
+        Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
+    }
 }
 
 pub(crate) fn system_time_from_millis(ms: i64) -> SystemTime {
@@ -296,6 +299,22 @@ impl<R: RngCore> IdGenerator for R {
     /// Generates a random ULID using the provided RNG.
     fn gen_ulid(&mut self) -> Ulid {
         Ulid::with_source(self)
+    }
+}
+
+/// A timeout wrapper for futures that returns a SlateDBError::Timeout if the future
+/// does not complete within the specified duration.
+pub async fn timeout<T>(
+    clock: Arc<dyn SystemClock>,
+    duration: Duration,
+    future: impl Future<Output = Result<T, SlateDBError>> + Send,
+) -> Result<T, SlateDBError> {
+    tokio::select! {
+        biased;
+        res = future => res,
+        _ = clock.sleep(duration) => Err(SlateDBError::Timeout {
+            msg: "Timeout".to_string(),
+        })
     }
 }
 
@@ -560,5 +579,72 @@ mod tests {
         // a buffer of the minimal size, as Bytes doesn't expose the underlying buffer's
         // capacity. The best we can do is assert it allocated a new buffer.
         assert_ne!(clamped.as_ptr(), slice.as_ptr());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    async fn test_timeout_completes_before_expiry() {
+        use crate::{clock::MockSystemClock, utils::timeout};
+
+        // Given: a mock clock and a future that completes quickly
+        let clock = Arc::new(MockSystemClock::new());
+
+        // When: we execute a future with a timeout
+        let completed_future = async { Ok::<_, SlateDBError>(42) };
+        let timeout_future = timeout(clock, Duration::from_millis(100), completed_future);
+
+        // Then: the future should complete successfully with the expected value
+        let result = timeout_future.await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    async fn test_timeout_expires() {
+        use std::sync::atomic::AtomicBool;
+
+        use crate::clock::{MockSystemClock, SystemClock};
+        use crate::utils::timeout;
+
+        // Given: a mock clock and a future that will never complete
+        let clock = Arc::new(MockSystemClock::new());
+        let never_completes = std::future::pending::<Result<(), SlateDBError>>();
+
+        // When: we execute the future with a timeout and advance the clock past the timeout duration
+        let timeout_future = timeout(clock.clone(), Duration::from_millis(100), never_completes);
+        let done = Arc::new(AtomicBool::new(false));
+        let this_done = done.clone();
+
+        tokio::spawn(async move {
+            while !this_done.load(SeqCst) {
+                clock.advance(Duration::from_millis(100)).await;
+                // Yield or else the scheduler keeps picking this loop, which
+                // the sleep task forever.
+                tokio::task::yield_now().await;
+            }
+        });
+
+        // Then: the future should complete with a timeout error
+        let result = timeout_future.await;
+        done.store(true, SeqCst);
+        assert!(matches!(result, Err(SlateDBError::Timeout { .. })));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    async fn test_timeout_respects_biased_select() {
+        use crate::{clock::MockSystemClock, utils::timeout};
+
+        // Given: a mock clock and two futures that complete simultaneously
+        let clock = Arc::new(MockSystemClock::new());
+        let completes_immediately = async { Ok::<_, SlateDBError>(42) };
+
+        // When: we execute the future with a timeout and both are ready immediately
+        let timeout_future = timeout(clock, Duration::from_millis(100), completes_immediately);
+
+        // Then: because of the 'biased' select, the future should complete with the value
+        // rather than timing out, even though both are ready
+        let result = timeout_future.await;
+        assert_eq!(result.unwrap(), 42);
     }
 }

@@ -385,7 +385,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             path_resolver.clone(),
             self.fp_registry.clone(),
             block_cache.as_ref().map(|c| {
-                Arc::new(DbCacheWrapper::new(c.clone(), stat_registry.as_ref())) as Arc<dyn DbCache>
+                Arc::new(DbCacheWrapper::new(
+                    c.clone(),
+                    stat_registry.as_ref(),
+                    system_clock.clone(),
+                )) as Arc<dyn DbCache>
             }),
         ));
 
@@ -404,9 +408,12 @@ impl<P: Into<Path>> DbBuilder<P> {
                 StoredManifest::create_new_db(manifest_store.clone(), state).await?
             }
         };
-        let mut manifest =
-            FenceableManifest::init_writer(stored_manifest, self.settings.manifest_update_timeout)
-                .await?;
+        let mut manifest = FenceableManifest::init_writer(
+            stored_manifest,
+            self.settings.manifest_update_timeout,
+            system_clock.clone(),
+        )
+        .await?;
 
         // Setup communication channels
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();

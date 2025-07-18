@@ -12,7 +12,7 @@ use tokio::{
 use tracing::{debug, error, instrument, trace};
 
 use crate::{
-    clock::MonotonicClock,
+    clock::{MonotonicClock, SystemClock},
     db_state::{DbState, SsTableId},
     db_stats::DbStats,
     iter::KeyValueIterator,
@@ -56,6 +56,7 @@ pub(crate) struct WalBufferManager {
     db_stats: DbStats,
     quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
     mono_clock: Arc<MonotonicClock>,
+    system_clock: Arc<dyn SystemClock>,
     table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
     max_flush_interval: Option<Duration>,
@@ -89,6 +90,7 @@ impl WalBufferManager {
         oracle: Arc<Oracle>,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
+        system_clock: Arc<dyn SystemClock>,
         max_wal_bytes_size: usize,
         max_flush_interval: Option<Duration>,
     ) -> Self {
@@ -111,6 +113,7 @@ impl WalBufferManager {
             quit_once: WatchableOnceCell::new(),
             table_store,
             mono_clock,
+            system_clock,
             max_wal_bytes_size,
             max_flush_interval,
         }
@@ -310,7 +313,7 @@ impl WalBufferManager {
         loop {
             let mut flush_interval_fut: Pin<Box<dyn Future<Output = ()> + Send>> =
                 match max_flush_interval {
-                    Some(duration) => Box::pin(tokio::time::sleep(duration)),
+                    Some(duration) => self.system_clock.sleep(duration),
                     None => Box::pin(std::future::pending()),
                 };
 
@@ -514,7 +517,7 @@ struct WalFlushWork {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::MonotonicClock;
+    use crate::clock::{DefaultSystemClock, MonotonicClock};
     use crate::db_state::CoreDbState;
     use crate::manifest::store::DirtyManifest;
     use crate::manifest::Manifest;
@@ -568,6 +571,7 @@ mod tests {
             oracle,
             table_store.clone(),
             mono_clock,
+            Arc::new(DefaultSystemClock::default()),
             1000,                            // max_wal_bytes_size
             Some(Duration::from_millis(10)), // max_flush_interval
         ));

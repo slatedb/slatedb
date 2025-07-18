@@ -369,21 +369,7 @@ impl RetentionBuffer {
 mod tests {
     use super::*;
     use crate::types::RowEntry;
-    use crate::{clock::SystemClock, test_utils::TestIterator};
     use rstest::rstest;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Mock SystemClock that returns the compaction_start_ts as current time
-    #[derive(Debug)]
-    struct MockSystemClock {
-        ts: i64,
-    }
-
-    impl SystemClock for MockSystemClock {
-        fn now(&self) -> SystemTime {
-            UNIX_EPOCH + std::time::Duration::from_millis(self.ts as u64)
-        }
-    }
 
     struct RetentionBufferTestCase {
         name: &'static str,
@@ -578,6 +564,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-util")]
     struct RetentionIteratorTestCase {
         name: &'static str,
         input_entries: Vec<RowEntry>,
@@ -900,16 +887,18 @@ mod tests {
         filter_tombstone: true, // tombstone is not in the tail, so not filtered out
     })]
     #[tokio::test]
+    #[cfg(feature = "test-util")]
     async fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
+        use crate::clock::MockSystemClock;
+        use crate::test_utils::TestIterator;
+
         // Test the apply_retention_filter function directly since TestIterator doesn't support create_ts
         let mut versions = std::collections::BTreeMap::new();
         for entry in test_case.input_entries.iter() {
             versions.insert(Reverse(entry.seq), entry.clone());
         }
 
-        let system_clock = Arc::new(MockSystemClock {
-            ts: test_case.system_clock_ts,
-        });
+        let system_clock = Arc::new(MockSystemClock::with_time(test_case.system_clock_ts));
         let filtered_versions = RetentionIterator::<TestIterator>::apply_retention_filter(
             versions,
             test_case.compaction_start_ts,

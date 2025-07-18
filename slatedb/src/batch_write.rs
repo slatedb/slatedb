@@ -124,10 +124,10 @@ impl DbInner {
         let mut is_stopped = false;
         let mut is_first_write = true;
         let monitor_first_write =
-            async |mut watcher: WatchableOnceCellReader<Result<(), SlateDBError>>| {
+            async move |mut watcher: WatchableOnceCellReader<Result<(), SlateDBError>>| {
                 tokio::select! {
                     _ = watcher.await_value() => {}
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    _ = this.system_clock.sleep(Duration::from_secs(5)) => {
                         warn!("First write not durable after 5 seconds and WAL is disabled. \
                         SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
                         is reached. If writer is single threaded or has low throughput, the \
@@ -136,6 +136,7 @@ impl DbInner {
                 }
             };
 
+        let this = Arc::clone(self);
         let fut = async move {
             while !(is_stopped && rx.is_empty()) {
                 match rx.recv().await.expect("unexpected channel close") {
@@ -144,7 +145,11 @@ impl DbInner {
                         let result = this.write_batch(batch).await;
                         if is_first_write && !this.wal_enabled && options.await_durable {
                             is_first_write = false;
-                            tokio::spawn(monitor_first_write(result.clone()?));
+                            let monitor_first_write = monitor_first_write.clone();
+                            let durable_watcher = result.clone()?;
+                            tokio::spawn(async move {
+                                monitor_first_write(durable_watcher).await;
+                            });
                         }
                         _ = done.send(result);
                     }

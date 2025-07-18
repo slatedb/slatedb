@@ -15,7 +15,7 @@ use tracing::{error, info};
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
-use crate::clock::DefaultSystemClock;
+use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::WorkerToOrchestratorMsg;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
@@ -37,6 +37,7 @@ pub struct CompactionExecuteBench {
     path: Path,
     object_store: Arc<dyn ObjectStore>,
     rand: Arc<DbRand>,
+    system_clock: Arc<dyn SystemClock>,
 }
 
 impl CompactionExecuteBench {
@@ -49,6 +50,7 @@ impl CompactionExecuteBench {
             path,
             object_store,
             rand,
+            system_clock: Arc::new(DefaultSystemClock::new()),
         }
     }
 
@@ -95,6 +97,7 @@ impl CompactionExecuteBench {
                 num_keys,
                 val_bytes,
                 self.rand.clone(),
+                self.system_clock.clone(),
             ));
             futures.push(jh)
         }
@@ -115,6 +118,7 @@ impl CompactionExecuteBench {
         num_keys: usize,
         val_bytes: usize,
         rand: Arc<DbRand>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<(), SlateDBError> {
         let mut retries = 0;
         loop {
@@ -124,6 +128,7 @@ impl CompactionExecuteBench {
                 key_start.clone(),
                 num_keys,
                 val_bytes,
+                system_clock.clone(),
                 rand.clone(),
             )
             .await;
@@ -138,7 +143,10 @@ impl CompactionExecuteBench {
                 }
             }
             retries += 1;
-            tokio::time::sleep(Duration::from_secs(retries + 1)).await;
+            system_clock
+                .clone()
+                .sleep(Duration::from_secs(retries + 1))
+                .await;
         }
     }
 
@@ -148,9 +156,10 @@ impl CompactionExecuteBench {
         key_start: Vec<u8>,
         num_keys: usize,
         val_bytes: usize,
+        system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<(), SlateDBError> {
-        let start = tokio::time::Instant::now();
+        let start = system_clock.now();
         let mut suffix = Vec::<u8>::new();
         suffix.put_u32(i);
         let mut key_gen =
@@ -164,7 +173,12 @@ impl CompactionExecuteBench {
             sst_writer.add(row_entry).await?;
         }
         let encoded = sst_writer.close().await?;
-        info!("wrote sst with id: {:?} {:?}", &encoded.id, start.elapsed());
+        let elapsed_ms = system_clock
+            .now()
+            .duration_since(start)
+            .expect("clock moved backwards")
+            .as_millis();
+        info!("wrote sst with id: {:?} {:?}ms", &encoded.id, elapsed_ms);
         Ok(())
     }
 
@@ -337,14 +351,20 @@ impl CompactionExecuteBench {
                 .await?
             }
         };
-        let start = tokio::time::Instant::now();
+        let start = self.system_clock.now();
         info!("start compaction job");
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
         while let Some(msg) = rx.recv().await {
             if let WorkerToOrchestratorMsg::CompactionFinished { id: _, result } = msg {
                 match result {
                     Ok(_) => {
-                        info!(elapsed = ?start.elapsed(), "compaction finished");
+                        let elapsed_ms = self
+                            .system_clock
+                            .now()
+                            .duration_since(start)
+                            .expect("clock moved backwards")
+                            .as_millis();
+                        info!(elapsed_ms, "compaction finished");
                     }
                     Err(err) => return Err(err),
                 }

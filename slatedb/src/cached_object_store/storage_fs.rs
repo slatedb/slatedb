@@ -380,6 +380,7 @@ impl FsCacheEvictor {
             .set(tokio::spawn(Self::background_scan(
                 inner.clone(),
                 self.scan_interval,
+                self.system_clock.clone(),
             )))
             .ok();
 
@@ -414,12 +415,16 @@ impl FsCacheEvictor {
         }
     }
 
-    async fn background_scan(inner: Arc<FsCacheEvictorInner>, scan_interval: Option<Duration>) {
+    async fn background_scan(
+        inner: Arc<FsCacheEvictorInner>,
+        scan_interval: Option<Duration>,
+        system_clock: Arc<dyn SystemClock>,
+    ) {
         inner.clone().scan_entries(true).await;
 
         if let Some(scan_interval) = scan_interval {
             loop {
-                tokio::time::sleep(scan_interval).await;
+                system_clock.clone().sleep(scan_interval).await;
                 inner.clone().scan_entries(true).await;
             }
         }
