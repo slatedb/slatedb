@@ -722,11 +722,13 @@ mod tests {
     use super::*;
     use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
+    use crate::db_cache::DbCacheWrapper;
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
     use crate::iter::IterationOrder::Ascending;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, build_test_sst, gen_attrs, gen_empty_attrs};
 
@@ -778,7 +780,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -829,7 +831,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -915,7 +917,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         );
         let mut builder = table_store.table_builder();
         for k in 1..=8 {
@@ -996,7 +998,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         );
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
@@ -1055,7 +1057,7 @@ mod tests {
             ObjectStores::new(object_store.clone(), None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         );
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
@@ -1076,7 +1078,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         );
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle).await.unwrap();
@@ -1132,7 +1134,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1180,7 +1182,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         );
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
@@ -1242,7 +1244,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format.clone(),
             root_path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         );
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
@@ -1291,7 +1293,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path,
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let mut builder = table_store.table_builder();
         for key in 'a'..='z' {

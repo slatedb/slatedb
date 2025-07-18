@@ -278,12 +278,14 @@ impl WalReplayIterator<'_> {
 mod tests {
     use super::{WalReplayIterator, WalReplayOptions};
     use crate::bytes_range::BytesRange;
+    use crate::db_cache::DbCacheWrapper;
     use crate::db_state::{CoreDbState, SsTableId};
     use crate::iter::{IterationOrder, KeyValueIterator};
     use crate::mem_table::WritableKVTable;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
     use crate::sst::SsTableFormat;
+    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::{test_utils, SlateDBError};
@@ -557,7 +559,7 @@ mod tests {
             ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
             path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ))
     }
 

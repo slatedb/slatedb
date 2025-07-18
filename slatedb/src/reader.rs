@@ -532,6 +532,8 @@ mod tests {
     async fn test_level_get_handles_expire(
         #[case] test_case: LevelGetExpireTestCase,
     ) -> Result<(), SlateDBError> {
+        use crate::db_cache::DbCacheWrapper;
+
         let mock_read_snapshot = mock_read_snapshot();
         let stat_registry = StatRegistry::new();
         let get = LevelGet {
@@ -542,7 +544,7 @@ mod tests {
                 ObjectStores::new(Arc::new(InMemory::new()), None),
                 SsTableFormat::default(),
                 Path::from(""),
-                None,
+                Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
             )),
             db_stats: DbStats::new(&stat_registry),
             now: 10000,

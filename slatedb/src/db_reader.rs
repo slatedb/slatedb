@@ -3,6 +3,7 @@ use crate::clock::{
     DefaultLogicalClock, DefaultSystemClock, LogicalClock, MonotonicClock, SystemClock,
 };
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
+use crate::db_cache::DbCacheWrapper;
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
@@ -533,10 +534,16 @@ impl DbReader {
         options: DbReaderOptions,
     ) -> Result<Self, SlateDBError> {
         let path = path.into();
+        let block_cache = options.block_cache.as_ref().map(|cache| cache.clone());
+        let meta_cache = options.meta_cache.as_ref().map(|cache| cache.clone());
         let store_provider = DefaultStoreProvider {
             path,
             object_store,
-            block_cache: options.block_cache.clone(),
+            cache: Arc::new(DbCacheWrapper::new(
+                block_cache,
+                meta_cache,
+                &StatRegistry::new(),
+            )),
         };
 
         Self::open_internal(
@@ -844,6 +851,7 @@ impl DbReader {
 mod tests {
     use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+    use crate::db_cache::DbCacheWrapper;
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::CoreDbState;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -854,6 +862,7 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
     use crate::sst::SsTableFormat;
+    use crate::stats::StatRegistry;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::{test_utils, Db, SlateDBError};
@@ -1221,7 +1230,7 @@ mod tests {
                 SsTableFormat::default(),
                 PathResolver::new(self.path.clone()),
                 Arc::clone(&self.fp_registry),
-                None,
+                Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
             ))
         }
 

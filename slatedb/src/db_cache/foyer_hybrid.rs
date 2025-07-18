@@ -75,9 +75,9 @@ impl FoyerHybridCache {
 }
 
 impl FoyerHybridCache {
-    async fn get(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
         self.inner
-            .get(&key)
+            .get(key)
             .await
             .map_err(|e| DbCacheError { msg: e.to_string() })
             .map(|maybe_v| maybe_v.map(|v| v.value().clone()))
@@ -86,15 +86,15 @@ impl FoyerHybridCache {
 
 #[async_trait]
 impl DbCache for FoyerHybridCache {
-    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
         self.get(key).await
     }
 
-    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
         self.get(key).await
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
         self.get(key).await
     }
 
@@ -102,8 +102,8 @@ impl DbCache for FoyerHybridCache {
         self.inner.insert(key, value);
     }
 
-    async fn remove(&self, key: CachedKey) {
-        self.inner.remove(&key);
+    async fn remove(&self, key: &CachedKey) {
+        self.inner.remove(key);
     }
 
     fn entry_count(&self) -> u64 {
@@ -140,7 +140,7 @@ mod tests {
         let mut found = 0;
         let mut notfound = 0;
         for (k, v) in items {
-            let cached_v = cache.get_block(k).await.unwrap();
+            let cached_v = cache.get_block(&k).await.unwrap();
             if let Some(cached_v) = cached_v {
                 assert!(v.block().unwrap().as_ref() == cached_v.block().unwrap().as_ref());
                 found += 1;

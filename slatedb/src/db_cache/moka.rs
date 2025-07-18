@@ -107,24 +107,24 @@ impl Default for MokaCache {
 
 #[async_trait]
 impl DbCache for MokaCache {
-    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        Ok(self.inner.get(&key).await)
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+        Ok(self.inner.get(key).await)
     }
 
-    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        Ok(self.inner.get(&key).await)
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+        Ok(self.inner.get(key).await)
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        Ok(self.inner.get(&key).await)
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+        Ok(self.inner.get(key).await)
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         self.inner.insert(key, value).await;
     }
 
-    async fn remove(&self, key: CachedKey) {
-        self.inner.remove(&key).await;
+    async fn remove(&self, key: &CachedKey) {
+        self.inner.remove(key).await;
     }
 
     fn entry_count(&self) -> u64 {

@@ -515,6 +515,7 @@ struct WalFlushWork {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
+    use crate::db_cache::DbCacheWrapper;
     use crate::db_state::CoreDbState;
     use crate::manifest::store::DirtyManifest;
     use crate::manifest::Manifest;
@@ -551,7 +552,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             SsTableFormat::default(),
             Path::from("/root"),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));

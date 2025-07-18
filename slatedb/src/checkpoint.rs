@@ -63,6 +63,7 @@ mod tests {
     use crate::clock::SystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
+    use crate::db_cache::DbCacheWrapper;
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
@@ -72,6 +73,7 @@ mod tests {
     use crate::proptest_util::{rng, sample};
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils;
     use bytes::Bytes;
@@ -379,7 +381,7 @@ mod tests {
             ObjectStores::new(Arc::clone(&object_store), None),
             SsTableFormat::default(),
             path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let sst_handle = table_store.open_sst(table_id).await.unwrap();
 

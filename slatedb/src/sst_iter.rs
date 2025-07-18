@@ -389,9 +389,11 @@ impl KeyValueIterator for SstIterator<'_> {
 mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
+    use crate::db_cache::DbCacheWrapper;
     use crate::db_state::SsTableId;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
+    use crate::stats::StatRegistry;
     use crate::test_utils::{assert_kv, gen_attrs};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
@@ -409,7 +411,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let mut builder = table_store.table_builder();
         builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
@@ -463,7 +465,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let mut builder = table_store.table_builder();
 
@@ -521,7 +523,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let first_key = [b'a'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
@@ -571,7 +573,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -615,7 +617,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -649,7 +651,7 @@ mod tests {
             ObjectStores::new(object_store, None),
             format,
             root_path.clone(),
-            None,
+            Arc::new(DbCacheWrapper::new(None, None, &StatRegistry::new())),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
