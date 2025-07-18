@@ -12,13 +12,13 @@
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tokio::time::Instant;
 use tracing::{debug, error};
 
+use crate::clock::SystemClock;
 use crate::db_cache::stats::DbCacheStats;
 use crate::stats::StatRegistry;
 use crate::{
@@ -239,18 +239,24 @@ impl CachedEntry {
 
 pub struct DbCacheWrapper {
     stats: DbCacheStats,
+    system_clock: Arc<dyn SystemClock>,
     cache: Arc<dyn DbCache>,
     // Records the last time that the wrapper logged an error from the wrapped cache at error
     // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
-    last_err_log_instant: Mutex<Option<Instant>>,
+    last_err_log_time: Mutex<Option<SystemTime>>,
 }
 
 impl DbCacheWrapper {
-    pub fn new(cache: Arc<dyn DbCache>, stats_registry: &StatRegistry) -> Self {
+    pub fn new(
+        cache: Arc<dyn DbCache>,
+        stats_registry: &StatRegistry,
+        system_clock: Arc<dyn SystemClock>,
+    ) -> Self {
         Self {
             stats: DbCacheStats::new(stats_registry),
             cache,
-            last_err_log_instant: Mutex::new(None),
+            last_err_log_time: Mutex::new(None),
+            system_clock,
         }
     }
 }
@@ -262,14 +268,21 @@ const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
 impl DbCacheWrapper {
     fn record_get_err(&self, block_type: &str, err: &SlateDBError) {
         let log_at_err = {
-            let mut guard = self.last_err_log_instant.lock();
+            let mut guard = self.last_err_log_time.lock();
             match *guard {
                 None => {
-                    *guard = Some(Instant::now());
+                    *guard = Some(self.system_clock.now());
                     true
                 }
-                Some(i) if i.elapsed() > ERROR_LOG_INTERVAL => {
-                    *guard = Some(Instant::now());
+                Some(t)
+                    if self
+                        .system_clock
+                        .now()
+                        .duration_since(t)
+                        .expect("clock moved backwards")
+                        > ERROR_LOG_INTERVAL =>
+                {
+                    *guard = Some(self.system_clock.now());
                     true
                 }
                 _ => false,
@@ -456,6 +469,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
 
+    use crate::clock::DefaultSystemClock;
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper};
     use crate::db_state::SsTableId;
 
@@ -615,7 +629,11 @@ mod tests {
     #[fixture]
     fn cache() -> DbCacheWrapper {
         let registry = StatRegistry::new();
-        DbCacheWrapper::new(Arc::new(TestCache::new()), &registry)
+        DbCacheWrapper::new(
+            Arc::new(TestCache::new()),
+            &registry,
+            Arc::new(DefaultSystemClock::default()),
+        )
     }
 
     #[fixture]
