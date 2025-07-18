@@ -58,8 +58,14 @@ impl Ord for MergeIteratorHeapEntry<'_> {
 }
 
 pub(crate) struct MergeIterator<'a> {
+    /// The current entry popped from the heap.
     current: Option<MergeIteratorHeapEntry<'a>>,
+    /// Use a heap to perform merge sort.
     iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>,
+    /// Whether to deduplicate entries of multiple versions with the same key. It's enabled by
+    /// default, but it is useful to disable when we want to have some merge logics during
+    /// compaction.
+    dedup: bool,
 }
 
 impl<'a> MergeIterator<'a> {
@@ -79,7 +85,13 @@ impl<'a> MergeIterator<'a> {
         Ok(Self {
             current: heap.pop().map(|r| r.0),
             iterators: heap,
+            dedup: true,
         })
+    }
+
+    pub(crate) fn with_dedup(mut self, dedup: bool) -> Self {
+        self.dedup = dedup;
+        self
     }
 
     fn peek(&self) -> Option<&RowEntry> {
@@ -103,6 +115,10 @@ impl<'a> MergeIterator<'a> {
 #[async_trait]
 impl KeyValueIterator for MergeIterator<'_> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if !self.dedup {
+            return self.advance().await;
+        }
+
         let mut current_kv = match self.advance().await? {
             Some(kv) => kv,
             None => return Ok(None),
@@ -359,6 +375,33 @@ mod tests {
                 RowEntry::new_value(b"cc", b"cc2", 6),
                 RowEntry::new_value(b"dd", b"dd1", 3),
                 RowEntry::new_value(b"ee", b"ee2", 7),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_dedup_disabled() {
+        let iter1 = TestIterator::new()
+            .with_entry(b"key1", b"value1", 1)
+            .with_entry(b"key2", b"value2", 2);
+        let iter2 = TestIterator::new()
+            .with_entry(b"key1", b"value1_updated", 3)
+            .with_entry(b"key3", b"value3", 4);
+
+        let mut merge_iter = MergeIterator::new([iter1, iter2])
+            .await
+            .unwrap()
+            .with_dedup(false);
+
+        // With dedup disabled, should return all entries in order
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"key1", b"value1", 1), // first occurrence
+                RowEntry::new_value(b"key1", b"value1_updated", 3), // second occurrence
+                RowEntry::new_value(b"key2", b"value2", 2),
+                RowEntry::new_value(b"key3", b"value3", 4),
             ],
         )
         .await;
