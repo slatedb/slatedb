@@ -238,9 +238,9 @@ mod tests {
     use super::*;
 
     use std::collections::HashSet;
-    use std::{fs::File, sync::Arc, time::SystemTime};
+    use std::{fs::File, sync::Arc};
 
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
     use tokio::runtime::Handle;
     use uuid::Uuid;
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
     }
 
-    fn new_checkpoint(manifest_id: u64, expire_time: Option<SystemTime>) -> Checkpoint {
+    fn new_checkpoint(manifest_id: u64, expire_time: Option<DateTime<Utc>>) -> Checkpoint {
         Checkpoint {
             id: uuid::Uuid::new_v4(),
             manifest_id,
@@ -343,7 +343,7 @@ mod tests {
 
     async fn checkpoint_current_manifest(
         stored_manifest: &mut StoredManifest,
-        expire_time: Option<SystemTime>,
+        expire_time: Option<DateTime<Utc>>,
     ) -> Result<Uuid, SlateDBError> {
         let mut dirty = stored_manifest.prepare_dirty();
         let checkpoint = new_checkpoint(stored_manifest.id(), expire_time);
@@ -384,7 +384,7 @@ mod tests {
         // Manifest 2 (expired_checkpoint_id -> 1)
         let one_day_ago = DefaultSystemClock::default()
             .now()
-            .checked_sub(std::time::Duration::from_secs(86400))
+            .checked_sub_days(Days::new(1))
             .unwrap();
         let _expired_checkpoint_id =
             checkpoint_current_manifest(&mut stored_manifest, Some(one_day_ago))
@@ -393,7 +393,7 @@ mod tests {
         // Manifest 3 (expired_checkpoint_id -> 1, unexpired_checkpoint_id -> 2)
         let one_day_ahead = DefaultSystemClock::default()
             .now()
-            .checked_add(std::time::Duration::from_secs(86400))
+            .checked_add_days(Days::new(1))
             .unwrap();
         let unexpired_checkpoint_id =
             checkpoint_current_manifest(&mut stored_manifest, Some(one_day_ahead))
@@ -963,11 +963,9 @@ mod tests {
     ) -> DateTime<Utc> {
         let file = local_object_store.path_to_filesystem(path).unwrap();
         let file = File::open(file).unwrap();
-        let now_minus_24h = DefaultSystemClock::default()
-            .now()
-            .checked_sub(std::time::Duration::from_secs(seconds_ago))
-            .unwrap();
-        file.set_modified(now_minus_24h).unwrap();
+        let now_minus_24h = DefaultSystemClock::default().now()
+            - TimeDelta::seconds(seconds_ago.try_into().unwrap());
+        file.set_modified(now_minus_24h.into()).unwrap();
         DateTime::<Utc>::from(now_minus_24h)
     }
 

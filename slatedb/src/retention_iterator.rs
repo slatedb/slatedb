@@ -84,7 +84,8 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                     let create_ts = entry
                         .create_ts
                         .expect("a record with no create_ts should not happen");
-                    let current_system_ts = system_time_to_millis(system_clock.now());
+                    // TODO: This is wrong! We're mixing logical (create_ts) and physical (system_clock) timestamps.
+                    let current_system_ts = system_clock.now().timestamp_millis();
                     create_ts + (timeout.as_millis() as i64) > current_system_ts
                 })
                 .unwrap_or(false);

@@ -3,8 +3,8 @@ use crate::db::Db;
 use crate::error::SlateDBError;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::utils::SendSafely;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::time::SystemTime;
 use uuid::Uuid;
 
 #[non_exhaustive]
@@ -12,8 +12,8 @@ use uuid::Uuid;
 pub struct Checkpoint {
     pub id: Uuid,
     pub manifest_id: u64,
-    pub expire_time: Option<SystemTime>,
-    pub create_time: SystemTime,
+    pub expire_time: Option<DateTime<Utc>>,
+    pub create_time: DateTime<Utc>,
 }
 
 #[non_exhaustive]
@@ -75,6 +75,7 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::test_utils;
     use bytes::Bytes;
+    use chrono::TimeDelta;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -146,9 +147,9 @@ mod tests {
         let expected = checkpoint_time + Duration::from_secs(3600);
         // check that expire time is close to the expected value (account for delay/time adjustment)
         if expire_time >= expected {
-            assert!(expire_time.duration_since(expected).unwrap() < Duration::from_secs(5))
+            assert!(expire_time.signed_duration_since(expected) < TimeDelta::seconds(5))
         } else {
-            assert!(expected.duration_since(expire_time).unwrap() < Duration::from_secs(5))
+            assert!(expected.signed_duration_since(expire_time) < TimeDelta::seconds(5))
         }
     }
 

@@ -148,6 +148,7 @@ impl SystemClock for MockSystemClock {
     fn now(&self) -> DateTime<Utc> {
         let current_ts = self.current_ts.load(Ordering::SeqCst);
         DateTime::from_timestamp_millis(current_ts)
+            .expect(format!("invalid timestamp: {}", current_ts).as_str())
     }
 
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
@@ -286,7 +287,7 @@ mod tests {
     async fn test_mock_system_clock_default() {
         let clock = MockSystemClock::default();
         assert_eq!(
-            system_time_to_millis(clock.now()),
+            clock.now().timestamp_millis(),
             0,
             "Default MockSystemClock should start at timestamp 0"
         );
@@ -301,7 +302,7 @@ mod tests {
         let positive_ts = 1625097600000i64; // 2021-07-01T00:00:00Z in milliseconds
         clock.clone().set(positive_ts);
         assert_eq!(
-            system_time_to_millis(clock.now()),
+            clock.now().timestamp_millis(),
             positive_ts,
             "MockSystemClock should return the timestamp set with set_now"
         );
@@ -310,7 +311,7 @@ mod tests {
         let negative_ts = -1625097600000; // Before Unix epoch
         clock.clone().set(negative_ts);
         assert_eq!(
-            system_time_to_millis(clock.now()),
+            clock.now().timestamp_millis(),
             negative_ts,
             "MockSystemClock should handle negative timestamps correctly"
         );
@@ -331,7 +332,7 @@ mod tests {
 
         // Check that time advanced correctly
         assert_eq!(
-            system_time_to_millis(clock.now()),
+            clock.now().timestamp_millis(),
             initial_ts + 500,
             "MockSystemClock should advance time by the specified duration"
         );

@@ -3,6 +3,7 @@ use std::ops::{Bound, RangeBounds};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
+use chrono::{DateTime, Utc};
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
@@ -143,17 +144,17 @@ impl ManifestCodec for FlatBufferManifestCodec {
 }
 
 impl FlatBufferManifestCodec {
-    fn unix_ts_to_time(unix_ts: u32) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(unix_ts as u64)
-    }
+    // fn unix_ts_to_time(unix_ts: u32) -> SystemTime {
+    //     UNIX_EPOCH + Duration::from_secs(unix_ts as u64)
+    // }
 
-    fn maybe_unix_ts_to_time(unix_ts: u32) -> Option<SystemTime> {
-        if unix_ts == 0 {
-            None
-        } else {
-            Some(Self::unix_ts_to_time(unix_ts))
-        }
-    }
+    // fn maybe_unix_ts_to_time(unix_ts: u32) -> Option<SystemTime> {
+    //     if unix_ts == 0 {
+    //         None
+    //     } else {
+    //         Some(Self::unix_ts_to_time(unix_ts))
+    //     }
+    // }
 
     fn decode_uuid(uuid: Uuid) -> uuid::Uuid {
         uuid::Uuid::from_u64_pair(uuid.high(), uuid.low())
@@ -221,8 +222,18 @@ impl FlatBufferManifestCodec {
             .map(|cp| checkpoint::Checkpoint {
                 id: Self::decode_uuid(cp.id()),
                 manifest_id: cp.manifest_id(),
-                expire_time: Self::maybe_unix_ts_to_time(cp.checkpoint_expire_time_s()),
-                create_time: Self::unix_ts_to_time(cp.checkpoint_create_time_s()),
+                expire_time: match cp.checkpoint_expire_time_s() {
+                    0 => None,
+                    _ => Some(
+                        DateTime::<Utc>::from_timestamp(cp.checkpoint_expire_time_s() as i64, 0)
+                            .expect("invalid timestamp"),
+                    ),
+                },
+                create_time: DateTime::<Utc>::from_timestamp(
+                    cp.checkpoint_create_time_s() as i64,
+                    0,
+                )
+                .expect("invalid timestamp"),
             })
             .collect();
         let core = CoreDbState {
@@ -381,20 +392,21 @@ impl<'b> DbFlatBufferBuilder<'b> {
         Uuid::create(&mut self.builder, &UuidArgs { high, low })
     }
 
-    fn time_to_unix_ts(time: &SystemTime) -> u32 {
-        time.duration_since(UNIX_EPOCH)
-            .expect("manifest expire time cannot be earlier than epoch")
-            .as_secs() as u32 // TODO: check bounds
-    }
+    // fn time_to_unix_ts(time: &SystemTime) -> u32 {
+    //     time.duration_since(UNIX_EPOCH)
+    //         .expect("manifest expire time cannot be earlier than epoch")
+    //         .as_secs() as u32 // TODO: check bounds
+    // }
 
-    fn maybe_time_to_unix_ts(time: Option<&SystemTime>) -> u32 {
-        time.map(Self::time_to_unix_ts).unwrap_or(0)
-    }
+    // fn maybe_time_to_unix_ts(time: Option<&SystemTime>) -> u32 {
+    //     time.map(Self::time_to_unix_ts).unwrap_or(0)
+    // }
 
     fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
         let id = self.add_uuid(checkpoint.id);
-        let checkpoint_expire_time_s = Self::maybe_time_to_unix_ts(checkpoint.expire_time.as_ref());
-        let checkpoint_create_time_s = Self::time_to_unix_ts(&checkpoint.create_time);
+        let checkpoint_expire_time_s =
+            checkpoint.expire_time.map(|t| t.timestamp()).unwrap_or(0) as u32;
+        let checkpoint_create_time_s = checkpoint.create_time.timestamp() as u32;
         Checkpoint::create(
             &mut self.builder,
             &CheckpointArgs {
@@ -567,12 +579,12 @@ mod tests {
     use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
     use crate::{checkpoint, SlateDBError};
     use std::collections::VecDeque;
-    use std::time::{Duration, SystemTime};
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::sst::SsTableFormat;
     use crate::test_utils::build_test_sst;
     use bytes::{BufMut, Bytes, BytesMut};
+    use chrono::{DateTime, Utc};
 
     use super::{manifest_generated, MANIFEST_FORMAT_VERSION};
 
@@ -585,13 +597,15 @@ mod tests {
                 id: uuid::Uuid::new_v4(),
                 manifest_id: 1,
                 expire_time: None,
-                create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+                create_time: DateTime::<Utc>::from_timestamp(100, 0).expect("invalid timestamp"),
             },
             checkpoint::Checkpoint {
                 id: uuid::Uuid::new_v4(),
                 manifest_id: 2,
-                expire_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)),
-                create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
+                expire_time: Some(
+                    DateTime::<Utc>::from_timestamp(1000, 0).expect("invalid timestamp"),
+                ),
+                create_time: DateTime::<Utc>::from_timestamp(200, 0).expect("invalid timestamp"),
             },
         ];
         let manifest = Manifest::initial(core);
