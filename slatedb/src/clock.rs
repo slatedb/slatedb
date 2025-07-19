@@ -1,7 +1,5 @@
 #![allow(clippy::disallowed_methods)]
 
-#[cfg(feature = "test-util")]
-use std::time::UNIX_EPOCH;
 use std::{
     cmp,
     fmt::Debug,
@@ -11,20 +9,18 @@ use std::{
         atomic::{AtomicI64, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
-use crate::{
-    utils::{self, system_time_from_millis, system_time_to_millis},
-    SlateDBError,
-};
+use crate::SlateDBError;
+use chrono::{DateTime, Utc};
 use tracing::info;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.
 pub trait SystemClock: Debug + Send + Sync {
     /// Returns the current time
-    fn now(&self) -> SystemTime;
+    fn now(&self) -> DateTime<Utc>;
     /// Advances the clock by the specified duration
     #[cfg(feature = "test-util")]
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -71,14 +67,14 @@ impl<'a> SystemClockTicker<'a> {
 /// DefaultSystemClock's time as well.
 #[derive(Debug)]
 pub struct DefaultSystemClock {
-    initial_ts: i64,
+    initial_ts: DateTime<Utc>,
     initial_instant: tokio::time::Instant,
 }
 
 impl DefaultSystemClock {
     pub fn new() -> Self {
         Self {
-            initial_ts: utils::system_time_to_millis(SystemTime::now()),
+            initial_ts: Utc::now(),
             initial_instant: tokio::time::Instant::now(),
         }
     }
@@ -91,9 +87,9 @@ impl Default for DefaultSystemClock {
 }
 
 impl SystemClock for DefaultSystemClock {
-    fn now(&self) -> SystemTime {
+    fn now(&self) -> DateTime<Utc> {
         let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
-        system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
+        self.initial_ts + elapsed
     }
 
     #[cfg(feature = "test-util")]
@@ -149,13 +145,9 @@ impl MockSystemClock {
 
 #[cfg(feature = "test-util")]
 impl SystemClock for MockSystemClock {
-    fn now(&self) -> SystemTime {
-        if self.current_ts.load(Ordering::SeqCst) < 0 {
-            UNIX_EPOCH
-                - Duration::from_millis(self.current_ts.load(Ordering::SeqCst).unsigned_abs())
-        } else {
-            UNIX_EPOCH + Duration::from_millis(self.current_ts.load(Ordering::SeqCst) as u64)
-        }
+    fn now(&self) -> DateTime<Utc> {
+        let current_ts = self.current_ts.load(Ordering::SeqCst);
+        DateTime::from_timestamp_millis(current_ts)
     }
 
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
@@ -216,7 +208,7 @@ impl DefaultLogicalClock {
 
 impl LogicalClock for DefaultLogicalClock {
     fn now(&self) -> i64 {
-        let current_ts = system_time_to_millis(self.inner.now());
+        let current_ts = self.inner.now().timestamp_millis();
         self.last_ts.fetch_max(current_ts, Ordering::SeqCst);
         self.last_ts.load(Ordering::SeqCst)
     }

@@ -175,9 +175,8 @@ impl CompactionExecuteBench {
         let encoded = sst_writer.close().await?;
         let elapsed_ms = system_clock
             .now()
-            .duration_since(start)
-            .expect("clock moved backwards")
-            .as_millis();
+            .signed_duration_since(start)
+            .num_milliseconds();
         info!("wrote sst with id: {:?} {:?}ms", &encoded.id, elapsed_ms);
         Ok(())
     }
@@ -361,9 +360,8 @@ impl CompactionExecuteBench {
                         let elapsed_ms = self
                             .system_clock
                             .now()
-                            .duration_since(start)
-                            .expect("clock moved backwards")
-                            .as_millis();
+                            .signed_duration_since(start)
+                            .num_milliseconds();
                         info!(elapsed_ms, "compaction finished");
                     }
                     Err(err) => return Err(err),

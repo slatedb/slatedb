@@ -12,9 +12,9 @@
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use chrono::{DateTime, TimeDelta, Utc};
 use parking_lot::Mutex;
 use tracing::{debug, error};
 
@@ -243,7 +243,7 @@ pub struct DbCacheWrapper {
     cache: Arc<dyn DbCache>,
     // Records the last time that the wrapper logged an error from the wrapped cache at error
     // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
-    last_err_log_time: Mutex<Option<SystemTime>>,
+    last_err_log_time: Mutex<Option<DateTime<Utc>>>,
 }
 
 impl DbCacheWrapper {
@@ -263,7 +263,7 @@ impl DbCacheWrapper {
 
 // The minimum interval between which the wrapper logs cache errors at error level. This is used to
 // ensure we don't spam the logs on non-transient errors from the cache.
-const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(1);
+const ERROR_LOG_INTERVAL: TimeDelta = TimeDelta::seconds(1); // 1 second
 
 impl DbCacheWrapper {
     fn record_get_err(&self, block_type: &str, err: &SlateDBError) {
@@ -274,14 +274,7 @@ impl DbCacheWrapper {
                     *guard = Some(self.system_clock.now());
                     true
                 }
-                Some(t)
-                    if self
-                        .system_clock
-                        .now()
-                        .duration_since(t)
-                        .expect("clock moved backwards")
-                        > ERROR_LOG_INTERVAL =>
-                {
+                Some(t) if self.system_clock.now() - t > ERROR_LOG_INTERVAL => {
                     *guard = Some(self.system_clock.now());
                     true
                 }
