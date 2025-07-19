@@ -193,7 +193,7 @@ impl GarbageCollector {
     async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &mut T) {
         if let Err(e) = self.remove_expired_checkpoints().await {
             error!("Error removing expired checkpoints: {}", e);
-        } else if let Err(e) = task.collect(self.system_clock.now().into()).await {
+        } else if let Err(e) = task.collect(self.system_clock.now()).await {
             error!("Error collecting compacted garbage: {}", e);
         }
     }
@@ -210,14 +210,14 @@ impl GarbageCollector {
         &self,
         manifest: &StoredManifest,
     ) -> Result<Option<DirtyManifest>, SlateDBError> {
-        let utc_now: DateTime<Utc> = self.system_clock.now().into();
+        let utc_now: DateTime<Utc> = self.system_clock.now();
         let mut dirty = manifest.prepare_dirty();
         let retained_checkpoints: Vec<Checkpoint> = dirty
             .core
             .checkpoints
             .iter()
             .filter(|checkpoint| match checkpoint.expire_time {
-                Some(expire_time) => DateTime::<Utc>::from(expire_time) > utc_now,
+                Some(expire_time) => expire_time > utc_now,
                 None => true,
             })
             .cloned()
@@ -966,7 +966,7 @@ mod tests {
         let now_minus_24h = DefaultSystemClock::default().now()
             - TimeDelta::seconds(seconds_ago.try_into().unwrap());
         file.set_modified(now_minus_24h.into()).unwrap();
-        DateTime::<Utc>::from(now_minus_24h)
+        now_minus_24h
     }
 
     async fn assert_no_dangling_references(

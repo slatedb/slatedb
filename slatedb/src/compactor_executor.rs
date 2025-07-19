@@ -2,7 +2,6 @@ use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::TimeDelta;
 use futures::future::join_all;

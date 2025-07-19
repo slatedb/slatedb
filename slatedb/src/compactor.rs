@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::UNIX_EPOCH;
 
 use crossbeam_skiplist::SkipMap;
 use tokio::runtime::Handle;

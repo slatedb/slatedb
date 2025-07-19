@@ -9,7 +9,6 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
-use crate::utils::system_time_to_millis;
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
