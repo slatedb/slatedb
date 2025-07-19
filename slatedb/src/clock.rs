@@ -145,10 +145,11 @@ impl MockSystemClock {
 
 #[cfg(feature = "test-util")]
 impl SystemClock for MockSystemClock {
+    #[allow(clippy::panic)]
     fn now(&self) -> DateTime<Utc> {
         let current_ts = self.current_ts.load(Ordering::SeqCst);
         DateTime::from_timestamp_millis(current_ts)
-            .expect(format!("invalid timestamp: {}", current_ts).as_str())
+            .unwrap_or_else(|| panic!("invalid timestamp: {}", current_ts))
     }
 
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
