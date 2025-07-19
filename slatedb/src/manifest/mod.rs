@@ -79,7 +79,6 @@ impl Manifest {
         }
     }
 
-    #[allow(unused)]
     pub(crate) fn projected(source_manifest: &Manifest, range: BytesRange) -> Manifest {
         let mut projected = source_manifest.clone();
         let mut sorter_runs_filtered = vec![];
@@ -119,7 +118,6 @@ impl Manifest {
         filtered_handles
     }
 
-    #[allow(unused)]
     pub(crate) fn union(manifests: Vec<Manifest>) -> Manifest {
         if manifests.len() == 1 {
             manifests[0].clone()

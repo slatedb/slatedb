@@ -1,9 +1,11 @@
+use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CheckpointOptions;
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::manifest::Manifest;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
@@ -13,6 +15,114 @@ use object_store::ObjectStore;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+
+#[allow(dead_code)]
+#[derive(Clone)]
+pub(crate) struct SourceDatabase<P: Into<Path>> {
+    pub(crate) path: P,
+    pub(crate) checkpoint: Uuid,
+    pub(crate) visible_range: BytesRange,
+}
+
+impl<P: Into<Path>> SourceDatabase<P> {
+    fn into_path(self) -> SourceDatabase<Path> {
+        SourceDatabase {
+            path: self.path.into(),
+            checkpoint: self.checkpoint,
+            visible_range: self.visible_range,
+        }
+    }
+}
+
+fn validate_sources_are_non_overlapping(
+    sources: &[SourceDatabase<Path>],
+) -> Result<(), SlateDBError> {
+    let mut sorted = vec![];
+    for (idx, item) in sources.iter().enumerate() {
+        sorted.push((idx, item.visible_range.clone()));
+    }
+    sorted.sort_by_key(|entry| entry.1.clone());
+    for idx in 1..sorted.len() {
+        let (previous_idx, previous_range) = &sorted[idx - 1];
+        let (current_idx, current_range) = &sorted[idx];
+        if previous_range.intersect(current_range).is_some() {
+            let previous_path = &sources[*previous_idx].path;
+            let current_path = &sources[*current_idx].path;
+            return Err(SlateDBError::InvalidArgument {
+                msg: format!(
+                    "Ranges [{:?}] and [{:?}] for databases at [{}] and [{}] are overlapping",
+                    previous_range, current_range, previous_path, current_path
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(crate) async fn create_multi_clone<P: Into<Path>>(
+    clone_path: P,
+    sources: Vec<SourceDatabase<P>>,
+    object_store: Arc<dyn ObjectStore>,
+) -> Result<(), SlateDBError> {
+    let sources: Vec<SourceDatabase<Path>> = sources.into_iter().map(|s| s.into_path()).collect();
+    validate_sources_are_non_overlapping(&sources)?;
+
+    let clone_path = clone_path.into();
+    let mut projected_manifests = vec![];
+
+    for source in sources {
+        if clone_path == source.path {
+            return Err(SlateDBError::InvalidArgument {
+                msg: format!(
+                    "Source path '{}' must be different from the clone's path '{}'",
+                    source.path, clone_path
+                ),
+            });
+        }
+
+        let source_manifest_store =
+            Arc::new(ManifestStore::new(&source.path, object_store.clone()));
+        let (source_latest_manifest_id, source_latest_manifest) =
+            source_manifest_store.read_latest_manifest().await?;
+        let Some(source_checkpoint) = source_latest_manifest
+            .core
+            .find_checkpoint(source.checkpoint)
+        else {
+            return Err(CheckpointMissing(source.checkpoint));
+        };
+        let source_manifest_at_checkpoint =
+            if source_checkpoint.manifest_id == source_latest_manifest_id {
+                &source_latest_manifest
+            } else {
+                &source_manifest_store
+                    .read_manifest(source_checkpoint.manifest_id)
+                    .await?
+            };
+
+        if source_manifest_at_checkpoint.core.next_wal_sst_id - 1
+            > source_manifest_at_checkpoint.core.replay_after_wal_id
+        {
+            return Err(SlateDBError::InvalidArgument {
+                msg: format!("Source database at '{}' must have no WAL", source.path),
+            });
+        }
+
+        let manifest = Manifest::cloned(
+            source_manifest_at_checkpoint,
+            source.path.to_string(),
+            source_checkpoint.id,
+        );
+
+        projected_manifests.push(Manifest::projected(&manifest, source.visible_range));
+    }
+
+    let merged_manifest = Manifest::union(projected_manifests);
+    let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
+    StoredManifest::init(clone_manifest_store, merged_manifest).await?;
+
+    Ok(())
+}
 
 pub(crate) async fn create_clone<P: Into<Path>>(
     clone_path: P,
@@ -312,7 +422,8 @@ async fn copy_wal_ssts(
 
 #[cfg(test)]
 mod tests {
-    use crate::clone::create_clone;
+    use crate::bytes_range::BytesRange;
+    use crate::clone::{create_clone, create_multi_clone};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::CoreDbState;
@@ -326,8 +437,13 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use std::ops::RangeFull;
+    use rand::seq::SliceRandom;
+    use rstest::rstest;
+    use std::ops::{RangeBounds, RangeFull};
     use std::sync::Arc;
+    use uuid::Uuid;
+
+    use super::{validate_sources_are_non_overlapping, SourceDatabase};
 
     #[tokio::test]
     async fn should_clone_latest_state_if_no_checkpoint_provided() {
@@ -758,5 +874,104 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(SlateDBError::Unsupported(..))));
+    }
+
+    struct RangeValidationTestCase {
+        ranges: Vec<BytesRange>,
+        is_ok: bool,
+    }
+
+    #[rstest]
+    #[case(RangeValidationTestCase {
+        ranges: vec![
+            BytesRange::from_ref("a".."b"),
+            BytesRange::from_ref("b".."c"),
+            BytesRange::from_ref("c".."d"),
+        ],
+        is_ok: true,
+    })]
+    #[case(RangeValidationTestCase {
+        ranges: vec![
+            BytesRange::from_ref("a"..),
+            BytesRange::from_ref("b".."c"),
+            BytesRange::from_ref("c".."d"),
+        ],
+        is_ok: false,
+    })]
+    #[case(RangeValidationTestCase {
+        ranges: vec![
+            BytesRange::from_ref(.."z"),
+            BytesRange::from_ref("a".."b"),
+            BytesRange::from_ref("c".."d"),
+        ],
+        is_ok: false,
+    })]
+    #[case(RangeValidationTestCase {
+        ranges: vec![
+            BytesRange::from_ref(.."d"),
+            BytesRange::from_ref("d".."z"),
+        ],
+        is_ok: true,
+    })]
+    fn test_validate_sources_are_non_overlapping(#[case] test_case: RangeValidationTestCase) {
+        let mut shuffled = test_case.ranges.clone();
+        shuffled.shuffle(&mut rng::new_test_rng(None));
+        let mut sources = vec![];
+        for idx in 0..test_case.ranges.len() {
+            sources.push(SourceDatabase {
+                path: Path::from(format!("/tmp/{}", idx)),
+                visible_range: test_case.ranges[idx].clone(),
+                checkpoint: Uuid::new_v4(),
+            });
+        }
+        assert_eq!(
+            validate_sources_are_non_overlapping(&sources).is_ok(),
+            test_case.is_ok
+        );
+    }
+
+    #[tokio::test]
+    async fn test_projection() -> Result<(), SlateDBError> {
+        let object_store = Arc::new(InMemory::new());
+        let parent_path = "/tmp/test_parent";
+        let clone_path = "/tmp/test_clone";
+
+        let parent_db = Db::builder(parent_path, object_store.clone())
+            .build()
+            .await?;
+
+        for i in 0..10 {
+            parent_db.put(&[i as u8; 4], &[i as u8; 28]).await?;
+        }
+
+        let parent_checkpoint = parent_db
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await?;
+
+        let visible_range = BytesRange::from_ref("c".."f");
+        create_multi_clone(
+            clone_path,
+            vec![SourceDatabase {
+                path: parent_path,
+                visible_range: visible_range.clone(),
+                checkpoint: parent_checkpoint.id,
+            }],
+            object_store.clone(),
+        )
+        .await?;
+
+        let clone_db = Db::open(clone_path, object_store.clone()).await?;
+        let mut iter = clone_db.scan("a".."z").await?;
+
+        // Verify all keys are within visible range
+        while let Some(entry) = iter.next().await? {
+            assert!(
+                visible_range.contains(&entry.key),
+                "Key {:?} outside visible range [c..f]",
+                entry.key
+            );
+        }
+
+        Ok(())
     }
 }

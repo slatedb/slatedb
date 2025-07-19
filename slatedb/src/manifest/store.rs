@@ -248,7 +248,10 @@ pub(crate) struct StoredManifest {
 }
 
 impl StoredManifest {
-    async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
+    pub(crate) async fn init(
+        store: Arc<ManifestStore>,
+        manifest: Manifest,
+    ) -> Result<Self, SlateDBError> {
         store.write_manifest(1, &manifest).await?;
         Ok(Self {
             id: 1,
