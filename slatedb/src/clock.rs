@@ -148,7 +148,7 @@ impl SystemClock for MockSystemClock {
     fn now(&self) -> DateTime<Utc> {
         let current_ts = self.current_ts.load(Ordering::SeqCst);
         DateTime::from_timestamp_millis(current_ts)
-            .unwrap_or_else(|| panic!("invalid timestamp: {}", current_ts))
+            .expect(format!("invalid timestamp: {}", current_ts).as_str())
     }
 
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
