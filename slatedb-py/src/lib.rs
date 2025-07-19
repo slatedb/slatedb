@@ -12,7 +12,7 @@ use pyo3::types::{PyBytes, PyDict, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
 use std::backtrace::Backtrace;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
