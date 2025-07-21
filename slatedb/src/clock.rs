@@ -223,14 +223,17 @@ impl MockSystemClock {
 
     /// Sets the current timestamp of the mock system clock
     pub fn set(&self, duration: Duration) {
-        self.current_ts_ms.store(duration.as_millis() as u64, Ordering::SeqCst);
+        self.current_ts_ms
+            .store(duration.as_millis() as u64, Ordering::SeqCst);
     }
 }
 
 #[cfg(feature = "test-util")]
 impl SystemClock for MockSystemClock {
     fn now(&self) -> SystemTimestamp {
-        SystemTimestamp(Duration::from_millis(self.current_ts_ms.load(Ordering::SeqCst)))
+        SystemTimestamp(Duration::from_millis(
+            self.current_ts_ms.load(Ordering::SeqCst),
+        ))
     }
 
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {

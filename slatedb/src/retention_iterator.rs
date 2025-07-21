@@ -898,7 +898,9 @@ mod tests {
             versions.insert(Reverse(entry.seq), entry.clone());
         }
 
-        let system_clock = Arc::new(MockSystemClock::with_duration(Duration::from_millis(test_case.system_clock_ts as u64)));
+        let system_clock = Arc::new(MockSystemClock::with_duration(Duration::from_millis(
+            test_case.system_clock_ts as u64,
+        )));
         let filtered_versions = RetentionIterator::<TestIterator>::apply_retention_filter(
             versions,
             test_case.compaction_start_ts,
