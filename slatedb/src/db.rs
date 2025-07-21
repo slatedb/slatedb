@@ -38,6 +38,7 @@ use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
 use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
 use crate::db_iter::DbIterator;
+use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
@@ -583,6 +584,46 @@ impl Db {
         }
 
         Ok(())
+    }
+
+    /// Create a snapshot of the database.
+    ///
+    /// ## Returns
+    /// - `Result<DbSnapshot, SlateDBError>`: the snapshot of the database, it represents
+    ///   a consistent view of the database at the time of the snapshot.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), SlateDBError> {
+    ///     let object_store = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     
+    ///     // Write some data and create a snapshot
+    ///     db.put(b"key1", b"value1").await?;
+    ///     let snapshot = db.snapshot().await?;
+    ///     
+    ///     // Snapshot provides read-only access to database state
+    ///     let value = snapshot.get(b"key1").await?;
+    ///     assert_eq!(value, Some(b"value1".as_slice()));
+    ///     
+    ///     // Write more data to original database
+    ///     db.put(b"key2", b"value2").await?;
+    ///     
+    ///     // Snapshot still sees old state, original db sees new data
+    ///     assert_eq!(snapshot.get(b"key2").await?, None);
+    ///     assert_eq!(db.get(b"key2").await?, Some(b"value2".as_slice()));
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn snapshot(&self) -> Result<DbSnapshot, SlateDBError> {
+        todo!()
     }
 
     /// Get a value from the database with default read options.

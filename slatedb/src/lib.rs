@@ -69,6 +69,7 @@ mod db;
 mod db_common;
 mod db_iter;
 mod db_reader;
+mod db_snapshot;
 mod db_state;
 mod error;
 mod filter;
