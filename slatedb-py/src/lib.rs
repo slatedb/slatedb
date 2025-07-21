@@ -382,7 +382,7 @@ impl PySlateDBAdmin {
                 .map(|s| Uuid::parse_str(&s).map_err(create_value_error))
                 .transpose()?;
             admin
-                .create_checkpoint(&CheckpointOptions { lifetime, source })
+                .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
                 .await
                 .map_err(create_value_error)
         })?;
