@@ -7,7 +7,7 @@ use std::{
     ops::{Add, Sub},
     pin::Pin,
     sync::{
-        atomic::{AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicI64, Ordering},
         Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -18,6 +18,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use tracing::info;
+
+#[cfg(feature = "test-util")]
+use std::sync::atomic::AtomicU64;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.
