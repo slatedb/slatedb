@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::Interval;
 use tracing::error;
 
 use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
@@ -113,10 +112,6 @@ impl GcTask for WalGcTask {
         self.wal_options
             .and_then(|opts| opts.interval)
             .unwrap_or(DEFAULT_INTERVAL)
-    }
-
-    fn ticker(&self) -> Interval {
-        tokio::time::interval(self.interval())
     }
 
     fn resource(&self) -> &str {
