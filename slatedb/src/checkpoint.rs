@@ -96,7 +96,7 @@ mod tests {
             id: checkpoint_id,
             manifest_id: checkpoint_manifest_id,
         } = admin
-            .create_checkpoint(&CheckpointOptions::default())
+            .create_detached_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -131,7 +131,7 @@ mod tests {
             id: checkpoint_id,
             manifest_id: _,
         } = admin
-            .create_checkpoint(&CheckpointOptions {
+            .create_detached_checkpoint(&CheckpointOptions {
                 lifetime: Some(Duration::from_secs(3600)),
                 ..CheckpointOptions::default()
             })
@@ -167,7 +167,7 @@ mod tests {
             id: source_checkpoint_id,
             manifest_id: source_checkpoint_manifest_id,
         } = admin
-            .create_checkpoint(&CheckpointOptions::default())
+            .create_detached_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -175,7 +175,7 @@ mod tests {
             id: _,
             manifest_id: checkpoint_manifest_id,
         } = admin
-            .create_checkpoint(&CheckpointOptions {
+            .create_detached_checkpoint(&CheckpointOptions {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             })
@@ -199,7 +199,7 @@ mod tests {
 
         let source_checkpoint_id = uuid::Uuid::new_v4();
         let result = admin
-            .create_checkpoint(&CheckpointOptions {
+            .create_detached_checkpoint(&CheckpointOptions {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             })
@@ -216,7 +216,9 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let admin = AdminBuilder::new(path, object_store.clone()).build();
-        let result = admin.create_checkpoint(&CheckpointOptions::default()).await;
+        let result = admin
+            .create_detached_checkpoint(&CheckpointOptions::default())
+            .await;
 
         assert!(result.is_err());
         assert!(matches!(
@@ -236,7 +238,7 @@ mod tests {
             .await
             .unwrap();
         let CheckpointCreateResult { id, manifest_id: _ } = admin
-            .create_checkpoint(&CheckpointOptions {
+            .create_detached_checkpoint(&CheckpointOptions {
                 lifetime: Some(Duration::from_secs(100)),
                 ..CheckpointOptions::default()
             })
@@ -298,7 +300,7 @@ mod tests {
             .await
             .unwrap();
         let CheckpointCreateResult { id, manifest_id: _ } = admin
-            .create_checkpoint(&CheckpointOptions::default())
+            .create_detached_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
