@@ -1,30 +1,29 @@
 #![allow(clippy::disallowed_methods)]
 
-#[cfg(feature = "test-util")]
-use std::time::UNIX_EPOCH;
 use std::{
     cmp,
     fmt::Debug,
     future::Future,
+    ops::{Add, Sub},
     pin::Pin,
     sync::{
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{
-    utils::{self, system_time_from_millis, system_time_to_millis},
-    SlateDBError,
-};
+use crate::SlateDBError;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 use tracing::info;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.
 pub trait SystemClock: Debug + Send + Sync {
     /// Returns the current time
-    fn now(&self) -> SystemTime;
+    fn now(&self) -> SystemTimestamp;
     /// Advances the clock by the specified duration
     #[cfg(feature = "test-util")]
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -32,6 +31,87 @@ pub trait SystemClock: Debug + Send + Sync {
     fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
     /// Returns a ticker that emits a signal every `duration` interval
     fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a>;
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SystemTimestamp(Duration);
+
+impl SystemTimestamp {
+    pub fn as_millis(self) -> u64 {
+        self.0.as_millis() as u64
+    }
+
+    pub fn as_secs(self) -> u64 {
+        self.0.as_secs() as u64
+    }
+
+    pub fn checked_add(self, duration: Duration) -> Option<SystemTimestamp> {
+        self.0.checked_add(duration).map(SystemTimestamp)
+    }
+
+    pub fn checked_sub(self, duration: Duration) -> Option<SystemTimestamp> {
+        self.0.checked_sub(duration).map(SystemTimestamp)
+    }
+
+    pub fn duration_since(self, other: SystemTimestamp) -> Result<Duration, SlateDBError> {
+        if self < other {
+            return Err(SlateDBError::InvalidClockTick {
+                last_tick: other.as_millis() as i64,
+                next_tick: self.as_millis() as i64,
+            });
+        }
+        Ok(self.0 - other.0)
+    }
+}
+
+impl std::fmt::Display for SystemTimestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.0.as_secs(), self.0.subsec_millis())
+    }
+}
+
+impl Add<Duration> for SystemTimestamp {
+    type Output = Self;
+    fn add(self, rhs: Duration) -> Self::Output {
+        Self(self.0 + rhs)
+    }
+}
+
+impl Sub<Duration> for SystemTimestamp {
+    type Output = Self;
+    fn sub(self, rhs: Duration) -> Self::Output {
+        Self(self.0 - rhs)
+    }
+}
+
+impl From<SystemTimestamp> for SystemTime {
+    fn from(ts: SystemTimestamp) -> Self {
+        UNIX_EPOCH + ts.0
+    }
+}
+
+impl From<SystemTime> for SystemTimestamp {
+    fn from(ts: SystemTime) -> Self {
+        SystemTimestamp(ts.duration_since(UNIX_EPOCH).unwrap())
+    }
+}
+
+impl From<Duration> for SystemTimestamp {
+    fn from(d: Duration) -> Self {
+        SystemTimestamp(d)
+    }
+}
+
+impl From<SystemTimestamp> for DateTime<Utc> {
+    fn from(ts: SystemTimestamp) -> Self {
+        DateTime::<Utc>::from(SystemTime::from(ts))
+    }
+}
+
+impl From<DateTime<Utc>> for SystemTimestamp {
+    fn from(ts: DateTime<Utc>) -> Self {
+        SystemTimestamp(Duration::from_millis(ts.timestamp_millis() as u64))
+    }
 }
 
 pub struct SystemClockTicker<'a> {
@@ -71,15 +151,15 @@ impl<'a> SystemClockTicker<'a> {
 /// DefaultSystemClock's time as well.
 #[derive(Debug)]
 pub struct DefaultSystemClock {
-    initial_ts: i64,
-    initial_instant: tokio::time::Instant,
+    initial_ts: SystemTimestamp,
+    initial_instant: Instant,
 }
 
 impl DefaultSystemClock {
     pub fn new() -> Self {
         Self {
-            initial_ts: utils::system_time_to_millis(SystemTime::now()),
-            initial_instant: tokio::time::Instant::now(),
+            initial_ts: SystemTimestamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap()),
+            initial_instant: Instant::now(),
         }
     }
 }
@@ -91,9 +171,9 @@ impl Default for DefaultSystemClock {
 }
 
 impl SystemClock for DefaultSystemClock {
-    fn now(&self) -> SystemTime {
-        let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
-        system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
+    fn now(&self) -> SystemTimestamp {
+        let elapsed = Instant::now().duration_since(self.initial_instant);
+        self.initial_ts + elapsed
     }
 
     #[cfg(feature = "test-util")]
@@ -118,7 +198,7 @@ impl SystemClock for DefaultSystemClock {
 pub struct MockSystemClock {
     /// The current timestamp in milliseconds since the Unix epoch.
     /// Can be negative to represent a time before the epoch.
-    current_ts: AtomicI64,
+    current_ts_ms: AtomicU64,
 }
 
 #[cfg(feature = "test-util")]
@@ -131,44 +211,41 @@ impl Default for MockSystemClock {
 #[cfg(feature = "test-util")]
 impl MockSystemClock {
     pub fn new() -> Self {
-        Self::with_time(0)
+        Self::with_duration(Duration::from_millis(0))
     }
 
-    /// Creates a new mock system clock with the specified timestamp
-    pub fn with_time(ts_millis: i64) -> Self {
+    /// Creates a new mock system clock with the specified duration since the Unix epoch
+    pub fn with_duration(duration: Duration) -> Self {
         Self {
-            current_ts: AtomicI64::new(ts_millis),
+            current_ts_ms: AtomicU64::new(duration.as_millis() as u64),
         }
     }
 
     /// Sets the current timestamp of the mock system clock
-    pub fn set(&self, ts_millis: i64) {
-        self.current_ts.store(ts_millis, Ordering::SeqCst);
+    pub fn set(&self, duration: Duration) {
+        self.current_ts_ms.store(duration.as_millis() as u64, Ordering::SeqCst);
     }
 }
 
 #[cfg(feature = "test-util")]
 impl SystemClock for MockSystemClock {
-    fn now(&self) -> SystemTime {
-        if self.current_ts.load(Ordering::SeqCst) < 0 {
-            UNIX_EPOCH
-                - Duration::from_millis(self.current_ts.load(Ordering::SeqCst).unsigned_abs())
-        } else {
-            UNIX_EPOCH + Duration::from_millis(self.current_ts.load(Ordering::SeqCst) as u64)
-        }
+    fn now(&self) -> SystemTimestamp {
+        SystemTimestamp(Duration::from_millis(self.current_ts_ms.load(Ordering::SeqCst)))
     }
 
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        self.current_ts
-            .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
+        self.current_ts_ms
+            .fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
         Box::pin(async move {})
     }
 
+    /// Sleeps for the specified duration. The duration argument is a duration relative to the point
+    /// at which sleep() is called. It is not the absolute duration since the Unix epoch.
     fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        let end_time = self.current_ts.load(Ordering::SeqCst) + duration.as_millis() as i64;
+        let end_time = self.current_ts_ms.load(Ordering::SeqCst) + duration.as_millis() as u64;
         Box::pin(async move {
             #[allow(clippy::while_immutable_condition)]
-            while self.current_ts.load(Ordering::SeqCst) < end_time {
+            while self.current_ts_ms.load(Ordering::SeqCst) < end_time {
                 tokio::task::yield_now().await;
             }
         })
@@ -216,7 +293,7 @@ impl DefaultLogicalClock {
 
 impl LogicalClock for DefaultLogicalClock {
     fn now(&self) -> i64 {
-        let current_ts = system_time_to_millis(self.inner.now());
+        let current_ts = self.inner.now().as_millis() as i64;
         self.last_ts.fetch_max(current_ts, Ordering::SeqCst);
         self.last_ts.load(Ordering::SeqCst)
     }
@@ -294,8 +371,8 @@ mod tests {
     async fn test_mock_system_clock_default() {
         let clock = MockSystemClock::default();
         assert_eq!(
-            system_time_to_millis(clock.now()),
-            0,
+            clock.now(),
+            SystemTimestamp(Duration::from_millis(0)),
             "Default MockSystemClock should start at timestamp 0"
         );
     }
@@ -307,20 +384,11 @@ mod tests {
 
         // Test positive timestamp
         let positive_ts = 1625097600000i64; // 2021-07-01T00:00:00Z in milliseconds
-        clock.clone().set(positive_ts);
+        clock.clone().set(Duration::from_millis(positive_ts as u64));
         assert_eq!(
-            system_time_to_millis(clock.now()),
-            positive_ts,
+            clock.now(),
+            SystemTimestamp(Duration::from_millis(positive_ts as u64)),
             "MockSystemClock should return the timestamp set with set_now"
-        );
-
-        // Test negative timestamp (before Unix epoch)
-        let negative_ts = -1625097600000; // Before Unix epoch
-        clock.clone().set(negative_ts);
-        assert_eq!(
-            system_time_to_millis(clock.now()),
-            negative_ts,
-            "MockSystemClock should handle negative timestamps correctly"
         );
     }
 
@@ -328,7 +396,7 @@ mod tests {
     #[cfg(feature = "test-util")]
     async fn test_mock_system_clock_advance() {
         let clock = Arc::new(MockSystemClock::new());
-        let initial_ts = 1000;
+        let initial_ts = Duration::from_millis(1000);
 
         // Set initial time
         clock.clone().set(initial_ts);
@@ -339,8 +407,8 @@ mod tests {
 
         // Check that time advanced correctly
         assert_eq!(
-            system_time_to_millis(clock.now()),
-            initial_ts + 500,
+            clock.now(),
+            SystemTimestamp(initial_ts + duration),
             "MockSystemClock should advance time by the specified duration"
         );
     }
@@ -349,7 +417,7 @@ mod tests {
     #[cfg(feature = "test-util")]
     async fn test_mock_system_clock_sleep() {
         let clock = Arc::new(MockSystemClock::new());
-        let initial_ts = 2000;
+        let initial_ts = Duration::from_millis(2000);
 
         // Set initial time
         clock.clone().set(initial_ts);
@@ -369,7 +437,7 @@ mod tests {
         );
 
         // Advance clock by 500ms (not enough to complete sleep)
-        clock.set(initial_ts + 500);
+        clock.set(initial_ts + Duration::from_millis(500));
         assert!(
             timeout(Duration::from_millis(10), sleep_handle2)
                 .await
@@ -378,7 +446,7 @@ mod tests {
         );
 
         // Advance clock by enough to complete sleep
-        clock.set(initial_ts + 1000);
+        clock.set(initial_ts + Duration::from_millis(1000));
         assert!(
             timeout(Duration::from_millis(100), sleep_handle3)
                 .await
@@ -416,7 +484,7 @@ mod tests {
         // now + 100. Then advance the clock by 100ms and verify the tick
         // completes.
         let tick_handle = ticker.tick();
-        clock.clone().set(100);
+        clock.clone().set(Duration::from_millis(100));
         assert!(
             timeout(Duration::from_millis(10000), tick_handle)
                 .await

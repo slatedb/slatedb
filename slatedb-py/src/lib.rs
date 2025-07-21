@@ -1,4 +1,5 @@
 use ::slatedb::admin::{load_object_store_from_env, Admin};
+use ::slatedb::clock::SystemTimestamp;
 use ::slatedb::config::{CheckpointOptions, DbReaderOptions, Settings};
 use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
@@ -409,8 +410,8 @@ impl PySlateDBAdmin {
                 let dict = PyDict::new(py);
                 dict.set_item("id", c.id.to_string())?;
                 dict.set_item("manifest_id", c.manifest_id)?;
-                dict.set_item("expire_time", c.expire_time.map(to_millis))?;
-                dict.set_item("create_time", to_millis(c.create_time))?;
+                dict.set_item("expire_time", c.expire_time.map(SystemTimestamp::as_millis))?;
+                dict.set_item("create_time", c.create_time.as_millis())?;
                 Ok(dict)
             })
             .collect::<PyResult<Vec<Bound<PyDict>>>>()

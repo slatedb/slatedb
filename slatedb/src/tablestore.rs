@@ -3,7 +3,6 @@ use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
 use object_store::buffered::BufWriter;
@@ -13,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
 use ulid::Ulid;
 
+use crate::clock::SystemTimestamp;
 use crate::db_cache::{CachedEntry, DbCache};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -62,7 +62,7 @@ pub(crate) struct SstFileMetadata {
     pub(crate) id: SsTableId,
     #[allow(dead_code)]
     pub(crate) location: Path,
-    pub(crate) last_modified: chrono::DateTime<Utc>,
+    pub(crate) last_modified: SystemTimestamp,
     #[allow(dead_code)]
     pub(crate) size: u64,
 }
@@ -133,7 +133,7 @@ impl TableStore {
                         wal_list.push(SstFileMetadata {
                             id: SsTableId::Wal(id),
                             location: file.location,
-                            last_modified: file.last_modified,
+                            last_modified: file.last_modified.into(),
                             size: file.size,
                         });
                     }
@@ -282,7 +282,7 @@ impl TableStore {
                         sst_list.push(SstFileMetadata {
                             id: SsTableId::Compacted(id),
                             location: file.location,
-                            last_modified: file.last_modified,
+                            last_modified: file.last_modified.into(),
                             size: file.size,
                         });
                     }

@@ -12,14 +12,13 @@
 //! referenced by in-flight operations.
 
 use crate::checkpoint::Checkpoint;
-use crate::clock::SystemClock;
+use crate::clock::{SystemClock, SystemTimestamp};
 use crate::config::GarbageCollectorOptions;
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
 use manifest_gc::ManifestGcTask;
 use std::sync::atomic::Ordering;
@@ -40,7 +39,7 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
 trait GcTask {
     fn resource(&self) -> &str;
     fn interval(&self) -> Duration;
-    async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
+    async fn collect(&self, now: SystemTimestamp) -> Result<(), SlateDBError>;
 }
 
 /// SlateDB's garbage collector.
@@ -210,14 +209,14 @@ impl GarbageCollector {
         &self,
         manifest: &StoredManifest,
     ) -> Result<Option<DirtyManifest>, SlateDBError> {
-        let utc_now: DateTime<Utc> = self.system_clock.now().into();
+        let utc_now = self.system_clock.now();
         let mut dirty = manifest.prepare_dirty();
         let retained_checkpoints: Vec<Checkpoint> = dirty
             .core
             .checkpoints
             .iter()
             .filter(|checkpoint| match checkpoint.expire_time {
-                Some(expire_time) => DateTime::<Utc>::from(expire_time) > utc_now,
+                Some(expire_time) => expire_time > utc_now,
                 None => true,
             })
             .cloned()
@@ -238,7 +237,7 @@ mod tests {
     use super::*;
 
     use std::collections::HashSet;
-    use std::{fs::File, sync::Arc, time::SystemTime};
+    use std::{fs::File, sync::Arc};
 
     use chrono::{DateTime, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
@@ -246,7 +245,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
-    use crate::clock::DefaultSystemClock;
+    use crate::clock::{DefaultSystemClock, SystemTimestamp};
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
@@ -332,7 +331,7 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
     }
 
-    fn new_checkpoint(manifest_id: u64, expire_time: Option<SystemTime>) -> Checkpoint {
+    fn new_checkpoint(manifest_id: u64, expire_time: Option<SystemTimestamp>) -> Checkpoint {
         Checkpoint {
             id: uuid::Uuid::new_v4(),
             manifest_id,
@@ -343,7 +342,7 @@ mod tests {
 
     async fn checkpoint_current_manifest(
         stored_manifest: &mut StoredManifest,
-        expire_time: Option<SystemTime>,
+        expire_time: Option<SystemTimestamp>,
     ) -> Result<Uuid, SlateDBError> {
         let mut dirty = stored_manifest.prepare_dirty();
         let checkpoint = new_checkpoint(stored_manifest.id(), expire_time);
@@ -574,7 +573,7 @@ mod tests {
         assert_eq!(wal_ssts.len(), 2);
         assert_eq!(wal_ssts[0].id, id1);
         assert_eq!(wal_ssts[1].id, id2);
-        assert_eq!(wal_ssts[0].last_modified, now_minus_24h);
+        assert_eq!(wal_ssts[0].last_modified, now_minus_24h.into());
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
@@ -687,8 +686,8 @@ mod tests {
         assert_eq!(wal_ssts.len(), 2);
         assert_eq!(wal_ssts[0].id, id1);
         assert_eq!(wal_ssts[1].id, id2);
-        assert_eq!(wal_ssts[0].last_modified, now_minus_24h_1);
-        assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2);
+        assert_eq!(wal_ssts[0].last_modified, now_minus_24h_1.into());
+        assert_eq!(wal_ssts[1].last_modified, now_minus_24h_2.into());
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
         let current_manifest = manifest_store.read_latest_manifest().await.unwrap().1;
@@ -779,19 +778,19 @@ mod tests {
         assert_eq!(compacted_ssts[7].id, inactive_unexpired_sst_handle.id);
         assert_eq!(
             compacted_ssts[1].last_modified,
-            now_minus_24h_expired_l0_sst
+            now_minus_24h_expired_l0_sst.into()
         );
         assert_eq!(
             compacted_ssts[2].last_modified,
-            now_minus_24h_inactive_expired_l0_sst
+            now_minus_24h_inactive_expired_l0_sst.into()
         );
         assert_eq!(
             compacted_ssts[5].last_modified,
-            now_minus_24h_active_expired_sst
+            now_minus_24h_active_expired_sst.into()
         );
         assert_eq!(
             compacted_ssts[6].last_modified,
-            now_minus_24h_inactive_expired_sst_id
+            now_minus_24h_inactive_expired_sst_id.into()
         );
         let manifests = manifest_store.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 1);
@@ -967,7 +966,7 @@ mod tests {
             .now()
             .checked_sub(std::time::Duration::from_secs(seconds_ago))
             .unwrap();
-        file.set_modified(now_minus_24h).unwrap();
+        file.set_modified(now_minus_24h.into()).unwrap();
         DateTime::<Utc>::from(now_minus_24h)
     }
 

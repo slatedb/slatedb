@@ -754,7 +754,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{DefaultSystemClock, SystemClock};
+    use crate::clock::{DefaultSystemClock, SystemClock, SystemTimestamp};
     use crate::config::CheckpointOptions;
     use crate::db_state::CoreDbState;
     use crate::error;
@@ -1078,13 +1078,13 @@ mod tests {
         Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
     }
 
-    fn now_rounded_to_nearest_sec() -> SystemTime {
+    fn now_rounded_to_nearest_sec() -> SystemTimestamp {
         let now_secs = DefaultSystemClock::default()
             .now()
-            .duration_since(SystemTime::UNIX_EPOCH)
+            .duration_since(SystemTime::UNIX_EPOCH.into())
             .unwrap()
             .as_secs();
-        SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
+        SystemTimestamp::from(Duration::from_secs(now_secs))
     }
 
     fn new_checkpoint(manifest_id: u64) -> Checkpoint {

@@ -1,7 +1,7 @@
 use crate::{
-    config::GarbageCollectorDirectoryOptions, manifest::store::ManifestStore, SlateDBError,
+    clock::SystemTimestamp, config::GarbageCollectorDirectoryOptions,
+    manifest::store::ManifestStore, SlateDBError,
 };
-use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,18 +36,16 @@ impl ManifestGcTask {
         }
     }
 
-    fn manifest_min_age(&self) -> chrono::Duration {
-        let min_age = self
-            .manifest_options
-            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age).expect("invalid duration")
+    fn manifest_min_age(&self) -> Duration {
+        self.manifest_options
+            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age)
     }
 }
 
 impl GcTask for ManifestGcTask {
     /// Collect garbage from the manifest store. This will delete any manifests
     /// that are older than the minimum age specified in the options.
-    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    async fn collect(&self, now: SystemTimestamp) -> Result<(), SlateDBError> {
         let min_age = self.manifest_min_age();
         let mut manifest_metadata_list = self.manifest_store.list_manifests(..).await?;
 
@@ -72,7 +70,10 @@ impl GcTask for ManifestGcTask {
         for manifest_metadata in manifest_metadata_list {
             let is_active = active_manifest_ids.contains(&manifest_metadata.id);
             if !is_active
-                && utc_now.signed_duration_since(manifest_metadata.last_modified) > min_age
+                && now
+                    .duration_since(manifest_metadata.last_modified.into())
+                    .unwrap()
+                    > min_age
             {
                 if let Err(e) = self
                     .manifest_store

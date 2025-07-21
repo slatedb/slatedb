@@ -1,10 +1,10 @@
+use crate::clock::SystemTimestamp;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::utils::SendSafely;
 use serde::Serialize;
-use std::time::SystemTime;
 use uuid::Uuid;
 
 #[non_exhaustive]
@@ -12,8 +12,8 @@ use uuid::Uuid;
 pub struct Checkpoint {
     pub id: Uuid,
     pub manifest_id: u64,
-    pub expire_time: Option<SystemTime>,
-    pub create_time: SystemTime,
+    pub expire_time: Option<SystemTimestamp>,
+    pub create_time: SystemTimestamp,
 }
 
 #[non_exhaustive]

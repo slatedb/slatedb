@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use tracing::{debug, error};
 
-use crate::clock::SystemClock;
+use crate::clock::{SystemClock, SystemTimestamp};
 use crate::db_cache::stats::DbCacheStats;
 use crate::stats::StatRegistry;
 use crate::{
@@ -243,7 +243,7 @@ pub struct DbCacheWrapper {
     cache: Arc<dyn DbCache>,
     // Records the last time that the wrapper logged an error from the wrapped cache at error
     // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
-    last_err_log_time: Mutex<Option<SystemTime>>,
+    last_err_log_time: Mutex<Option<SystemTimestamp>>,
 }
 
 impl DbCacheWrapper {

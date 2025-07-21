@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 use std::{fmt::Display, io::SeekFrom};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
-use crate::clock::SystemClock;
+use crate::clock::{SystemClock, SystemTimestamp};
 use crate::rand::DbRand;
 use bytes::Bytes;
 use object_store::path::Path;
@@ -456,7 +456,7 @@ struct FsCacheEvictorInner {
     batch_factor: usize,
     max_cache_size_bytes: usize,
     track_lock: Mutex<()>,
-    cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>,
+    cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTimestamp, usize)>>,
     cache_size_bytes: AtomicU64,
     stats: Arc<CachedObjectStoreStats>,
     rand: Arc<DbRand>,
@@ -509,7 +509,7 @@ impl FsCacheEvictorInner {
                     continue;
                 }
             };
-            let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
+            let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH).into();
             let path = entry.path().to_path_buf();
             let bytes = metadata.len() as usize;
 
@@ -524,7 +524,7 @@ impl FsCacheEvictorInner {
         &self,
         path: std::path::PathBuf,
         bytes: usize,
-        accessed_time: SystemTime,
+        accessed_time: SystemTimestamp,
         evict: bool,
     ) -> usize {
         let _track_guard = self.track_lock.lock().await;
@@ -649,7 +649,7 @@ impl FsCacheEvictorInner {
         }
     }
 
-    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (SystemTime, usize))> {
+    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (SystemTimestamp, usize))> {
         let cache_entries = self.cache_entries.lock().await;
         let mut rng = self.rand.rng();
 

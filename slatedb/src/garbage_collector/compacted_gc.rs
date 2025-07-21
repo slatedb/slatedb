@@ -1,8 +1,8 @@
+use crate::clock::SystemTimestamp;
 use crate::{
     config::GarbageCollectorDirectoryOptions, db_state::SsTableId, manifest::store::ManifestStore,
     tablestore::TableStore, SlateDBError,
 };
-use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::{sync::Arc, time::Duration};
 use tracing::error;
@@ -39,11 +39,9 @@ impl CompactedGcTask {
         }
     }
 
-    fn compacted_sst_min_age(&self) -> chrono::Duration {
-        let min_age = self
-            .compacted_options
-            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age).expect("invalid duration")
+    fn compacted_sst_min_age(&self) -> Duration {
+        self.compacted_options
+            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age)
     }
 
     async fn list_active_l0_and_compacted_ssts(&self) -> Result<HashSet<SsTableId>, SlateDBError> {
@@ -66,7 +64,7 @@ impl CompactedGcTask {
 impl GcTask for CompactedGcTask {
     /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
     /// older than the minimum age specified in the options and are not active in the manifest.
-    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    async fn collect(&self, now: SystemTimestamp) -> Result<(), SlateDBError> {
         let active_ssts = self.list_active_l0_and_compacted_ssts().await?;
         let min_age = self.compacted_sst_min_age();
         let sst_ids_to_delete = self
@@ -76,7 +74,7 @@ impl GcTask for CompactedGcTask {
             .await?
             .into_iter()
             // Filter out the ones that are too young to be collected
-            .filter(|sst| utc_now.signed_duration_since(sst.last_modified) > min_age)
+            .filter(|sst| now.duration_since(sst.last_modified).unwrap() > min_age)
             .map(|sst| sst.id)
             // Filter out the ones that are active in the manifest
             .filter(|id| !active_ssts.contains(id))

@@ -221,8 +221,11 @@ impl FlatBufferManifestCodec {
             .map(|cp| checkpoint::Checkpoint {
                 id: Self::decode_uuid(cp.id()),
                 manifest_id: cp.manifest_id(),
-                expire_time: Self::maybe_unix_ts_to_time(cp.checkpoint_expire_time_s()),
-                create_time: Self::unix_ts_to_time(cp.checkpoint_create_time_s()),
+                expire_time: match cp.checkpoint_expire_time_s() {
+                    0 => None,
+                    t => Some(Duration::from_secs(t as u64).into()),
+                },
+                create_time: Duration::from_secs(cp.checkpoint_create_time_s() as u64).into(),
             })
             .collect();
         let core = CoreDbState {
@@ -393,8 +396,11 @@ impl<'b> DbFlatBufferBuilder<'b> {
 
     fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
         let id = self.add_uuid(checkpoint.id);
-        let checkpoint_expire_time_s = Self::maybe_time_to_unix_ts(checkpoint.expire_time.as_ref());
-        let checkpoint_create_time_s = Self::time_to_unix_ts(&checkpoint.create_time);
+        let checkpoint_expire_time_s = match checkpoint.expire_time {
+            Some(expire_time) => expire_time.as_secs() as u32,
+            None => 0,
+        };
+        let checkpoint_create_time_s = checkpoint.create_time.as_secs() as u32;
         Checkpoint::create(
             &mut self.builder,
             &CheckpointArgs {
@@ -567,7 +573,7 @@ mod tests {
     use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
     use crate::{checkpoint, SlateDBError};
     use std::collections::VecDeque;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::sst::SsTableFormat;
@@ -585,13 +591,13 @@ mod tests {
                 id: uuid::Uuid::new_v4(),
                 manifest_id: 1,
                 expire_time: None,
-                create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+                create_time: Duration::from_secs(100).into(),
             },
             checkpoint::Checkpoint {
                 id: uuid::Uuid::new_v4(),
                 manifest_id: 2,
-                expire_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)),
-                create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
+                expire_time: Some(Duration::from_secs(1000).into()),
+                create_time: Duration::from_secs(200).into(),
             },
         ];
         let manifest = Manifest::initial(core);

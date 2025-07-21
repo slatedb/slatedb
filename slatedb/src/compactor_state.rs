@@ -554,8 +554,9 @@ mod tests {
     where
         F: FnMut() -> Option<T>,
     {
-        let now = DefaultSystemClock::default().now();
-        while now.elapsed().unwrap() < duration {
+        let clock = DefaultSystemClock::default();
+        let start = clock.now();
+        while clock.now().duration_since(start).unwrap() < duration {
             let maybe_result = f();
             if maybe_result.is_some() {
                 return maybe_result;

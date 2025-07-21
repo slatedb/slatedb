@@ -1,10 +1,10 @@
+use crate::clock::SystemTimestamp;
 use crate::manifest::Manifest;
 use crate::tablestore::SstFileMetadata;
 use crate::{
     config::GarbageCollectorDirectoryOptions, manifest::store::ManifestStore,
     tablestore::TableStore, SlateDBError,
 };
-use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,12 +43,13 @@ impl WalGcTask {
     }
 
     fn is_wal_sst_eligible_for_deletion(
-        utc_now: &DateTime<Utc>,
+        now: &SystemTimestamp,
         wal_sst: &SstFileMetadata,
-        min_age: &chrono::Duration,
+        min_age: &Duration,
         active_manifests: &BTreeMap<u64, Manifest>,
     ) -> bool {
-        if utc_now.signed_duration_since(wal_sst.last_modified) <= *min_age {
+        let wal_sst_age = now.duration_since(wal_sst.last_modified);
+        if wal_sst_age.is_err() || wal_sst_age.unwrap() <= *min_age {
             return false;
         }
 
@@ -58,11 +59,9 @@ impl WalGcTask {
             .any(|manifest| manifest.has_wal_sst_reference(wal_sst_id))
     }
 
-    fn wal_sst_min_age(&self) -> chrono::Duration {
-        let min_age = self
-            .wal_options
-            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age);
-        chrono::Duration::from_std(min_age).expect("invalid duration")
+    fn wal_sst_min_age(&self) -> Duration {
+        self.wal_options
+            .map_or(DEFAULT_MIN_AGE, |opts| opts.min_age)
     }
 }
 
@@ -72,7 +71,7 @@ impl GcTask for WalGcTask {
     ///  - not referenced by an active checkpoint
     ///  - older than the minimum age specified in the options
     ///  - older than the last compacted WAL SST.
-    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    async fn collect(&self, now: SystemTimestamp) -> Result<(), SlateDBError> {
         let active_manifests = self.manifest_store.read_active_manifests().await?;
         let latest_manifest = active_manifests
             .last_key_value()
@@ -87,12 +86,7 @@ impl GcTask for WalGcTask {
             .await?
             .into_iter()
             .filter(|wal_sst| {
-                Self::is_wal_sst_eligible_for_deletion(
-                    &utc_now,
-                    wal_sst,
-                    &min_age,
-                    &active_manifests,
-                )
+                Self::is_wal_sst_eligible_for_deletion(&now, wal_sst, &min_age, &active_manifests)
             })
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();

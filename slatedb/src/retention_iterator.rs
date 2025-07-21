@@ -9,7 +9,6 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
-use crate::utils::system_time_to_millis;
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -84,7 +83,8 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                     let create_ts = entry
                         .create_ts
                         .expect("a record with no create_ts should not happen");
-                    let current_system_ts = system_time_to_millis(system_clock.now());
+                    // TODO: This is incorrect. We're mixing logical and system timestamps.
+                    let current_system_ts = system_clock.now().as_millis() as i64;
                     create_ts + (timeout.as_millis() as i64) > current_system_ts
                 })
                 .unwrap_or(false);
@@ -898,7 +898,7 @@ mod tests {
             versions.insert(Reverse(entry.seq), entry.clone());
         }
 
-        let system_clock = Arc::new(MockSystemClock::with_time(test_case.system_clock_ts));
+        let system_clock = Arc::new(MockSystemClock::with_duration(Duration::from_millis(test_case.system_clock_ts as u64)));
         let filtered_versions = RetentionIterator::<TestIterator>::apply_retention_filter(
             versions,
             test_case.compaction_start_ts,
