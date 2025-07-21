@@ -42,7 +42,7 @@ impl SystemTimestamp {
     }
 
     pub fn as_secs(self) -> u64 {
-        self.0.as_secs() as u64
+        self.0.as_secs()
     }
 
     pub fn checked_add(self, duration: Duration) -> Option<SystemTimestamp> {

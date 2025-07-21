@@ -38,12 +38,6 @@ fn load_object_store(env_file: Option<String>) -> PyResult<Arc<dyn ObjectStore>>
     }
 }
 
-fn to_millis(time: SystemTime) -> u64 {
-    time.duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
-
 /// A Python module implemented in Rust.
 #[pymodule]
 fn slatedb(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
