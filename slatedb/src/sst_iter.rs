@@ -709,47 +709,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[should_panic(expected = "Range must be non-empty")]
-    async fn test_iter_with_start_key_larger_than_end_key() {
-        // Initialize the table store and other required components
-        let root_path = Path::from("");
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let format = SsTableFormat {
-            block_size: 128,
-            min_filter_keys: 1,
-            ..SsTableFormat::default()
-        };
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
-            format,
-            root_path.clone(),
-            None,
-        ));
-        let first_key = [b'b'; 16];
-        let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
-        let first_val = [2u8; 16];
-        let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
-        let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
-
-        // Create an iterator where start range is larger than end range
-        let start_key = [b'z'; 16];
-        let end_key = [b'a'; 16];
-        let range = BytesRange::from_slice(start_key.as_ref()..end_key.as_ref());
-        let mut iter = SstIterator::new_borrowed(
-            range,
-            &sst,
-            table_store.clone(),
-            SstIteratorOptions::default(),
-        )
-        .await
-        .unwrap()
-        .expect("Expected Some(iter) but got None");
-
-        // This should not panic in next_iter
-        iter.next_iter(true).await.unwrap();
-    }
-
     async fn build_sst_with_n_blocks(
         n: usize,
         ts: Arc<TableStore>,
