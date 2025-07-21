@@ -90,7 +90,7 @@ async fn exec_create_checkpoint(
     source: Option<Uuid>,
 ) -> Result<(), Box<dyn Error>> {
     let result = admin
-        .create_checkpoint(&CheckpointOptions { lifetime, source })
+        .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
         .await?;
     println!("{:?}", result);
     Ok(())

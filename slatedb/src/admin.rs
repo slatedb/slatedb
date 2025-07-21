@@ -143,7 +143,16 @@ impl Admin {
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
-    /// provided options. The checkpoint will reference the current active manifest of the db.
+    /// provided options. The checkpoint will reference the current active manifest of the db. This
+    /// method does not flush writer memtables or WALs before creating the checkpoint. You will be
+    /// responsible for refreshing checkpoints periodically.
+    ///
+    /// If you have a [`crate::Db`] instance open, you can use the [`crate::Db::create_checkpoint`]
+    /// method instead. That method will flush the memtables and WALs before creating the checkpoint.
+    ///
+    /// If you're using a [`crate::DbReader`], you might wish to have the reader manage the checkpoint
+    /// for you by calling [`crate::DbReader::open`] with no `checkpoint_id` set. The reader will
+    /// create a checkpoint for you and periodically refresh it.
     ///
     /// # Examples
     ///
@@ -163,14 +172,14 @@ impl Admin {
     ///    db.close().await?;
     ///
     ///    let admin = AdminBuilder::new("parent_path", object_store).build();
-    ///    let _ = admin.create_checkpoint(
+    ///    let _ = admin.create_detached_checkpoint(
     ///      &CheckpointOptions::default(),
     ///    ).await?;
     ///
     ///    Ok(())
     /// }
     /// ```
-    pub async fn create_checkpoint(
+    pub async fn create_detached_checkpoint(
         &self,
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
