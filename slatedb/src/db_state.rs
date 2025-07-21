@@ -48,13 +48,7 @@ impl SsTableHandle {
     pub(crate) fn new(id: SsTableId, info: SsTableInfo) -> Self {
         let effective_range = match info.first_key.clone() {
             Some(physical_first_key) => BytesRange::new(Included(physical_first_key), Unbounded),
-            None => {
-                // Empty range.
-                BytesRange::new(
-                    Excluded(Bytes::copy_from_slice(&[0_u8])),
-                    Excluded(Bytes::copy_from_slice(&[0_u8])),
-                )
-            }
+            None => BytesRange::new_empty(),
         };
 
         SsTableHandle {
