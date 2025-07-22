@@ -185,7 +185,7 @@ impl DefaultDstDistribution {
     #[inline]
     fn maybe_gen_existing_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Option<Vec<u8>> {
         let hit_probability = self.rand.rng().random_range(0.0..1.0);
-        let is_db_hit = state.len() > 0 && self.rand.rng().random_bool(hit_probability);
+        let is_db_hit = !state.is_empty() && self.rand.rng().random_bool(hit_probability);
         if is_db_hit {
             let existing_key = state
                 .keys()
@@ -230,7 +230,7 @@ impl DefaultDstDistribution {
 impl DstDistribution for DefaultDstDistribution {
     fn sample_action(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
         let weights = [1; 5]; // all actions have equal probability for now
-        let dist = WeightedIndex::new(&weights).expect("non-empty weights and all ≥ 0");
+        let dist = WeightedIndex::new(weights).expect("non-empty weights and all ≥ 0");
         let action = dist.sample(&mut self.rand.rng());
         match action {
             0 => self.sample_write(state),
@@ -340,8 +340,7 @@ impl Dst {
     // TODO: should we be using rng_seed (tokio_unstable) for the tokio runtime?
     pub async fn run_simulation(&mut self, iterations: u32) -> Result<(), SlateDBError> {
         let start_time = self.system_clock.now();
-        let mut step_count = 0;
-        for _ in 0..iterations {
+        for (step_count, _) in (0..iterations).enumerate() {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
                 step_count,
@@ -367,7 +366,6 @@ impl Dst {
                 // TODO: add checkpointing?
                 // TODO: add fencing?
             }
-            step_count += 1;
             self.maybe_shrink_db().await?;
         }
         Ok(())
@@ -472,7 +470,7 @@ impl Dst {
             (self.options.max_btree_size_bytes as f64 * 0.8) as usize
                 ..self.options.max_btree_size_bytes as usize,
         );
-        while self.state.size_bytes > shrink_to_bytes && self.state.len() > 0 {
+        while self.state.size_bytes > shrink_to_bytes && !self.state.is_empty() {
             let key = self
                 .state
                 .keys()

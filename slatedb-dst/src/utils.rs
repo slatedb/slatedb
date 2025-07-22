@@ -72,10 +72,7 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
     let compression_codec =
         if let Some(compression_codec) = COMPRESSION_CODECS[compression_codec_idx] {
-            match CompressionCodec::from_str(compression_codec) {
-                Ok(codec) => Some(codec),
-                Err(_) => None,
-            }
+            CompressionCodec::from_str(compression_codec).ok()
         } else {
             None
         };
