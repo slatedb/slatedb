@@ -33,7 +33,7 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
 ];
 
 pub async fn build_dst(system_clock: Arc<dyn SystemClock>, rand: Rc<DbRand>) -> Dst {
-    let db = build_db(&rand, system_clock.clone()).await;
+    let db = build_db(system_clock.clone(), &rand).await;
     let dst_opts = DstOptions::default();
     Dst::new(
         db,
@@ -45,7 +45,7 @@ pub async fn build_dst(system_clock: Arc<dyn SystemClock>, rand: Rc<DbRand>) -> 
 }
 
 /// Builds a DB instance with components that are selected at random.
-pub async fn build_db(rand: &DbRand, system_clock: Arc<dyn SystemClock>) -> Db {
+pub async fn build_db(system_clock: Arc<dyn SystemClock>, rand: &DbRand) -> Db {
     let mut builder = DbBuilder::new("test_db", Arc::new(InMemory::new()));
     builder = builder.with_settings(build_settings(rand).await);
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));

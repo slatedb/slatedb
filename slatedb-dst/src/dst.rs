@@ -19,7 +19,6 @@ use std::ops::RangeBounds;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::Instant;
 use tracing::debug;
 use tracing::info;
 
@@ -308,13 +307,13 @@ impl Dst {
 
     // TODO: should we be using rng_seed (tokio_unstable) for the tokio runtime?
     pub async fn run_simulation(&mut self, iterations: u32) -> Result<(), SlateDBError> {
-        let start_time = Instant::now();
+        let start_time = self.system_clock.now();
         let mut step_count = 0;
         for _ in 0..iterations {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
                 step_count,
-                simulated_time = utils::pretty_duration(&Instant::now().duration_since(start_time)),
+                simulated_time = utils::pretty_duration(&self.system_clock.now().duration_since(start_time).unwrap()),
                 btree_size = utils::pretty_bytes(self.state.size_bytes),
                 btree_entries = self.state.len(),
                 step_action = %step_action,
