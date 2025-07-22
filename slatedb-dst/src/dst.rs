@@ -248,7 +248,6 @@ impl DstDistribution for DefaultDstDistribution {
         let put_probability = 0.8;
         let mut remaining_bytes =
             self.sample_log_uniform(1..self.options.max_write_batch_bytes) as i64;
-        eprintln!("remaining_bytes: {}", remaining_bytes);
         while remaining_bytes > 0 {
             let is_put = self.rand.rng().random_bool(put_probability);
             if is_put {

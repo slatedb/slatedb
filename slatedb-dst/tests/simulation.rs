@@ -15,34 +15,38 @@ use slatedb_dst::DstOptions;
 use std::rc::Rc;
 use std::sync::Arc;
 use tracing::error;
+use tracing::info;
 
 /// Runs some DSTs with a small number of iterations. This is just a brief safety
 /// check to be run against PRs.
 #[rstest]
-#[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(1)), 100)]
-#[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(2)), 100)]
-#[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(3)), 100)]
+#[case(
+    Arc::new(MockSystemClock::new()),
+    Rc::new(DbRand::new(1)),
+    100,
+    DstOptions::default()
+)]
+#[case(
+    Arc::new(MockSystemClock::new()),
+    Rc::new(DbRand::new(2)),
+    100,
+    DstOptions::default()
+)]
+#[case(
+    Arc::new(MockSystemClock::new()),
+    Rc::new(DbRand::new(3)),
+    100,
+    DstOptions::default()
+)]
 #[tokio::test(start_paused = true, flavor = "current_thread")]
-async fn test_dst_short(
+async fn test_dst(
     #[case] system_clock: Arc<dyn SystemClock>,
     #[case] rand: Rc<DbRand>,
     #[case] iterations: u32,
+    #[case] dst_opts: DstOptions,
 ) -> Result<(), SlateDBError> {
-    run_simulation(system_clock, rand, iterations, DstOptions::default()).await
+    run_simulation(system_clock, rand, iterations, dst_opts).await
 }
-
-/// Run DSTs with seeds that have failed in the past to catch any regressions.
-// TODO: update this as we find DST failures
-// #[rstest]
-// #[tokio::test(start_paused = true, flavor = "current_thread")]
-// async fn test_dst_regressions(
-//     #[case] system_clock: Arc<dyn SystemClock>,
-//     #[case] rand: Rc<DbRand>,
-//     #[case] iterations: u32,
-//     #[case] dst_opts: DstOptions,
-// ) -> Result<(), SlateDBError> {
-//     run_simulation(system_clock, rand, iterations, dst_opts).await
-// }
 
 /// Verifies that SlateDB is deterministic when we seed the random number
 /// generator, system clock, and runtime appropriately. DSTs are not meaningful
@@ -76,10 +80,11 @@ async fn test_dst_is_deterministic(
     let mut expected_u64: Option<u64> = None;
     let mut expected_time: Option<SystemTime> = None;
 
-    for _i in 0..simulations {
+    for simulation_count in 0..simulations {
         let rand = Rc::new(DbRand::new(seed));
         let system_clock = Arc::new(MockSystemClock::new());
         let mut dst = build_dst(system_clock.clone(), rand.clone(), DstOptions::default()).await;
+        info!(seed, simulation_count, "running simulation");
         match dst.run_simulation(iterations).await {
             Ok(()) => {
                 let next_u64 = rand.rng().random::<u64>();
@@ -87,20 +92,22 @@ async fn test_dst_is_deterministic(
                 if let Some(expected_u64) = expected_u64 {
                     assert_eq!(
                         next_u64, expected_u64,
-                        "non-determinism detected: seed={}, next_u64={}, expected_u64={}",
-                        seed, next_u64, expected_u64
+                        "non-determinism detected: seed={}, simulation_count={}, next_u64={}, expected_u64={}",
+                        seed, simulation_count, next_u64, expected_u64
                     );
                 }
                 if let Some(expected_time) = expected_time {
                     assert_eq!(
                         next_time,
                         expected_time,
-                        "non-determinism detected: seed={}, next_time={:?}, expected_time={:?}",
+                        "non-determinism detected: seed={}, simulation_count={}, next_time={:?}, expected_time={:?}",
                         seed,
+                        simulation_count,
                         next_time.duration_since(UNIX_EPOCH),
                         expected_time.duration_since(UNIX_EPOCH)
                     );
                 }
+                info!(seed, simulation_count, "simulation passed");
                 expected_u64 = Some(next_u64);
                 expected_time = Some(next_time);
             }
