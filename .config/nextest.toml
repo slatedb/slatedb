@@ -12,5 +12,4 @@ run-wrapper = "backtrace-on-timeout"
 
 [profile.dst]
 slow-timeout = { period = "30m", terminate-after = 1 }
-test-threads = "num-cpus"
 default-filter = "package(slatedb-dst) & test(dst)"
