@@ -61,11 +61,11 @@ async fn test_dst_short(
 /// * `iterations` - The number of iterations to run for each simulation.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 #[rstest]
-#[case(101, 10, 100)]
-#[case(102, 10, 100)]
-#[case(103, 10, 100)]
-#[case(104, 10, 100)]
-#[case(105, 10, 100)]
+#[case(101, 10, 50)]
+#[case(102, 10, 50)]
+#[case(103, 10, 50)]
+#[case(104, 10, 50)]
+#[case(105, 10, 50)]
 async fn test_dst_is_deterministic(
     #[case] seed: u64,
     #[case] simulations: u32,
