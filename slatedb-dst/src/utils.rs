@@ -8,11 +8,13 @@ use slatedb::Db;
 use slatedb::DbBuilder;
 use slatedb::DbRand;
 use slatedb::Settings;
+use slatedb::SlateDBError;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
+use tracing::{error, info};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
@@ -32,9 +34,12 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
     None,
 ];
 
-pub async fn build_dst(system_clock: Arc<dyn SystemClock>, rand: Rc<DbRand>) -> Dst {
+pub async fn build_dst(
+    system_clock: Arc<dyn SystemClock>,
+    rand: Rc<DbRand>,
+    dst_opts: DstOptions,
+) -> Dst {
     let db = build_db(system_clock.clone(), &rand).await;
-    let dst_opts = DstOptions::default();
     Dst::new(
         db,
         system_clock,
@@ -97,6 +102,24 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         compactor_options: Some(CompactorOptions::default()),
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
+    }
+}
+
+pub async fn run_simulation(
+    system_clock: Arc<dyn SystemClock>,
+    rand: Rc<DbRand>,
+    iterations: u32,
+    dst_opts: DstOptions,
+) -> Result<(), SlateDBError> {
+    let seed = rand.seed();
+    info!("running simulation with seed {}", seed);
+    let mut dst = build_dst(system_clock.clone(), rand.clone(), dst_opts).await;
+    match dst.run_simulation(iterations).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            error!("simulation failed with seed {}: {}", seed, e);
+            Err(e)
+        }
     }
 }
 

@@ -4,31 +4,39 @@ use slatedb::clock::MockSystemClock;
 use slatedb::clock::SystemClock;
 use slatedb::DbRand;
 use slatedb::SlateDBError;
-use slatedb_dst::utils::build_dst;
+use slatedb_dst::utils::{build_dst, run_simulation};
+use slatedb_dst::DstOptions;
 use std::rc::Rc;
 use std::sync::Arc;
 use tracing::error;
-use tracing::info;
 
 #[rstest]
 #[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(1)), 100)]
 #[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(2)), 100)]
 #[tokio::test(start_paused = true, flavor = "current_thread")]
-async fn test_dst_quickly(
+async fn test_dst_short(
     #[case] system_clock: Arc<dyn SystemClock>,
     #[case] rand: Rc<DbRand>,
     #[case] iterations: u32,
 ) -> Result<(), SlateDBError> {
-    let seed = rand.seed();
-    info!("running simulation with seed {}", seed);
-    let mut dst = build_dst(system_clock.clone(), rand.clone()).await;
-    match dst.run_simulation(iterations).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            error!("simulation failed with seed {}: {}", seed, e);
-            Err(e)
-        }
-    }
+    run_simulation(system_clock, rand, iterations, DstOptions::default()).await
+}
+
+#[rstest]
+#[case(
+    Arc::new(MockSystemClock::new()),
+    Rc::new(DbRand::new(6561056955098952705)),
+    99999,
+    DstOptions::default()
+)]
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn test_dst_regressions(
+    #[case] system_clock: Arc<dyn SystemClock>,
+    #[case] rand: Rc<DbRand>,
+    #[case] iterations: u32,
+    #[case] dst_opts: DstOptions,
+) -> Result<(), SlateDBError> {
+    run_simulation(system_clock, rand, iterations, dst_opts).await
 }
 
 /// Verifies that SlateDB is deterministic when we seed the random number
@@ -66,7 +74,7 @@ async fn test_dst_is_deterministic(
     for _i in 0..simulations {
         let rand = Rc::new(DbRand::new(seed));
         let system_clock = Arc::new(MockSystemClock::new());
-        let mut dst = build_dst(system_clock.clone(), rand.clone()).await;
+        let mut dst = build_dst(system_clock.clone(), rand.clone(), DstOptions::default()).await;
         match dst.run_simulation(iterations).await {
             Ok(()) => {
                 let next_u64 = rand.rng().random::<u64>();
