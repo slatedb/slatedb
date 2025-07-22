@@ -1,6 +1,7 @@
 use crate::utils;
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
+use rand::distr::Uniform;
 use rand::seq::IteratorRandom;
 use rand::Rng;
 use rand::RngCore;
@@ -15,6 +16,7 @@ use slatedb::SlateDBError;
 use slatedb::WriteBatch;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::ops::RangeFull;
 use std::rc::Rc;
@@ -25,17 +27,17 @@ use tracing::info;
 
 #[derive(Clone)]
 pub struct DstOptions {
-    max_key_len: usize,
-    max_val_len: usize,
-    max_write_batch_bytes: usize,
-    max_btree_size_bytes: usize,
+    max_key_len: u32,
+    max_val_len: u32,
+    max_write_batch_bytes: u32,
+    max_btree_size_bytes: u32,
 }
 
 impl Default for DstOptions {
     fn default() -> Self {
         Self {
-            max_key_len: u16::MAX as usize, // keys are limited to 65_535 bytes
-            max_val_len: 1024 * 1024,       // 1 MiB
+            max_key_len: u16::MAX as u32, // keys are limited to 65_535 bytes
+            max_val_len: 1024 * 1024,     // 1 MiB
             max_write_batch_bytes: 50 * 1024 * 1024, // 50 MiB
             max_btree_size_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB
         }
@@ -138,12 +140,43 @@ impl DefaultDstDistribution {
         Self { options, rand }
     }
 
+    /// Samples a value from a log-uniform distribution. This allows us to evenly sample from
+    /// each order of magnitude of the range. For example, if the range is 1..10000, samples with
+    /// 1 digit, 2 digits, 3 digits, and 4 digits will be sampled with equal probability.
+    ///
+    /// This is useful for covering a wide range of values without favoring small or large values.
+    /// A linear uniform distribution favors large values, and both geometric and log distributions
+    /// favor small values, while normal distributions favor values close to the mean.
+    ///
+    /// For DST, evenly sampling across orders of magnitude seems to expose the most bugs.
+    fn sample_log_uniform<R: RangeBounds<u32>>(&self, range: R) -> u32 {
+        let min = match range.start_bound() {
+            Bound::Unbounded => 0,
+            Bound::Included(min) => *min,
+            Bound::Excluded(min) => min + 1,
+        };
+        let max = match range.end_bound() {
+            Bound::Unbounded => u32::MAX,
+            Bound::Included(max) => *max,
+            Bound::Excluded(max) => max - 1,
+        };
+        assert!(min < max, "range must not be empty");
+        // Convert to common log space (log10) so we sample evenly across orders of magnitude.
+        let min_ln = (min as f64).log10();
+        let max_ln = (max as f64).log10();
+        let log10_dist = Uniform::new(min_ln, max_ln).expect("non-empty weights and all ≥ 0");
+        let u = log10_dist.sample(&mut self.rand.rng());
+        // Convert back to original space.
+        // Note that clamping means we'll favor edges of the range, but should be fine for DST.
+        (10f64.powf(u) as u32).clamp(min, max)
+    }
+
     #[inline]
     fn gen_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
         if let Some(existing_key) = self.maybe_gen_existing_key(state) {
             return existing_key;
         }
-        let key_len = self.rand.rng().random_range(1..self.options.max_key_len);
+        let key_len = self.sample_log_uniform(1..self.options.max_key_len) as usize;
         let mut bytes = vec![0; key_len];
         self.rand.rng().fill_bytes(&mut bytes);
         bytes
@@ -167,7 +200,7 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_val(&self) -> Vec<u8> {
-        let val_len = self.rand.rng().random_range(1..self.options.max_val_len);
+        let val_len = self.sample_log_uniform(1..self.options.max_val_len) as usize;
         let mut bytes = vec![0; val_len];
         self.rand.rng().fill_bytes(&mut bytes);
         bytes
@@ -214,9 +247,8 @@ impl DstDistribution for DefaultDstDistribution {
         let write_option = self.get_write_options();
         let put_probability = 0.8;
         let mut remaining_bytes =
-            self.rand
-                .rng()
-                .random_range(1..=self.options.max_write_batch_bytes) as i64;
+            self.sample_log_uniform(1..self.options.max_write_batch_bytes) as i64;
+        eprintln!("remaining_bytes: {}", remaining_bytes);
         while remaining_bytes > 0 {
             let is_put = self.rand.rng().random_bool(put_probability);
             if is_put {
@@ -439,7 +471,7 @@ impl Dst {
     async fn maybe_shrink_db(&mut self) -> Result<(), SlateDBError> {
         let shrink_to_bytes = self.rand.rng().random_range(
             (self.options.max_btree_size_bytes as f64 * 0.8) as usize
-                ..self.options.max_btree_size_bytes,
+                ..self.options.max_btree_size_bytes as usize,
         );
         while self.state.size_bytes > shrink_to_bytes && self.state.len() > 0 {
             let key = self
