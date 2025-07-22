@@ -9,8 +9,8 @@ use std::ops::RangeBounds;
 /// Trait for read-only database operations.
 ///
 /// This trait defines the interface for reading data from SlateDB,
-/// and can be implemented by both `Db` and `DbReader` to provide
-/// a unified interface for read operations.
+/// and can be implemented by `Db`, `DbReader` and `DbSnapshot`
+/// to provide a unified interface for read-only operations.
 ///
 /// The trait is designed to be object-safe, allowing for dynamic dispatch
 /// when needed.
