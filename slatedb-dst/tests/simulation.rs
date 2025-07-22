@@ -97,7 +97,7 @@ fn test_dst_is_deterministic(
     for simulation_count in 0..simulations {
         let rand = Rc::new(DbRand::new(seed));
         let system_clock = Arc::new(MockSystemClock::new());
-        let runtime = build_runtime(seed);
+        let runtime = build_runtime(rand.rng().random::<u64>());
         runtime.block_on(async {
             let mut dst = build_dst(system_clock.clone(), rand.clone(), DstOptions::default()).await;
             info!(seed, simulation_count, "running simulation");
