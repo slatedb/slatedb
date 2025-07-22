@@ -169,11 +169,11 @@ impl DbInner {
             .await
     }
 
-    pub async fn scan_with_options<'a>(
-        &'a self,
+    pub async fn scan_with_options(
+        &self,
         range: BytesRange,
         options: &ScanOptions,
-    ) -> Result<DbIterator<'a>, SlateDBError> {
+    ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.inc();
         self.check_error()?;
         let snapshot = self.state.read().snapshot();
