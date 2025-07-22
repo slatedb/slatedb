@@ -161,7 +161,13 @@ impl SystemClock for MockSystemClock {
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         self.current_ts
             .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
-        Box::pin(async move {})
+        Box::pin(async move {
+            // An empty async block always returns Poll::Ready(()) because nothing inside
+            // the block can yield control to other tasks. Calling advance() in a tight loop
+            // would prevent other tasks from running in this case. Yielding control to other
+            // tasks explicitly so we avoid this issue.
+            tokio::task::yield_now().await;
+        })
     }
 
     fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
