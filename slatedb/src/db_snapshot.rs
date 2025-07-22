@@ -7,7 +7,9 @@ use crate::db_iter::DbIterator;
 use crate::error::SlateDBError;
 use crate::Db;
 
-pub struct DbSnapshot {}
+pub struct DbSnapshot {
+    seq: u64,
+}
 
 impl DbSnapshot {
     pub(crate) fn new(db: Arc<Db>) -> Self {
