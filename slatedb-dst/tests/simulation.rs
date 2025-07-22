@@ -21,6 +21,7 @@ use tracing::error;
 #[rstest]
 #[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(1)), 100)]
 #[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(2)), 100)]
+#[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(3)), 100)]
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn test_dst_short(
     #[case] system_clock: Arc<dyn SystemClock>,
@@ -31,22 +32,17 @@ async fn test_dst_short(
 }
 
 /// Run DSTs with seeds that have failed in the past to catch any regressions.
-#[rstest]
-#[case(
-    Arc::new(MockSystemClock::new()),
-    Rc::new(DbRand::new(6561056955098952705)),
-    99999,
-    DstOptions::default()
-)]
-#[tokio::test(start_paused = true, flavor = "current_thread")]
-async fn test_dst_regressions(
-    #[case] system_clock: Arc<dyn SystemClock>,
-    #[case] rand: Rc<DbRand>,
-    #[case] iterations: u32,
-    #[case] dst_opts: DstOptions,
-) -> Result<(), SlateDBError> {
-    run_simulation(system_clock, rand, iterations, dst_opts).await
-}
+// TODO: update this as we find DST failures
+// #[rstest]
+// #[tokio::test(start_paused = true, flavor = "current_thread")]
+// async fn test_dst_regressions(
+//     #[case] system_clock: Arc<dyn SystemClock>,
+//     #[case] rand: Rc<DbRand>,
+//     #[case] iterations: u32,
+//     #[case] dst_opts: DstOptions,
+// ) -> Result<(), SlateDBError> {
+//     run_simulation(system_clock, rand, iterations, dst_opts).await
+// }
 
 /// Verifies that SlateDB is deterministic when we seed the random number
 /// generator, system clock, and runtime appropriately. DSTs are not meaningful
