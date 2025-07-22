@@ -105,7 +105,12 @@ impl MemtableFlusher {
             }
         } {
             let clock = self.db_inner.system_clock.as_ref();
-            let id = SsTableId::Compacted(self.db_inner.rand.rng().gen_ulid(system_time_to_millis(clock.now())));
+            let id = SsTableId::Compacted(
+                self.db_inner
+                    .rand
+                    .rng()
+                    .gen_ulid(system_time_to_millis(clock.now())),
+            );
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)

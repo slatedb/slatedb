@@ -105,6 +105,19 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     }
 }
 
+#[cfg(tokio_unstable)]
+pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
+    use tokio::runtime::RngSeed;
+
+    // https://pierrezemb.fr/posts/tokio-hidden-gems/
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
+        .build_local(&mut Default::default())
+        .unwrap()
+}
+
 pub async fn run_simulation(
     system_clock: Arc<dyn SystemClock>,
     rand: Rc<DbRand>,
