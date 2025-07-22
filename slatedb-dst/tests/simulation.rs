@@ -1,3 +1,9 @@
+// These tests are only enabled when DST is enabled.
+// To run the tests, use one of:
+// - `RUSTFLAGS="--cfg dst" cargo test test_dst --all-features`
+// - `RUSTFLAGS="--cfg dst" cargo nextest run test_dst  --profile dst`
+#![cfg(dst)]
+
 use rand::Rng;
 use rstest::rstest;
 use slatedb::clock::MockSystemClock;
