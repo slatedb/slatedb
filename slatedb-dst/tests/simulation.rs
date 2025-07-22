@@ -16,6 +16,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use tracing::error;
 
+/// Runs some DSTs with a small number of iterations. This is just a brief safety
+/// check to be run against PRs.
 #[rstest]
 #[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(1)), 100)]
 #[case(Arc::new(MockSystemClock::new()), Rc::new(DbRand::new(2)), 100)]
@@ -28,6 +30,7 @@ async fn test_dst_short(
     run_simulation(system_clock, rand, iterations, DstOptions::default()).await
 }
 
+/// Run DSTs with seeds that have failed in the past to catch any regressions.
 #[rstest]
 #[case(
     Arc::new(MockSystemClock::new()),

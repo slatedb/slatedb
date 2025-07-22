@@ -16,6 +16,7 @@ use slatedb::WriteBatch;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::RangeBounds;
+use std::ops::RangeFull;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -390,9 +391,14 @@ impl Dst {
         scan_options: &ScanOptions,
     ) -> Result<(), SlateDBError> {
         if self.state.is_empty() {
-            debug!("run_scan (empty)");
-            let mut db_iter = self.db.scan(start_key.clone()..end_key.clone()).await?;
+            debug!("run_scan (empty db)");
+            let mut db_iter = self.db.scan::<Vec<u8>, RangeFull>(..).await?;
             assert!(db_iter.next().await?.is_none());
+            return Ok(());
+        }
+        if start_key == end_key {
+            debug!("run_scan (start_key == end_key)");
+            // Skip because SlateDB does not allow empty ranges (see #681)
             return Ok(());
         }
         let future = self
