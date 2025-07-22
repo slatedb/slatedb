@@ -7,6 +7,8 @@ edition.workspace = true
 repository.workspace = true
 license.workspace = true
 homepage.workspace = true
+# Skipping publication for this test crate for now. We can publish if users want.
+publish = false
 
 [dependencies]
 ctor = { workspace = true }

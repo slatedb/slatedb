@@ -97,7 +97,7 @@ jobs:
       - name: Run DST Tests
         run: cargo nextest run --workspace --all-features --profile dst
         env:
-          RUSTFLAGS: "--cfg dst"
+          RUSTFLAGS: "--cfg dst --cfg tokio_unstable"
 
   bindings:
     runs-on: ubuntu-latest
