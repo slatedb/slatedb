@@ -69,6 +69,21 @@ fn test_dst(
 #[case(103, 10, 50)]
 #[case(104, 10, 50)]
 #[case(105, 10, 50)]
+#[case(106, 10, 50)]
+#[case(107, 10, 50)]
+#[case(108, 10, 50)]
+#[case(109, 10, 50)]
+#[case(110, 10, 50)]
+#[case(111, 10, 50)]
+#[case(112, 10, 50)]
+#[case(113, 10, 50)]
+#[case(114, 10, 50)]
+#[case(115, 10, 50)]
+#[case(116, 10, 50)]
+#[case(117, 10, 50)]
+#[case(118, 10, 50)]
+#[case(119, 10, 50)]
+#[case(120, 10, 50)]
 fn test_dst_is_deterministic(
     #[case] seed: u64,
     #[case] simulations: u32,
