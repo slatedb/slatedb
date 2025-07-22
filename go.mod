@@ -1,4 +1,4 @@
-module github.com/confluentinc/slatedbgo
+module github.com/slatedbgo
 
 go 1.24.3
 
