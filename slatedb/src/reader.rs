@@ -38,7 +38,7 @@ impl SstFilterResult {
     }
 }
 
-pub(crate) trait ReadDbState {
+pub(crate) trait DbStateAccess {
     fn memtable(&self) -> Arc<KVTable>;
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
     fn core(&self) -> &CoreDbState;
@@ -97,7 +97,7 @@ impl Reader {
         &self,
         key: K,
         options: &ReadOptions,
-        db_state: &(dyn ReadDbState + Sync + Send),
+        db_state: &(dyn DbStateAccess + Sync + Send),
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
@@ -117,7 +117,7 @@ impl Reader {
         &'a self,
         range: BytesRange,
         options: &ScanOptions,
-        db_state: &(dyn ReadDbState + Sync),
+        db_state: &(dyn DbStateAccess + Sync),
         max_seq: Option<u64>,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
@@ -172,7 +172,7 @@ impl Reader {
 struct LevelGet<'a> {
     key: &'a [u8],
     max_seq: Option<u64>,
-    db_state: &'a (dyn ReadDbState + Sync + Send),
+    db_state: &'a (dyn DbStateAccess + Sync + Send),
     table_store: Arc<TableStore>,
     db_stats: DbStats,
     now: i64,
@@ -381,7 +381,7 @@ mod tests {
         imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     }
 
-    impl ReadDbState for MockReadDbState {
+    impl DbStateAccess for MockReadDbState {
         fn memtable(&self) -> Arc<KVTable> {
             self.memtable.clone()
         }

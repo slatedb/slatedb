@@ -12,7 +12,7 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::oracle::Oracle;
 use crate::rand::DbRand;
-use crate::reader::{ReadDbState, Reader};
+use crate::reader::{DbStateAccess, Reader};
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
@@ -74,7 +74,7 @@ struct CheckpointState {
 
 static EMPTY_TABLE: Lazy<Arc<KVTable>> = Lazy::new(|| Arc::new(KVTable::new()));
 
-impl ReadDbState for CheckpointState {
+impl DbStateAccess for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
         Arc::clone(&EMPTY_TABLE)
     }

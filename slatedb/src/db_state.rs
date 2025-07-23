@@ -4,7 +4,7 @@ use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
-use crate::reader::ReadDbState;
+use crate::reader::DbStateAccess;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
@@ -388,14 +388,14 @@ impl CoreDbState {
     }
 }
 
-// represents a read-snapshot of the current db state
+// represents a consistent view of the current db state
 #[derive(Clone)]
 pub(crate) struct DbStateView {
     pub(crate) memtable: Arc<KVTable>,
     pub(crate) state: Arc<COWDbState>,
 }
 
-impl ReadDbState for DbStateView {
+impl DbStateAccess for DbStateView {
     fn memtable(&self) -> Arc<KVTable> {
         Arc::clone(&self.memtable)
     }
