@@ -69,6 +69,7 @@ mod db;
 mod db_common;
 mod db_iter;
 mod db_reader;
+mod db_snapshot;
 mod db_state;
 mod error;
 mod filter;
@@ -99,6 +100,7 @@ mod store_provider;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;
+mod transaction_manager;
 mod transactional_object_store;
 mod types;
 mod utils;
