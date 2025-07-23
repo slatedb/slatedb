@@ -42,18 +42,43 @@
 //! ## Example
 //!
 //! ```rust
+//! # // Both of the following environment variables must be set to test this code block:
+//! # // RUSTFLAGS="--cfg tokio_unstable"
+//! # // RUSTDOCFLAGS="--cfg tokio_unstable"
+//! # #[cfg(tokio_unstable)] {
+//! # use slatedb::*;
 //! # use slatedb::clock::MockSystemClock;
 //! # use slatedb::clock::MockLogicalClock;
-//! # use slatedb::DbRand;
-//! # use slatedb_dst::DstOptions;
-//! # use slatedb_dst::utils::{build_dst, run_simulation};
-//! let system_clock = MockSystemClock::new();
-//! let logical_clock = MockLogicalClock::new();
-//! let rand = DbRand::new(1);
+//! # use slatedb::object_store::memory::InMemory;
+//! # use slatedb_dst::*;
+//! # use slatedb_dst::utils::*;
+//! # use std::sync::Arc;
+//! # use std::rc::Rc;
+//! let system_clock = Arc::new(MockSystemClock::new());
+//! let logical_clock = Arc::new(MockLogicalClock::new());
+//! let rand = Rc::new(DbRand::new(12345));
 //! let dst_opts = DstOptions::default();
-//! run_simulation(system_clock, logical_clock, rand, 10, dst_opts).await?;
+//! let runtime = build_runtime(5678);
+//! runtime.block_on(async move {
+//!     let db = DbBuilder::new("test_db", Arc::new(InMemory::new()))
+//!         .with_seed(1234)
+//!         .with_system_clock(system_clock.clone())
+//!         .with_logical_clock(logical_clock.clone())
+//!         .build()
+//!         .await
+//!         .unwrap();
+//!     let distr = Box::new(DefaultDstDistribution::new(rand.clone(), dst_opts.clone()));
+//!     let mut dst = Dst::new(
+//!         db,
+//!         system_clock,
+//!         rand.clone(),
+//!         distr,
+//!         dst_opts,
+//!     );
+//!     dst.run_simulation(10).await.unwrap();
+//! });
+//! # }
 //! ```
-//!
 
 use crate::utils;
 use rand::distr::weighted::WeightedIndex;
