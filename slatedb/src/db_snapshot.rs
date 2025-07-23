@@ -31,11 +31,6 @@ impl DbSnapshot {
         })
     }
 
-    /// Get the snapshot's sequence number
-    pub fn seq(&self) -> u64 {
-        self.transaction_state.seq
-    }
-
     /// Get a value from the snapshot with default read options.
     ///
     /// ## Arguments
