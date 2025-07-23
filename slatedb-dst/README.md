@@ -24,14 +24,14 @@ be enabled with `cfg(tokio_unstable)` and Tokio's `rt` feature.
 To run DST tests, you must set the `RUSTFLAGS` environment variable to include
 `--cfg dst` and `--cfg tokio_unstable`.
 
-```
+```bash
 $ RUSTFLAGS="--cfg dst --cfg tokio_unstable" \
   cargo test -p slatedb-dst --all-features
 ```
 
 Or if you prefer nextest:
 
-```
+```bash
 $ RUSTFLAGS="--cfg dst --cfg tokio_unstable" \
   cargo nextest run -p slatedb-dst --profile dst
 ```
