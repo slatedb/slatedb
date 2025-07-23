@@ -30,6 +30,7 @@ use bytes::Bytes;
 /// Note that the `WriteBatch` has an unlimited size. This means that batch
 /// writes can exceed `l0_sst_size_bytes` (when `WAL` is disabled). It also
 /// means that WAL SSTs could get large if there's a large batch write.
+#[derive(Clone, Debug)]
 pub struct WriteBatch {
     pub(crate) ops: Vec<WriteOp>,
 }
@@ -40,7 +41,7 @@ impl Default for WriteBatch {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 pub(crate) enum WriteOp {
     Put(Bytes, Bytes, PutOptions),
     Delete(Bytes),

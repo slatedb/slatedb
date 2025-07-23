@@ -93,3 +93,6 @@ bench = false
 [[bench]]
 name = "db_operations"
 harness = false
+
+[lints]
+workspace = true

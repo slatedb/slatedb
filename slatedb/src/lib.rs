@@ -1,3 +1,4 @@
+#![doc = include_str!("../../README.md")]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
@@ -37,6 +38,7 @@ pub use db_reader::DbReader;
 pub use error::{SettingsError, SlateDBError};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
+pub use rand::DbRand;
 pub use types::KeyValue;
 
 pub mod admin;

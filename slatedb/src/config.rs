@@ -219,7 +219,7 @@ pub enum DurabilityLevel {
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -255,7 +255,7 @@ impl ReadOptions {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ScanOptions {
     /// Specifies the minimum durability level for data returned by this scan. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -317,7 +317,7 @@ impl ScanOptions {
 
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.

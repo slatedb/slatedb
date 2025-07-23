@@ -4,6 +4,7 @@ members = [
     "slatedb",
     "slatedb-bencher",
     "slatedb-cli",
+    "slatedb-dst",
     "slatedb-py",
 ]
 
@@ -83,3 +84,6 @@ proptest = "1.7.0"
 rstest = "0.23.0"
 tempfile = "3.3"
 tokio-test = "0.4.4"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(dst)'] }

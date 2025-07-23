@@ -5,7 +5,7 @@ use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
-use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
+use crate::utils::{bg_task_result_into_err, spawn_bg_task, system_time_to_millis, IdGenerator};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -104,7 +104,13 @@ impl MemtableFlusher {
                 rguard.state().imm_memtable.back().cloned()
             }
         } {
-            let id = SsTableId::Compacted(self.db_inner.rand.rng().gen_ulid());
+            let clock = self.db_inner.system_clock.as_ref();
+            let id = SsTableId::Compacted(
+                self.db_inner
+                    .rand
+                    .rng()
+                    .gen_ulid(system_time_to_millis(clock.now())),
+            );
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)

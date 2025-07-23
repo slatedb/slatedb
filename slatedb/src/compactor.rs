@@ -323,11 +323,24 @@ impl CompactorEventHandler {
 
     async fn stop_executor(&self) -> Result<(), SlateDBError> {
         let this_executor = self.executor.clone();
-        tokio::task::spawn_blocking(move || {
+        // Explicitly allow spawn_blocking for compactors since we can't trust them
+        // not to block the runtime. This could cause non-determinism, since it creates
+        // a race between the executor's first .await call and the runtime awaiting
+        // on the join handle. We use tokio::spawn for DST since we need full determinism.
+        #[cfg(not(dst))]
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
             this_executor.stop();
         })
         .await
-        .map_err(|_| SlateDBError::CompactionExecutorFailed)
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        #[cfg(dst)]
+        let result = tokio::spawn(async move {
+            this_executor.stop();
+        })
+        .await
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        result
     }
 
     fn is_executor_stopped(&self) -> bool {
@@ -440,11 +453,24 @@ impl CompactorEventHandler {
         self.progress_tracker
             .add_job(id, job.estimated_source_bytes());
         let this_executor = self.executor.clone();
-        tokio::task::spawn_blocking(move || {
+        // Explicitly allow spawn_blocking for compactors since we can't trust them
+        // not to block the runtime. This could cause non-determinism, since it creates
+        // a race between the executor's first .await call and the runtime awaiting
+        // on the join handle. We use tokio::spawn for DST since we need full determinism.
+        #[cfg(not(dst))]
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
             this_executor.start_compaction(job);
         })
         .await
-        .map_err(|_| SlateDBError::CompactionExecutorFailed)
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        #[cfg(dst)]
+        let result = tokio::spawn(async move {
+            this_executor.start_compaction(job);
+        })
+        .await
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        result
     }
 
     // state writers
