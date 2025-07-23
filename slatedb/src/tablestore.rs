@@ -532,17 +532,22 @@ impl EncodedSsTableWriter<'_> {
         Ok(block_size)
     }
 
-    pub async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
+    pub async fn close(mut self) -> Result<(SsTableHandle, usize), SlateDBError> {
+        let mut unconsumed_blocks_size = 0;
         let mut encoded_sst = self.builder.build()?;
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+            unconsumed_blocks_size += block.len();
         }
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
         self.writer.shutdown().await?;
         self.table_store
             .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
-        Ok(SsTableHandle::new(self.id, encoded_sst.info))
+        Ok((
+            SsTableHandle::new(self.id, encoded_sst.info),
+            unconsumed_blocks_size,
+        ))
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
@@ -554,6 +559,10 @@ impl EncodedSsTableWriter<'_> {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn is_drained(&self) -> bool {
+        self.builder.is_drained()
     }
 
     #[cfg(test)]
@@ -658,7 +667,7 @@ mod tests {
             .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
             .await
             .unwrap();
-        let sst = writer.close().await.unwrap();
+        let (sst, _) = writer.close().await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
             eager_spawn: true,
@@ -726,7 +735,7 @@ mod tests {
             .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
             .await
             .unwrap();
-        let sst = writer.close().await.unwrap();
+        let (sst, _) = writer.close().await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
             eager_spawn: true,
@@ -829,7 +838,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         // Read the index
         let index = ts.read_index(&handle).await.unwrap();

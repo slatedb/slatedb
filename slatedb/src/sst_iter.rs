@@ -722,6 +722,7 @@ mod tests {
             writer.add(entry).await.unwrap();
             nkeys += 1;
         }
-        (writer.close().await.unwrap(), nkeys)
+        let (sst, _) = writer.close().await.unwrap();
+        (sst, nkeys)
     }
 }

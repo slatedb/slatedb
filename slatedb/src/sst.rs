@@ -575,7 +575,7 @@ impl EncodedSsTableBuilder<'_> {
     }
 
     fn finish_block(&mut self) -> Result<Option<usize>, SlateDBError> {
-        if self.builder.is_empty() {
+        if self.is_drained() {
             return Ok(None);
         }
 
@@ -718,6 +718,10 @@ impl EncodedSsTableBuilder<'_> {
             unconsumed_blocks: self.blocks,
             footer: Bytes::from(buf),
         })
+    }
+
+    pub(crate) fn is_drained(&self) -> bool {
+        self.builder.is_empty()
     }
 }
 

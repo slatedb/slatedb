@@ -189,13 +189,9 @@ impl TokioCompactionExecutorInner {
             .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid()));
 
         let mut compacted_block_size = 0usize;
-        let mut total_bytes_processed = 0u64;
         let mut last_progress_report = self.clock.now();
 
         while let Some(kv) = all_iter.next_entry().await? {
-            let key_len = kv.key.len();
-            let value_len = kv.value.len();
-
             let duration_since_last_report = self
                 .clock
                 .now()
@@ -230,13 +226,24 @@ impl TokioCompactionExecutorInner {
                     self.table_store
                         .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid())),
                 );
-                output_ssts.push(finished_writer.close().await?);
+                let (sst, unconsumed_blocks_size) = finished_writer.close().await?;
+
+                output_ssts.push(sst);
                 self.stats.bytes_compacted.add(compacted_block_size as u64);
+                self.stats
+                    .bytes_compacted
+                    .add(unconsumed_blocks_size as u64);
+
                 compacted_block_size = 0;
+            }
         }
 
-            output_ssts.push(current_writer.close().await?);
-            self.stats.bytes_compacted.add(compacted_block_size as u64);
+        if !current_writer.is_drained() {
+            let (sst, unconsumed_blocks_size) = current_writer.close().await?;
+            output_ssts.push(sst);
+            self.stats
+                .bytes_compacted
+                .add(unconsumed_blocks_size as u64);
         }
 
         Ok(SortedRun {
