@@ -95,7 +95,7 @@ jobs:
       - name: Run Doc Tests
         run: cargo test --doc --all-features
       - name: Run DST Tests
-        run: cargo nextest run --workspace --all-features --profile dst
+        run: cargo nextest run -p slatedb-dst --all-features --profile dst
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable"
 
