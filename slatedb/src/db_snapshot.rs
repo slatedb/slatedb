@@ -5,45 +5,35 @@ use std::sync::{Arc, Weak};
 use crate::config::{ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
 use crate::error::SlateDBError;
-use crate::transaction_manager::TransactionManager;
+use crate::transaction_manager::{TransactionManager, TransactionState};
 use crate::Db;
 
 pub struct DbSnapshot {
-    seq: u64,
+    transaction_state: Arc<TransactionState>,
     /// Unique ID assigned by the transaction manager
-    id: u64,
-    /// Reference to the transaction manager for cleanup
     transaction_manager: Arc<TransactionManager>,
     /// Reference to the database
     db: Arc<Db>,
 }
 
 impl DbSnapshot {
-    pub(crate) fn new(db: Arc<Db>, transaction_manager: Arc<TransactionManager>, seq: u64) -> Arc<Self> {
-        // Get the ID first, then create the snapshot
-        let id = transaction_manager.next_snapshot_id();
-        
-        let snapshot = Arc::new(Self {
-            seq,
-            id,
-            transaction_manager: transaction_manager.clone(),
+    pub(crate) fn new(
+        db: Arc<Db>,
+        transaction_manager: Arc<TransactionManager>,
+        seq: u64,
+    ) -> Arc<Self> {
+        let transaction_state = transaction_manager.new_transaction_state(seq);
+
+        Arc::new(Self {
+            transaction_state,
+            transaction_manager,
             db,
-        });
-        
-        // Register the snapshot with the transaction manager
-        transaction_manager.register_snapshot(id, Arc::downgrade(&snapshot));
-        
-        snapshot
+        })
     }
 
     /// Get the snapshot's sequence number
     pub fn seq(&self) -> u64 {
-        self.seq
-    }
-
-    /// Get the snapshot's unique ID
-    pub fn id(&self) -> u64 {
-        self.id
+        self.transaction_state.seq
     }
 
     /// Get a value from the snapshot with default read options.
@@ -112,6 +102,7 @@ impl DbSnapshot {
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
         // Unregister from transaction manager when dropped
-        self.transaction_manager.unregister_snapshot(self.id);
+        self.transaction_manager
+            .remove(self.transaction_state.as_ref());
     }
 }
