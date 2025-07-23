@@ -1,3 +1,5 @@
+//! This module contains helper functions to simplify deterministic simulation (DST).
+
 use rand::Rng;
 use slatedb::clock::LogicalClock;
 use slatedb::clock::SystemClock;
@@ -35,6 +37,10 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
     None,
 ];
 
+/// Builds a [Dst] instance (including its [Db]) with [Settings] that are selected
+/// at random.
+///
+/// All arguments are expected to be deterministic.
 pub async fn build_dst(
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
@@ -51,7 +57,9 @@ pub async fn build_dst(
     )
 }
 
-/// Builds a DB instance with components that are selected at random.
+/// Builds a DB instance with [Settings] that are selected at random.
+///
+/// All arguments are expected to be deterministic.
 pub async fn build_db(
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
@@ -66,6 +74,8 @@ pub async fn build_db(
 }
 
 /// Builds a Settings instance with random values.
+///
+/// All arguments are expected to be deterministic.
 pub async fn build_settings(rand: &DbRand) -> Settings {
     let mut rng = rand.rng();
     let flush_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
@@ -109,6 +119,15 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     }
 }
 
+/// Tokio's default Runtime is non-deterministic even if a single thread is used.
+/// Certain methods such as [tokio::select] pick a branch to poll at random (see
+/// [tokio::select!](https://docs.rs/tokio/latest/tokio/macro.select.html#fairness)).
+///
+/// This function uses a seed to build a deterministic Tokio runtime.
+///
+/// `RUSTFLAGS="--cfg tokio_unstable"` must be set, and Tokio's `rt` feature
+/// must be enabled to use this function. See [tokio::runtime::Builder::rng_seed] for
+/// more details.
 #[cfg(tokio_unstable)]
 pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
     use tokio::runtime::RngSeed;
@@ -120,6 +139,10 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
         .unwrap()
 }
 
+/// Builds a [Dst] instance (including its [Db]) with [Settings] that are selected
+/// at random. Then runs a simulation for the given number of iterations.
+///
+/// All arguments are expected to be deterministic.
 pub async fn run_simulation(
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
@@ -145,6 +168,7 @@ pub async fn run_simulation(
     }
 }
 
+/// Formats a number of bytes in a human-readable way.
 pub(crate) fn pretty_bytes(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{}b", bytes)
@@ -157,6 +181,7 @@ pub(crate) fn pretty_bytes(bytes: usize) -> String {
     }
 }
 
+/// Formats a [Duration] in a human-readable way.
 pub(crate) fn pretty_duration(d: &Duration) -> String {
     let total_secs = d.as_secs();
     let weeks = total_secs / 604_800;
@@ -201,7 +226,7 @@ pub(crate) fn pretty_duration(d: &Duration) -> String {
 static INIT_LOGGING: Once = Once::new();
 
 /// Initialize logging for tests so we get log output. Uses `RUST_LOG` environment
-/// variable to set the log level, or defaults to `debug` if not set.
+/// variable to set the log level, or defaults to `info` if not set.
 #[ctor::ctor]
 fn init_tracing() {
     INIT_LOGGING.call_once(|| {

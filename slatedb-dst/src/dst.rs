@@ -1,4 +1,4 @@
-//! # Deterministic Simulation Tests
+//! # Deterministic Simulation Testing (DST)
 //!
 //! This module contains tools for running deterministic simulations on a SlateDB
 //! instance. The main purpose of this module is to provide a [Dst::run_simulation]
