@@ -186,6 +186,7 @@ pub enum SstBlockSize {
     /// 64KiB blocks
     Block64Kib,
     /// Other block sizes
+    #[cfg(test)]
     Other(usize),
 }
 
@@ -200,6 +201,7 @@ impl SstBlockSize {
             SstBlockSize::Block16Kib => 16384,
             SstBlockSize::Block32Kib => 32768,
             SstBlockSize::Block64Kib => 65536,
+            #[cfg(test)]
             SstBlockSize::Other(size) => *size,
         }
     }
