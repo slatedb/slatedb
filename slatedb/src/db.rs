@@ -163,9 +163,9 @@ impl DbInner {
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.db_stats.get_requests.inc();
         self.check_error()?;
-        let snapshot = self.state.read().snapshot();
+        let db_state_view = self.state.read().view();
         self.reader
-            .get_with_options(key, options, &snapshot, None)
+            .get_with_options(key, options, &db_state_view, None)
             .await
     }
 
@@ -176,9 +176,9 @@ impl DbInner {
     ) -> Result<DbIterator<'a>, SlateDBError> {
         self.db_stats.scan_requests.inc();
         self.check_error()?;
-        let snapshot = self.state.read().snapshot();
+        let db_state_view = self.state.read().view();
         self.reader
-            .scan_with_options(range, options, &snapshot, None)
+            .scan_with_options(range, options, &db_state_view, None)
             .await
     }
 
@@ -1406,7 +1406,7 @@ mod tests {
         );
         db.flush().await.unwrap();
 
-        let state = db.inner.state.read().snapshot();
+        let state = db.inner.state.read().view();
         assert_eq!(1, state.state.manifest.core.l0.len());
         let sst = state.state.manifest.core.l0.front().unwrap();
         let index = db.inner.table_store.read_index(sst).await.unwrap();
@@ -2328,7 +2328,7 @@ mod tests {
 
         db.flush().await.unwrap();
 
-        let snapshot = db.inner.state.read().snapshot();
+        let snapshot = db.inner.state.read().view();
         assert_eq!(snapshot.state.imm_memtable.len(), 1);
     }
 
@@ -2699,7 +2699,7 @@ mod tests {
         next_wal_id += 1;
 
         // verify that we reload imm
-        let snapshot = reader.inner.state.read().snapshot();
+        let snapshot = reader.inner.state.read().view();
         assert_eq!(snapshot.state.imm_memtable.len(), 2);
 
         // one empty wal and two wals for the puts
@@ -2780,7 +2780,7 @@ mod tests {
             .unwrap();
 
         // verify that we reload imm
-        let snapshot = db.inner.state.read().snapshot();
+        let snapshot = db.inner.state.read().view();
 
         // resume write-compacted-sst-io-error since we got a snapshot and
         // want to let the test finish.
