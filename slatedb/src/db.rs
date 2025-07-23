@@ -163,9 +163,9 @@ impl DbInner {
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.db_stats.get_requests.inc();
         self.check_error()?;
-        let db_state_view = self.state.read().view();
+        let db_state = self.state.read().view();
         self.reader
-            .get_with_options(key, options, &db_state_view, None)
+            .get_with_options(key, options, &db_state, None)
             .await
     }
 
@@ -176,9 +176,9 @@ impl DbInner {
     ) -> Result<DbIterator<'a>, SlateDBError> {
         self.db_stats.scan_requests.inc();
         self.check_error()?;
-        let db_state_view = self.state.read().view();
+        let db_state = self.state.read().view();
         self.reader
-            .scan_with_options(range, options, &db_state_view, None)
+            .scan_with_options(range, options, &db_state, None)
             .await
     }
 
@@ -2328,8 +2328,8 @@ mod tests {
 
         db.flush().await.unwrap();
 
-        let snapshot = db.inner.state.read().view();
-        assert_eq!(snapshot.state.imm_memtable.len(), 1);
+        let db_state = db.inner.state.read().view();
+        assert_eq!(db_state.state.imm_memtable.len(), 1);
     }
 
     #[tokio::test]
@@ -2699,12 +2699,12 @@ mod tests {
         next_wal_id += 1;
 
         // verify that we reload imm
-        let snapshot = reader.inner.state.read().view();
-        assert_eq!(snapshot.state.imm_memtable.len(), 2);
+        let db_state = reader.inner.state.read().view();
+        assert_eq!(db_state.state.imm_memtable.len(), 2);
 
         // one empty wal and two wals for the puts
         assert_eq!(
-            snapshot
+            db_state
                 .state
                 .imm_memtable
                 .front()
@@ -2713,7 +2713,7 @@ mod tests {
             1 + 2
         );
         assert_eq!(
-            snapshot
+            db_state
                 .state
                 .imm_memtable
                 .get(1)
@@ -2721,7 +2721,7 @@ mod tests {
                 .recent_flushed_wal_id(),
             2
         );
-        assert_eq!(snapshot.state.core().next_wal_sst_id, next_wal_id);
+        assert_eq!(db_state.state.core().next_wal_sst_id, next_wal_id);
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -2780,17 +2780,17 @@ mod tests {
             .unwrap();
 
         // verify that we reload imm
-        let snapshot = db.inner.state.read().view();
+        let db_state = db.inner.state.read().view();
 
         // resume write-compacted-sst-io-error since we got a snapshot and
         // want to let the test finish.
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
-        assert_eq!(snapshot.state.imm_memtable.len(), 1);
+        assert_eq!(db_state.state.imm_memtable.len(), 1);
 
         // one empty wal and one wal for the first put
         assert_eq!(
-            snapshot
+            db_state
                 .state
                 .imm_memtable
                 .front()
@@ -2798,9 +2798,9 @@ mod tests {
                 .recent_flushed_wal_id(),
             1 + 1
         );
-        assert!(snapshot.state.imm_memtable.get(1).is_none());
+        assert!(db_state.state.imm_memtable.get(1).is_none());
 
-        assert_eq!(snapshot.state.core().next_wal_sst_id, 4);
+        assert_eq!(db_state.state.core().next_wal_sst_id, 4);
         assert_eq!(
             db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
