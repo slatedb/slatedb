@@ -642,6 +642,8 @@ impl Dst {
     }
 }
 
+/// A [BTreeMap] that tracks the total size of the map in bytes. This helps
+/// us keep an upper-bound on the memory usage.
 pub struct SizedBTreeMap<K, V>
 where
     K: Ord + AsRef<[u8]>,
