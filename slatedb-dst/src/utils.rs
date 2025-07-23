@@ -1,4 +1,5 @@
 use rand::Rng;
+use slatedb::clock::LogicalClock;
 use slatedb::clock::SystemClock;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
@@ -36,10 +37,11 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
 
 pub async fn build_dst(
     system_clock: Arc<dyn SystemClock>,
+    logical_clock: Arc<dyn LogicalClock>,
     rand: Rc<DbRand>,
     dst_opts: DstOptions,
 ) -> Dst {
-    let db = build_db(system_clock.clone(), &rand).await;
+    let db = build_db(system_clock.clone(), logical_clock.clone(), &rand).await;
     Dst::new(
         db,
         system_clock,
@@ -50,11 +52,16 @@ pub async fn build_dst(
 }
 
 /// Builds a DB instance with components that are selected at random.
-pub async fn build_db(system_clock: Arc<dyn SystemClock>, rand: &DbRand) -> Db {
+pub async fn build_db(
+    system_clock: Arc<dyn SystemClock>,
+    logical_clock: Arc<dyn LogicalClock>,
+    rand: &DbRand,
+) -> Db {
     let mut builder = DbBuilder::new("test_db", Arc::new(InMemory::new()));
     builder = builder.with_settings(build_settings(rand).await);
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
     builder = builder.with_system_clock(system_clock.clone());
+    builder = builder.with_logical_clock(logical_clock.clone());
     builder.build().await.unwrap()
 }
 
@@ -115,13 +122,20 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
 
 pub async fn run_simulation(
     system_clock: Arc<dyn SystemClock>,
+    logical_clock: Arc<dyn LogicalClock>,
     rand: Rc<DbRand>,
     iterations: u32,
     dst_opts: DstOptions,
 ) -> Result<(), SlateDBError> {
     let seed = rand.seed();
     info!("running simulation with seed {}", seed);
-    let mut dst = build_dst(system_clock.clone(), rand.clone(), dst_opts).await;
+    let mut dst = build_dst(
+        system_clock.clone(),
+        logical_clock.clone(),
+        rand.clone(),
+        dst_opts,
+    )
+    .await;
     match dst.run_simulation(iterations).await {
         Ok(_) => Ok(()),
         Err(e) => {

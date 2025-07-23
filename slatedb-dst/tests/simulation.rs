@@ -10,6 +10,7 @@
 
 use rand::Rng;
 use rstest::rstest;
+use slatedb::clock::MockLogicalClock;
 use slatedb::clock::MockSystemClock;
 use slatedb::clock::SystemClock;
 use slatedb::DbRand;
@@ -56,7 +57,10 @@ fn test_dst(
     #[case] dst_opts: DstOptions,
 ) -> Result<(), SlateDBError> {
     let runtime = build_runtime(rand.seed());
-    runtime.block_on(async move { run_simulation(system_clock, rand, iterations, dst_opts).await })
+    let logical_clock = Arc::new(MockLogicalClock::new());
+    runtime.block_on(async move {
+        run_simulation(system_clock, logical_clock, rand, iterations, dst_opts).await
+    })
 }
 
 /// Verifies that SlateDB is deterministic when we seed the random number
@@ -98,9 +102,10 @@ fn test_dst_is_deterministic(
     for simulation_count in 0..simulations {
         let rand = Rc::new(DbRand::new(seed));
         let system_clock = Arc::new(MockSystemClock::new());
+        let logical_clock = Arc::new(MockLogicalClock::new());
         let runtime = build_runtime(rand.rng().random::<u64>());
         runtime.block_on(async {
-            let mut dst = build_dst(system_clock.clone(), rand.clone(), DstOptions::default()).await;
+            let mut dst = build_dst(system_clock.clone(), logical_clock.clone(), rand.clone(), DstOptions::default()).await;
             info!(seed, simulation_count, "running simulation");
             match dst.run_simulation(iterations).await {
                 Ok(()) => {

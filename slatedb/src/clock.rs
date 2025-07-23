@@ -228,6 +228,31 @@ impl LogicalClock for DefaultLogicalClock {
     }
 }
 
+/// A mock logical clock implementation that uses an atomic i64 to track time.
+/// The clock always starts at i64::MIN and increments by 1 on each call to now().
+/// It is fully deterministic.
+#[cfg(feature = "test-util")]
+#[derive(Debug)]
+pub struct MockLogicalClock {
+    current_tick: AtomicI64,
+}
+
+#[cfg(feature = "test-util")]
+impl MockLogicalClock {
+    pub fn new() -> Self {
+        Self {
+            current_tick: AtomicI64::new(i64::MIN),
+        }
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl LogicalClock for MockLogicalClock {
+    fn now(&self) -> i64 {
+        self.current_tick.fetch_add(1, Ordering::SeqCst)
+    }
+}
+
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
 /// from the underlying implementation are monotonically increasing
 pub(crate) struct MonotonicClock {

@@ -5,11 +5,11 @@
 //! that runs a simulation for a given number of iterations.
 //!
 //! Each iteration, or step, in the simulation runs a single action to perform
-//! on the database. Each action is determined by a [DstDistribution] implementation.
+//! on the database. The action is determined by a [DstDistribution] implementation.
 //! If the action is a read (get or scan), the simulation verifies the result
-//! against an in-memory copy of the database ([Dst::state]). If the action is a
-//! write (put or delete), the simulation updates both the database and the in-memory
-//! copy.
+//! against an in-memory [BTreeMap] copy of the database ([Dst::state]). If the action
+//! is a write (put or delete), the simulation updates both the database and the
+//! in-memory copy.
 //!
 //! [DstAction] contains the (currently) supported actions:
 //!
@@ -19,25 +19,28 @@
 //! - [DstAction::Flush]
 //! - [DstAction::AdvanceTime]
 //!
-//! Notice the [DstAction::AdvanceTime] action. [Dst] expects to be run with
-//! completely deterministic components. This includes:
+//! [Dst] expects to be run with completely deterministic components for time, random
+//! numbers, and scheduling (the async runtime). SlateDB provides the following
+//! components to make this possible:
 //!
-//! - [SystemClock]: A mock system clock is provided by [MockSystemClock](slatedb::clock::MockSystemClock).
-//! - [LogicalClock](slatedb::clock::LogicalClock): A mock logical clock is provided by [MockLogicalClock](slatedb::clock::MockLogicalClock).
+//! - [SystemClock]: A mock system clock is provided by
+//!   [MockSystemClock](slatedb::clock::MockSystemClock).
+//! - [LogicalClock](slatedb::clock::LogicalClock): A mock logical clock is provided
+//!   by [MockLogicalClock](slatedb::clock::MockLogicalClock).
 //! - [DbRand]: Can be made deterministic by providing a seed in [DbRand::new].
-//! - [Runtime](tokio::runtime::Runtime): A single threaded Tokio runtime with a rng_seed provided. This will require `RUSTFLAGS="--cfg tokio_unstable"`
+//! - [Runtime](tokio::runtime::Runtime): A single threaded Tokio runtime with a
+//!   rng_seed provided. This requires `RUSTFLAGS="--cfg tokio_unstable"` and Tokio's
+//!   `rt` feature enabled.
 //!
-//! ## [DefaultDstDistribution]
+//! It is somewhat cumbersome to set up these components, so helper functions are
+//! provided in [utils]. The `simulation.rs` tests show examples of how to use them.
 //!
-//! [DefaultDstDistribution] warrants some special attention. It is the default
-//! implementation of [DstDistribution] and is used by [Dst::run_simulation].
-//! It generates a random action with some probability, and performs it on the
-//! database. The probability of each action is determined by the
-//! [DefaultDstDistribution::gen_action] method.
+//! [Dst] can be configured with [DstOptions], which determines the maximum length of
+//! keys, values, and write batches, as well as the maximum size of the in-memory
+//! database ([Dst::state]).
 //!
-//! ## Usage
+//! ## Example
 //!
-//! DSTs are used to simulate random operations on a SlateDB instance. DSTs are
 
 use crate::utils;
 use rand::distr::weighted::WeightedIndex;
@@ -203,7 +206,15 @@ pub trait DstDistribution {
     fn sample_action(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction;
 }
 
-/// A default implementation of [DstDistribution].
+/// [DefaultDstDistribution] has the following characteristics:
+///
+/// - All [DstAction]s have an equal probability of being selected.
+/// - Each [DstWriteOp] has an 80% chance of being a write, and 20% chance of being a
+///   delete.
+/// - Scans are always generated with a start key < end key, and the start key. Both
+///   keys are sampled using [DefaultDstDistribution::gen_key].
+/// - [DefaultDstDistribution::sample_log10_uniform] is used to generate keys and values,
+///   and to advance time between 1ms and 10 seconds.
 pub struct DefaultDstDistribution {
     options: DstOptions,
     rand: Rc<DbRand>,
@@ -322,14 +333,14 @@ impl DefaultDstDistribution {
     /// Generates a key for actions that require a key. The key can be either a key that's
     /// currently in the DB, or a new key. New keys are filled with random bytes. The
     /// probability of sampling an existing key is determined by
-    /// [DefaultDstDistribution::maybe_gen_existing_key].
+    /// [DefaultDstDistribution::maybe_get_existing_key].
     ///
-    /// Key sizes are sampled using [DefaultDstDistribution::sample_log_uniform]. This
+    /// Key sizes are sampled using [DefaultDstDistribution::sample_log10_uniform]. This
     /// ensures that we cover a wide range of keys without favoring any particular size.
-    /// See [DefaultDstDistribution::sample_log_uniform] for more details.
+    /// See [DefaultDstDistribution::sample_log10_uniform] for more details.
     #[inline]
     fn gen_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
-        if let Some(existing_key) = self.maybe_gen_existing_key(state) {
+        if let Some(existing_key) = self.maybe_get_existing_key(state) {
             return existing_key;
         }
         let key_len = self.sample_log10_uniform(1..self.options.max_key_bytes as u32) as usize;
@@ -343,7 +354,7 @@ impl DefaultDstDistribution {
     /// a simple way to control the probability of sampling an existing key, but it may be
     /// improved in the future.
     #[inline]
-    fn maybe_gen_existing_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Option<Vec<u8>> {
+    fn maybe_get_existing_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Option<Vec<u8>> {
         let hit_probability = self.rand.rng().random_range(0.0..1.0);
         let is_db_hit = !state.is_empty() && self.rand.rng().random_bool(hit_probability);
         if is_db_hit {
@@ -360,9 +371,9 @@ impl DefaultDstDistribution {
 
     /// Generates a value for actions that require a value. The value is filled with random bytes.
     ///
-    /// Value sizes are sampled using [DefaultDstDistribution::sample_log_uniform]. This
+    /// Value sizes are sampled using [DefaultDstDistribution::sample_log10_uniform]. This
     /// ensures that we cover a wide range of values without favoring any particular size.
-    /// See [DefaultDstDistribution::sample_log_uniform] for more details.
+    /// See [DefaultDstDistribution::sample_log10_uniform] for more details.
     #[inline]
     fn gen_val(&self) -> Vec<u8> {
         let val_len = self.sample_log10_uniform(1..self.options.max_val_bytes) as usize;
