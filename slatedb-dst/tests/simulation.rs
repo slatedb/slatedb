@@ -1,7 +1,11 @@
-// These tests are only enabled when DST is enabled.
-// To run the tests, use one of:
-// - `RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo test test_dst --all-features`
-// - `RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo nextest run test_dst  --profile dst`
+//! # Deterministic Simulation Tests
+//!
+//! ## Usage
+//!
+//! These tests can only be run when DST is enabled. Use one of the following commands to run them:
+//!
+//! - `RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo test test_dst --all-features`
+//! - `RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo nextest run test_dst  --profile dst`
 #![cfg(all(dst, tokio_unstable))]
 
 use rand::Rng;
