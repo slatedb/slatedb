@@ -1,14 +1,39 @@
 //! # Deterministic Simulation Tests
 //!
-//! DSTs are used to simulate random operations on a SlateDB instance. DSTs are
-//! deterministic when configured for DSTs.
+//! This module contains tools for running deterministic simulations on a SlateDB
+//! instance. The main purpose of this module is to provide a [Dst::run_simulation]
+//! that runs a simulation for a given number of iterations.
 //!
-//! ## Components
+//! Each iteration, or step, in the simulation runs a single action to perform
+//! on the database. Each action is determined by a [DstDistribution] implementation.
+//! If the action is a read (get or scan), the simulation verifies the result
+//! against an in-memory copy of the database ([Dst::state]). If the action is a
+//! write (put or delete), the simulation updates both the database and the in-memory
+//! copy.
 //!
-//! - [Dst]: A DST is a simulation of random operations on a SlateDB instance.
-//! - [DstAction]: An action to be performed by the DST.
-//! - [DstDistribution]: A trait for generating DST actions with some probability.
-//! - [DefaultDstDistribution]: A default implementation of [DstDistribution].
+//! [DstAction] contains the (currently) supported actions:
+//!
+//! - [DstAction::Write]
+//! - [DstAction::Get]
+//! - [DstAction::Scan]
+//! - [DstAction::Flush]
+//! - [DstAction::AdvanceTime]
+//!
+//! Notice the [DstAction::AdvanceTime] action. [Dst] expects to be run with
+//! completely deterministic components. This includes:
+//!
+//! - [SystemClock]: A mock system clock is provided by [MockSystemClock](slatedb::clock::MockSystemClock).
+//! - [LogicalClock](slatedb::clock::LogicalClock): A mock logical clock is provided by [MockLogicalClock](slatedb::clock::MockLogicalClock).
+//! - [DbRand]: Can be made deterministic by providing a seed in [DbRand::new].
+//! - [Runtime](tokio::runtime::Runtime): A single threaded Tokio runtime with a rng_seed provided. This will require `RUSTFLAGS="--cfg tokio_unstable"`
+//!
+//! ## [DefaultDstDistribution]
+//!
+//! [DefaultDstDistribution] warrants some special attention. It is the default
+//! implementation of [DstDistribution] and is used by [Dst::run_simulation].
+//! It generates a random action with some probability, and performs it on the
+//! database. The probability of each action is determined by the
+//! [DefaultDstDistribution::gen_action] method.
 //!
 //! ## Usage
 //!
@@ -232,7 +257,8 @@ impl DefaultDstDistribution {
     /// the end key. SlateDB panics if the range is empty, so we skip scanning empty
     /// ranges.
     ///
-    /// See [DefaultDstDistribution::gen_key] for more information.
+    /// [DefaultDstDistribution::gen_key] is used to generate the start and end keys.
+    /// This means scan inherits the db_hit probability from that method.
     fn sample_scan(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
         let mut start_key = self.gen_key(state);
         let mut end_key = self.gen_key(state);
@@ -424,7 +450,7 @@ impl Dst {
 
     /// Runs the simulation for the given number of iterations.
     ///
-    /// Each iteration is a single step in the simulation. Each iteration samples an action
+    /// Each iteration is a single step in the simulation. Each step samples an action
     /// from the action sampler and runs it. Reads (get and scan) are verified against the
     /// in-memory state. Writes are run against the DB and the in-memory state.
     pub async fn run_simulation(&mut self, iterations: u32) -> Result<(), SlateDBError> {
