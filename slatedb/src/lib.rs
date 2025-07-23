@@ -1,3 +1,4 @@
+#![doc = include_str!("../../README.md")]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]

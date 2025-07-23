@@ -42,7 +42,7 @@
 //! ## Example
 //!
 //! ```rust
-//! # // Both of the following environment variables must be set to test this code block:
+//! # // The following environment variables must be set to test this code block:
 //! # // RUSTFLAGS="--cfg tokio_unstable"
 //! # // RUSTDOCFLAGS="--cfg tokio_unstable"
 //! # #[cfg(tokio_unstable)] {
