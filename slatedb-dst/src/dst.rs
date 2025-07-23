@@ -41,6 +41,19 @@
 //!
 //! ## Example
 //!
+//! ```rust
+//! # use slatedb::clock::MockSystemClock;
+//! # use slatedb::clock::MockLogicalClock;
+//! # use slatedb::DbRand;
+//! # use slatedb_dst::DstOptions;
+//! # use slatedb_dst::utils::{build_dst, run_simulation};
+//! let system_clock = MockSystemClock::new();
+//! let logical_clock = MockLogicalClock::new();
+//! let rand = DbRand::new(1);
+//! let dst_opts = DstOptions::default();
+//! run_simulation(system_clock, logical_clock, rand, 10, dst_opts).await?;
+//! ```
+//!
 
 use crate::utils;
 use rand::distr::weighted::WeightedIndex;

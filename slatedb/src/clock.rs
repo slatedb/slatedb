@@ -238,6 +238,13 @@ pub struct MockLogicalClock {
 }
 
 #[cfg(feature = "test-util")]
+impl Default for MockLogicalClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "test-util")]
 impl MockLogicalClock {
     pub fn new() -> Self {
         Self {
