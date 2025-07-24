@@ -511,7 +511,10 @@ impl FsCacheEvictorInner {
                 }
             };
             #[allow(clippy::disallowed_types)]
-            let atime = metadata.accessed().unwrap_or(std::time::SystemTime::UNIX_EPOCH).into();
+            let atime = metadata
+                .accessed()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                .into();
             let path = entry.path().to_path_buf();
             let bytes = metadata.len() as usize;
 
