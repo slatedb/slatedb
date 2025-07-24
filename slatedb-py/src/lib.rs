@@ -12,7 +12,7 @@ use pyo3::types::{PyBytes, PyDict, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
 use std::backtrace::Backtrace;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -35,12 +35,6 @@ fn load_object_store(env_file: Option<String>) -> PyResult<Arc<dyn ObjectStore>>
     } else {
         Ok(Arc::new(InMemory::new()))
     }
-}
-
-fn to_millis(time: SystemTime) -> u64 {
-    time.duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
 }
 
 /// A Python module implemented in Rust.
@@ -409,8 +403,8 @@ impl PySlateDBAdmin {
                 let dict = PyDict::new(py);
                 dict.set_item("id", c.id.to_string())?;
                 dict.set_item("manifest_id", c.manifest_id)?;
-                dict.set_item("expire_time", c.expire_time.map(to_millis))?;
-                dict.set_item("create_time", to_millis(c.create_time))?;
+                dict.set_item("expire_time", c.expire_time.map(|t| t.timestamp_millis()))?;
+                dict.set_item("create_time", c.create_time.timestamp_millis())?;
                 Ok(dict)
             })
             .collect::<PyResult<Vec<Bound<PyDict>>>>()

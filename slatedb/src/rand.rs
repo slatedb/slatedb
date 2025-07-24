@@ -1,5 +1,3 @@
-#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
-
 //! SlateDB's module for generating random data.
 //!
 //! This module exists because we want to do deterministic simulation testing
@@ -9,6 +7,8 @@
 //! The module currently uses Xoshiro128++ for all random number generators. The
 //! rand crate's `seed_from_u64` method uses SplitMix64 under the hood, which
 //! makes it safe to use when creating new thread-local RNGs.
+
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
