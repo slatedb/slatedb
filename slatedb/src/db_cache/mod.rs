@@ -263,7 +263,7 @@ impl DbCacheWrapper {
 
 // The minimum interval between which the wrapper logs cache errors at error level. This is used to
 // ensure we don't spam the logs on non-transient errors from the cache.
-const ERROR_LOG_INTERVAL: TimeDelta = TimeDelta::seconds(1); // 1 second
+const ERROR_LOG_INTERVAL: TimeDelta = TimeDelta::seconds(1);
 
 impl DbCacheWrapper {
     fn record_get_err(&self, block_type: &str, err: &SlateDBError) {

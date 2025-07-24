@@ -379,16 +379,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
         Uuid::create(&mut self.builder, &UuidArgs { high, low })
     }
 
-    // fn time_to_unix_ts(time: &SystemTime) -> u32 {
-    //     time.duration_since(UNIX_EPOCH)
-    //         .expect("manifest expire time cannot be earlier than epoch")
-    //         .as_secs() as u32 // TODO: check bounds
-    // }
-
-    // fn maybe_time_to_unix_ts(time: Option<&SystemTime>) -> u32 {
-    //     time.map(Self::time_to_unix_ts).unwrap_or(0)
-    // }
-
     fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
         let id = self.add_uuid(checkpoint.id);
         let checkpoint_expire_time_s =
