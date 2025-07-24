@@ -10,9 +10,14 @@
 //!    (LSN) from a database, a Kafka offset, a `created_at` timestamp
 //!    associated with the write, and so on.
 //!
-//! We've chosen to implement our own [SystemClock] so we can provide a mock
-//! implementation for testing purposes. A [DefaultSystemClock] and a
-//! [MockSystemClock] are both provided.
+//! We've chosen to implement our own [SystemClock] so we can mock it for testing
+//! purposes. Mocks are available when the `test-util` feature is enabled.
+//!
+//! [DefaultSystemClock] and [DefaultLogicalClock] are both provided as well.
+//! [DefaultSystemClock] implements a system clock that uses Tokio's clock to measure
+//! time duration. [DefaultLogicalClock] implements a logical clock that wraps
+//! the [DefaultSystemClock] and returns the number of milliseconds since the
+//! Unix epoch.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -198,17 +203,19 @@ impl SystemClock for MockSystemClock {
 /// Defines the logical clock that SlateDB will use to measure time for things
 /// like TTL expiration.
 pub trait LogicalClock: Debug + Send + Sync {
-    /// Returns a timestamp (typically measured in millis since the unix epoch),
-    /// must return monotonically increasing numbers (this is enforced
+    /// Returns a timestamp (typically measured in millis since the unix epoch).
+    /// Must return monotonically increasing numbers (this is enforced
     /// at runtime and will panic if the invariant is broken).
     ///
     /// Note that this clock does not need to return a number that
-    /// represents the unix timestamp; the only requirement is that
+    /// represents a unix timestamp; the only requirement is that
     /// it represents a sequence that can attribute a logical ordering
     /// to actions on the database.
     fn now(&self) -> i64;
 }
 
+/// A logical clock implementation that wraps the [DefaultSystemClock]
+/// and returns the number of milliseconds since the Unix epoch.
 #[derive(Debug)]
 pub struct DefaultLogicalClock {
     last_ts: AtomicI64,
