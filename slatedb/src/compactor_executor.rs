@@ -212,10 +212,6 @@ impl TokioCompactionExecutorInner {
                 last_progress_report = self.clock.now();
             }
 
-            if compaction.is_dest_last_run && kv.value.is_tombstone() {
-                continue;
-            }
-
             if let Some(block_size) = current_writer.add(kv).await? {
                 compacted_block_size += block_size;
             }
