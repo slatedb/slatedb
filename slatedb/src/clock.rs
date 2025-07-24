@@ -1,3 +1,19 @@
+//! This module contains utility methods and structs for handling time.
+//!
+//! SlateDB has two concepts of time:
+//!
+//! 1. The [SystemClock], which is used to measure wall-clock time for things
+//!    like garbage collection schedule ticks, compaction schedule ticks, and so
+//!    on.
+//! 2. The [LogicalClock], which is a monotonically increasing number used to order
+//!    writes in the database. This could represent a logical sequence number
+//!    (LSN) from a database, a Kafka offset, a `created_at` timestamp
+//!    associated with the write, and so on.
+//!
+//! We've chosen to implement our own [SystemClock] so we can provide a mock
+//! implementation for testing purposes. A [DefaultSystemClock] and a
+//! [MockSystemClock] are both provided.
+
 #![allow(clippy::disallowed_methods)]
 
 use std::{
@@ -30,6 +46,11 @@ pub trait SystemClock: Debug + Send + Sync {
     fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a>;
 }
 
+/// A ticker that emits a signal every `duration` interval. This allows us to use our
+/// clock to control ticking.
+///
+/// The first tick will complete immediately. Subsequent ticks will complete after the
+/// specified duration has elapsed. This is to mimic Tokio's ticker behavior.
 pub struct SystemClockTicker<'a> {
     clock: &'a dyn SystemClock,
     duration: Duration,
@@ -58,9 +79,8 @@ impl<'a> SystemClockTicker<'a> {
 }
 
 /// A system clock implementation that uses tokio::time::Instant to measure time duration.
-/// SystemTime::now() is used to track the initial timestamp (ms since Unix epoch). This
-/// timestamp is used to convert the tokio::time::Instant to a SystemTime when now() is
-/// called.
+/// Utc::now() is used to track the initial timestamp (ms since Unix epoch). This DateTime
+/// is used to convert the tokio::time::Instant to a DateTime when now() is called.
 ///
 /// Note that, becasue we're using tokio::time::Instant, manipulating tokio's clock with
 /// tokio::time::pause(), tokio::time::advance(), and so on will affect the
@@ -158,6 +178,8 @@ impl SystemClock for MockSystemClock {
         Box::pin(async move {})
     }
 
+    /// Sleeps for the specified duration. Note that sleep() does not advance the clock.
+    /// Another thread or task must call advance() to advance the clock to unblock the sleep.
     fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         let end_time = self.current_ts.load(Ordering::SeqCst) + duration.as_millis() as i64;
         Box::pin(async move {
@@ -216,8 +238,7 @@ impl LogicalClock for DefaultLogicalClock {
     }
 }
 
-/// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
-/// from the underlying implementation are monotonically increasing
+/// A clock that enforces that LogicalClock ticks are monotonically increasing.
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
     pub(crate) last_durable_tick: AtomicI64,
