@@ -181,16 +181,42 @@ The compaction state is persisted to the object store following the same CAS pat
 #### **CompactionState Structure**
 The persistent state contains the complete view of all compaction activity:
 
-```
-CompactionState
-├── compactor_epoch: u64                    # Fencing token for single compactor
-├── next_compactor_state_id: u64            # Next state ID to use (current = this - 1)
-├── active_compactions: Map<CompactionId, Compaction>
-├── job_history: Map<CompactionJobId, CompactionJob>
-├── manual_compaction_queue: Vec<ManualCompactionRequest>
-├── statistics: CompactionStatistics        # Aggregated metrics
-├── last_gc_coordination_ts: DateTime       # GC synchronization point
-└── configuration: CompactionConfiguration  # Active settings
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionState {
+    /// Fencing token to ensure single active compactor
+    /// Incremented each time a new compactor takes control
+    pub compactor_epoch: u64,
+    
+    /// Next state ID to use for CAS operations
+    /// Current state ID = this value - 1
+    pub next_compactor_state_id: u64,
+    
+    /// All currently active compactions indexed by ID
+    /// Includes queued, running, and recently completed compactions
+    pub active_compactions: HashMap<CompactionId, Compaction>,
+    
+    /// Historical record of completed compaction jobs
+    /// Used for statistics and debugging, cleaned up by GC
+    pub job_history: HashMap<CompactionJobId, CompactionJob>,
+    
+    /// Queue of pending manual compaction requests
+    /// Processed in priority order by the active compactor
+    pub manual_compaction_queue: Vec<ManualCompactionRequest>,
+    
+    /// Aggregated performance and reliability statistics
+    pub statistics: CompactionStatistics,
+    
+    /// Timestamp of last coordination with garbage collector
+    /// Used to prevent GC from removing SSTs still being compacted
+    pub last_gc_coordination_ts: DateTime<Utc>,
+    
+    /// Active configuration settings for compaction behavior
+    pub configuration: CompactionConfiguration,
+    
+    /// Timestamp when this state was created/last updated
+    pub state_timestamp: DateTime<Utc>,
+}
 ```
 
 #### **CAS-Based Atomic Updates**
@@ -390,7 +416,7 @@ For a **typical 40GB compaction** (160 input SSTs → ~160 output SSTs):
 
 #### **Cloud Cost Analysis** 
 
-Using **AWS S3 Standard** pricing (as of 2024):
+Using **AWS S3 Standard** pricing:
 - **PUT operations**: $0.0005 per 1,000 requests
 - **GET operations**: $0.0004 per 1,000 requests  
 - **DELETE operations**: $0.0005 per 1,000 requests
