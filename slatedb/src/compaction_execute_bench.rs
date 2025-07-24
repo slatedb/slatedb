@@ -172,13 +172,16 @@ impl CompactionExecuteBench {
             let row_entry = RowEntry::new(key, ValueDeletable::Value(val.into()), 0, None, None);
             sst_writer.add(row_entry).await?;
         }
-        let (encoded, _) = sst_writer.close().await?;
+        let closed_sst = sst_writer.close().await?;
         let elapsed_ms = system_clock
             .now()
             .duration_since(start)
             .expect("clock moved backwards")
             .as_millis();
-        info!("wrote sst with id: {:?} {:?}ms", &encoded.id, elapsed_ms);
+        info!(
+            "wrote sst with id: {:?} {:?}ms",
+            &closed_sst.sst.id, elapsed_ms
+        );
         Ok(())
     }
 
