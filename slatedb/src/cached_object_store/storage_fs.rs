@@ -1,7 +1,7 @@
 use std::ops::{DerefMut, Range};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{fmt::Display, io::SeekFrom};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
@@ -510,7 +510,8 @@ impl FsCacheEvictorInner {
                     continue;
                 }
             };
-            let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH).into();
+            #[allow(clippy::disallowed_types)]
+            let atime = metadata.accessed().unwrap_or(std::time::SystemTime::UNIX_EPOCH).into();
             let path = entry.path().to_path_buf();
             let bytes = metadata.len() as usize;
 

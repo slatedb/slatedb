@@ -40,6 +40,7 @@ disallowed-types   = [
     { path = "uuid::Builder", reason = "Use crate::utils::IdGenerator instead" },
     { path = "ulid::Generator", reason = "Use crate::utils::IdGenerator instead" },
     { path = "std::time::Instant", reason = "Use tokio::time::Instant instead" },
+    { path = "std::time::SystemTime", reason = "Use crate::clock::SystemClock instead" },
     { path = "std::thread::Builder", reason = "Use tokio::task::Builder instead" },
 ]
 disallowed-methods = [
@@ -48,8 +49,6 @@ disallowed-methods = [
     { path = "rand::thread_rng", reason = "Use crate::rand::DbRand instead" },
     { path = "rand::prelude::random", reason = "Use crate::rand::DbRand instead" },
     { path = "rand::prelude::thread_rng", reason = "Use crate::rand::DbRand instead" },
-    { path = "std::time::SystemTime::now", reason = "Use crate::clock::SystemClock instead" },
-    { path = "std::time::SystemTime::elapsed", reason = "Use crate::clock::SystemClock instead" },
     { path = "chrono::Utc::now", reason = "Use crate::clock::SystemClock instead" },
     { path = "ulid::Ulid::new", reason = "Use crate::utils::IdGenerator instead" },
     { path = "uuid::Uuid::new_v1", reason = "Use crate::utils::IdGenerator instead" },
