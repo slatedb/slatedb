@@ -143,7 +143,6 @@ impl ManifestCodec for FlatBufferManifestCodec {
 }
 
 impl FlatBufferManifestCodec {
-
     fn decode_uuid(uuid: Uuid) -> uuid::Uuid {
         uuid::Uuid::from_u64_pair(uuid.high(), uuid.low())
     }
