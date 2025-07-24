@@ -543,11 +543,11 @@ impl EncodedSsTableWriter<'_> {
 
     pub async fn close(mut self) -> Result<ClosedSsTableHandle, SlateDBError> {
         let mut encoded_sst = self.builder.build()?;
-        let drained_blocks_size = if encoded_sst.unconsumed_blocks.is_empty() {
-            None
-        } else {
-            Some(encoded_sst.unconsumed_blocks.iter().map(|b| b.len()).sum())
-        };
+        let drained_blocks_size = encoded_sst
+            .unconsumed_blocks
+            .iter()
+            .map(|b| Some(b.len()))
+            .sum::<Option<usize>>();
 
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
