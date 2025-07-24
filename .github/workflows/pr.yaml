@@ -94,6 +94,10 @@ jobs:
         run: cargo nextest run --workspace --all-features --profile ci
       - name: Run Doc Tests
         run: cargo test --doc --all-features
+      - name: Run DST Tests
+        run: cargo nextest run -p slatedb-dst --all-features --profile dst
+        env:
+          RUSTFLAGS: "--cfg dst --cfg tokio_unstable"
 
   bindings:
     runs-on: ubuntu-latest

@@ -3237,6 +3237,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "slatedb-dst"
+version = "0.7.0"
+dependencies = [
+ "ctor",
+ "futures",
+ "object_store",
+ "rand 0.9.1",
+ "rstest",
+ "slatedb",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "slatedb-py"
 version = "0.7.0"
 dependencies = [

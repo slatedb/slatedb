@@ -161,7 +161,13 @@ impl SystemClock for MockSystemClock {
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         self.current_ts
             .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
-        Box::pin(async move {})
+        Box::pin(async move {
+            // An empty async block always returns Poll::Ready(()) because nothing inside
+            // the block can yield control to other tasks. Calling advance() in a tight loop
+            // would prevent other tasks from running in this case. Yielding control to other
+            // tasks explicitly so we avoid this issue.
+            tokio::task::yield_now().await;
+        })
     }
 
     fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
@@ -219,6 +225,38 @@ impl LogicalClock for DefaultLogicalClock {
         let current_ts = system_time_to_millis(self.inner.now());
         self.last_ts.fetch_max(current_ts, Ordering::SeqCst);
         self.last_ts.load(Ordering::SeqCst)
+    }
+}
+
+/// A mock logical clock implementation that uses an atomic i64 to track time.
+/// The clock always starts at i64::MIN and increments by 1 on each call to now().
+/// It is fully deterministic.
+#[cfg(feature = "test-util")]
+#[derive(Debug)]
+pub struct MockLogicalClock {
+    current_tick: AtomicI64,
+}
+
+#[cfg(feature = "test-util")]
+impl Default for MockLogicalClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl MockLogicalClock {
+    pub fn new() -> Self {
+        Self {
+            current_tick: AtomicI64::new(i64::MIN),
+        }
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl LogicalClock for MockLogicalClock {
+    fn now(&self) -> i64 {
+        self.current_tick.fetch_add(1, Ordering::SeqCst)
     }
 }
 
