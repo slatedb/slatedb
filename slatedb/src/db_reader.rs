@@ -3,6 +3,7 @@ use crate::clock::{
     DefaultLogicalClock, DefaultSystemClock, LogicalClock, MonotonicClock, SystemClock,
 };
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
+use crate::db_read::DbRead;
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
@@ -12,7 +13,7 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::oracle::Oracle;
 use crate::rand::DbRand;
-use crate::reader::{ReadSnapshot, Reader};
+use crate::reader::{DbStateReader, Reader};
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
@@ -74,7 +75,7 @@ struct CheckpointState {
 
 static EMPTY_TABLE: Lazy<Arc<KVTable>> = Lazy::new(|| Arc::new(KVTable::new()));
 
-impl ReadSnapshot for CheckpointState {
+impl DbStateReader for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
         Arc::clone(&EMPTY_TABLE)
     }
@@ -184,9 +185,9 @@ impl DbReaderInner {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.check_error()?;
-        let snapshot = Arc::clone(&self.state.read());
+        let db_state = Arc::clone(&self.state.read());
         self.reader
-            .get_with_options(key, options, snapshot.as_ref(), None)
+            .get_with_options(key, options, db_state.as_ref(), None)
             .await
     }
 
@@ -196,9 +197,9 @@ impl DbReaderInner {
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_error()?;
-        let snapshot = Arc::clone(&self.state.read());
+        let db_state = Arc::clone(&self.state.read());
         self.reader
-            .scan_with_options(range, options, snapshot.as_ref(), None)
+            .scan_with_options(range, options, db_state.as_ref(), None)
             .await
     }
 
@@ -839,6 +840,29 @@ impl DbReader {
             }
         }
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl DbRead for DbReader {
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, SlateDBError> {
+        self.get_with_options(key, options).await
+    }
+
+    async fn scan_with_options<K, T>(
+        &self,
+        range: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, SlateDBError>
+    where
+        K: AsRef<[u8]> + Send,
+        T: RangeBounds<K> + Send,
+    {
+        self.scan_with_options(range, options).await
     }
 }
 
