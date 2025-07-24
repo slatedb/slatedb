@@ -143,17 +143,6 @@ impl ManifestCodec for FlatBufferManifestCodec {
 }
 
 impl FlatBufferManifestCodec {
-    // fn unix_ts_to_time(unix_ts: u32) -> SystemTime {
-    //     UNIX_EPOCH + Duration::from_secs(unix_ts as u64)
-    // }
-
-    // fn maybe_unix_ts_to_time(unix_ts: u32) -> Option<SystemTime> {
-    //     if unix_ts == 0 {
-    //         None
-    //     } else {
-    //         Some(Self::unix_ts_to_time(unix_ts))
-    //     }
-    // }
 
     fn decode_uuid(uuid: Uuid) -> uuid::Uuid {
         uuid::Uuid::from_u64_pair(uuid.high(), uuid.low())
