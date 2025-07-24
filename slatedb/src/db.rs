@@ -38,6 +38,7 @@ use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
 use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
 use crate::db_iter::DbIterator;
+use crate::db_read::DbRead;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
@@ -169,11 +170,11 @@ impl DbInner {
             .await
     }
 
-    pub async fn scan_with_options<'a>(
-        &'a self,
+    pub async fn scan_with_options(
+        &self,
         range: BytesRange,
         options: &ScanOptions,
-    ) -> Result<DbIterator<'a>, SlateDBError> {
+    ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.inc();
         self.check_error()?;
         let db_state = self.state.read().view();
@@ -1003,6 +1004,29 @@ impl Db {
 
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl DbRead for Db {
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, SlateDBError> {
+        self.get_with_options(key, options).await
+    }
+
+    async fn scan_with_options<K, T>(
+        &self,
+        range: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, SlateDBError>
+    where
+        K: AsRef<[u8]> + Send,
+        T: RangeBounds<K> + Send,
+    {
+        self.scan_with_options(range, options).await
     }
 }
 
