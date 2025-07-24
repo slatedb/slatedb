@@ -547,7 +547,8 @@ impl EncodedSsTableWriter<'_> {
             .unconsumed_blocks
             .iter()
             .map(|b| Some(b.len()))
-            .sum::<Option<usize>>();
+            .sum::<Option<usize>>()
+            .filter(|s| *s > 0);
 
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
