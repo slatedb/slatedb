@@ -50,7 +50,7 @@ Compaction currently happens for the following:
 - L0 SSTs
 - Various level Sorted Runs(Range partitioned SST across the complete keyspace)
 
-This RFC proposes the goals & design Compaction State Persistence along with ways to improve current compaction mechanism by adding retries and tracking.
+This RFC proposes the goals & design for compaction state persistence along with ways to improve current compaction mechanism by adding retries and tracking.
 
 ## Goals
 
