@@ -112,12 +112,12 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 #### Steps
 
-1. `Compaction` initialises the `CompactionScheduler` and `CompactionEventHandler` during startup [No change required]
+1. `Compactor` initialises the `CompactionScheduler` and `CompactionEventHandler` during startup [No change required]
 2.  The `CompactionEventHandler` refreshes the compaction state by merging it with the `current manifest`[Need to refresh and merge with the persisted compaction state]
 3. `CompactionEventHandler` communicates this compaction state to the `CompactionScheduler` which decides and groups L0 SSTs and SRs to be compacted together.
 [This logic would require some changes to re-process the partially processed]
 4. A `CompactionExecutor` executes these grouped SSTs by spawning tasks that execute the `compactionJob`.[No change required]
-5. The task loads all the iterators in a `MergeIterator` struct and runs compactions on it. It discards older expired versions and continues to write to a SST block. Once the SST block reaches it's threshold size, the block is written to the active destination SR. Periodically the task also provides stats on task progress. [Need to persist the new block to the compaction state in object store]
+5. The task loads all the iterators in a `MergeIterator` struct and runs compactions on it. It discards older expired versions and continues to write to a SST. Once the SST reaches it's threshold size, the SST is written to the active destination SR. Periodically the task also provides stats on task progress. [Need to persist the new SST to the compaction state in object store]
 6. When a task completes compaction execution, the task returns the {destinationId, outputSSTs} to the `CompactionEventHandler`
 7. `CompactionEventHandler` is responsible to update in-memory compaction state, cleanup the job task, write logs and update manifest. [Need to update the compaction persistence state]
 8. GC clears the orphaned states and SSTs during it's run.
@@ -141,11 +141,7 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 **Rationale**: Reuses proven patterns for atomic updates, version checking, and conflict resolution that are already battle-tested in SlateDB.
 
 #### **4. Recovery Strategy**
-**Decision**: Smart recovery based on work preservation efficiency:
-- **High efficiency** (>80% work preserved): Resume from last completed output SST
-- **Low efficiency**: Full retry with exponential backoff
-
-**Rationale**: Balances complexity vs. value - don't over-optimize recovery for cases where restart is simpler.
+- Resume from last completed output SST
 
 ### **Data Model**
 ```
