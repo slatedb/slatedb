@@ -8,12 +8,12 @@
 //! Basic usage of the `DbBuilder` struct:
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
 //!         .build()
@@ -25,12 +25,12 @@
 //! Example with custom settings:
 //!
 //! ```
-//! use slatedb::{Db, config::Settings, SlateDBError};
+//! use slatedb::{Db, config::Settings, Error};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
 //!         .with_settings(Settings {
@@ -46,13 +46,13 @@
 //! Example with a custom block cache:
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::object_store::memory::InMemory;
 //! use slatedb::db_cache::moka::MokaCache;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
 //!         .with_block_cache(Arc::new(MokaCache::new()))
@@ -65,13 +65,13 @@
 //! Example with a custom clock:
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::clock::DefaultLogicalClock;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let clock = Arc::new(DefaultLogicalClock::new());
 //!     let db = Db::builder("test_db", object_store)
@@ -85,13 +85,13 @@
 //! Example with a custom SST block size:
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::config::SstBlockSize;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
 //!         .with_sst_block_size(SstBlockSize::Block8Kib) // 8KiB blocks
@@ -283,7 +283,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 
     /// Builds and opens the database.
-    pub async fn build(self) -> Result<Db, SlateDBError> {
+    pub async fn build(self) -> Result<Db, crate::Error> {
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
@@ -356,7 +356,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
                 return Err(SlateDBError::Unsupported(String::from(
                     "WAL object store reconfiguration is not supported",
-                )));
+                ))
+                .into());
             }
         }
 

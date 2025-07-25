@@ -240,7 +240,7 @@ pub(crate) async fn seed_database(
     db: &Db,
     table: &BTreeMap<Bytes, Bytes>,
     await_durable: bool,
-) -> Result<(), SlateDBError> {
+) -> Result<(), crate::Error> {
     let put_options = PutOptions::default();
     let write_options = WriteOptions { await_durable };
 
