@@ -170,9 +170,9 @@ CompactionProgress
 The compaction state is persisted to the object store following the same CAS pattern as manifests, ensuring consistency and reliability:
 
 ```
-/compactor_state_000000001.fbs  # First compactor state
-/compactor_state_000000002.fbs  # Updated state after compactions
-/compactor_state_000000003.fbs  # Current state
+/compactor_state_000000001.compactor  # First compactor state
+/compactor_state_000000002.compactor  # Updated state after compactions
+/compactor_state_000000003.compactor  # Current state
 ```
 
 #### **CompactionState Structure**
@@ -196,13 +196,6 @@ pub struct CompactionState {
     /// Queue of pending manual compaction requests
     /// Processed in priority order by the active compactor
     pub manual_compaction_queue: Vec<ManualCompactionRequest>,
-    
-    /// Timestamp of last coordination with garbage collector
-    /// Used to prevent GC from removing SSTs still being compacted
-    pub last_gc_coordination_ts: DateTime<Utc>,
-    
-    /// Active configuration settings for compaction behavior
-    pub configuration: CompactionConfiguration,
     
     /// Timestamp when this state was created/last updated
     pub state_timestamp: DateTime<Utc>,
