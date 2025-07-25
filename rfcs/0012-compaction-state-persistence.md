@@ -78,7 +78,7 @@ This RFC proposes the goals & design for compaction state persistence along with
 
 ## ProblemStatement
 
-This RFC discusses on the extensions discussed in the below github issue. It also addresses several other sub-issues.
+This RFC extends discussions in the below github issue. It also addresses several other sub-issues.
 
 [Issue #673](https://github.com/slatedb/slatedb/issues/673):
 
