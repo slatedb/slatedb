@@ -193,16 +193,9 @@ pub struct CompactionState {
     /// Includes queued, running, and recently completed compactions
     pub active_compactions: HashMap<CompactionId, Compaction>,
     
-    /// Historical record of completed compaction jobs
-    /// Used for statistics and debugging, cleaned up by GC
-    pub job_history: HashMap<CompactionJobId, CompactionJob>,
-    
     /// Queue of pending manual compaction requests
     /// Processed in priority order by the active compactor
     pub manual_compaction_queue: Vec<ManualCompactionRequest>,
-    
-    /// Aggregated performance and reliability statistics
-    pub statistics: CompactionStatistics,
     
     /// Timestamp of last coordination with garbage collector
     /// Used to prevent GC from removing SSTs still being compacted
