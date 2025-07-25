@@ -68,7 +68,7 @@ This RFC proposes the goals & design for compaction state persistence along with
 ## Constraints
 
 - Changes should be backward compatible and extend the existing compaction structs
-- State updation should be cost efficient
+- State updates should be cost efficient
 - Manifest can be eventually consistent with the latest view after comapaction
 
 ## References
