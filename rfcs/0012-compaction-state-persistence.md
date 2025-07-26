@@ -467,4 +467,5 @@ Using **AWS S3 Standard** pricing:
 ## Future Extensions
 
 ### **Distributed Compaction**
-Persistent state provides foundation for multi-compactor coordination and work distribution.
+- Persistent state provides foundation for multi-compactor coordination and work distribution.
+- Add time boundary based persistence of SSTs to the compaction state in the object_store
