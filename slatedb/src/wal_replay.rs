@@ -1,11 +1,10 @@
 use crate::db_state::{CoreDbState, SsTableId};
+use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
-use crate::SlateDBError;
-use crate::SlateDBError::InvalidArgument;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -95,9 +94,7 @@ impl WalReplayIterator<'_> {
     ) -> Result<Self, SlateDBError> {
         let sst_batch_size = options.sst_batch_size;
         if sst_batch_size < 1 {
-            return Err(InvalidArgument {
-                msg: "Replay batch size must be at least 1".to_string(),
-            });
+            return Err(SlateDBError::InvalidSSTBatchSize(sst_batch_size));
         }
 
         // load the last seq number from manifest, and use it as the starting seq number to avoid
@@ -286,7 +283,7 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
-    use crate::{test_utils, SlateDBError};
+    use crate::{error::SlateDBError, test_utils};
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;

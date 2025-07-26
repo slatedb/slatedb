@@ -15,7 +15,7 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{get_now_for_read, is_not_expired};
-use crate::{filter, DbIterator, SlateDBError};
+use crate::{error::SlateDBError, filter, DbIterator};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::FutureExt;

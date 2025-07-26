@@ -1,8 +1,8 @@
 use crate::manifest::Manifest;
 use crate::tablestore::SstFileMetadata;
 use crate::{
-    config::GarbageCollectorDirectoryOptions, manifest::store::ManifestStore,
-    tablestore::TableStore, SlateDBError,
+    config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
+    tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;

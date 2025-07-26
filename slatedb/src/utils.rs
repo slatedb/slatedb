@@ -307,13 +307,15 @@ impl<R: RngCore> IdGenerator for R {
 pub async fn timeout<T>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
+    op: &'static str,
     future: impl Future<Output = Result<T, SlateDBError>> + Send,
 ) -> Result<T, SlateDBError> {
     tokio::select! {
         biased;
         res = future => res,
         _ = clock.sleep(duration) => Err(SlateDBError::Timeout {
-            msg: "Timeout".to_string(),
+            op,
+            backoff: duration,
         })
     }
 }
@@ -591,7 +593,7 @@ mod tests {
 
         // When: we execute a future with a timeout
         let completed_future = async { Ok::<_, SlateDBError>(42) };
-        let timeout_future = timeout(clock, Duration::from_millis(100), completed_future);
+        let timeout_future = timeout(clock, Duration::from_millis(100), "test", completed_future);
 
         // Then: the future should complete successfully with the expected value
         let result = timeout_future.await;
@@ -611,7 +613,12 @@ mod tests {
         let never_completes = std::future::pending::<Result<(), SlateDBError>>();
 
         // When: we execute the future with a timeout and advance the clock past the timeout duration
-        let timeout_future = timeout(clock.clone(), Duration::from_millis(100), never_completes);
+        let timeout_future = timeout(
+            clock.clone(),
+            Duration::from_millis(100),
+            "test",
+            never_completes,
+        );
         let done = Arc::new(AtomicBool::new(false));
         let this_done = done.clone();
 
@@ -640,7 +647,12 @@ mod tests {
         let completes_immediately = async { Ok::<_, SlateDBError>(42) };
 
         // When: we execute the future with a timeout and both are ready immediately
-        let timeout_future = timeout(clock, Duration::from_millis(100), completes_immediately);
+        let timeout_future = timeout(
+            clock,
+            Duration::from_millis(100),
+            "test",
+            completes_immediately,
+        );
 
         // Then: because of the 'biased' select, the future should complete with the value
         // rather than timing out, even though both are ready

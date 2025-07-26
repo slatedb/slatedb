@@ -11,7 +11,7 @@ use slatedb::{
         moka::{MokaCache, MokaCacheOptions},
         DbCache,
     },
-    SettingsError,
+    Error,
 };
 use tracing::info;
 
@@ -68,7 +68,7 @@ pub(crate) struct DbArgs {
 
 impl DbArgs {
     /// Returns a `(Settings, Option<Arc<dyn DbCache>>)` struct based on DbArgs's arguments.
-    pub(crate) fn config(&self) -> Result<(Settings, Option<Arc<dyn DbCache>>), SettingsError> {
+    pub(crate) fn config(&self) -> Result<(Settings, Option<Arc<dyn DbCache>>), Error> {
         let settings = if let Some(path) = &self.db_options_path {
             Settings::from_file(path)?
         } else {

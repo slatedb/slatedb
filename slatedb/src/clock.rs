@@ -15,8 +15,8 @@ use std::{
 };
 
 use crate::{
+    error::SlateDBError,
     utils::{self, system_time_from_millis, system_time_to_millis},
-    SlateDBError,
 };
 use tracing::info;
 

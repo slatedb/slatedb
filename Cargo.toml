@@ -21,6 +21,7 @@ lto = true
 [workspace.dependencies]
 
 # dependencies
+anyhow = "1.0.98"
 async-trait = "0.1.82"
 atomic = "0.6.0"
 bitflags = "2.6.0"

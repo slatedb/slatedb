@@ -75,16 +75,16 @@ impl<'a> DbIterator<'a> {
     ///
     /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been invalidated
     ///  due to an underlying error
-    pub async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
         if let Some(error) = self.invalidated_error.clone() {
-            Err(SlateDBError::InvalidatedIterator(Box::new(error)))
+            Err(SlateDBError::InvalidatedIterator(Box::new(error)).into())
         } else {
             let result = self.iter.next().await;
             let result = self.maybe_invalidate(result);
             if let Ok(Some(ref kv)) = &result {
                 self.last_key = Some(kv.key.clone());
             }
-            result
+            result.map_err(Into::into)
         }
     }
 
@@ -107,7 +107,7 @@ impl<'a> DbIterator<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`SlateDBError::InvalidArgument`] in the following cases:
+    /// Returns an invalid argument error in the following cases:
     ///
     /// - if `next_key` comes before the current iterator position
     /// - if `next_key` is beyond the upper bound specified in the original
@@ -115,28 +115,25 @@ impl<'a> DbIterator<'a> {
     ///
     /// Returns [`SlateDBError::InvalidatedIterator`] if the iterator has been
     ///  invalidated in order to reclaim resources.
-    pub async fn seek<K: AsRef<[u8]>>(&mut self, next_key: K) -> Result<(), SlateDBError> {
+    pub async fn seek<K: AsRef<[u8]>>(&mut self, next_key: K) -> Result<(), crate::Error> {
         let next_key = next_key.as_ref();
         if let Some(error) = self.invalidated_error.clone() {
-            Err(SlateDBError::InvalidatedIterator(Box::new(error)))
+            Err(SlateDBError::InvalidatedIterator(Box::new(error)).into())
         } else if !self.range.contains(&next_key) {
-            Err(SlateDBError::InvalidArgument {
-                msg: format!(
-                    "Cannot seek to a key '{:?}' which is outside the iterator range {:?}",
-                    next_key, self.range
-                ),
-            })
+            Err(SlateDBError::SeekKeyOutOfRange {
+                key: next_key.to_vec(),
+                range: self.range.clone(),
+            }
+            .into())
         } else if self
             .last_key
             .clone()
             .is_some_and(|last_key| next_key <= last_key)
         {
-            Err(SlateDBError::InvalidArgument {
-                msg: "Cannot seek to a key less than the last returned key".to_string(),
-            })
+            Err(SlateDBError::SeekKeyLessThanLastReturnedKey.into())
         } else {
             let result = self.iter.seek(next_key).await;
-            self.maybe_invalidate(result)
+            self.maybe_invalidate(result).map_err(Into::into)
         }
     }
 }
@@ -176,11 +173,11 @@ mod tests {
         assert_invalidated_iterator_error(err);
     }
 
-    fn assert_invalidated_iterator_error(err: SlateDBError) {
-        let SlateDBError::InvalidatedIterator(from_err) = err else {
-            panic!("Unexpected error")
-        };
-        assert!(matches!(*from_err, SlateDBError::ChecksumMismatch));
+    fn assert_invalidated_iterator_error(err: crate::Error) {
+        assert_eq!(
+            err.to_string(),
+            "Operation error: iterator invalidated after unexpected error (checksum mismatch)"
+        );
     }
 
     #[tokio::test]
@@ -240,14 +237,17 @@ mod tests {
         assert_eq!(first.key, Bytes::from_static(b"key1"));
 
         // Seeking to the current key or a prior key should fail
-        assert!(matches!(
-            iter.seek(b"key1").await,
-            Err(SlateDBError::InvalidArgument { .. })
-        ));
-        assert!(matches!(
-            iter.seek(b"key0").await,
-            Err(SlateDBError::InvalidArgument { .. })
-        ));
+        let err = iter.seek(b"key1").await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Operation error: cannot seek to a key less than the last returned key"
+        );
+
+        let err = iter.seek(b"key0").await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Operation error: cannot seek to a key less than the last returned key"
+        );
 
         // Seeking forward succeeds and allows reading the next key
         iter.seek(b"key2").await.unwrap();
