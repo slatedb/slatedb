@@ -119,7 +119,7 @@ type can be transformed into an `slatedb::Error` through the `From` trait.
 ### Internal errors message format
 
 `SlateDbError` uses [thiserror](https://docs.rs/thiserror) to define internal errors. This crate gives you flexibility
-in the formatting of error messages, as well as other errors that are bubling up from the database.
+in the formatting of error messages, as well as other errors that are bubbling up from the database.
 
 We follow some conventions to generate message to ensure they are all consistent. This is the list of conventions:
 
