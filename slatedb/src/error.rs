@@ -178,6 +178,12 @@ pub(crate) enum SlateDBError {
 
     #[error("the final checkpoint for the cloned database no longer exists in the manifest. path=`{path}`, checkpoint_id=`{checkpoint_id}`")]
     CloneIncorrectFinalCheckpoint { path: String, checkpoint_id: Uuid },
+
+    #[error("unknown configuration file format. path=`{0}`")]
+    UnknownConfigurationFormat(PathBuf),
+
+    #[error("invalid configuration format")]
+    InvalidConfigurationFormat(#[from] Box<figment::Error>),
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -190,20 +196,6 @@ impl From<object_store::Error> for SlateDBError {
     fn from(value: object_store::Error) -> Self {
         Self::ObjectStoreError(Arc::new(value))
     }
-}
-
-/// Represents errors that can occur during the database configuration.
-///
-/// This enum encapsulates various error conditions that may arise
-/// when parsing or processing database configuration options.
-#[non_exhaustive]
-#[derive(ThisError, Debug)]
-pub(crate) enum SettingsError {
-    #[error("Unknown configuration file format `{0}`")]
-    UnknownFormat(PathBuf),
-
-    #[error("Invalid configuration format")]
-    InvalidFormat(#[from] Box<figment::Error>),
 }
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -404,16 +396,8 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneExternalDbMissing => Error::persistent_state(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::persistent_state(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::persistent_state(msg),
-        }
-    }
-}
-
-impl From<SettingsError> for Error {
-    fn from(err: SettingsError) -> Self {
-        let msg = err.to_string();
-        match err {
-            SettingsError::UnknownFormat(_) => Error::configuration(msg),
-            SettingsError::InvalidFormat(err) => {
+            SlateDBError::UnknownConfigurationFormat(_) => Error::configuration(msg),
+            SlateDBError::InvalidConfigurationFormat(err) => {
                 Error::configuration(msg).with_source(Box::new(err))
             }
         }

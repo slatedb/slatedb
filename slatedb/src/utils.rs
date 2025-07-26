@@ -304,6 +304,16 @@ impl<R: RngCore> IdGenerator for R {
 
 /// A timeout wrapper for futures that returns a SlateDBError::Timeout if the future
 /// does not complete within the specified duration.
+///
+/// Arguments:
+/// - `clock`: The clock to use for the timeout.
+/// - `duration`: The duration to wait for the future to complete.
+/// - `op`: The name of the operation that will time out, for logging purposes.
+/// - `future`: The future to timeout
+///
+/// Returns:
+/// - `Ok(T)`: If the future completes within the specified duration.
+/// - `Err(SlateDBError::Timeout)`: If the future does not complete within the specified duration.
 pub async fn timeout<T>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
