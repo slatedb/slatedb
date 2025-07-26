@@ -191,7 +191,7 @@ pub struct CompactionState {
     
     /// All currently active compactions indexed by ID
     /// Includes queued, running, and recently completed compactions
-    pub active_compactions: HashMap<CompactionId, Compaction>,
+    pub active_compactions: BTreeMap<CompactionId, Compaction>,
     
     /// Queue of pending manual compaction requests
     /// Processed in priority order by the active compactor
