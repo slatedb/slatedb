@@ -188,7 +188,7 @@ impl TokioCompactionExecutorInner {
             .table_store
             .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid()));
 
-        let mut compacted_block_size = 0usize;
+        let mut bytes_written = 0usize;
         let mut last_progress_report = self.clock.now();
 
         while let Some(kv) = all_iter.next_entry().await? {
@@ -213,34 +213,28 @@ impl TokioCompactionExecutorInner {
             }
 
             if let Some(block_size) = current_writer.add(kv).await? {
-                compacted_block_size += block_size;
+                bytes_written += block_size;
             }
 
-            if compacted_block_size > self.options.max_sst_size {
+            if bytes_written > self.options.max_sst_size {
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store
                         .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid())),
                 );
-                let closed_sst = finished_writer.close().await?;
+                let sst = finished_writer.close().await?;
 
-                output_ssts.push(closed_sst.sst);
-                self.stats.bytes_compacted.add(compacted_block_size as u64);
-                if let Some(drained_blocks_size) = closed_sst.drained_blocks_size {
-                    self.stats.bytes_compacted.add(drained_blocks_size as u64);
-                }
-
-                compacted_block_size = 0;
+                self.stats.bytes_compacted.add(sst.info.filter_offset);
+                output_ssts.push(sst);
+                bytes_written = 0;
             }
         }
 
         if !current_writer.is_drained() {
-            let closed_sst = current_writer.close().await?;
-            output_ssts.push(closed_sst.sst);
+            let sst = current_writer.close().await?;
 
-            if let Some(drained_blocks_size) = closed_sst.drained_blocks_size {
-                self.stats.bytes_compacted.add(drained_blocks_size as u64);
-            }
+            self.stats.bytes_compacted.add(sst.info.filter_offset);
+            output_ssts.push(sst);
         }
 
         Ok(SortedRun {

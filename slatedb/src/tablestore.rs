@@ -522,15 +522,6 @@ pub(crate) struct EncodedSsTableWriter<'a> {
     blocks_written: usize,
 }
 
-/// A handle to a closed SSTable.
-///
-/// This is returned when a SSTable writer is closed. It contains the SSTable handle
-/// and the size of the blocks that were drained from the writer before the SsTable was closed.
-pub struct ClosedSsTableHandle {
-    pub sst: SsTableHandle,
-    pub drained_blocks_size: Option<usize>,
-}
-
 impl EncodedSsTableWriter<'_> {
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
     /// The block size is calculated after applying any compression if enabled.
@@ -541,15 +532,8 @@ impl EncodedSsTableWriter<'_> {
         Ok(block_size)
     }
 
-    pub async fn close(mut self) -> Result<ClosedSsTableHandle, SlateDBError> {
+    pub async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
         let mut encoded_sst = self.builder.build()?;
-        let drained_blocks_size = encoded_sst
-            .unconsumed_blocks
-            .iter()
-            .map(|b| Some(b.len()))
-            .sum::<Option<usize>>()
-            .filter(|s| *s > 0);
-
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
         }
@@ -559,10 +543,7 @@ impl EncodedSsTableWriter<'_> {
         self.table_store
             .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
-        Ok(ClosedSsTableHandle {
-            sst: SsTableHandle::new(self.id, encoded_sst.info),
-            drained_blocks_size,
-        })
+        Ok(SsTableHandle::new(self.id, encoded_sst.info))
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
@@ -682,14 +663,14 @@ mod tests {
             .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
             .await
             .unwrap();
-        let closed_sst = writer.close().await.unwrap();
+        let sst = writer.close().await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
             eager_spawn: true,
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned(.., closed_sst.sst, ts.clone(), sst_iter_options)
+        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
             .await
             .unwrap()
             .expect("Expected Some(iter) but got None");
@@ -750,14 +731,14 @@ mod tests {
             .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
             .await
             .unwrap();
-        let closed_sst = writer.close().await.unwrap();
+        let sst = writer.close().await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
             eager_spawn: true,
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned(.., closed_sst.sst, ts.clone(), sst_iter_options)
+        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
             .await
             .unwrap()
             .expect("Expected Some(iter) but got None");
@@ -853,8 +834,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let closed_sst = writer.close().await.unwrap();
-        let handle = closed_sst.sst;
+        let handle = writer.close().await.unwrap();
 
         // Read the index
         let index = ts.read_index(&handle).await.unwrap();

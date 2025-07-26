@@ -471,8 +471,8 @@ mod tests {
                     RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);
                 writer.add(entry).await.unwrap();
             }
-            let closed_sst = writer.close().await.unwrap();
-            ssts.push(closed_sst.sst);
+            let sst = writer.close().await.unwrap();
+            ssts.push(sst);
         }
         SortedRun { id: 0, ssts }
     }
