@@ -1,5 +1,5 @@
 use crate::{
-    config::GarbageCollectorDirectoryOptions, manifest::store::ManifestStore, SlateDBError,
+    config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
