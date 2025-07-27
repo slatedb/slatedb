@@ -36,7 +36,9 @@ use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
-use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
+use crate::config::{
+    FlushOptions, FlushType, PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions,
+};
 use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
 use crate::db_state::{DbState, SsTableId};
@@ -979,7 +981,9 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// Flush the database to disk.
+    /// Flush in-memory writes to disk. This function blocks until the in-memory
+    /// data has been durably written to object storage.
+    ///
     /// If WAL is enabled, flushes the WAL to disk.
     /// If WAL is disabled, flushes the memtables to disk.
     ///
@@ -1003,10 +1007,58 @@ impl Db {
     /// ```
     pub async fn flush(&self) -> Result<(), crate::Error> {
         if self.inner.wal_enabled {
-            self.inner.flush_wals().await.map_err(Into::into)
+            self.flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
         } else {
-            self.inner.flush_memtables().await.map_err(Into::into)
+            self.flush_with_options(FlushOptions {
+                flush_type: FlushType::Memtable,
+            })
+            .await
         }
+    }
+
+    /// Flush in-memory writes to disk with custom options.
+    ///
+    /// If `options.flush_type` is `FlushType::Wal`, the WAL must be enabled or an error
+    /// will be returned. If `options.flush_type` is `FlushType::Memtable`, is allowed
+    /// even if WAL is enabled.
+    ///
+    /// ## Arguments
+    /// - `options`: the flush options
+    ///
+    /// ## Returns
+    /// - `Result<(), crate::Error>`: the result of the flush operation.
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error flushing the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::config::{FlushOptions, FlushType};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.flush_with_options(FlushOptions {
+    ///         flush_type: FlushType::Wal,
+    ///     })
+    ///     .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
+        match options.flush_type {
+            FlushType::Wal => self.inner.flush_wals().await,
+            FlushType::Memtable => self.inner.flush_memtables().await,
+        }
+        .map_err(Into::into)
     }
 
     /// Get the metrics registry for the database.
