@@ -47,6 +47,10 @@ impl TransactionManager {
 
     pub fn min_retention_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
-        inner.active_txns.values().map(|state| state.seq).min()
+        inner
+            .active_txns
+            .values()
+            .filter_map(|state| state.upgrade().map(|state| state.seq))
+            .min()
     }
 }

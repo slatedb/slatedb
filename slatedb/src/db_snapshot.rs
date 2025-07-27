@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use std::ops::RangeBounds;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
+use crate::bytes_range::BytesRange;
 use crate::config::{ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
 use crate::error::SlateDBError;
@@ -27,17 +28,6 @@ impl DbSnapshot {
         })
     }
 
-    /// Get a value from the snapshot with default read options.
-    ///
-    /// ## Arguments
-    /// - `key`: the key to get
-    ///
-    /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
-    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
-        todo!()
-    }
-
     /// Get a value from the snapshot with custom read options.
     ///
     /// ## Arguments
@@ -51,7 +41,13 @@ impl DbSnapshot {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        todo!()
+        self.db.inner.check_error()?;
+        let db_state = self.db.inner.state.read().view();
+        self.db
+            .inner
+            .reader
+            .get_with_options(key, options, &db_state, Some(self.txn_state.seq))
+            .await
     }
 
     /// Scan a range of keys using the default scan options.
@@ -66,7 +62,7 @@ impl DbSnapshot {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        todo!()
+        self.scan_with_options(range, &ScanOptions::default()).await
     }
 
     /// Scan a range of keys with the provided options.
@@ -86,7 +82,26 @@ impl DbSnapshot {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        todo!()
+        // TODO: this range conversion logic can be extract to an util
+        let start = range
+            .start_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let end = range
+            .end_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let range = (start, end);
+        self.db.inner.check_error()?;
+        let db_state = self.db.inner.state.read().view();
+        self.db
+            .inner
+            .reader
+            .scan_with_options(
+                BytesRange::from(range),
+                options,
+                &db_state,
+                Some(self.txn_state.seq),
+            )
+            .await
     }
 }
 
