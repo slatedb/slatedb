@@ -111,7 +111,9 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 - **Minimizes overhead**: Persistence aligns with existing I/O patterns
 - **Scales cost-effectively**: Higher persistence frequency for larger, more valuable compactions
 
-#### Steps
+#### Worflow
+
+### Compaction Workflow
 
 1. `Compactor` initialises the `CompactionScheduler` and `CompactionEventHandler` during startup [No change required]
 2.  The `CompactionEventHandler` refreshes the compaction state by merging it with the `current manifest`[Need to refresh and merge with the persisted compaction state]
@@ -122,6 +124,40 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 6. When a task completes compaction execution, the task returns the {destinationId, outputSSTs} to the `CompactionEventHandler`
 7. `CompactionEventHandler` is responsible to update in-memory compaction state, cleanup the job task, write logs and update manifest. [Need to update the compaction persistence state]
 8. GC clears the orphaned states and SSTs during it's run.
+
+### Resuming Partial Compactions
+
+1. When the output SSTs of partially completed compactions are fetched, pick the lastKey from the SST.
+2. In all the remaining input SSTs, move the iterator to a key greater than or equal to the lastKey.
+3. This is done by doing a binary search on a SST to find the right block and then iterating till we find the rightKey.
+4. Source SST those have been completely iterated are not considered.
+5. These {key, seq_number, sst_iterator} tuple is then added to a min_heap to decide the right order across a group of SRs( can be thought of as a way to get a sorted list from all the sorted SR SSTs).
+6. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each.  
+
+```rust
+async fn resume_compaction(&self, job: &CompactionJob) -> Result<(), SlateDBError> {
+    // 1. Find resume point
+    let last_key = self.get_last_written_key(&job.output_ssts_written).await?;
+    
+    // 2. Position all input iterators 
+    let mut positioned_iterators = Vec::new();
+    for input_sst in &job.remaining_input_sources {
+        if self.sst_has_keys_after(input_sst, &last_key) {  // 4. Skip exhausted SSTs
+            let mut iter = SstIterator::new(input_sst, self.table_store, options).await?;
+            if let Some(key) = &last_key {
+                iter.seek(key).await?;  // 3. Binary search + iteration
+            }
+            positioned_iterators.push(iter);
+        }
+    }
+    
+    // 5. Create merge iterator with min-heap
+    let merge_iter = MergeIterator::new(positioned_iterators).await?;
+    
+    // 6. Continue normal compaction
+    self.continue_compaction(merge_iter, job).await
+}
+```
 
 ### **Key Design Decisions**
 
@@ -144,6 +180,14 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 #### **4. Recovery Strategy**
 - Resume from last completed output SST
 
+#### **5. Migrate `compaction_epoch` from Manifest to CompactionState**
+**Decision**: Deprecate `compaction_epoch` from Manifest.
+
+**Rationale**: 
+- Clean separation: DB state vs process coordination
+- Process independence: Compactor can run separately
+- Logical grouping: Epoch lives with compaction concerns
+
 ### **Data Model**
 ```
 Compaction (1) ──→ (N) CompactionJob
@@ -151,6 +195,8 @@ Compaction (1) ──→ (N) CompactionJob
     ├── destination: u32  
     ├── job_attempts: Vec<CompactionJob>
     └── current_phase: CompactionPhase
+    └── created_ts: u64
+    └── updated_ts: u64
 
 CompactionJob
     ├── attempt_number: u32
@@ -161,6 +207,7 @@ CompactionJob
     └── output_ssts_written: Vec<SsTableId>
     └── bytes_read/written: u64
     └── current_phase: CompactionPhase
+    └── created_ts: u64
 ```
 
 ### **Persistent State Storage**
