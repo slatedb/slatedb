@@ -984,8 +984,11 @@ impl Db {
     /// Flush in-memory writes to disk. This function blocks until the in-memory
     /// data has been durably written to object storage.
     ///
-    /// If WAL is enabled, flushes the WAL to disk.
-    /// If WAL is disabled, flushes the memtables to disk.
+    /// If WAL is enabled, this method is equivalent to:
+    /// `flush_with_options(FlushOptions { flush_type: FlushType::Wal })`
+    ///
+    /// If WAL is disabled, this method is equivalent to:
+    /// `flush_with_options(FlushOptions { flush_type: FlushType::Memtable })`.
     ///
     /// ## Errors
     /// - `Error`: if there was an error flushing the database
@@ -1021,9 +1024,10 @@ impl Db {
 
     /// Flush in-memory writes to disk with custom options.
     ///
-    /// If `options.flush_type` is `FlushType::Wal`, the WAL must be enabled or an error
-    /// will be returned. If `options.flush_type` is `FlushType::Memtable`, is allowed
-    /// even if WAL is enabled.
+    /// An error will be returned if `options.flush_type` is `FlushType::Wal` and the WAL
+    /// is disabled.
+    ///
+    /// `FlushType::Memtable` is allowed even if WAL is enabled.
     ///
     /// ## Arguments
     /// - `options`: the flush options
@@ -2531,7 +2535,10 @@ mod tests {
             .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
             .unwrap()
             .get();
-        assert_eq!(immutable_memtable_flushes, initial_immutable_memtable_flushes);
+        assert_eq!(
+            immutable_memtable_flushes,
+            initial_immutable_memtable_flushes
+        );
     }
 
     // 2 threads so we can can wait on the write_with_options (main) thread
