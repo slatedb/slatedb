@@ -157,11 +157,9 @@ CompactionJob
     ├── progress: CompactionProgress  
     ├── status: CompactionJobStatus
     └── existing_output_ssts: Option<Vec<SsTableId>>
-
-CompactionProgress
-    ├── input_ssts_completed: Vec<SsTableId>
-    ├── output_ssts_written: Vec<SsTableId>
-    ├── bytes_read/written: u64
+    └── input_ssts_completed: Vec<SsTableId>
+    └── output_ssts_written: Vec<SsTableId>
+    └── bytes_read/written: u64
     └── current_phase: CompactionPhase
 ```
 
