@@ -2444,8 +2444,8 @@ mod tests {
         }
 
         // Verify our keys are in the SST
-        assert!(found_keys.contains(&key1.to_vec()));
-        assert!(found_keys.contains(&key2.to_vec()));
+        assert!(found_keys.contains(key1.as_slice()));
+        assert!(found_keys.contains(key2.as_slice()));
     }
 
     #[tokio::test]
