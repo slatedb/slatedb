@@ -94,7 +94,7 @@ use slatedb::config::ScanOptions;
 use slatedb::config::WriteOptions;
 use slatedb::Db;
 use slatedb::DbRand;
-use slatedb::SlateDBError;
+use slatedb::Error;
 use slatedb::WriteBatch;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -502,7 +502,7 @@ impl Dst {
     /// Each iteration is a single step in the simulation. Each step samples an action
     /// from the action sampler and runs it. Reads (get and scan) are verified against the
     /// in-memory state. Writes are run against the DB and the in-memory state.
-    pub async fn run_simulation(&mut self, iterations: u32) -> Result<(), SlateDBError> {
+    pub async fn run_simulation(&mut self, iterations: u32) -> Result<(), Error> {
         let start_time = self.system_clock.now();
         for (step_count, _) in (0..iterations).enumerate() {
             let step_action = self.action_sampler.sample_action(&self.state);
@@ -539,7 +539,7 @@ impl Dst {
         &mut self,
         write_ops: &Vec<DstWriteOp>,
         write_options: &WriteOptions,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), Error> {
         let mut write_batch = WriteBatch::new();
         for (key, val, options) in write_ops {
             if let Some(val) = val {
@@ -564,11 +564,7 @@ impl Dst {
         Ok(())
     }
 
-    async fn run_get(
-        &mut self,
-        key: &Vec<u8>,
-        read_options: &ReadOptions,
-    ) -> Result<(), SlateDBError> {
+    async fn run_get(&mut self, key: &Vec<u8>, read_options: &ReadOptions) -> Result<(), Error> {
         let future = self.db.get_with_options(key, read_options);
         let result = self.poll_await(future, 0f64).await?;
         let expected_val = self.state.get(key);
@@ -582,7 +578,7 @@ impl Dst {
         start_key: &Vec<u8>,
         end_key: &Vec<u8>,
         scan_options: &ScanOptions,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), Error> {
         if start_key == end_key {
             debug!("run_scan (start_key == end_key)");
             // Skip because SlateDB does not allow empty ranges (see #681)
@@ -605,7 +601,7 @@ impl Dst {
         Ok(())
     }
 
-    async fn run_flush(&self) -> Result<(), SlateDBError> {
+    async fn run_flush(&self) -> Result<(), Error> {
         debug!("run_flush");
         self.db.flush().await
     }
@@ -623,7 +619,7 @@ impl Dst {
     /// random size between 80% and 100% of `max_btree_size_bytes`. If the in-memory
     /// state is empty or below `max_btree_size_bytes`, the shrink operation is
     /// always skipped.
-    async fn maybe_shrink_db(&mut self) -> Result<(), SlateDBError> {
+    async fn maybe_shrink_db(&mut self) -> Result<(), Error> {
         let shrink_to_bytes = self.rand.rng().random_range(
             (self.options.max_btree_size_bytes as f64 * 0.8) as usize
                 ..self.options.max_btree_size_bytes as usize,
@@ -653,9 +649,9 @@ impl Dst {
     /// details.
     async fn poll_await<T>(
         &self,
-        future: impl Future<Output = Result<T, SlateDBError>>,
+        future: impl Future<Output = Result<T, Error>>,
         flush_probability: f64,
-    ) -> Result<T, SlateDBError> {
+    ) -> Result<T, Error> {
         use futures::task::noop_waker_ref;
         use std::task::Context;
         use std::task::Poll;

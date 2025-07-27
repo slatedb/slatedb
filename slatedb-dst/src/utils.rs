@@ -10,8 +10,8 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::Db;
 use slatedb::DbBuilder;
 use slatedb::DbRand;
+use slatedb::Error;
 use slatedb::Settings;
-use slatedb::SlateDBError;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -149,7 +149,7 @@ pub async fn run_simulation(
     rand: Rc<DbRand>,
     iterations: u32,
     dst_opts: DstOptions,
-) -> Result<(), SlateDBError> {
+) -> Result<(), Error> {
     let seed = rand.seed();
     info!("running simulation with seed {}", seed);
     let mut dst = build_dst(
