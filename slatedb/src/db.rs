@@ -570,6 +570,13 @@ impl Db {
             .await
             .expect("Failed to close WAL buffer");
 
+        // Shutdown the transaction manager.
+        self.inner
+            .txn_manager
+            .close()
+            .await
+            .expect("Failed to close transaction manager");
+
         // Shutdown the memtable flush thread.
         self.inner
             .memtable_flush_notifier

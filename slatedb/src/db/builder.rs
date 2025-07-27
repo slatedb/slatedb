@@ -446,6 +446,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         if inner.wal_enabled {
             inner.wal_buffer.start_background().await?;
         };
+        inner.txn_manager.start_background().await?;
 
         let memtable_flush_task =
             inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
