@@ -162,7 +162,7 @@ use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 
-use crate::error::{SettingsError, SlateDBError};
+use crate::error::SlateDBError;
 
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
@@ -596,7 +596,7 @@ impl Settings {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Settings, crate::Error> {
         let path = path.as_ref();
         let Some(ext) = path.extension() else {
-            return Err(SettingsError::UnknownFormat(path.into()).into());
+            return Err(SlateDBError::UnknownConfigurationFormat(path.into()).into());
         };
 
         let mut builder = Figment::from(Settings::default());
@@ -604,11 +604,11 @@ impl Settings {
             "json" => builder = builder.merge(Json::file(path)),
             "toml" => builder = builder.merge(Toml::file(path)),
             "yaml" | "yml" => builder = builder.merge(Yaml::file(path)),
-            _ => return Err(SettingsError::UnknownFormat(path.into()).into()),
+            _ => return Err(SlateDBError::UnknownConfigurationFormat(path.into()).into()),
         }
         builder
             .extract()
-            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)).into())
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
     }
 
     /// Loads Settings from environment variables with a specified prefix.
@@ -642,7 +642,7 @@ impl Settings {
         Figment::from(Settings::default())
             .merge(Env::prefixed(prefix))
             .extract()
-            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)).into())
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
     }
 
     /// Loads Settings from multiple configuration sources in a specific order.
@@ -677,7 +677,7 @@ impl Settings {
             .merge(Yaml::file("SlateDb.yml"))
             .admerge(Env::prefixed("SLATEDB_"))
             .extract()
-            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)).into())
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
     }
 }
 
