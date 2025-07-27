@@ -40,7 +40,7 @@
 //! Read compactor stats:
 //!
 //! ```
-//! use slatedb::{Db, error::Error};
+//! use slatedb::{Db, Error};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
