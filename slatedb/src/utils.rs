@@ -6,7 +6,7 @@ use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
-use rand::{Rng, RngCore};
+use rand::RngCore;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
@@ -281,7 +281,7 @@ impl<T> SendSafely<T> for UnboundedSender<T> {
 /// Trait for generating UUIDs and ULIDs from a random number generator.
 pub trait IdGenerator {
     fn gen_uuid(&mut self) -> Uuid;
-    fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid;
+    fn gen_ulid(&mut self) -> Ulid;
 }
 
 impl<R: RngCore> IdGenerator for R {
@@ -296,13 +296,9 @@ impl<R: RngCore> IdGenerator for R {
         Uuid::from_bytes(bytes)
     }
 
-    /// Generates a random ULID using the provided RNG. The clock is used to generate
-    /// the timestamp component of the ULID.
-    fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid {
-        let now = u64::try_from(system_time_to_millis(clock.now()))
-            .expect("timestamp outside u64 range in gen_ulid");
-        let random_bytes = self.random::<u128>();
-        Ulid::from_parts(now, random_bytes)
+    /// Generates a random ULID using the provided RNG.
+    fn gen_ulid(&mut self) -> Ulid {
+        Ulid::with_source(self)
     }
 }
 
