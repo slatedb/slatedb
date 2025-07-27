@@ -554,7 +554,7 @@ mod tests {
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
-    use crate::{checkpoint, SlateDBError};
+    use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;

@@ -33,7 +33,7 @@ use std::{
     time::Duration,
 };
 
-use crate::SlateDBError;
+use crate::error::SlateDBError;
 use chrono::{DateTime, Utc};
 use tracing::info;
 

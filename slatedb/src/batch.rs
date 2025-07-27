@@ -13,18 +13,25 @@ use bytes::Bytes;
 /// dropped.
 ///
 /// # Examples
-/// ```rust,no_run,compile_fail
-/// use slatedb::batch::{WriteBatch, WriteOp};
+/// ```rust
+/// # async fn run() -> Result<(), slatedb::Error> {
+/// #     use std::sync::Arc;
+/// #     use slatedb::object_store::memory::InMemory;
+///     use slatedb::Db;
+///     use slatedb::WriteBatch;
 ///
-/// let object_store = Arc::new(LocalFileSystem::new());
-/// let db = Db::open("path/to/db".into(), object_store).await;
+///     let object_store = Arc::new(InMemory::new());
+///     let db = Db::open("path/to/db", object_store).await?;
 ///
-/// let mut batch = WriteBatch::new();
-/// batch.put(b"key1", b"value1");
-/// batch.put(b"key2", b"value2");
-/// batch.delete(b"key3");
+///     let mut batch = WriteBatch::new();
+///     batch.put(b"key1", b"value1");
+///     batch.put(b"key2", b"value2");
+///     batch.delete(b"key3");
 ///
-/// db.write(batch).await;
+///     db.write(batch).await;
+///     Ok(())
+/// # };
+/// # tokio_test::block_on(run());
 /// ```
 ///
 /// Note that the `WriteBatch` has an unlimited size. This means that batch

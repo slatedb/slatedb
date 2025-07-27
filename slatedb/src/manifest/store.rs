@@ -3,6 +3,7 @@ use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
+use crate::error::SlateDBError::ManifestVersionExists;
 use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
 };
@@ -13,7 +14,6 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::utils;
-use crate::SlateDBError::ManifestVersionExists;
 use chrono::Utc;
 use futures::StreamExt;
 use object_store::path::Path;
@@ -112,34 +112,40 @@ impl FenceableManifest {
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        utils::timeout(system_clock, manifest_update_timeout, async {
-            loop {
-                let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
-                let mut manifest = stored_manifest.prepare_dirty();
-                set_epoch(&mut manifest, local_epoch);
-                match stored_manifest.update_manifest(manifest).await {
-                    Err(ManifestVersionExists) => {
-                        // The manifest may have been updated by a reader, or
-                        // we may have gotten this error after successfully updating
-                        // if we failed to get the response. Either way, refresh
-                        // the manifest and try the bump again.
-                        stored_manifest.refresh().await?;
-                        continue;
-                    }
-                    Err(err) => return Err(err),
-                    Ok(()) => {
-                        return Ok(Self {
-                            stored_manifest,
-                            local_epoch,
-                            stored_epoch,
-                        })
+        utils::timeout(
+            system_clock,
+            manifest_update_timeout,
+            "manifest update",
+            async {
+                loop {
+                    let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
+                    let mut manifest = stored_manifest.prepare_dirty();
+                    set_epoch(&mut manifest, local_epoch);
+                    match stored_manifest.update_manifest(manifest).await {
+                        Err(ManifestVersionExists) => {
+                            // The manifest may have been updated by a reader, or
+                            // we may have gotten this error after successfully updating
+                            // if we failed to get the response. Either way, refresh
+                            // the manifest and try the bump again.
+                            stored_manifest.refresh().await?;
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                        Ok(()) => {
+                            return Ok(Self {
+                                stored_manifest,
+                                local_epoch,
+                                stored_epoch,
+                            })
+                        }
                     }
                 }
-            }
-        })
+            },
+        )
         .await
         .map_err(|_| SlateDBError::Timeout {
-            msg: "Manifest update".to_string(),
+            op: "manifest update",
+            backoff: Duration::from_secs(1),
         })
     }
 

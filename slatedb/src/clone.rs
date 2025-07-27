@@ -26,12 +26,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
     let parent_path = parent_path.into();
 
     if clone_path == parent_path {
-        return Err(SlateDBError::InvalidArgument {
-            msg: format!(
-                "Parent path '{}' must be different from the clone's path '{}'",
-                parent_path, clone_path
-            ),
-        });
+        return Err(SlateDBError::IdenticalClonePaths(parent_path));
     }
 
     let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
@@ -207,9 +202,7 @@ fn validate_attached_to_external_db(
 ) -> Result<(), SlateDBError> {
     let external_dbs = &clone_manifest.manifest().external_dbs;
     if external_dbs.is_empty() {
-        return Err(SlateDBError::DatabaseAlreadyExists {
-            msg: "Database exists, but is not attached to any external database".to_string(),
-        });
+        return Err(SlateDBError::CloneExternalDbMissing);
     }
     if !external_dbs.iter().any(|external_db| {
         path == external_db.path
@@ -217,12 +210,9 @@ fn validate_attached_to_external_db(
                 .map(|id| id == external_db.source_checkpoint_id)
                 .unwrap_or(true)
     }) {
-        return Err(SlateDBError::DatabaseAlreadyExists {
-            msg: format!(
-                "Database exists, but is not attached to external database at [{}] with checkpoint [{}]",
-                path,
-                checkpoint_id.map(|id| id.to_string()).unwrap_or("<any>".to_string()),
-            ),
+        return Err(SlateDBError::CloneIncorrectExternalDbCheckpoint {
+            path,
+            checkpoint_id,
         });
     };
     Ok(())
@@ -254,13 +244,9 @@ async fn validate_external_dbs_contain_final_checkpoint(
             .find_checkpoint(final_checkpoint_id)
             .is_none()
         {
-            return Err(SlateDBError::DatabaseAlreadyExists {
-                msg: format!(
-                    "Cloned database already exists and is initialized, but the final checkpoint [{}] \
-                        referred to in the manifest no longer exists in the external database at \
-                        path [{}]",
-                    final_checkpoint_id, external_db.path,
-                ),
+            return Err(SlateDBError::CloneIncorrectFinalCheckpoint {
+                path: external_db.path.clone(),
+                checkpoint_id: final_checkpoint_id,
             });
         }
     }
@@ -524,7 +510,10 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(matches!(err, SlateDBError::DatabaseAlreadyExists { .. }));
+        assert!(matches!(
+            err,
+            SlateDBError::CloneIncorrectExternalDbCheckpoint { .. }
+        ));
     }
 
     #[tokio::test]
@@ -568,7 +557,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            SlateDBError::DatabaseAlreadyExists { msg: _ }
+            SlateDBError::CloneIncorrectExternalDbCheckpoint { .. }
         ));
     }
 
@@ -671,7 +660,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_fail_retry_if_source_checkpoint_is_missing() -> Result<(), SlateDBError> {
+    async fn should_fail_retry_if_source_checkpoint_is_missing() -> Result<(), crate::Error> {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store = Arc::new(InMemory::new());
         let parent_path = Path::from("/tmp/test_parent");
