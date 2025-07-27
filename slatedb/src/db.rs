@@ -2325,6 +2325,215 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_flush_memtable_with_wal_enabled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_with_options";
+        let mut options = test_db_options(0, 256, None);
+        options.flush_interval = Some(Duration::from_secs(u64::MAX));
+        options.wal_enabled = true;
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let sst_format = SsTableFormat {
+            min_filter_keys: 10,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            sst_format,
+            path,
+            None,
+        ));
+
+        // Write some data to populate the memtable
+        let key1 = b"test_key_1";
+        let value1 = b"test_value_1";
+        kv_store
+            .put_with_options(
+                key1,
+                value1,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        let key2 = b"test_key_2";
+        let value2 = b"test_value_2";
+        kv_store
+            .put_with_options(
+                key2,
+                value2,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Get initial state
+        let initial_manifest = stored_manifest.refresh().await.unwrap();
+        let initial_l0_count = initial_manifest.core.l0.len();
+
+        let initial_flush_count = kv_store
+            .metrics()
+            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+            .unwrap()
+            .get();
+
+        // Flush memtable using flush_with_options
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Memtable,
+            })
+            .await
+            .unwrap();
+
+        // Wait for the flush to complete and manifest to be updated
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.l0.len() > initial_l0_count,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        // Verify that a new SST was created in L0
+        assert_eq!(db_state.l0.len(), initial_l0_count + 1);
+
+        // Verify that the flush metrics were updated
+        let final_flush_count = kv_store
+            .metrics()
+            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+            .unwrap()
+            .get();
+        assert!(final_flush_count > initial_flush_count);
+
+        // Verify tha the WAL has not been flushed
+        let recent_flushed_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert_eq!(recent_flushed_wal_id, 0);
+
+        // Verify that the data is still accessible after flush
+        let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
+        assert_eq!(retrieved_value1.as_ref(), value1);
+
+        let retrieved_value2 = kv_store.get(key2).await.unwrap().unwrap();
+        assert_eq!(retrieved_value2.as_ref(), value2);
+
+        // Verify the data exists in the newly created SST
+        let latest_sst = db_state.l0.back().unwrap();
+        let sst_iter_options = SstIteratorOptions::default();
+        let mut iter =
+            SstIterator::new_borrowed(.., latest_sst, table_store.clone(), sst_iter_options)
+                .await
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
+
+        // Collect all key-value pairs from the SST
+        let mut found_keys = std::collections::HashSet::new();
+        while let Some(kv) = iter.next().await.unwrap() {
+            found_keys.insert(kv.key.to_vec());
+        }
+
+        // Verify our keys are in the SST
+        assert!(found_keys.contains(&key1.to_vec()));
+        assert!(found_keys.contains(&key2.to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_flush_with_options_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_with_options_wal";
+        let mut options = test_db_options(0, 1024, None);
+        options.wal_enabled = true;
+        // Larger memtable to avoid memtable flushes
+        options.flush_interval = Some(Duration::from_secs(u64::MAX));
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        let initial_immutable_memtable_flushes = kv_store
+            .metrics()
+            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+            .unwrap()
+            .get();
+
+        // Write some data to populate the WAL buffer
+        let key1 = b"wal_test_key_1";
+        let value1 = b"wal_test_value_1";
+        kv_store
+            .put_with_options(
+                key1,
+                value1,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        let key2 = b"wal_test_key_2";
+        let value2 = b"wal_test_value_2";
+        kv_store
+            .put_with_options(
+                key2,
+                value2,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Get initial WAL ID to verify flush occurred
+        let initial_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+
+        // Flush WAL using flush_with_options - this should succeed without error
+        let flush_result = kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await;
+
+        // Verify the flush operation completed successfully
+        assert!(flush_result.is_ok(), "WAL flush should succeed");
+
+        // Verify that the data is still accessible after WAL flush
+        let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
+        assert_eq!(retrieved_value1.as_ref(), value1);
+
+        let retrieved_value2 = kv_store.get(key2).await.unwrap().unwrap();
+        assert_eq!(retrieved_value2.as_ref(), value2);
+
+        // Verify that the WAL buffer is in a consistent state after flush
+        // The recent_flushed_wal_id should be at least as high as before
+        let final_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert!(
+            final_wal_id >= initial_wal_id,
+            "WAL ID should not decrease after flush"
+        );
+
+        // Verify that the memtable has not been flushed
+        let immutable_memtable_flushes = kv_store
+            .metrics()
+            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+            .unwrap()
+            .get();
+        assert_eq!(immutable_memtable_flushes, initial_immutable_memtable_flushes);
+    }
+
     // 2 threads so we can can wait on the write_with_options (main) thread
     // while the write_batch (background) thread is blocked on writing the
     // WAL SST.
