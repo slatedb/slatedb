@@ -45,7 +45,7 @@
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::open("test_db", object_store).await?;
 //!     let metrics = db.metrics();
