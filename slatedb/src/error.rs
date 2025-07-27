@@ -184,6 +184,9 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid configuration format")]
     InvalidConfigurationFormat(#[from] Box<figment::Error>),
+
+    #[error("attempted a WAL operation when the WAL is disabled")]
+    WalDisabled,
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -400,6 +403,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidConfigurationFormat(err) => {
                 Error::configuration(msg).with_source(Box::new(err))
             }
+            SlateDBError::WalDisabled => Error::operation(msg),
         }
     }
 }

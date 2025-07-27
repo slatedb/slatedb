@@ -1059,7 +1059,13 @@ impl Db {
     /// ```
     pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
         match options.flush_type {
-            FlushType::Wal => self.inner.flush_wals().await,
+            FlushType::Wal => {
+                if self.inner.wal_enabled {
+                    self.inner.flush_wals().await
+                } else {
+                    Err(SlateDBError::WalDisabled)
+                }
+            }
             FlushType::Memtable => self.inner.flush_memtables().await,
         }
         .map_err(Into::into)
