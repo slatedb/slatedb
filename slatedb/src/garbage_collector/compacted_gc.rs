@@ -1,6 +1,6 @@
 use crate::{
-    config::GarbageCollectorDirectoryOptions, db_state::SsTableId, manifest::store::ManifestStore,
-    tablestore::TableStore, SlateDBError,
+    config::GarbageCollectorDirectoryOptions, db_state::SsTableId, error::SlateDBError,
+    manifest::store::ManifestStore, tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;

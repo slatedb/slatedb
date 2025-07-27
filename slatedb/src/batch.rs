@@ -14,7 +14,7 @@ use bytes::Bytes;
 ///
 /// # Examples
 /// ```rust
-/// # async fn run() -> Result<(), slatedb::SlateDBError> {
+/// # async fn run() -> Result<(), slatedb::Error> {
 /// #     use std::sync::Arc;
 /// #     use slatedb::object_store::memory::InMemory;
 ///     use slatedb::Db;

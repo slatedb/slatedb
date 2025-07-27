@@ -565,6 +565,7 @@ mod tests {
     };
     use crate::db::Db;
     use crate::db_state::{CoreDbState, SortedRun};
+    use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
@@ -576,7 +577,6 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
-    use crate::SlateDBError;
 
     const PATH: &str = "/test/db";
 

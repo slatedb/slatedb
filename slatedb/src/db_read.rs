@@ -1,6 +1,5 @@
 use crate::{
     config::{ReadOptions, ScanOptions},
-    error::SlateDBError,
     DbIterator,
 };
 use bytes::Bytes;
@@ -27,13 +26,13 @@ pub trait DbRead {
     /// - `key`: the key to get
     ///
     /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`:
+    /// - `Result<Option<Bytes>, Error>`:
     ///     - `Some(Bytes)`: the value if it exists
     ///     - `None`: if the value does not exist
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error getting the value
-    async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
+    /// - `Error`: if there was an error getting the value
+    async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
         self.get_with_options(key, &ReadOptions::default()).await
     }
 
@@ -49,17 +48,17 @@ pub trait DbRead {
     /// - `options`: the read options to use
     ///
     /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`:
+    /// - `Result<Option<Bytes>, Error>`:
     ///   - `Some(Bytes)`: the value if it exists
     ///   - `None`: if the value does not exist
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error getting the value
+    /// - `Error`: if there was an error getting the value
     async fn get_with_options<K: AsRef<[u8]> + Send>(
         &self,
         key: K,
         options: &ReadOptions,
-    ) -> Result<Option<Bytes>, SlateDBError>;
+    ) -> Result<Option<Bytes>, crate::Error>;
 
     /// Scan a range of keys using the default scan options.
     ///
@@ -69,11 +68,11 @@ pub trait DbRead {
     /// - `range`: the range of keys to scan
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
+    /// - `Error`: if there was an error scanning the range of keys
     ///
     /// ## Returns
-    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    async fn scan<K, T>(&self, range: T) -> Result<DbIterator, SlateDBError>
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
+    async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
@@ -90,15 +89,15 @@ pub trait DbRead {
     /// - `options`: the scan options to use
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
+    /// - `Error`: if there was an error scanning the range of keys
     ///
     /// ## Returns
-    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
     async fn scan_with_options<K, T>(
         &self,
         range: T,
         options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDBError>
+    ) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send;

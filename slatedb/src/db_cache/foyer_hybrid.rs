@@ -59,9 +59,10 @@
 //! ```
 //!
 
+use std::sync::Arc;
+
 use crate::db_cache::{CachedEntry, CachedKey, DbCache};
-use crate::SlateDBError;
-use crate::SlateDBError::DbCacheError;
+use crate::error::SlateDBError::FoyerCacheReadingError;
 use async_trait::async_trait;
 
 pub struct FoyerHybridCache {
@@ -75,26 +76,26 @@ impl FoyerHybridCache {
 }
 
 impl FoyerHybridCache {
-    async fn get(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         self.inner
             .get(&key)
             .await
-            .map_err(|e| DbCacheError { msg: e.to_string() })
+            .map_err(|e| FoyerCacheReadingError(Arc::new(e)).into())
             .map(|maybe_v| maybe_v.map(|v| v.value().clone()))
     }
 }
 
 #[async_trait]
 impl DbCache for FoyerHybridCache {
-    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         self.get(key).await
     }
 
-    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         self.get(key).await
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         self.get(key).await
     }
 

@@ -15,6 +15,7 @@ use crate::{
     clock::{MonotonicClock, SystemClock},
     db_state::{DbState, SsTableId},
     db_stats::DbStats,
+    error::SlateDBError,
     iter::KeyValueIterator,
     mem_table::KVTable,
     oracle::Oracle,
@@ -22,7 +23,6 @@ use crate::{
     types::RowEntry,
     utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader},
     wal_id::WalIdStore,
-    SlateDBError,
 };
 
 /// [`WalBufferManager`] buffers write operations in memory before flushing them to persistent storage.
@@ -121,9 +121,7 @@ impl WalBufferManager {
 
     pub async fn start_background(self: &Arc<Self>) -> Result<(), SlateDBError> {
         if self.inner.read().background_task.is_some() {
-            return Err(SlateDBError::UnexpectedError {
-                msg: "wal_buffer already started".to_string(),
-            });
+            return Err(SlateDBError::WalBufferAlreadyStarted);
         }
 
         let (flush_tx, flush_rx) = mpsc::channel(128);

@@ -32,7 +32,7 @@ impl Db {
         &self,
         scope: CheckpointScope,
         options: &CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, SlateDBError> {
+    ) -> Result<CheckpointCreateResult, crate::Error> {
         // flush all the data into SSTs
         if let CheckpointScope::All = scope {
             if self.inner.wal_enabled {
@@ -50,7 +50,8 @@ impl Db {
             },
         )?;
 
-        rx.await?
+        let result = rx.await.map_err(SlateDBError::ReadChannelError)?;
+        result.map_err(Into::into)
     }
 }
 
@@ -64,7 +65,6 @@ mod tests {
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
-    use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
@@ -203,11 +203,15 @@ mod tests {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             })
-            .await;
+            .await
+            .unwrap_err();
 
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), SlateDBError::CheckpointMissing(id) if id == source_checkpoint_id)
+        assert_eq!(
+            result.to_string(),
+            format!(
+                "Persistent state error: checkpoint missing. checkpoint_id=`{}`",
+                source_checkpoint_id
+            )
         );
     }
 
@@ -218,13 +222,13 @@ mod tests {
         let admin = AdminBuilder::new(path, object_store.clone()).build();
         let result = admin
             .create_detached_checkpoint(&CheckpointOptions::default())
-            .await;
+            .await
+            .unwrap_err();
 
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            SlateDBError::LatestManifestMissing
-        ));
+        assert_eq!(
+            result.to_string(),
+            "Persistent state error: failed to find latest manifest"
+        );
     }
 
     #[tokio::test]
@@ -284,9 +288,13 @@ mod tests {
 
         let result = admin
             .refresh_checkpoint(uuid::Uuid::new_v4(), Some(Duration::from_secs(1000)))
-            .await;
+            .await
+            .unwrap_err();
 
-        assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
+        assert_eq!(
+            result.to_string(),
+            "Persistent state error: invalid DB state error"
+        );
     }
 
     #[tokio::test]
