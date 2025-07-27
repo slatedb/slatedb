@@ -1016,7 +1016,7 @@ impl Db {
             .await
         } else {
             self.flush_with_options(FlushOptions {
-                flush_type: FlushType::Memtable,
+                flush_type: FlushType::MemTable,
             })
             .await
         }
@@ -1066,7 +1066,7 @@ impl Db {
                     Err(SlateDBError::WalDisabled)
                 }
             }
-            FlushType::Memtable => self.inner.flush_memtables().await,
+            FlushType::MemTable => self.inner.flush_memtables().await,
         }
         .map_err(Into::into)
     }
@@ -2402,7 +2402,7 @@ mod tests {
         // Flush memtable using flush_with_options
         kv_store
             .flush_with_options(FlushOptions {
-                flush_type: FlushType::Memtable,
+                flush_type: FlushType::MemTable,
             })
             .await
             .unwrap();
@@ -2597,7 +2597,7 @@ mod tests {
         // Verify that memtable flush still works when WAL is disabled
         let memtable_flush_result = kv_store
             .flush_with_options(FlushOptions {
-                flush_type: FlushType::Memtable,
+                flush_type: FlushType::MemTable,
             })
             .await;
         assert!(

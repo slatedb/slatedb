@@ -326,7 +326,7 @@ pub enum FlushType {
     /// Freeze the active memtable [crate::mem_table::KVTable] and write
     /// all immutable memtable entries (including the formerly active
     /// memtable) to the object store.
-    Memtable,
+    MemTable,
     /// Freeze the active WAL [crate::mem_table::KVTable] and write all
     /// immutable WAL entries (including the formerly active WAL) to the
     /// object store.
