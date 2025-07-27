@@ -187,7 +187,8 @@ impl TokioCompactionExecutorInner {
         let mut current_writer = self
             .table_store
             .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid()));
-        let mut current_size = 0usize;
+
+        let mut bytes_written = 0usize;
         let mut last_progress_report = self.clock.now();
 
         while let Some(kv) = all_iter.next_entry().await? {
@@ -211,25 +212,31 @@ impl TokioCompactionExecutorInner {
                 last_progress_report = self.clock.now();
             }
 
-            current_writer.add(kv).await?;
-            current_size += key_len + value_len;
+            if let Some(block_size) = current_writer.add(kv).await? {
+                bytes_written += block_size;
+            }
 
-            if current_size > self.options.max_sst_size {
+            if bytes_written > self.options.max_sst_size {
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store
                         .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid())),
                 );
-                output_ssts.push(finished_writer.close().await?);
-                self.stats.bytes_compacted.add(current_size as u64);
-                current_size = 0;
+                let sst = finished_writer.close().await?;
+
+                self.stats.bytes_compacted.add(sst.info.filter_offset);
+                output_ssts.push(sst);
+                bytes_written = 0;
             }
         }
 
-        if current_size > 0 {
-            output_ssts.push(current_writer.close().await?);
-            self.stats.bytes_compacted.add(current_size as u64);
+        if !current_writer.is_drained() {
+            let sst = current_writer.close().await?;
+
+            self.stats.bytes_compacted.add(sst.info.filter_offset);
+            output_ssts.push(sst);
         }
+
         Ok(SortedRun {
             id: compaction.destination,
             ssts: output_ssts,
