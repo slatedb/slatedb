@@ -469,4 +469,4 @@ Using **AWS S3 Standard** pricing:
 
 ### **Distributed Compaction**
 - Persistent state provides foundation for multi-compactor coordination and work distribution.
-- Add time boundary based persistence of SSTs to the compaction state in the object_store
+- Define a minimum time boundary between compaction file updates to prevent excessive writes to the file (see https://github.com/slatedb/slatedb/pull/695#discussion_r2229977189)
