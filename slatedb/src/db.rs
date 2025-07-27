@@ -2341,7 +2341,6 @@ mod tests {
         let path = "/tmp/test_flush_with_options";
         let mut options = test_db_options(0, 256, None);
         options.flush_interval = Some(Duration::from_secs(u64::MAX));
-        options.wal_enabled = true;
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(options)
             .build()
@@ -2463,7 +2462,6 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_with_options_wal";
         let mut options = test_db_options(0, 1024, None);
-        options.wal_enabled = true;
         // Larger memtable to avoid memtable flushes
         options.flush_interval = Some(Duration::from_secs(u64::MAX));
         let kv_store = Db::builder(path, object_store.clone())
@@ -2545,6 +2543,71 @@ mod tests {
             immutable_memtable_flushes,
             initial_immutable_memtable_flushes
         );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_flush_with_options_wal_disabled_error() {
+        use std::error::Error;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_with_options_wal_disabled";
+        let mut options = test_db_options(0, 1024, None);
+        options.wal_enabled = false; // Disable WAL
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        // Write some data to the database
+        let key1 = b"test_key_1";
+        let value1 = b"test_value_1";
+        kv_store
+            .put_with_options(
+                key1,
+                value1,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Attempt to flush WAL on a WAL-disabled database
+        let flush_result = kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await;
+
+        // Verify that we get the WalDisabled error
+        assert!(flush_result.is_err(), "Expected WalDisabled error");
+        let error = flush_result.unwrap_err();
+        eprintln!("Error: {:?}", error.source());
+        assert!(
+            error
+                .to_string()
+                .contains("attempted a WAL operation when the WAL is disabled"),
+            "Expected WalDisabled error message, got: {}",
+            error
+        );
+
+        // Verify that memtable flush still works when WAL is disabled
+        let memtable_flush_result = kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Memtable,
+            })
+            .await;
+        assert!(
+            memtable_flush_result.is_ok(),
+            "Memtable flush should work even when WAL is disabled"
+        );
+
+        // Verify that the data is still accessible
+        let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
+        assert_eq!(retrieved_value1.as_ref(), value1);
     }
 
     // 2 threads so we can can wait on the write_with_options (main) thread
