@@ -52,6 +52,7 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::transaction_manager::TransactionManager;
 use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
@@ -79,6 +80,8 @@ pub(crate) struct DbInner {
     /// of the WAL buffer to the remote storage.
     pub(crate) wal_buffer: Arc<WalBufferManager>,
     pub(crate) wal_enabled: bool,
+    /// [`txn_manager`] tracks all the live transactions and related metadata.
+    pub(crate) txn_manager: Arc<TransactionManager>,
 }
 
 impl DbInner {
@@ -138,6 +141,7 @@ impl DbInner {
             settings.flush_interval,
         ));
 
+        let txn_manager = Arc::new(TransactionManager::new());
         let db_inner = Self {
             state,
             settings,
@@ -153,6 +157,7 @@ impl DbInner {
             rand,
             stat_registry,
             reader,
+            txn_manager,
         };
         Ok(db_inner)
     }
@@ -623,8 +628,11 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn snapshot(&self) -> Result<DbSnapshot, SlateDBError> {
-        todo!()
+    pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
+        self.inner.check_error()?;
+        let seq = self.inner.oracle.last_seq.load();
+        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
+        Ok(snapshot)
     }
 
     /// Get a value from the database with default read options.
@@ -3631,5 +3639,40 @@ mod tests {
             garbage_collector_options: None,
             default_ttl: ttl,
         }
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_basic_functionality() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open("test_db", object_store).await.unwrap();
+
+        // Write some data
+        db.put(b"key1", b"value1").await.unwrap();
+        db.put(b"key2", b"value2").await.unwrap();
+
+        // Create a snapshot
+        let snapshot = db.snapshot().await.unwrap();
+
+        // Verify snapshot can read the data
+        assert_eq!(
+            snapshot.get(b"key1").await.unwrap(),
+            Some(Bytes::from(b"value1".as_ref()))
+        );
+        assert_eq!(
+            snapshot.get(b"key2").await.unwrap(),
+            Some(Bytes::from(b"value2".as_ref()))
+        );
+
+        // Write more data to the original database
+        db.put(b"key3", b"value3").await.unwrap();
+
+        // Snapshot should not see the new data
+        assert_eq!(snapshot.get(b"key3").await.unwrap(), None);
+
+        // Original database should see the new data
+        assert_eq!(
+            db.get(b"key3").await.unwrap(),
+            Some(Bytes::from(b"value3".as_ref()))
+        );
     }
 }

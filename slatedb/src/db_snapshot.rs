@@ -5,9 +5,9 @@ use std::sync::Arc;
 use crate::bytes_range::BytesRange;
 use crate::config::{ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
-use crate::error::SlateDBError;
+
+use crate::db::DbInner;
 use crate::transaction_manager::{TransactionManager, TransactionState};
-use crate::Db;
 
 pub struct DbSnapshot {
     /// txn_state holds the seq number of the transaction that created this snapshot
@@ -15,17 +15,21 @@ pub struct DbSnapshot {
     /// Unique ID assigned by the transaction manager
     txn_manager: Arc<TransactionManager>,
     /// Reference to the database
-    db: Arc<Db>,
+    db_inner: Arc<DbInner>,
 }
 
 impl DbSnapshot {
-    pub(crate) fn new(db: Arc<Db>, txn_manager: Arc<TransactionManager>, seq: u64) -> Arc<Self> {
+    pub(crate) fn new(
+        db_inner: Arc<DbInner>,
+        txn_manager: Arc<TransactionManager>,
+        seq: u64,
+    ) -> Arc<Self> {
         let txn_state = txn_manager.new_txn(seq);
 
         Arc::new(Self {
             txn_state: txn_state,
             txn_manager,
-            db,
+            db_inner,
         })
     }
 
@@ -36,7 +40,7 @@ impl DbSnapshot {
     ///
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
-    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
+    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
         self.get_with_options(key, &ReadOptions::default()).await
     }
 
@@ -52,14 +56,14 @@ impl DbSnapshot {
         &self,
         key: K,
         options: &ReadOptions,
-    ) -> Result<Option<Bytes>, SlateDBError> {
-        self.db.inner.check_error()?;
-        let db_state = self.db.inner.state.read().view();
-        self.db
-            .inner
+    ) -> Result<Option<Bytes>, crate::Error> {
+        self.db_inner.check_error()?;
+        let db_state = self.db_inner.state.read().view();
+        self.db_inner
             .reader
             .get_with_options(key, options, &db_state, Some(self.txn_state.seq))
             .await
+            .map_err(Into::into)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -69,12 +73,14 @@ impl DbSnapshot {
     ///
     /// ## Returns
     /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, SlateDBError>
+    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_options(range, &ScanOptions::default()).await
+        self.scan_with_options(range, &ScanOptions::default())
+            .await
+            .map_err(Into::into)
     }
 
     /// Scan a range of keys with the provided options.
@@ -89,7 +95,7 @@ impl DbSnapshot {
         &self,
         range: T,
         options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDBError>
+    ) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
@@ -102,10 +108,9 @@ impl DbSnapshot {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
-        self.db.inner.check_error()?;
-        let db_state = self.db.inner.state.read().view();
-        self.db
-            .inner
+        self.db_inner.check_error()?;
+        let db_state = self.db_inner.state.read().view();
+        self.db_inner
             .reader
             .scan_with_options(
                 BytesRange::from(range),
@@ -114,6 +119,7 @@ impl DbSnapshot {
                 Some(self.txn_state.seq),
             )
             .await
+            .map_err(Into::into)
     }
 }
 
