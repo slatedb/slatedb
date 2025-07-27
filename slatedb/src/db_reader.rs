@@ -3,6 +3,7 @@ use crate::clock::{
     DefaultLogicalClock, DefaultSystemClock, LogicalClock, MonotonicClock, SystemClock,
 };
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
+use crate::db_read::DbRead;
 use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
@@ -12,7 +13,7 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::oracle::Oracle;
 use crate::rand::DbRand;
-use crate::reader::{ReadSnapshot, Reader};
+use crate::reader::{DbStateReader, Reader};
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
@@ -74,7 +75,7 @@ struct CheckpointState {
 
 static EMPTY_TABLE: Lazy<Arc<KVTable>> = Lazy::new(|| Arc::new(KVTable::new()));
 
-impl ReadSnapshot for CheckpointState {
+impl DbStateReader for CheckpointState {
     fn memtable(&self) -> Arc<KVTable> {
         Arc::clone(&EMPTY_TABLE)
     }
@@ -184,9 +185,9 @@ impl DbReaderInner {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.check_error()?;
-        let snapshot = Arc::clone(&self.state.read());
+        let db_state = Arc::clone(&self.state.read());
         self.reader
-            .get_with_options(key, options, snapshot.as_ref(), None)
+            .get_with_options(key, options, db_state.as_ref(), None)
             .await
     }
 
@@ -196,9 +197,9 @@ impl DbReaderInner {
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_error()?;
-        let snapshot = Arc::clone(&self.state.read());
+        let db_state = Arc::clone(&self.state.read());
         self.reader
-            .scan_with_options(range, options, snapshot.as_ref(), None)
+            .scan_with_options(range, options, db_state.as_ref(), None)
             .await
     }
 
@@ -501,22 +502,18 @@ impl DbReaderInner {
 impl DbReader {
     fn validate_options(options: &DbReaderOptions) -> Result<(), SlateDBError> {
         if options.checkpoint_lifetime.as_millis() < 1000 {
-            return Err(SlateDBError::InvalidArgument {
-                msg: "Checkpoint lifetime must be at least 1s".to_string(),
-            });
+            return Err(SlateDBError::InvalidCheckpointLifetime(
+                options.checkpoint_lifetime,
+            ));
         }
 
-        let double_poll_interval =
-            options
-                .manifest_poll_interval
-                .checked_mul(2)
-                .ok_or(SlateDBError::InvalidArgument {
-                    msg: "Manifest poll interval is too large".to_string(),
-                })?;
+        let double_poll_interval = options.manifest_poll_interval.checked_mul(2).ok_or(
+            SlateDBError::InvalidManifestPollInterval(options.manifest_poll_interval),
+        )?;
         if options.checkpoint_lifetime < double_poll_interval {
-            return Err(SlateDBError::InvalidArgument {
-                msg: "Checkpoint lifetime must be at least double the manifest poll interval"
-                    .to_string(),
+            return Err(SlateDBError::CheckpointLifetimeTooShort {
+                lifetime: options.checkpoint_lifetime,
+                interval: double_poll_interval,
             });
         }
         Ok(())
@@ -533,7 +530,7 @@ impl DbReader {
         object_store: Arc<dyn ObjectStore>,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
-    ) -> Result<Self, SlateDBError> {
+    ) -> Result<Self, crate::Error> {
         let path = path.into();
         let store_provider = DefaultStoreProvider {
             path,
@@ -550,6 +547,7 @@ impl DbReader {
             Arc::new(DbRand::default()),
         )
         .await
+        .map_err(Into::into)
     }
 
     async fn open_internal(
@@ -603,22 +601,22 @@ impl DbReader {
     /// - `key`: the key to get
     ///
     /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`:
+    /// - `Result<Option<Bytes>, Error>`:
     ///     - `Some(Bytes)`: the value if it exists
     ///     - `None`: if the value does not exist
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error getting the value
+    /// - `Error`: if there was an error getting the value
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, SlateDBError};
+    /// use slatedb::{Db, DbReader, config::DbReaderOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
     ///     db.put(b"key", b"value").await?;
@@ -634,7 +632,7 @@ impl DbReader {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
+    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
         self.get_with_options(key, &ReadOptions::default()).await
     }
 
@@ -651,22 +649,22 @@ impl DbReader {
     ///   for readers, which can only observe committed state).
     ///
     /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`:
+    /// - `Result<Option<Bytes>, Error>`:
     ///     - `Some(Bytes)`: the value if it exists
     ///     - `None`: if the value does not exist
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error getting the value
+    /// - `Error`: if there was an error getting the value
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ReadOptions, SlateDBError};
+    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ReadOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
     ///     db.put(b"key", b"value").await?;
@@ -686,8 +684,11 @@ impl DbReader {
         &self,
         key: K,
         options: &ReadOptions,
-    ) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner.get_with_options(key, options).await
+    ) -> Result<Option<Bytes>, crate::Error> {
+        self.inner
+            .get_with_options(key, options)
+            .await
+            .map_err(Into::into)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -698,20 +699,20 @@ impl DbReader {
     /// - `range`: the range of keys to scan
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
+    /// - `Error`: if there was an error scanning the range of keys
     ///
     /// ## Returns
-    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, SlateDBError};
+    /// use slatedb::{Db, DbReader, config::DbReaderOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
     ///     db.put(b"a", b"a_value").await?;
@@ -730,7 +731,7 @@ impl DbReader {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, SlateDBError>
+    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
@@ -748,20 +749,20 @@ impl DbReader {
     ///   for readers, which can only observe committed state).
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
+    /// - `Error`: if there was an error scanning the range of keys
     ///
     /// ## Returns
-    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ScanOptions, config::DurabilityLevel, SlateDBError};
+    /// use slatedb::{Db, DbReader, config::DbReaderOptions, config::ScanOptions, config::DurabilityLevel, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
     ///     db.put(b"a", b"a_value").await?;
@@ -786,7 +787,7 @@ impl DbReader {
         &self,
         range: T,
         options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDBError>
+    ) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
@@ -798,23 +799,26 @@ impl DbReader {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = BytesRange::from((start, end));
-        self.inner.scan_with_options(range, options).await
+        self.inner
+            .scan_with_options(range, options)
+            .await
+            .map_err(Into::into)
     }
 
     /// Close the database reader.
     ///
     /// ## Returns
-    /// - `Result<(), SlateDBError>`: if there was an error closing the reader
+    /// - `Result<(), Error>`: if there was an error closing the reader
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, config::DbReaderOptions, SlateDBError};
+    /// use slatedb::{Db, DbReader, config::DbReaderOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store.clone()).await?;
     ///     let options = DbReaderOptions::default();
@@ -824,7 +828,7 @@ impl DbReader {
     /// }
     /// ```
     ///
-    pub async fn close(&self) -> Result<(), SlateDBError> {
+    pub async fn close(&self) -> Result<(), crate::Error> {
         if let Some(poller) = &self.manifest_poller {
             poller
                 .thread_tx
@@ -839,6 +843,29 @@ impl DbReader {
             }
         }
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl DbRead for DbReader {
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, crate::Error> {
+        self.get_with_options(key, options).await
+    }
+
+    async fn scan_with_options<K, T>(
+        &self,
+        range: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        T: RangeBounds<K> + Send,
+    {
+        self.scan_with_options(range, options).await
     }
 }
 
@@ -858,7 +885,7 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
-    use crate::{test_utils, Db, SlateDBError};
+    use crate::{error::SlateDBError, test_utils, Db};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -1159,11 +1186,9 @@ mod tests {
         )
         .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let result = reader.get(b"key").await;
-        let Err(err) = result else {
-            panic!("Expected an error");
-        };
-        assert!(matches!(err, SlateDBError::IoError(_)));
+        let result = reader.get(b"key").await.unwrap_err();
+        dbg!(&result);
+        assert_eq!(result.to_string(), "System error: io error (oops)");
     }
 
     struct TestProvider {
@@ -1192,7 +1217,7 @@ mod tests {
     }
 
     impl TestProvider {
-        async fn new_db(&self, options: Settings) -> Result<Db, SlateDBError> {
+        async fn new_db(&self, options: Settings) -> Result<Db, crate::Error> {
             Db::builder(self.path.clone(), self.object_store.clone())
                 .with_settings(options)
                 .build()

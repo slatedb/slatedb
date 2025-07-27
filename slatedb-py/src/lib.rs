@@ -4,7 +4,7 @@ use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
-use ::slatedb::{KeyValue, SlateDBError};
+use ::slatedb::{Error, KeyValue};
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -388,7 +388,7 @@ impl PySlateDBAdmin {
                 .map(|s| Uuid::parse_str(&s).map_err(create_value_error))
                 .transpose()?;
             admin
-                .create_checkpoint(&CheckpointOptions { lifetime, source })
+                .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
                 .await
                 .map_err(create_value_error)
         })?;
@@ -417,7 +417,7 @@ impl PySlateDBAdmin {
     }
 }
 
-type IteratorReceiver = Arc<Mutex<mpsc::UnboundedReceiver<Result<Option<KeyValue>, SlateDBError>>>>;
+type IteratorReceiver = Arc<Mutex<mpsc::UnboundedReceiver<Result<Option<KeyValue>, Error>>>>;
 
 #[pyclass(name = "DbIterator")]
 pub struct PyDbIterator {
@@ -473,7 +473,7 @@ impl PyDbIterator {
                         }
                     }
                     let _ = sender.send(Ok(None)); // End of iteration
-                    Ok::<(), SlateDBError>(())
+                    Ok::<(), Error>(())
                 }
                 .await;
 
@@ -494,7 +494,7 @@ impl PyDbIterator {
                         }
                     }
                     let _ = sender.send(Ok(None)); // End of iteration
-                    Ok::<(), SlateDBError>(())
+                    Ok::<(), Error>(())
                 }
                 .await;
 

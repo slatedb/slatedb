@@ -65,7 +65,7 @@ impl CompactionExecuteBench {
         key_bytes: usize,
         val_bytes: usize,
         compression_codec: Option<CompressionCodec>,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), crate::Error> {
         let sst_format = SsTableFormat {
             compression_codec,
             ..SsTableFormat::default()
@@ -172,18 +172,18 @@ impl CompactionExecuteBench {
             let row_entry = RowEntry::new(key, ValueDeletable::Value(val.into()), 0, None, None);
             sst_writer.add(row_entry).await?;
         }
-        let encoded = sst_writer.close().await?;
+        let sst = sst_writer.close().await?;
         let elapsed_ms = system_clock
             .now()
             .duration_since(start)
             .expect("clock moved backwards")
             .as_millis();
-        info!("wrote sst with id: {:?} {:?}ms", &encoded.id, elapsed_ms);
+        info!("wrote sst with id: {:?} {:?}ms", &sst.id, elapsed_ms);
         Ok(())
     }
 
     #[allow(clippy::panic)]
-    pub async fn run_clear(&self, num_ssts: usize) -> Result<(), SlateDBError> {
+    pub async fn run_clear(&self, num_ssts: usize) -> Result<(), crate::Error> {
         let mut del_tasks = Vec::new();
         for i in 0u32..num_ssts as u32 {
             let os = self.object_store.clone();
@@ -198,7 +198,7 @@ impl CompactionExecuteBench {
         for result in results {
             match result {
                 Ok(Ok(())) => {}
-                Ok(Err(err)) => return Err(err.into()),
+                Ok(Err(err)) => return Err(SlateDBError::from(err).into()),
                 Err(err) => panic!("task failed: {:?}", err),
             }
         }
@@ -295,7 +295,7 @@ impl CompactionExecuteBench {
         source_sr_ids: Option<Vec<u32>>,
         destination_sr_id: u32,
         compression_codec: Option<CompressionCodec>,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), crate::Error> {
         let sst_format = SsTableFormat {
             compression_codec,
             ..SsTableFormat::default()
@@ -366,7 +366,7 @@ impl CompactionExecuteBench {
                             .as_millis();
                         info!(elapsed_ms, "compaction finished");
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => return Err(err.into()),
                 }
             }
         }

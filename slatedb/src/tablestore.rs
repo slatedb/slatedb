@@ -523,9 +523,13 @@ pub(crate) struct EncodedSsTableWriter<'a> {
 }
 
 impl EncodedSsTableWriter<'_> {
-    pub async fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
-        self.builder.add(entry)?;
-        self.drain_blocks().await
+    /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
+    /// The block size is calculated after applying any compression if enabled.
+    /// The block size is None if the builder has not finished compacting a block yet.
+    pub async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
+        let block_size = self.builder.add(entry)?;
+        self.drain_blocks().await?;
+        Ok(block_size)
     }
 
     pub async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
@@ -533,6 +537,7 @@ impl EncodedSsTableWriter<'_> {
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
         }
+
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
         self.writer.shutdown().await?;
         self.table_store
@@ -550,6 +555,10 @@ impl EncodedSsTableWriter<'_> {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn is_drained(&self) -> bool {
+        self.builder.is_drained()
     }
 
     #[cfg(test)]

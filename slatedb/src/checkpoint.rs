@@ -32,7 +32,7 @@ impl Db {
         &self,
         scope: CheckpointScope,
         options: &CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, SlateDBError> {
+    ) -> Result<CheckpointCreateResult, crate::Error> {
         // flush all the data into SSTs
         if let CheckpointScope::All = scope {
             if self.inner.wal_enabled {
@@ -50,7 +50,8 @@ impl Db {
             },
         )?;
 
-        rx.await?
+        let result = rx.await.map_err(SlateDBError::ReadChannelError)?;
+        result.map_err(Into::into)
     }
 }
 
@@ -64,7 +65,6 @@ mod tests {
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
-    use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
@@ -96,7 +96,7 @@ mod tests {
             id: checkpoint_id,
             manifest_id: checkpoint_manifest_id,
         } = admin
-            .create_checkpoint(&CheckpointOptions::default())
+            .create_detached_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -131,7 +131,7 @@ mod tests {
             id: checkpoint_id,
             manifest_id: _,
         } = admin
-            .create_checkpoint(&CheckpointOptions {
+            .create_detached_checkpoint(&CheckpointOptions {
                 lifetime: Some(Duration::from_secs(3600)),
                 ..CheckpointOptions::default()
             })
@@ -167,7 +167,7 @@ mod tests {
             id: source_checkpoint_id,
             manifest_id: source_checkpoint_manifest_id,
         } = admin
-            .create_checkpoint(&CheckpointOptions::default())
+            .create_detached_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -175,7 +175,7 @@ mod tests {
             id: _,
             manifest_id: checkpoint_manifest_id,
         } = admin
-            .create_checkpoint(&CheckpointOptions {
+            .create_detached_checkpoint(&CheckpointOptions {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             })
@@ -199,15 +199,19 @@ mod tests {
 
         let source_checkpoint_id = uuid::Uuid::new_v4();
         let result = admin
-            .create_checkpoint(&CheckpointOptions {
+            .create_detached_checkpoint(&CheckpointOptions {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             })
-            .await;
+            .await
+            .unwrap_err();
 
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), SlateDBError::CheckpointMissing(id) if id == source_checkpoint_id)
+        assert_eq!(
+            result.to_string(),
+            format!(
+                "Persistent state error: checkpoint missing. checkpoint_id=`{}`",
+                source_checkpoint_id
+            )
         );
     }
 
@@ -216,13 +220,15 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let admin = AdminBuilder::new(path, object_store.clone()).build();
-        let result = admin.create_checkpoint(&CheckpointOptions::default()).await;
+        let result = admin
+            .create_detached_checkpoint(&CheckpointOptions::default())
+            .await
+            .unwrap_err();
 
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            SlateDBError::LatestManifestMissing
-        ));
+        assert_eq!(
+            result.to_string(),
+            "Persistent state error: failed to find latest manifest"
+        );
     }
 
     #[tokio::test]
@@ -236,7 +242,7 @@ mod tests {
             .await
             .unwrap();
         let CheckpointCreateResult { id, manifest_id: _ } = admin
-            .create_checkpoint(&CheckpointOptions {
+            .create_detached_checkpoint(&CheckpointOptions {
                 lifetime: Some(Duration::from_secs(100)),
                 ..CheckpointOptions::default()
             })
@@ -282,9 +288,13 @@ mod tests {
 
         let result = admin
             .refresh_checkpoint(uuid::Uuid::new_v4(), Some(Duration::from_secs(1000)))
-            .await;
+            .await
+            .unwrap_err();
 
-        assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
+        assert_eq!(
+            result.to_string(),
+            "Persistent state error: invalid DB state error"
+        );
     }
 
     #[tokio::test]
@@ -298,7 +308,7 @@ mod tests {
             .await
             .unwrap();
         let CheckpointCreateResult { id, manifest_id: _ } = admin
-            .create_checkpoint(&CheckpointOptions::default())
+            .create_detached_checkpoint(&CheckpointOptions::default())
             .await
             .unwrap();
 

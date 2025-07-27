@@ -93,6 +93,6 @@ impl DbSnapshot {
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
         // Unregister from transaction manager when dropped
-        self.txn_manager.remove_txn(self.transaction_state.as_ref());
+        self.txn_manager.remove_txn(self.txn_state.as_ref());
     }
 }

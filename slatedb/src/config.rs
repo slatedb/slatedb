@@ -162,7 +162,7 @@ use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 
-use crate::error::{SettingsError, SlateDBError};
+use crate::error::SlateDBError;
 
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
@@ -185,6 +185,9 @@ pub enum SstBlockSize {
     Block32Kib,
     /// 64KiB blocks
     Block64Kib,
+    /// Other block sizes
+    #[cfg(test)]
+    Other(usize),
 }
 
 impl SstBlockSize {
@@ -198,6 +201,8 @@ impl SstBlockSize {
             SstBlockSize::Block16Kib => 16384,
             SstBlockSize::Block32Kib => 32768,
             SstBlockSize::Block64Kib => 65536,
+            #[cfg(test)]
+            SstBlockSize::Other(size) => *size,
         }
     }
 }
@@ -577,7 +582,7 @@ impl Settings {
     /// # Returns
     ///
     /// * `Ok(Settings)` if the file was successfully read and parsed.
-    /// * `Err(SettingsError)` if there was an error reading or parsing the file.
+    /// * `Err(Error)` if there was an error reading or parsing the file.
     ///
     /// # Errors
     ///
@@ -593,10 +598,10 @@ impl Settings {
     ///
     /// let config = Settings::from_file("config.toml").expect("Failed to load options from file");
     /// ```
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Settings, SettingsError> {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Settings, crate::Error> {
         let path = path.as_ref();
         let Some(ext) = path.extension() else {
-            return Err(SettingsError::UnknownFormat(path.into()));
+            return Err(SlateDBError::UnknownConfigurationFormat(path.into()).into());
         };
 
         let mut builder = Figment::from(Settings::default());
@@ -604,11 +609,11 @@ impl Settings {
             "json" => builder = builder.merge(Json::file(path)),
             "toml" => builder = builder.merge(Toml::file(path)),
             "yaml" | "yml" => builder = builder.merge(Yaml::file(path)),
-            _ => return Err(SettingsError::UnknownFormat(path.into())),
+            _ => return Err(SlateDBError::UnknownConfigurationFormat(path.into()).into()),
         }
         builder
             .extract()
-            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)))
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
     }
 
     /// Loads Settings from environment variables with a specified prefix.
@@ -628,7 +633,7 @@ impl Settings {
     /// # Returns
     ///
     /// * `Ok(Settings)` if the environment variables were successfully read and parsed.
-    /// * `Err(SettingsError)` if there was an error reading or parsing the environment variables.
+    /// * `Err(Error)` if there was an error reading or parsing the environment variables.
     ///
     /// # Examples
     ///
@@ -638,11 +643,11 @@ impl Settings {
     /// // Assuming environment variables like SLATEDB_FLUSH_INTERVAL, SLATEDB_WAL_ENABLED, etc. are set
     /// let config = Settings::from_env("SLATEDB_").expect("Failed to load options from env");
     /// ```
-    pub fn from_env(prefix: &str) -> Result<Settings, SettingsError> {
+    pub fn from_env(prefix: &str) -> Result<Settings, crate::Error> {
         Figment::from(Settings::default())
             .merge(Env::prefixed(prefix))
             .extract()
-            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)))
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
     }
 
     /// Loads Settings from multiple configuration sources in a specific order.
@@ -660,7 +665,7 @@ impl Settings {
     /// # Returns
     ///
     /// * `Ok(Settings)` if the configuration was successfully loaded and parsed.
-    /// * `Err(SettingsError)` if there was an error reading or parsing the configuration.
+    /// * `Err(Error)` if there was an error reading or parsing the configuration.
     ///
     /// # Examples
     ///
@@ -669,7 +674,7 @@ impl Settings {
     ///
     /// let config = Settings::load().expect("Failed to load options");
     /// ```
-    pub fn load() -> Result<Settings, SettingsError> {
+    pub fn load() -> Result<Settings, crate::Error> {
         Figment::from(Settings::default())
             .merge(Json::file("SlateDb.json"))
             .merge(Toml::file("SlateDb.toml"))
@@ -677,7 +682,7 @@ impl Settings {
             .merge(Yaml::file("SlateDb.yml"))
             .admerge(Env::prefixed("SLATEDB_"))
             .extract()
-            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)))
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
     }
 }
 
@@ -780,7 +785,7 @@ pub enum CompressionCodec {
 }
 
 impl FromStr for CompressionCodec {
-    type Err = SlateDBError;
+    type Err = crate::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -792,7 +797,7 @@ impl FromStr for CompressionCodec {
             "lz4" => Ok(Self::Lz4),
             #[cfg(feature = "zstd")]
             "zstd" => Ok(Self::Zstd),
-            _ => Err(SlateDBError::InvalidCompressionCodec),
+            _ => Err(SlateDBError::InvalidCompressionCodec.into()),
         }
     }
 }

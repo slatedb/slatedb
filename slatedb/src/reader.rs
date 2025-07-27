@@ -15,7 +15,7 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{get_now_for_read, is_not_expired};
-use crate::{filter, DbIterator, SlateDBError};
+use crate::{error::SlateDBError, filter, DbIterator};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::FutureExt;
@@ -38,7 +38,7 @@ impl SstFilterResult {
     }
 }
 
-pub(crate) trait ReadSnapshot {
+pub(crate) trait DbStateReader {
     fn memtable(&self) -> Arc<KVTable>;
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
     fn core(&self) -> &CoreDbState;
@@ -97,7 +97,7 @@ impl Reader {
         &self,
         key: K,
         options: &ReadOptions,
-        snapshot: &(dyn ReadSnapshot + Sync + Send),
+        db_state: &(dyn DbStateReader + Sync + Send),
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
@@ -105,7 +105,7 @@ impl Reader {
         let get = LevelGet {
             key: key.as_ref(),
             max_seq,
-            snapshot,
+            db_state,
             table_store: self.table_store.clone(),
             db_stats: self.db_stats.clone(),
             now,
@@ -113,16 +113,16 @@ impl Reader {
         get.get().await
     }
 
-    pub(crate) async fn scan_with_options<'a>(
-        &'a self,
+    pub(crate) async fn scan_with_options(
+        &self,
         range: BytesRange,
         options: &ScanOptions,
-        snapshot: &(dyn ReadSnapshot + Sync),
+        db_state: &(dyn DbStateReader + Sync),
         max_seq: Option<u64>,
-    ) -> Result<DbIterator<'a>, SlateDBError> {
+    ) -> Result<DbIterator, SlateDBError> {
         let mut memtables = VecDeque::new();
-        memtables.push_back(snapshot.memtable());
-        for memtable in snapshot.imm_memtable() {
+        memtables.push_back(db_state.memtable());
+        for memtable in db_state.imm_memtable() {
             memtables.push_back(memtable.table());
         }
         let memtable_iters: Vec<MemTableIterator> = memtables
@@ -140,7 +140,7 @@ impl Reader {
         };
 
         let mut l0_iters = VecDeque::new();
-        for sst in &snapshot.core().l0 {
+        for sst in &db_state.core().l0 {
             if let Some(iter) = SstIterator::new_owned(
                 range.clone(),
                 sst.clone(),
@@ -154,7 +154,7 @@ impl Reader {
         }
 
         let mut sr_iters = VecDeque::new();
-        for sr in &snapshot.core().compacted {
+        for sr in &db_state.core().compacted {
             let iter = SortedRunIterator::new_owned(
                 range.clone(),
                 sr.clone(),
@@ -172,7 +172,7 @@ impl Reader {
 struct LevelGet<'a> {
     key: &'a [u8],
     max_seq: Option<u64>,
-    snapshot: &'a (dyn ReadSnapshot + Sync + Send),
+    db_state: &'a (dyn DbStateReader + Sync + Send),
     table_store: Arc<TableStore>,
     db_stats: DbStats,
     now: i64,
@@ -209,8 +209,8 @@ impl<'a> LevelGet<'a> {
 
     fn get_memtable(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
         async move {
-            let maybe_val = std::iter::once(self.snapshot.memtable())
-                .chain(self.snapshot.imm_memtable().iter().map(|imm| imm.table()))
+            let maybe_val = std::iter::once(self.db_state.memtable())
+                .chain(self.db_state.imm_memtable().iter().map(|imm| imm.table()))
                 .find_map(|memtable| memtable.get(self.key, self.max_seq));
             if let Some(val) = maybe_val {
                 return Ok(Some(val));
@@ -232,7 +232,7 @@ impl<'a> LevelGet<'a> {
 
             let key_hash = filter::filter_hash(self.key);
 
-            for sst in &self.snapshot.core().l0 {
+            for sst in &self.db_state.core().l0 {
                 let filter_result = self.sst_might_include_key(sst, self.key, key_hash).await?;
                 self.record_filter_result(&filter_result);
 
@@ -274,7 +274,7 @@ impl<'a> LevelGet<'a> {
             };
             let key_hash = filter::filter_hash(self.key);
 
-            for sr in &self.snapshot.core().compacted {
+            for sr in &self.db_state.core().compacted {
                 let filter_result = self.sr_might_include_key(sr, self.key, key_hash).await?;
                 self.record_filter_result(&filter_result);
 
@@ -376,12 +376,12 @@ mod tests {
     use object_store::{memory::InMemory, path::Path};
     use rstest::rstest;
 
-    struct MockReadSnapshot {
+    struct MockReadDbState {
         memtable: Arc<KVTable>,
         imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     }
 
-    impl ReadSnapshot for MockReadSnapshot {
+    impl DbStateReader for MockReadDbState {
         fn memtable(&self) -> Arc<KVTable> {
             self.memtable.clone()
         }
@@ -395,8 +395,8 @@ mod tests {
         }
     }
 
-    fn mock_read_snapshot() -> MockReadSnapshot {
-        MockReadSnapshot {
+    fn mock_db_state() -> MockReadDbState {
+        MockReadDbState {
             memtable: Arc::new(KVTable::new()),
             imm_memtable: VecDeque::new(),
         }
@@ -532,12 +532,12 @@ mod tests {
     async fn test_level_get_handles_expire(
         #[case] test_case: LevelGetExpireTestCase,
     ) -> Result<(), SlateDBError> {
-        let mock_read_snapshot = mock_read_snapshot();
+        let mock_read_db_state = mock_db_state();
         let stat_registry = StatRegistry::new();
         let get = LevelGet {
             key: b"key",
             max_seq: None,
-            snapshot: &mock_read_snapshot,
+            db_state: &mock_read_db_state,
             table_store: Arc::new(TableStore::new(
                 ObjectStores::new(Arc::new(InMemory::new()), None),
                 SsTableFormat::default(),

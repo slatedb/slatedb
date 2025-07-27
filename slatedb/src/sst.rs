@@ -397,6 +397,12 @@ pub(crate) struct EncodedSsTableBlock {
     pub(crate) encoded_bytes: Bytes,
 }
 
+impl EncodedSsTableBlock {
+    pub(crate) fn len(&self) -> usize {
+        self.encoded_bytes.len()
+    }
+}
+
 pub(crate) struct EncodedSsTable {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
@@ -511,16 +517,20 @@ impl EncodedSsTableBuilder<'_> {
         }
     }
 
-    pub fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
+    /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
+    /// The block size is calculated after applying any compression if enabled.
+    /// The block size is None if the builder has not finished compacting a block yet.
+    pub fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
         self.num_keys += 1;
         let key = entry.key.clone();
 
         let index_key = compute_index_key(self.current_block_max_key.take(), &key);
         self.current_block_max_key = Some(key.clone());
 
+        let mut block_size = None;
         if !self.builder.add(entry.clone()) {
             // Create a new block builder and append block data
-            self.finish_block()?;
+            block_size = self.finish_block()?;
 
             // New block must always accept the first KV pair
             assert!(self.builder.add(entry));
@@ -534,7 +544,7 @@ impl EncodedSsTableBuilder<'_> {
 
         self.filter_builder.add_key(&key);
 
-        Ok(())
+        Ok(block_size)
     }
 
     #[cfg(test)]
@@ -543,7 +553,7 @@ impl EncodedSsTableBuilder<'_> {
         key: &[u8],
         val: &[u8],
         attrs: crate::types::RowAttributes,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<Option<usize>, SlateDBError> {
         let entry = RowEntry::new(
             key.to_vec().into(),
             crate::types::ValueDeletable::Value(Bytes::copy_from_slice(val)),
@@ -564,10 +574,11 @@ impl EncodedSsTableBuilder<'_> {
         self.block_meta.len()
     }
 
-    fn finish_block(&mut self) -> Result<(), SlateDBError> {
-        if self.builder.is_empty() {
-            return Ok(());
+    fn finish_block(&mut self) -> Result<Option<usize>, SlateDBError> {
+        if self.is_drained() {
+            return Ok(None);
         }
+
         let new_builder = BlockBuilder::new(self.block_size);
         let builder = std::mem::replace(&mut self.builder, new_builder);
         let block = self.prepare_block(builder, self.current_len)?;
@@ -579,10 +590,13 @@ impl EncodedSsTableBuilder<'_> {
             },
         );
         self.block_meta.push(block_meta);
-        self.current_len += block.encoded_bytes.len() as u64;
+
+        let block_size = block.len();
+        self.current_len += block_size as u64;
         self.blocks.push_back(block);
         self.first_key = None;
-        Ok(())
+
+        Ok(Some(block_size))
     }
 
     fn prepare_block(
@@ -704,6 +718,10 @@ impl EncodedSsTableBuilder<'_> {
             unconsumed_blocks: self.blocks,
             footer: Bytes::from(buf),
         })
+    }
+
+    pub(crate) fn is_drained(&self) -> bool {
+        self.builder.is_empty()
     }
 }
 

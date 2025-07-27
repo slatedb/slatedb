@@ -60,8 +60,17 @@ impl BytesRange {
             is_bound_non_empty(&end_bound),
             "End bound must be non-empty"
         );
+        let inner = ComparableRange::new(start_bound, end_bound);
+        assert!(inner.non_empty(), "Range must be non-empty");
+        Self { inner }
+    }
+
+    pub(crate) fn new_empty() -> Self {
         Self {
-            inner: ComparableRange::new(start_bound, end_bound),
+            inner: ComparableRange::new(
+                Excluded(Bytes::copy_from_slice(&[0_u8])),
+                Excluded(Bytes::copy_from_slice(&[0_u8])),
+            ),
         }
     }
 
@@ -129,7 +138,9 @@ pub(crate) mod tests {
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
 
+    use bytes::Bytes;
     use proptest::proptest;
+    use std::ops::Bound;
     use std::ops::Bound::Unbounded;
     use std::ops::RangeBounds;
 
@@ -138,7 +149,11 @@ pub(crate) mod tests {
         proptest!(|(range in arbitrary::nonempty_range(10))| {
             assert!(range.non_empty());
         });
+    }
 
+    #[should_panic(expected = "Range must be non-empty")]
+    #[test]
+    fn test_arbitrary_empty_range() {
         proptest!(|(range in arbitrary::empty_range(10))| {
             assert!(range.empty());
         });
@@ -147,10 +162,9 @@ pub(crate) mod tests {
     #[test]
     fn test_intersection_of_empty_range_and_nonempty_range_is_empty() {
         proptest!(|(
-            empty_range in arbitrary::empty_range(10),
             non_empty_range in arbitrary::nonempty_range(10),
         )| {
-            assert!(empty_range.intersect(&non_empty_range).is_none())
+            assert!(BytesRange::new_empty().intersect(&non_empty_range).is_none())
         });
     }
 
@@ -171,6 +185,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Range must be non-empty")]
     fn test_contains_with_empty_range() {
         proptest!(|(range in arbitrary::empty_range(10), sample in arbitrary::nonempty_bytes(10))| {
             assert!(!range.contains(&sample), "Expected value {sample:?} to not be in empty range {range:?}");
@@ -184,5 +199,18 @@ pub(crate) mod tests {
         )| {
             assert!(non_empty_1.intersect(&non_empty_2).is_some())
         });
+    }
+
+    #[test]
+    fn test_new_with_unbounded_range_is_valid() {
+        BytesRange::new(Unbounded, Unbounded);
+    }
+
+    #[test]
+    #[should_panic(expected = "Range must be non-empty")]
+    fn test_new_with_start_larger_than_end_panics() {
+        let start = Bound::Included(Bytes::from("z"));
+        let end = Bound::Included(Bytes::from("a"));
+        BytesRange::new(start, end);
     }
 }
