@@ -10,6 +10,7 @@ use crate::transaction_manager::{TransactionManager, TransactionState};
 use crate::Db;
 
 pub struct DbSnapshot {
+    /// txn_state holds the seq number of the transaction that created this snapshot
     txn_state: Arc<TransactionState>,
     /// Unique ID assigned by the transaction manager
     txn_manager: Arc<TransactionManager>,
@@ -26,6 +27,17 @@ impl DbSnapshot {
             txn_manager,
             db,
         })
+    }
+
+    /// Get a value from the snapshot with default read options.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to get
+    ///
+    /// ## Returns
+    /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
+    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
+        self.get_with_options(key, &ReadOptions::default()).await
     }
 
     /// Get a value from the snapshot with custom read options.
