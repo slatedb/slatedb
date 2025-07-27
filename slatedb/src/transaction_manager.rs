@@ -12,30 +12,41 @@ pub(crate) struct TransactionState {
 /// Manages the lifecycle of DbSnapshot objects, tracking all living transaction states
 pub struct TransactionManager {
     /// Map of transaction state ID to weak reference
-    transaction_states: Arc<RwLock<HashMap<Uuid, Weak<TransactionState>>>>,
+    inner: Arc<RwLock<TransactionManagerInner>>,
+}
+
+struct TransactionManagerInner {
+    active_txns: HashMap<Uuid, Weak<TransactionState>>,
 }
 
 impl TransactionManager {
     pub fn new() -> Self {
         Self {
-            transaction_states: Arc::new(RwLock::new(HashMap::new())),
+            inner: Arc::new(RwLock::new(TransactionManagerInner {
+                active_txns: HashMap::new(),
+            })),
         }
     }
 
     /// Register a transaction state with a specific ID
-    pub fn new_transaction_state(&self, seq: u64) -> Arc<TransactionState> {
+    pub fn new_txn(&self, seq: u64) -> Arc<TransactionState> {
         let id = Uuid::new_v4();
-        let transaction_state = Arc::new(TransactionState { id, seq });
+        let txn_state = Arc::new(TransactionState { id, seq });
         {
-            let mut transaction_states = self.transaction_states.write();
-            transaction_states.insert(id, Arc::downgrade(&transaction_state));
+            let mut inner = self.inner.write();
+            inner.active_txns.insert(id, Arc::downgrade(&txn_state));
         }
-        transaction_state
+        txn_state
     }
 
     /// Remove a transaction state when it's dropped
-    pub fn remove(&self, transaction_state: &TransactionState) {
-        let mut transaction_states = self.transaction_states.write();
-        transaction_states.remove(&transaction_state.id);
+    pub fn remove_txn(&self, txn_state: &TransactionState) {
+        let mut inner = self.inner.write();
+        inner.active_txns.remove(&txn_state.id);
+    }
+
+    pub fn min_retention_seq(&self) -> Option<u64> {
+        let inner = self.inner.read();
+        inner.active_txns.values().map(|state| state.seq).min()
     }
 }

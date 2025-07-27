@@ -9,24 +9,20 @@ use crate::transaction_manager::{TransactionManager, TransactionState};
 use crate::Db;
 
 pub struct DbSnapshot {
-    transaction_state: Arc<TransactionState>,
+    txn_state: Arc<TransactionState>,
     /// Unique ID assigned by the transaction manager
-    transaction_manager: Arc<TransactionManager>,
+    txn_manager: Arc<TransactionManager>,
     /// Reference to the database
     db: Arc<Db>,
 }
 
 impl DbSnapshot {
-    pub(crate) fn new(
-        db: Arc<Db>,
-        transaction_manager: Arc<TransactionManager>,
-        seq: u64,
-    ) -> Arc<Self> {
-        let transaction_state = transaction_manager.new_transaction_state(seq);
+    pub(crate) fn new(db: Arc<Db>, txn_manager: Arc<TransactionManager>, seq: u64) -> Arc<Self> {
+        let txn_state = txn_manager.new_txn(seq);
 
         Arc::new(Self {
-            transaction_state,
-            transaction_manager,
+            txn_state: txn_state,
+            txn_manager,
             db,
         })
     }
@@ -97,7 +93,6 @@ impl DbSnapshot {
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
         // Unregister from transaction manager when dropped
-        self.transaction_manager
-            .remove(self.transaction_state.as_ref());
+        self.txn_manager.remove_txn(self.transaction_state.as_ref());
     }
 }
