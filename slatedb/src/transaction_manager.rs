@@ -5,12 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Weak;
 use tokio::time::Instant;
-use tokio::{
-    select,
-    sync::mpsc::{self, error::TrySendError},
-    task::JoinHandle,
-};
-use tracing::{debug, error, instrument, trace};
+use tokio::{select, sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
 pub(crate) struct TransactionState {
@@ -91,19 +86,22 @@ impl TransactionManager {
 
     /// Remove a transaction state when it's dropped
     pub fn remove_txn(&self, txn_state: &TransactionState) {
-        let mut inner = self.inner.write();
-        inner.active_txns.remove(&txn_state.id);
+        let need_sync_manifest = {
+            let mut inner = self.inner.write();
+            inner.active_txns.remove(&txn_state.id);
 
-        let need_sync_manifest = inner
-            .last_manifest_sync_time
-            .map(|t| t.elapsed().as_secs() > 10)
-            .unwrap_or(true);
+            let need_sync_manifest = inner
+                .last_manifest_sync_time
+                .map(|t| t.elapsed().as_secs() > 10)
+                .unwrap_or(true);
+            need_sync_manifest
+        };
 
         if need_sync_manifest {
             if let Some(tx) = self.inner.write().work_tx.as_ref() {
                 tx.try_send(TransactionBackgroundWork::SyncManifest).ok();
             }
-            inner.last_manifest_sync_time = Some(Instant::now());
+            self.inner.write().last_manifest_sync_time = Some(Instant::now());
         }
     }
 
