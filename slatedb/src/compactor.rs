@@ -1124,6 +1124,60 @@ mod tests {
         assert_eq!(l0_ids, compaction.sources);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "zstd")]
+    async fn test_compactor_compressed_block_size() {
+        use crate::compactor_stats::BYTES_COMPACTED;
+        use crate::config::{CompressionCodec, SstBlockSize};
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+            SizeTieredCompactionSchedulerOptions {
+                min_compaction_sources: 1,
+                max_compaction_sources: 999,
+                include_size_threshold: 4.0,
+            },
+        ));
+
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 128;
+        options.compression_codec = Some(CompressionCodec::Zstd);
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_sst_block_size(SstBlockSize::Other(128))
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, _) = build_test_stores(os.clone());
+        for i in 0..4 {
+            let k = vec![b'a' + i as u8; 16];
+            let v = vec![b'b' + i as u8; 48];
+            db.put(&k, &v).await.unwrap();
+            let k = vec![b'j' + i as u8; 16];
+            let v = vec![b'k' + i as u8; 48];
+            db.put(&k, &v).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+
+        // when:
+        await_compaction(&db, manifest_store)
+            .await
+            .expect("db was not compacted");
+
+        // then:
+        let metrics = db.metrics();
+        let bytes_compacted = metrics.lookup(BYTES_COMPACTED).unwrap().get();
+
+        assert!(bytes_compacted > 0, "bytes_compacted: {}", bytes_compacted);
+    }
+
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>
     where
         F: Future<Output = Option<T>>,

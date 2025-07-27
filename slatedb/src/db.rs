@@ -1009,6 +1009,7 @@ impl Db {
         }
     }
 
+    /// Get the metrics registry for the database.
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
     }
