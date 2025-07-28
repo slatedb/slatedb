@@ -73,7 +73,7 @@ async fn test_concurrent_writers_and_readers() {
                     .expect("Failed to write value");
 
                     if i % 10 == 0 {
-                        println!("Writer {} wrote {} values", writer_id, i);
+                        log::info!("Writer {} wrote {} values", writer_id, i);
                     }
                 }
             })
@@ -129,7 +129,13 @@ async fn test_concurrent_writers_and_readers() {
                         iterations += 1;
 
                         if current_value != last_seen_value {
-                            println!("Reader {} processed {} values. Sample key: {}, last seen value: {}, current value: {}", reader_id, iterations, key, last_seen_value, current_value);
+                            log::info!(
+                                reader_id,
+                                iterations,
+                                sample_key = key,
+                                last_seen_value,
+                                current_value;
+                                "progress");
                         }
                     }
                 }

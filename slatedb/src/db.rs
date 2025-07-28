@@ -2548,8 +2548,6 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_flush_with_options_wal_disabled_error() {
-        use std::error::Error;
-
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_with_options_wal_disabled";
         let mut options = test_db_options(0, 1024, None);
@@ -2585,7 +2583,7 @@ mod tests {
         // Verify that we get the WalDisabled error
         assert!(flush_result.is_err(), "Expected WalDisabled error");
         let error = flush_result.unwrap_err();
-        eprintln!("Error: {:?}", error.source());
+
         assert!(
             error
                 .to_string()
