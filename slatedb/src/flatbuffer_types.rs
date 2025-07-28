@@ -780,4 +780,26 @@ mod tests {
 
         assert_eq!(manifest, decoded);
     }
+
+    #[test]
+    fn test_should_encode_decode_retention_min_seq() {
+        let mut manifest = Manifest::initial(CoreDbState::new());
+        manifest.core.retention_min_seq = Some(12345);
+
+        let codec = FlatBufferManifestCodec {};
+        let bytes = codec.encode(&manifest);
+        let decoded = codec.decode(&bytes).unwrap();
+
+        assert_eq!(manifest.core.retention_min_seq, decoded.core.retention_min_seq);
+        assert_eq!(decoded.core.retention_min_seq, Some(12345));
+
+        // Test None case
+        let mut manifest_none = Manifest::initial(CoreDbState::new());
+        manifest_none.core.retention_min_seq = None;
+
+        let bytes_none = codec.encode(&manifest_none);
+        let decoded_none = codec.decode(&bytes_none).unwrap();
+
+        assert_eq!(decoded_none.core.retention_min_seq, None);
+    }
 }
