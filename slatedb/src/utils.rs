@@ -281,7 +281,7 @@ impl<R: RngCore> IdGenerator for R {
     /// Generates a random ULID using the provided RNG. The clock is used to generate
     /// the timestamp component of the ULID.
     fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid {
-        let now = u64::try_from(system_time_to_millis(clock.now()))
+        let now = u64::try_from(clock.now().timestamp_millis())
             .expect("timestamp outside u64 range in gen_ulid");
         let random_bytes = self.random::<u128>();
         Ulid::from_parts(now, random_bytes)
