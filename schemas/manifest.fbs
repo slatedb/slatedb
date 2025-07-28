@@ -90,6 +90,9 @@ table ManifestV1 {
 
     // The URI of the object store dedicated specifically for WAL, if any.
     wal_object_store_uri: string;
+
+    // The recent seq that is safe for retention.
+    min_retention_seq: ulong;
 }
 
 table CompactedSstId {
