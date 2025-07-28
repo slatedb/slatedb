@@ -92,7 +92,7 @@ table ManifestV1 {
     wal_object_store_uri: string;
 
     // The recent seq that is safe for retention.
-    min_retention_seq: ulong;
+    retention_min_seq: ulong;
 }
 
 table CompactedSstId {
