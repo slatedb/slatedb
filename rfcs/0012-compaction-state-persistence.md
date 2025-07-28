@@ -249,6 +249,40 @@ pub struct CompactionState {
 ```
 
 #### **CAS-Based Atomic Updates**
+
+CAS based atomic updates can occur in two scenarios. These scenarios are as follows:
+1. Compactor Fencing.
+2. Optimistic Locking of CompactionState
+
+On startup, a compactor must increment `compactor_epoch` in the `CompactionState`.
+
+1. List `CompactionState` to find the `CompactionState` with the largest ID.
+2. Read the latest CompactionState (e.g. compaction/00000000000000000002.compactor).
+3. Increment the `compactor_epoch` in the current CompactionState in memory.
+4. CAS based atomic update of the CompactionState with the updated `compactor_epoch` (e.g. compaction/00000000000000000003.compactor).
+
+Now, there are 4 possible outcomes of the CAS-Based Atomic Updates
+- The write is successful.
+
+- The write was unsuccessful. Another compactor wrote the `CompactionState` with the same ID and a lower (older) `compactor_epoch`.[OptimisticLockingConflict]
+  1. This case can be reproduced when a new compactor starts, as mentioned in the above state it prepares a `CompactionState` with updated `compaction_epoch`
+  2. However, before the compactor can write the `CompactionState` to the object store, the old compactor persisted `CompactionState` from it's Compaction execution cycle.
+  3. Now, the new Compactor tries to persist the `CompactionState` and finds that the ID matches and the object store `compactor_epoch` is less than the new `compactor_epoch`
+  4. The new Compactor should refresh the local `CompactorState` and increment the `compactor_epoch` in the local `CompactorState`.
+  5 Now, it should again retry writing the `CompactionState` to the object_store. If the write fails, go back to step 4
+
+- The write was unsuccessful. Another compactor wrote the `CompactionState` with the same ID and the same `compactor_epoch`.[FencedCompactor]
+  1. This case can be reproduced when two new compactors starts lets call them c1 and c2, as mentioned in the above state it prepares a `CompactionState` with updated `compaction_epoch`
+  2. Compactor c1 successfully writes the `CompactionState` to object_store
+  3. Now, the Compactor c2 tries to persist the `CompactionState` and finds that the ID and matches and the object store `compactor_epoch` is also equal to the c2's `compactor_epoch`
+  4. In this case, the Compactor c2 should gracefully shutdown after clean up.
+
+- The write was unsuccessful. Another writer wrote the `CompactionState` with the same ID and a higher (newer) `compactor_epoch`.[FencedCompactor]
+  1. This case can be reproduced when the active Compactor is processing a compaction, however another compactor starts and updates the `CompactionState` with updated `compaction_epoch` in the object_store.
+  2. Now, when the active Compactor tries to write the `CompactionState` to the object store, it finds the `compactor_epoch` higher than its `compactor_epoch`
+  3. In this case, the Compactor should gracefully shutdown after clean up.
+
+
 State updates follow the same CAS pattern as manifest updates for guaranteed atomicity:
 
 1. **Read current state** and extract `next_compactor_state_id`
