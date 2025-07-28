@@ -105,7 +105,7 @@ impl TransactionManager {
         }
     }
 
-    pub fn min_retention_seq(&self) -> Option<u64> {
+    fn min_retention_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
         inner
             .active_txns
