@@ -225,6 +225,11 @@ impl FlatBufferManifestCodec {
                 create_time: Self::unix_ts_to_time(cp.checkpoint_create_time_s()),
             })
             .collect();
+        let retention_min_seq = if manifest.retention_min_seq() == 0 {
+            None
+        } else {
+            Some(manifest.retention_min_seq())
+        };
         let core = CoreDbState {
             initialized: manifest.initialized(),
             l0_last_compacted,
@@ -236,6 +241,7 @@ impl FlatBufferManifestCodec {
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
+            retention_min_seq,
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -499,6 +505,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 checkpoints: Some(checkpoints),
                 last_l0_seq: core.last_l0_seq,
                 wal_object_store_uri,
+                retention_min_seq: core.retention_min_seq.unwrap_or(0),
             },
         );
         self.builder.finish(manifest, None);
@@ -727,6 +734,7 @@ mod tests {
                 last_l0_clock_tick: 0,
                 last_l0_seq: 0,
                 wal_object_store_uri: None,
+                retention_min_seq: 0,
             },
         );
         fbb.finish(manifest, None);

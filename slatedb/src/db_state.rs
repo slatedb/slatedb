@@ -336,6 +336,8 @@ pub(crate) struct CoreDbState {
     /// it's persisted in the manifest, and only updated when a new L0
     /// SST is created in the manifest.
     pub(crate) last_l0_seq: u64,
+    /// The recent seq that is safe for retention.
+    pub(crate) retention_min_seq: Option<u64>,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) wal_object_store_uri: Option<String>,
 }
@@ -353,6 +355,7 @@ impl CoreDbState {
             last_l0_seq: 0,
             checkpoints: vec![],
             wal_object_store_uri: None,
+            retention_min_seq: None,
         }
     }
 
@@ -559,6 +562,7 @@ impl DbState {
             last_l0_seq: my_db_state.last_l0_seq,
             checkpoints: remote_manifest.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
+            retention_min_seq: my_db_state.retention_min_seq,
         };
         state.manifest = remote_manifest;
         self.update_state(state);

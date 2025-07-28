@@ -34,6 +34,7 @@ pub(crate) struct CompactionJob {
     pub(crate) sorted_runs: Vec<SortedRun>,
     pub(crate) compaction_ts: i64,
     pub(crate) is_dest_last_run: bool,
+    pub(crate) retention_min_seq: Option<u64>,
 }
 
 impl std::fmt::Debug for CompactionJob {
@@ -46,6 +47,7 @@ impl std::fmt::Debug for CompactionJob {
             .field("compaction_ts", &self.compaction_ts)
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("estimated_source_bytes", &self.estimated_source_bytes())
+            .field("retention_min_seq", &self.retention_min_seq)
             .finish()
     }
 }
