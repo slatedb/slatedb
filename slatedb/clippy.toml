@@ -74,3 +74,10 @@ disallowed-methods = [
     { path = "tokio::time::timeout", reasonon = "Use crate::clock::SystemClock instead" },
     { path = "tokio::time::timeout_at", reasonon = "Use crate::clock::SystemClock instead" },
 ]
+disallowed-macros = [
+    { path = "tracing::info", reasonon = "Use log::info instead" },
+    { path = "tracing::warn", reasonon = "Use log::warn instead" },
+    { path = "tracing::error", reasonon = "Use log::error instead" },
+    { path = "tracing::debug", reasonon = "Use log::debug instead" },
+    { path = "tracing::trace", reasonon = "Use log::trace instead" },
+]
