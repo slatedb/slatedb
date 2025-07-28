@@ -1,5 +1,4 @@
-// Allowed because we don't have access to SlateDB's private rand crate
-#![allow(clippy::disallowed_types)]
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
