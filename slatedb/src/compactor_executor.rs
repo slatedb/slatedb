@@ -192,9 +192,6 @@ impl TokioCompactionExecutorInner {
         let mut last_progress_report = self.clock.now();
 
         while let Some(kv) = all_iter.next_entry().await? {
-            let key_len = kv.key.len();
-            let value_len = kv.value.len();
-
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
