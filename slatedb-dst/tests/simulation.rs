@@ -14,7 +14,7 @@ use slatedb::clock::MockLogicalClock;
 use slatedb::clock::MockSystemClock;
 use slatedb::clock::SystemClock;
 use slatedb::DbRand;
-use slatedb::SlateDBError;
+use slatedb::Error;
 use slatedb_dst::utils::{build_dst, build_runtime, run_simulation};
 use slatedb_dst::DstOptions;
 use std::rc::Rc;
@@ -55,7 +55,7 @@ fn test_dst(
     #[case] rand: Rc<DbRand>,
     #[case] iterations: u32,
     #[case] dst_opts: DstOptions,
-) -> Result<(), SlateDBError> {
+) -> Result<(), Error> {
     let runtime = build_runtime(rand.seed());
     let logical_clock = Arc::new(MockLogicalClock::new());
     runtime.block_on(async move {
@@ -93,7 +93,7 @@ fn test_dst_is_deterministic(
     #[case] seed: u64,
     #[case] simulations: u32,
     #[case] iterations: u32,
-) -> Result<(), SlateDBError> {
+) -> Result<(), Error> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let mut expected_u64: Option<u64> = None;
