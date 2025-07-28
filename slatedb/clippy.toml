@@ -80,4 +80,8 @@ disallowed-macros = [
     { path = "tracing::error", reasonon = "Use log::error instead" },
     { path = "tracing::debug", reasonon = "Use log::debug instead" },
     { path = "tracing::trace", reasonon = "Use log::trace instead" },
+    { path = "std::eprintln", reasonon = "Use log::error instead" },
+    { path = "std::eprint", reasonon = "Use log::error instead" },
+    { path = "std::println", reasonon = "Use log::info instead" },
+    { path = "std::print", reasonon = "Use log::info instead" },
 ]
