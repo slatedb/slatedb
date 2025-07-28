@@ -104,12 +104,11 @@ impl MemtableFlusher {
                 rguard.state().imm_memtable.back().cloned()
             }
         } {
-            let clock = self.db_inner.system_clock.as_ref();
             let id = SsTableId::Compacted(
                 self.db_inner
                     .rand
                     .rng()
-                    .gen_ulid(system_time_to_millis(clock.now())),
+                    .gen_ulid(self.db_inner.system_clock.as_ref()),
             );
             let sst_handle = self
                 .db_inner
