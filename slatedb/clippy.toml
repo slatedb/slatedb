@@ -50,6 +50,7 @@ disallowed-methods = [
     { path = "rand::prelude::thread_rng", reason = "Use crate::rand::DbRand instead" },
     { path = "std::time::SystemTime::now", reason = "Use crate::clock::SystemClock instead" },
     { path = "std::time::SystemTime::elapsed", reason = "Use crate::clock::SystemClock instead" },
+    { path = "std::option::Option::unwrap", reasonon = "Use expect instead" },
     { path = "chrono::Utc::now", reason = "Use crate::clock::SystemClock instead" },
     { path = "ulid::Ulid::new", reason = "Use crate::utils::IdGenerator instead" },
     { path = "uuid::Uuid::new_v1", reason = "Use crate::utils::IdGenerator instead" },
