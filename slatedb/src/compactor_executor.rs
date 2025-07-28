@@ -23,7 +23,7 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
-use crate::utils::{spawn_bg_task, system_time_to_millis, IdGenerator};
+use crate::utils::{spawn_bg_task, IdGenerator};
 use tracing::{debug, error, instrument};
 use uuid::Uuid;
 
