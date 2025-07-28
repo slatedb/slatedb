@@ -320,6 +320,33 @@ impl ScanOptions {
     }
 }
 
+/// Enum representing the type of flush to perform.
+#[derive(Clone)]
+pub enum FlushType {
+    /// Freeze the active memtable [crate::mem_table::KVTable] and write
+    /// all immutable memtable entries (including the formerly active
+    /// memtable) to the object store.
+    MemTable,
+    /// Freeze the active WAL [crate::mem_table::KVTable] and write all
+    /// immutable WAL entries (including the formerly active WAL) to the
+    /// object store.
+    Wal,
+}
+
+#[derive(Clone)]
+pub struct FlushOptions {
+    /// The type of flush to perform.
+    pub flush_type: FlushType,
+}
+
+impl Default for FlushOptions {
+    fn default() -> Self {
+        Self {
+            flush_type: FlushType::Wal,
+        }
+    }
+}
+
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
 #[derive(Clone)]
