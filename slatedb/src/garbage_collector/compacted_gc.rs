@@ -3,9 +3,9 @@ use crate::{
     manifest::store::ManifestStore, tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
+use log::error;
 use std::collections::HashSet;
 use std::{sync::Arc, time::Duration};
-use tracing::error;
 
 use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 

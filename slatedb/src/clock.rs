@@ -18,7 +18,7 @@ use crate::{
     error::SlateDBError,
     utils::{self, system_time_from_millis, system_time_to_millis},
 };
-use tracing::info;
+use log::info;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.

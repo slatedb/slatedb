@@ -56,7 +56,7 @@ use crate::tablestore::TableStore;
 use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use tracing::{info, trace, warn};
+use log::{info, trace, warn};
 
 pub mod builder;
 pub use builder::DbBuilder;
@@ -290,7 +290,7 @@ impl DbInner {
                 total_mem_size_bytes,
                 wal_size_bytes,
                 imm_memtable_size_bytes,
-                max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                max_unflushed_bytes = self.settings.max_unflushed_bytes;
                 "checking backpressure",
             );
 
@@ -300,7 +300,7 @@ impl DbInner {
                     total_mem_size_bytes,
                     wal_size_bytes,
                     imm_memtable_size_bytes,
-                    max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                    max_unflushed_bytes = self.settings.max_unflushed_bytes;
                     "Unflushed memtable size exceeds max_unflushed_bytes. Applying backpressure.",
                 );
 

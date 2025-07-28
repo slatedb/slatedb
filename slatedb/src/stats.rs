@@ -60,7 +60,7 @@ use std::sync::{Arc, Mutex};
 
 use atomic::{Atomic, Ordering};
 use bytemuck::NoUninit;
-use tracing::warn;
+use log::warn;
 
 pub trait ReadableStat: Send + Sync + std::fmt::Debug {
     fn get(&self) -> i64;
