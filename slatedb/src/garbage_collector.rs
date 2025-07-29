@@ -21,12 +21,13 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
+use log::{debug, error, info};
 use manifest_gc::ManifestGcTask;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument};
+use tracing::instrument;
 use wal_gc::WalGcTask;
 
 mod compacted_gc;

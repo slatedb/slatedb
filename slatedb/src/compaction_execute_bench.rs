@@ -6,12 +6,12 @@ use std::time::Duration;
 use bytes::BufMut;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use log::{error, info};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;

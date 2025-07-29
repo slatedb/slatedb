@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
-use tracing::info;
+use log::info;
 use ulid::Ulid;
 use uuid::Uuid;
 

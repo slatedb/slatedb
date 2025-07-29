@@ -35,7 +35,7 @@ use std::{
 
 use crate::error::SlateDBError;
 use chrono::{DateTime, Utc};
-use tracing::info;
+use log::info;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.

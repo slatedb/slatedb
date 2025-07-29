@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
+use log::{debug, error};
 use parking_lot::Mutex;
-use tracing::{debug, error};
 
 use crate::clock::SystemClock;
 use crate::db_cache::stats::DbCacheStats;

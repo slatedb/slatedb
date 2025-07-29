@@ -12,7 +12,7 @@ use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
-#[allow(warnings)]
+#[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
 #[rustfmt::skip]
 mod manifest_generated;
 pub use manifest_generated::{

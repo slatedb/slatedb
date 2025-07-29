@@ -56,7 +56,7 @@ use crate::tablestore::TableStore;
 use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use tracing::{info, trace, warn};
+use log::{info, trace, warn};
 
 pub mod builder;
 pub use builder::DbBuilder;
@@ -290,7 +290,7 @@ impl DbInner {
                 total_mem_size_bytes,
                 wal_size_bytes,
                 imm_memtable_size_bytes,
-                max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                max_unflushed_bytes = self.settings.max_unflushed_bytes;
                 "checking backpressure",
             );
 
@@ -300,7 +300,7 @@ impl DbInner {
                     total_mem_size_bytes,
                     wal_size_bytes,
                     imm_memtable_size_bytes,
-                    max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                    max_unflushed_bytes = self.settings.max_unflushed_bytes;
                     "Unflushed memtable size exceeds max_unflushed_bytes. Applying backpressure.",
                 );
 
@@ -2548,8 +2548,6 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_flush_with_options_wal_disabled_error() {
-        use std::error::Error;
-
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_with_options_wal_disabled";
         let mut options = test_db_options(0, 1024, None);
@@ -2585,7 +2583,7 @@ mod tests {
         // Verify that we get the WalDisabled error
         assert!(flush_result.is_err(), "Expected WalDisabled error");
         let error = flush_result.unwrap_err();
-        eprintln!("Error: {:?}", error.source());
+
         assert!(
             error
                 .to_string()

@@ -413,7 +413,7 @@ struct PanicError(Arc<Mutex<Box<dyn Any + Send>>>);
 impl std::error::Error for PanicError {}
 impl std::fmt::Display for PanicError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let guard = self.0.lock().unwrap();
+        let guard = self.0.lock().expect("Failed to lock panic error");
         if let Some(err) = guard.downcast_ref::<SlateDBError>() {
             write!(f, "{err}")?;
         } else if let Some(err) = guard.downcast_ref::<Box<dyn std::error::Error>>() {

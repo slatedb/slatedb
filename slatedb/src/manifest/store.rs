@@ -16,6 +16,7 @@ use crate::transactional_object_store::{
 use crate::utils;
 use chrono::Utc;
 use futures::StreamExt;
+use log::{debug, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore};
@@ -24,7 +25,6 @@ use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, warn};
 use uuid::Uuid;
 
 /// Represents a local view of the manifest that is in the process of being updated
@@ -609,7 +609,7 @@ impl ManifestStore {
         }
 
         let manifest_path = &self.get_manifest_path(id);
-        debug!(%manifest_path, "deleting manifest");
+        debug!(manifest_path:%; "deleting manifest");
         self.object_store.delete(manifest_path).await?;
         Ok(())
     }
