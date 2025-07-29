@@ -282,6 +282,11 @@ Now, there are 4 possible outcomes of the CAS-Based Atomic Updates
   2. Now, when the active Compactor tries to write the `CompactionState` to the object store, it finds the `compactor_epoch` higher than its `compactor_epoch`
   3. In this case, the Compactor should gracefully shutdown after clean up.
 
+Once the compactor the process is active, it can encounter following conditions when persisting SRs
+
+1. if compactor_epoch in file > then we're fenced
+2. if compactor_epoch in file == panic, this should never happen (we have two processes writing with the same compactor epoch)
+3. if compactor_epoch in file < panic, this should never happen (we somehow went backwards in epochs after the current process fenced any previous epoch writers)
 
 State updates follow the same CAS pattern as manifest updates for guaranteed atomicity:
 
