@@ -105,12 +105,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fail_parallel::FailPointRegistry;
+use log::{info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
 
 use crate::admin::Admin;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
@@ -290,9 +290,9 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
-            info!(?path, settings = settings_json, "Opening SlateDB database");
+            info!(path:?, settings:? = settings_json; "Opening SlateDB database");
         } else {
-            info!(?path, ?self.settings, "Opening SlateDB database");
+            info!(path:?, settings:? = self.settings; "Opening SlateDB database");
         }
 
         let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());

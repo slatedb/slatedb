@@ -8,6 +8,7 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::clock::SystemClock;
 use crate::rand::DbRand;
 use bytes::Bytes;
+use log::{debug, warn};
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
 use radix_trie::{Trie, TrieCommon};
@@ -19,7 +20,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{Mutex, OnceCell},
 };
-use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};

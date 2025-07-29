@@ -5,10 +5,10 @@ use crate::{
     tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
+use log::error;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::error;
 
 use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 

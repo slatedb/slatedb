@@ -24,7 +24,8 @@ use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
 use crate::utils::{spawn_bg_task, IdGenerator};
-use tracing::{debug, error, instrument};
+use log::{debug, error};
+use tracing::instrument;
 use uuid::Uuid;
 
 pub(crate) struct CompactionJob {
@@ -181,7 +182,7 @@ impl TokioCompactionExecutorInner {
         &self,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
-        debug!(?compaction, "executing compaction");
+        debug!(compaction:?; "executing compaction");
         let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
