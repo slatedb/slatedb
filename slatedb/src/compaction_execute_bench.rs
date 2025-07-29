@@ -362,7 +362,7 @@ impl CompactionExecuteBench {
                             .now()
                             .signed_duration_since(start)
                             .num_milliseconds();
-                        info!(elapsed_ms, "compaction finished");
+                        info!(elapsed_ms; "compaction finished");
                     }
                     Err(err) => return Err(err.into()),
                 }
