@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::UNIX_EPOCH;
 
 use crossbeam_skiplist::SkipMap;
+use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
 use tracing::instrument;
-use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -83,7 +81,7 @@ impl CompactionProgressTracker {
             self.processed_bytes
                 .insert(id, (bytes_processed, total_bytes));
         } else {
-            warn!(%id, "compaction progress tracker missing for job");
+            warn!(id:%; "compaction progress tracker missing for job");
         }
     }
 
@@ -94,10 +92,10 @@ impl CompactionProgressTracker {
             let (processed_bytes, total_bytes) = entry.value();
             let percentage = (processed_bytes * 100 / total_bytes) as u32;
             debug!(
-                id = %id,
-                current_percentage = format!("{percentage}%"),
-                processed_bytes = processed_bytes,
-                estimated_total_bytes = total_bytes,
+                id:%,
+                current_percentage:% = format!("{percentage}%"),
+                processed_bytes,
+                estimated_total_bytes = total_bytes;
                 "compaction progress"
             );
         }
@@ -490,13 +488,9 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         self.write_manifest_safely().await?;
         self.maybe_schedule_compactions().await?;
-        self.stats.last_compaction_ts.set(
-            self.system_clock
-                .now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
+        self.stats
+            .last_compaction_ts
+            .set(self.system_clock.now().timestamp() as u64);
         Ok(())
     }
 

@@ -25,10 +25,11 @@
 //! _Note: The `write_batch` loop still holds a lock on the db_state. There can still
 //! be contention between `get`s, which holds a lock, and the write loop._
 
+use log::{info, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tracing::{info, instrument, warn};
+use tracing::instrument;
 
 use crate::config::WriteOptions;
 use crate::types::{RowEntry, ValueDeletable};

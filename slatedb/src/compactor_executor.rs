@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
-use std::time::Duration;
 
+use chrono::TimeDelta;
 use futures::future::join_all;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
@@ -24,7 +24,8 @@ use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
 use crate::utils::{spawn_bg_task, IdGenerator};
-use tracing::{debug, error, instrument};
+use log::{debug, error};
+use tracing::instrument;
 use uuid::Uuid;
 
 pub(crate) struct CompactionJob {
@@ -181,7 +182,7 @@ impl TokioCompactionExecutorInner {
         &self,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
-        debug!(?compaction, "executing compaction");
+        debug!(compaction:?; "executing compaction");
         let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
@@ -191,12 +192,9 @@ impl TokioCompactionExecutorInner {
         let mut last_progress_report = self.clock.now();
 
         while let Some(kv) = all_iter.next_entry().await? {
-            let duration_since_last_report = self
-                .clock
-                .now()
-                .duration_since(last_progress_report)
-                .unwrap_or(Duration::from_secs(0));
-            if duration_since_last_report > Duration::from_secs(1) {
+            let duration_since_last_report =
+                self.clock.now().signed_duration_since(last_progress_report);
+            if duration_since_last_report > TimeDelta::seconds(1) {
                 // Allow send() because we are treating the executor like an external
                 // component. They can do what they want. The send().expect() will raise
                 // a SendErr, which will be caught in the cleanup_fn and set if there's
