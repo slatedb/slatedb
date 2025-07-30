@@ -23,7 +23,7 @@ pub struct TransactionManager {
     /// cancellation token for the background task.
     cancellation_token: CancellationToken,
     /// The duration to sync the manifest.
-    sync_manifest_duration: Duration,
+    sync_min_retention_seq_duration: Duration,
 }
 
 struct TransactionManagerInner {
@@ -33,7 +33,7 @@ struct TransactionManagerInner {
     /// task handle of the background worker.
     background_task: Option<JoinHandle<Result<(), SlateDBError>>>,
     /// The last min retention seq that has been synced to the object store.
-    last_manifest_sync_time: Option<Instant>,
+    last_sync_min_retention_seq_time: Option<Instant>,
 }
 
 impl TransactionManager {
@@ -43,10 +43,10 @@ impl TransactionManager {
                 active_txns: HashMap::new(),
                 work_tx: None,
                 background_task: None,
-                last_manifest_sync_time: None,
+                last_sync_min_retention_seq_time: None,
             })),
             cancellation_token,
-            sync_manifest_duration: Duration::from_secs(30),
+            sync_min_retention_seq_duration: Duration::from_secs(30),
         }
     }
 
@@ -98,8 +98,8 @@ impl TransactionManager {
         let need_sync_manifest = {
             let inner = self.inner.read();
             inner
-                .last_manifest_sync_time
-                .map(|t| t.elapsed() > self.sync_manifest_duration)
+                .last_sync_min_retention_seq_time
+                .map(|t| t.elapsed() > self.sync_min_retention_seq_duration)
                 .unwrap_or(true)
         };
 
@@ -107,7 +107,7 @@ impl TransactionManager {
             if let Some(tx) = self.inner.write().work_tx.as_ref() {
                 tx.try_send(TransactionBackgroundWork::SyncManifest).ok();
             }
-            self.inner.write().last_manifest_sync_time = Some(Instant::now());
+            self.inner.write().last_sync_min_retention_seq_time = Some(Instant::now());
         }
     }
 
