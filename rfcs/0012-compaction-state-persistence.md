@@ -194,19 +194,17 @@ Compaction (1) ──→ (N) CompactionJob
     ├── sources: Vec<SourceId>
     ├── destination: u32  
     ├── job_attempts: Vec<CompactionJob>
-    └── current_phase: CompactionPhase
+    └── current_status: CompactionStatus
     └── created_ts: u64
     └── updated_ts: u64
 
 CompactionJob
     ├── attempt_number: u32
     ├── progress: CompactionProgress  
-    ├── status: CompactionJobStatus
+    ├── current_status: CompactionJobStatus
     └── existing_output_ssts: Option<Vec<SsTableId>>
     └── input_ssts_completed: Vec<SsTableId>
     └── output_ssts_written: Vec<SsTableId>
-    └── bytes_read/written: u64
-    └── current_phase: CompactionPhase
     └── created_ts: u64
 ```
 
@@ -238,11 +236,7 @@ pub struct CompactionState {
     /// All currently active compactions indexed by ID
     /// Includes queued, running, and recently completed compactions
     pub active_compactions: BTreeMap<CompactionId, Compaction>,
-    
-    /// Queue of pending manual compaction requests
-    /// Processed in priority order by the active compactor
-    pub manual_compaction_queue: Vec<ManualCompactionRequest>,
-    
+        
     /// Timestamp when this state was created/last updated
     pub state_timestamp: DateTime<Utc>,
 }
@@ -371,7 +365,7 @@ We extend the `Db` API to support manual compaction operations, and introduce a 
 /// Options for manual compaction submission
 pub struct ManualCompactionOptions {
     /// Priority level for the compaction
-    pub priority: CompactionPriority,
+    pub priority: CompactionRequestPriority,
     /// Optional deadline for completion
     pub deadline: Option<DateTime<Utc>>,
     /// Optional description/reason for the compaction  
@@ -380,7 +374,7 @@ pub struct ManualCompactionOptions {
 
 /// Priority levels for compaction scheduling
 #[derive(Debug, Clone, PartialEq)]
-pub enum CompactionPriority {
+pub enum CompactionRequestPriority {
     Critical,  // Preempts all other compactions
     High,      // Preempts normal/low compactions  
     Normal,    // Standard automatic compaction priority
@@ -389,17 +383,17 @@ pub enum CompactionPriority {
 
 /// Status of a compaction job
 #[derive(Debug, Clone, PartialEq)]
-pub enum CompactionStatus {
-    Queued,      // Waiting to be scheduled
-    Running,     // Currently executing
-    Completed,   // Successfully finished
-    Failed,      // Failed with error
-    Cancelled,   // Cancelled by request
+pub enum CompactionRequestStatus {
+    Submitted,      // Waiting to be scheduled
+    InProgress,     // Currently executing
+    Completed,      // Successfully finished
+    Failed,         // Failed with error
+    Cancelled,      // Cancelled by request
 }
 
 /// Progress information for an active compaction
 #[derive(Debug, Clone)]
-pub struct CompactionProgress {
+pub struct CompactionRequestProgress {
     /// Number of input SSTs processed so far
     pub input_ssts_processed: usize,
     /// Total number of input SSTs to process
@@ -420,15 +414,15 @@ pub struct CompactionInfo {
     /// Unique identifier for the compaction
     pub id: CompactionId,
     /// Current status
-    pub status: CompactionStatus,
+    pub status: CompactionRequestStatus,
     /// Priority level
-    pub priority: CompactionPriority,
+    pub priority: CompactionRequestPriority,
     /// Source SSTs/SRs being compacted
     pub sources: Vec<String>,
-    /// Target level for output
-    pub target_level: Option<u32>,
+    /// Target Destination of compaction
+    pub target: String,
     /// Current progress (if running)
-    pub progress: Option<CompactionProgress>,
+    pub progress: Option<CompactionRequestProgress>,
     /// When the compaction was created
     pub created_at: DateTime<Utc>,
     /// When the compaction started (if applicable)
@@ -438,6 +432,36 @@ pub struct CompactionInfo {
     /// Error message (if failed)
     pub error_message: Option<String>,
 }
+```
+
+#### Example
+```rust
+// CLI parses arguments into this public struct
+let options = ManualCompactionOptions {
+    priority: CompactionRequestPriority::High,           // --priority high
+    deadline: Some(parse_datetime("2025-01-30T10:00:00Z")), // --deadline
+    reason: Some("urgent cleanup".to_string()),   // --reason
+};
+
+// API method signature uses the public struct directly
+pub async fn submit_manual_compaction(
+    &self, 
+    sources: Vec<String>,                    
+    options: ManualCompactionOptions        
+) -> Result<CompactionInfo, Error>   
+
+pub async fn get_compaction_info(
+    &self,
+    id: CompactionId
+) -> Result<CompactionInfo, Error>           // ← Returns public struct directly
+
+// API method returns vector of public struct
+pub async fn list_compactions(
+    &self,
+    status_filter: Option<CompactionRequestStatus>  // ← Public enum
+) -> Result<Vec<CompactionInfo>, Error> 
+
+```        
 
 ### **Garbage Collection Integration**
 - The garbage collector would be responsible to delete the entries in the compaction state files based on the two conditions:
