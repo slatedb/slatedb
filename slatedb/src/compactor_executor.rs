@@ -188,7 +188,6 @@ impl TokioCompactionExecutorInner {
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
         ));
-
         let mut bytes_written = 0usize;
         let mut last_progress_report = self.clock.now();
 

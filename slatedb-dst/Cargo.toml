@@ -1,0 +1,30 @@
+[package]
+name = "slatedb-dst"
+description = "A deterministic simulation testing (DST) tool for SlateDB."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+# Skipping publication for this test crate for now. We can publish if users want.
+publish = false
+
+[dependencies]
+chrono = { workspace = true }
+ctor = { workspace = true }
+futures = { workspace = true }
+log = { workspace = true, features = ["kv"] }
+object_store = { workspace = true }
+rand = { workspace = true }
+slatedb = { workspace = true, features = ["lz4", "snappy", "test-util", "wal_disable", "zlib", "zstd"] }
+tokio = { workspace = true, features = ["macros", "test-util", "rt"] }
+tracing = { workspace = true }
+tracing-log = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+rstest = { workspace = true }
+
+[lints]
+workspace = true
