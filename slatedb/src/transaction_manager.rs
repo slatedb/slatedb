@@ -113,6 +113,11 @@ impl TransactionManager {
             .min()
     }
 
+    async fn sync_manifest(&self) -> Result<(), SlateDBError> {
+        // TODO: update manifest with the latest min retention seq
+        Ok(())
+    }
+
     async fn do_background_work(
         self: Arc<Self>,
         mut work_rx: mpsc::Receiver<TransactionBackgroundWork>,
