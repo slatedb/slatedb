@@ -1,5 +1,7 @@
 use crate::error::SlateDBError;
 use crate::utils::spawn_bg_task;
+use log::info;
+use log::warn;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -131,13 +133,19 @@ impl TransactionManager {
                         Some(work) => {
                             match work {
                                 TransactionBackgroundWork::SyncManifest => {
-                                    // TODO: sync manifest to the object store
+                                    match self.sync_min_retention_seq().await {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            warn!("failed to sync min retention seq to manifest: {:?}", e);
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 _ = cancellation_token.cancelled() => {
+                    info!("quitting transaction manager background task: cancelled");
                     return Ok(());
                 }
             };
