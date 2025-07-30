@@ -30,6 +30,7 @@ use std::{
         atomic::{AtomicI64, Ordering},
         Arc,
     },
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -51,6 +52,28 @@ pub trait SystemClock: Debug + Send + Sync {
     fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a>;
 }
 
+/// A future returned by SystemClockTicker::tick() that updates the ticker state
+/// only when the future completes (not when it's created or cancelled).
+pub struct TickFuture<'a> {
+    sleep_future: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+    last_tick_time: &'a mut Option<DateTime<Utc>>,
+    next_tick_time: DateTime<Utc>,
+}
+
+impl<'a> Future for TickFuture<'a> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.sleep_future.as_mut().poll(cx) {
+            Poll::Ready(()) => {
+                *self.last_tick_time = Some(self.next_tick_time);
+                Poll::Ready(())
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 /// A ticker that emits a signal every `duration` interval. This allows us to use our
 /// clock to control ticking.
 ///
@@ -59,7 +82,7 @@ pub trait SystemClock: Debug + Send + Sync {
 pub struct SystemClockTicker<'a> {
     clock: &'a dyn SystemClock,
     duration: Duration,
-    first_tick: bool,
+    last_tick: Option<DateTime<Utc>>,
 }
 
 impl<'a> SystemClockTicker<'a> {
@@ -67,18 +90,57 @@ impl<'a> SystemClockTicker<'a> {
         Self {
             clock,
             duration,
-            first_tick: true,
+            last_tick: None,
         }
     }
 
-    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        // Tokio's ticker ticks immediately when the first tick() is called.
-        // Let's emulate that behavior in our ticker.
-        if self.first_tick {
-            self.first_tick = false;
-            Box::pin(async {})
-        } else {
-            self.clock.sleep(self.duration)
+    pub fn tick(&mut self) -> TickFuture<'_> {
+        let now = self.clock.now();
+
+        // If last_tick hasn't been set yet (first tick future hasn't completed),
+        // treat this as if no time has passed and tick immediately
+        let last_tick = match self.last_tick {
+            Some(time) => time,
+            None => {
+                return TickFuture {
+                    sleep_future: Box::pin(async {}),
+                    last_tick_time: &mut self.last_tick,
+                    next_tick_time: now,
+                };
+            }
+        };
+        // Guard against duration overflow in chrono. This really only happens in
+        // tests where we set `duration` to `Duration::MAX`
+        let next_tick_time = match last_tick.checked_add_signed(
+            chrono::Duration::from_std(self.duration).unwrap_or(chrono::Duration::MAX),
+        ) {
+            Some(time) => time,
+            None => {
+                // If we can't add the duration (overflow), tick immediately
+                return TickFuture {
+                    sleep_future: Box::pin(async {}),
+                    last_tick_time: &mut self.last_tick,
+                    next_tick_time: now,
+                };
+            }
+        };
+
+        // If we're already past the next tick time, tick immediately
+        if now >= next_tick_time {
+            return TickFuture {
+                sleep_future: Box::pin(async {}),
+                last_tick_time: &mut self.last_tick,
+                next_tick_time: now,
+            };
+        }
+
+        // Sleep for the remaining time until next tick
+        let sleep_duration = (next_tick_time - now).to_std().unwrap();
+
+        TickFuture {
+            sleep_future: self.clock.sleep(sleep_duration),
+            last_tick_time: &mut self.last_tick,
+            next_tick_time,
         }
     }
 }
@@ -506,5 +568,38 @@ mod tests {
         ticker.tick().await;
         let after = clock.now();
         assert_eq!(before + tick_duration, after);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    async fn test_ticker_starvation_in_select() {
+        let clock = Arc::new(MockSystemClock::new());
+        let tick_duration = Duration::from_millis(50);
+        let mut ticker = clock.ticker(tick_duration);
+
+        let mut tick_count = 0;
+        let mut yield_count = 0;
+
+        for i in 0..10 {
+            // Advance the mock clock to satisfy any pending sleeps
+            clock.set((i + 1) * 50);
+
+            tokio::select! {
+                _ = ticker.tick() => {
+                    tick_count += 1;
+                }
+                _ = tokio::task::yield_now() => {
+                    yield_count += 1;
+                }
+            }
+        }
+
+        // Ticker should complete at least once
+        assert!(
+            tick_count > 0,
+            "Ticker was completely starved. tick_count: {}, yield_count: {}",
+            tick_count,
+            yield_count
+        );
     }
 }
