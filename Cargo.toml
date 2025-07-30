@@ -88,4 +88,4 @@ tempfile = "3.3"
 tokio-test = "0.4.4"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "allow", check-cfg = ['cfg(dst)'] }
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(dst)', 'cfg(tokio_unstable)'] }

@@ -20,7 +20,8 @@ rand = { workspace = true }
 slatedb = { workspace = true, features = ["lz4", "snappy", "test-util", "wal_disable", "zlib", "zstd"] }
 tokio = { workspace = true, features = ["macros", "test-util", "rt"] }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-log = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [dev-dependencies]
 rstest = { workspace = true }
