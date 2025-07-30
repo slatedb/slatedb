@@ -22,6 +22,8 @@ pub struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
     /// cancellation token for the background task.
     cancellation_token: CancellationToken,
+    /// The duration to sync the manifest.
+    sync_manifest_duration: Duration,
 }
 
 struct TransactionManagerInner {
@@ -44,6 +46,7 @@ impl TransactionManager {
                 last_manifest_sync_time: None,
             })),
             cancellation_token,
+            sync_manifest_duration: Duration::from_secs(30),
         }
     }
 
@@ -87,15 +90,17 @@ impl TransactionManager {
 
     /// Remove a transaction state when it's dropped
     pub fn remove_txn(&self, txn_state: &TransactionState) {
-        let need_sync_manifest = {
+        {
             let mut inner = self.inner.write();
             inner.active_txns.remove(&txn_state.id);
+        }
 
-            let need_sync_manifest = inner
+        let need_sync_manifest = {
+            let inner = self.inner.read();
+            inner
                 .last_manifest_sync_time
-                .map(|t| t.elapsed().as_secs() > 10)
-                .unwrap_or(true);
-            need_sync_manifest
+                .map(|t| t.elapsed() > self.sync_manifest_duration)
+                .unwrap_or(true)
         };
 
         if need_sync_manifest {
