@@ -17,6 +17,7 @@ slatedb = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-util = { workspace = true, default-features = false, features = ["rt"] }
 tracing = { workspace = true, features = ["log"] }
+tracing-log = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 
