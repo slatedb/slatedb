@@ -11,6 +11,7 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     let runtime = Runtime::new().expect("Failed to create Tokio runtime");
     let db = Db::open("/tmp/test_kv_store", object_store);
+    #[allow(clippy::disallowed_methods)]
     let db = runtime.block_on(db).unwrap();
     c.bench_function("put", |b| {
         b.to_async(&runtime).iter(|| async {

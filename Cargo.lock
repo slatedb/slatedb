@@ -3195,6 +3195,7 @@ dependencies = [
  "tokio-test",
  "tokio-util",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "ulid",
  "uuid",
@@ -3217,6 +3218,7 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 
@@ -3233,6 +3235,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "uuid",
 ]
