@@ -28,5 +28,5 @@ slatedb = { workspace = true, features = ["aws", "azure", "bencher", "wal_disabl
 tokio = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-log = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
 sysinfo = { workspace = true }
