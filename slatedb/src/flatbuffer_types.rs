@@ -790,7 +790,10 @@ mod tests {
         let bytes = codec.encode(&manifest);
         let decoded = codec.decode(&bytes).unwrap();
 
-        assert_eq!(manifest.core.retention_min_seq, decoded.core.retention_min_seq);
+        assert_eq!(
+            manifest.core.retention_min_seq,
+            decoded.core.retention_min_seq
+        );
         assert_eq!(decoded.core.retention_min_seq, Some(12345));
 
         // Test None case
