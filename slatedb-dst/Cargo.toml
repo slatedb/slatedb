@@ -21,7 +21,7 @@ slatedb = { workspace = true, features = ["lz4", "snappy", "test-util", "wal_dis
 tokio = { workspace = true, features = ["macros", "test-util", "rt"] }
 tracing = { workspace = true }
 tracing-log = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["fmt"] }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 rstest = { workspace = true }
