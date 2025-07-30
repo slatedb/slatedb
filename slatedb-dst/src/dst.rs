@@ -81,6 +81,8 @@
 //! ```
 
 use crate::utils;
+use log::debug;
+use log::info;
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
 use rand::distr::Uniform;
@@ -103,8 +105,6 @@ use std::ops::RangeBounds;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::debug;
-use tracing::info;
 
 /// Configuration options for the simulation.
 #[derive(Clone)]
@@ -180,7 +180,7 @@ impl std::fmt::Display for DstAction {
             }
             DstAction::Flush => write!(f, "Flush"),
             DstAction::AdvanceTime(duration) => {
-                write!(f, "AdvanceTime({:?})", utils::pretty_duration(duration))
+                write!(f, "AdvanceTime({:?})", duration)
             }
         }
     }
@@ -508,10 +508,10 @@ impl Dst {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
                 step_count,
-                simulated_time = utils::pretty_duration(&self.system_clock.now().duration_since(start_time).unwrap()),
-                btree_size = utils::pretty_bytes(self.state.size_bytes),
+                simulated_time:% = self.system_clock.now().signed_duration_since(start_time),
+                btree_size:% = utils::pretty_bytes(self.state.size_bytes),
                 btree_entries = self.state.len(),
-                step_action = %step_action,
+                step_action:% = step_action;
                 "run_simulation"
             );
             match step_action {
@@ -607,7 +607,7 @@ impl Dst {
     }
 
     async fn advance_time(&self, duration: Duration) {
-        debug!(?duration, "advance_time");
+        debug!(duration:?; "advance_time");
         self.system_clock.clone().advance(duration).await;
     }
 

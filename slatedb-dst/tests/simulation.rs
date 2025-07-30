@@ -94,10 +94,10 @@ fn test_dst_is_deterministic(
     #[case] simulations: u32,
     #[case] iterations: u32,
 ) -> Result<(), Error> {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use chrono::{DateTime, Utc};
 
     let mut expected_u64: Option<u64> = None;
-    let mut expected_time: Option<SystemTime> = None;
+    let mut expected_time: Option<DateTime<Utc>> = None;
 
     for simulation_count in 0..simulations {
         let rand = Rc::new(DbRand::new(seed));
@@ -125,8 +125,8 @@ fn test_dst_is_deterministic(
                             "non-determinism detected: seed={}, simulation_count={}, next_time={:?}, expected_time={:?}",
                             seed,
                             simulation_count,
-                            next_time.duration_since(UNIX_EPOCH),
-                            expected_time.duration_since(UNIX_EPOCH)
+                            next_time,
+                            expected_time,
                         );
                     }
                     info!(seed, simulation_count, "simulation passed");

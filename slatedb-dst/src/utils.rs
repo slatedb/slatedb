@@ -181,47 +181,6 @@ pub(crate) fn pretty_bytes(bytes: usize) -> String {
     }
 }
 
-/// Formats a [Duration] in a human-readable way.
-pub(crate) fn pretty_duration(d: &Duration) -> String {
-    let total_secs = d.as_secs();
-    let weeks = total_secs / 604_800;
-    let days = (total_secs % 604_800) / 86_400;
-    let hours = (total_secs % 86_400) / 3_600;
-    let mins = (total_secs % 3_600) / 60;
-    let secs = total_secs % 60;
-    let millis = d.subsec_millis();
-    let micros = d.subsec_micros();
-
-    let mut parts = Vec::new();
-    if weeks > 0 {
-        parts.push(format!("{}w", weeks));
-    }
-    if days > 0 {
-        parts.push(format!("{}d", days));
-    }
-    if hours > 0 {
-        parts.push(format!("{}h", hours));
-    }
-    if mins > 0 {
-        parts.push(format!("{}m", mins));
-    }
-    if secs > 0 {
-        parts.push(format!("{}s", secs));
-    }
-    if millis > 0 {
-        parts.push(format!("{}ms", millis));
-    } else if micros > 0 {
-        parts.push(format!("{}μs", micros));
-    }
-
-    if parts.is_empty() {
-        // handle zero-duration specially
-        "0s".to_string()
-    } else {
-        parts.join(" ")
-    }
-}
-
 // A flag so we only initialize logging once.
 static INIT_LOGGING: Once = Once::new();
 

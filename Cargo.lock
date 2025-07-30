@@ -3241,8 +3241,10 @@ dependencies = [
 name = "slatedb-dst"
 version = "0.7.0"
 dependencies = [
+ "chrono",
  "ctor",
  "futures",
+ "log",
  "object_store",
  "rand 0.9.1",
  "rstest",
