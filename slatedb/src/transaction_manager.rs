@@ -127,18 +127,17 @@ impl TransactionManager {
     ) -> Result<(), SlateDBError> {
         loop {
             select! {
-                work = work_rx.recv() => {
+                _ = work_rx.recv() => {
+                    let work = match work {
+                        None => continue,
+                        Some(work) => work
+                    };
                     match work {
-                        None => break,
-                        Some(work) => {
-                            match work {
-                                TransactionBackgroundWork::SyncManifest => {
-                                    match self.sync_min_retention_seq().await {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            warn!("failed to sync min retention seq to manifest: {:?}", e);
-                                        }
-                                    }
+                        TransactionBackgroundWork::SyncManifest => {
+                            match self.sync_min_retention_seq().await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    warn!("failed to sync min retention seq to manifest: {:?}", e);
                                 }
                             }
                         }
