@@ -113,7 +113,7 @@ impl TransactionManager {
             .min()
     }
 
-    async fn sync_manifest(&self) -> Result<(), SlateDBError> {
+    async fn sync_min_retention_seq(&self) -> Result<(), SlateDBError> {
         // TODO: update manifest with the latest min retention seq
         Ok(())
     }
