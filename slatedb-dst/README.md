@@ -26,6 +26,7 @@ To run DST tests, you must set the `RUSTFLAGS` environment variable to include
 
 ```bash
 $ RUSTFLAGS="--cfg dst --cfg tokio_unstable" \
+  RUSTDOCFLAGS="--cfg tokio_unstable" \
   cargo test -p slatedb-dst --all-features
 ```
 
@@ -33,5 +34,6 @@ Or if you prefer nextest:
 
 ```bash
 $ RUSTFLAGS="--cfg dst --cfg tokio_unstable" \
+  RUSTDOCFLAGS="--cfg tokio_unstable" \
   cargo nextest run -p slatedb-dst --profile dst
 ```
