@@ -97,6 +97,7 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
+        cancellation_token: CancellationToken,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
@@ -141,7 +142,7 @@ impl DbInner {
             settings.flush_interval,
         ));
 
-        let txn_manager = Arc::new(TransactionManager::new());
+        let txn_manager = Arc::new(TransactionManager::new(cancellation_token));
         let db_inner = Self {
             state,
             settings,
@@ -569,13 +570,6 @@ impl Db {
             .close()
             .await
             .expect("Failed to close WAL buffer");
-
-        // Shutdown the transaction manager.
-        self.inner
-            .txn_manager
-            .close()
-            .await
-            .expect("Failed to close transaction manager");
 
         // Shutdown the memtable flush thread.
         self.inner

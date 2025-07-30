@@ -1,11 +1,12 @@
 use crate::error::SlateDBError;
-use crate::utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader};
+use crate::utils::spawn_bg_task;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Weak;
 use tokio::time::Instant;
 use tokio::{select, sync::mpsc, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub(crate) struct TransactionState {
@@ -17,7 +18,8 @@ pub(crate) struct TransactionState {
 pub struct TransactionManager {
     /// Map of transaction state ID to weak reference
     inner: Arc<RwLock<TransactionManagerInner>>,
-    quit_once: WatchableOnceCell<Result<(), SlateDBError>>,
+    /// cancellation token for the background task.
+    cancellation_token: CancellationToken,
 }
 
 struct TransactionManagerInner {
@@ -31,7 +33,7 @@ struct TransactionManagerInner {
 }
 
 impl TransactionManager {
-    pub fn new() -> Self {
+    pub fn new(cancellation_token: CancellationToken) -> Self {
         Self {
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
@@ -39,7 +41,7 @@ impl TransactionManager {
                 background_task: None,
                 last_manifest_sync_time: None,
             })),
-            quit_once: WatchableOnceCell::new(),
+            cancellation_token,
         }
     }
 
@@ -57,13 +59,10 @@ impl TransactionManager {
 
         let background_fut = self
             .clone()
-            .do_background_work(work_rx, self.quit_once.reader());
-        let self_clone = self.clone();
+            .do_background_work(work_rx, self.cancellation_token.clone());
         let task_handle = spawn_bg_task(
             &tokio::runtime::Handle::current(),
-            move |result| {
-                Self::do_cleanup(self_clone, result.clone());
-            },
+            move |_| {},
             background_fut,
         );
         {
@@ -117,7 +116,7 @@ impl TransactionManager {
     async fn do_background_work(
         self: Arc<Self>,
         mut work_rx: mpsc::Receiver<TransactionBackgroundWork>,
-        mut quit_rx: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        cancellation_token: CancellationToken,
     ) -> Result<(), SlateDBError> {
         loop {
             select! {
@@ -133,23 +132,12 @@ impl TransactionManager {
                         }
                     }
                 }
-                _ = quit_rx.await_value() => {
+                _ = cancellation_token.cancelled() => {
                     return Ok(());
                 }
             };
         }
 
-        Ok(())
-    }
-
-    fn do_cleanup(self: Arc<Self>, result: Result<(), SlateDBError>) {
-        if let Err(e) = &result {
-            self.quit_once.write(Err(e.clone()));
-        }
-    }
-
-    pub async fn close(&self) -> Result<(), SlateDBError> {
-        self.quit_once.write(Ok(()));
         Ok(())
     }
 }
