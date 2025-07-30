@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::UNIX_EPOCH;
 
 use crossbeam_skiplist::SkipMap;
 use log::{debug, error, info, warn};
@@ -463,13 +462,9 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         self.write_manifest_safely().await?;
         self.maybe_schedule_compactions().await?;
-        self.stats.last_compaction_ts.set(
-            self.system_clock
-                .now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
+        self.stats
+            .last_compaction_ts
+            .set(self.system_clock.now().timestamp() as u64);
         Ok(())
     }
 

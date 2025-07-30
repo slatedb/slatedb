@@ -40,6 +40,7 @@ disallowed-types   = [
     { path = "uuid::Builder", reason = "Use crate::utils::IdGenerator instead" },
     { path = "ulid::Generator", reason = "Use crate::utils::IdGenerator instead" },
     { path = "std::time::Instant", reason = "Use tokio::time::Instant instead" },
+    { path = "std::time::SystemTime", reason = "Use crate::clock::SystemClock instead" },
     { path = "std::thread::Builder", reason = "Use tokio::task::Builder instead" },
 ]
 disallowed-methods = [

@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
-use std::time::Duration;
 
+use chrono::TimeDelta;
 use futures::future::join_all;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
@@ -193,12 +193,9 @@ impl TokioCompactionExecutorInner {
         let mut last_progress_report = self.clock.now();
 
         while let Some(kv) = all_iter.next_entry().await? {
-            let duration_since_last_report = self
-                .clock
-                .now()
-                .duration_since(last_progress_report)
-                .unwrap_or(Duration::from_secs(0));
-            if duration_since_last_report > Duration::from_secs(1) {
+            let duration_since_last_report =
+                self.clock.now().signed_duration_since(last_progress_report);
+            if duration_since_last_report > TimeDelta::seconds(1) {
                 // Allow send() because we are treating the executor like an external
                 // component. They can do what they want. The send().expect() will raise
                 // a SendErr, which will be caught in the cleanup_fn and set if there's
