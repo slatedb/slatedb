@@ -1206,7 +1206,7 @@ impl<'a> ManifestV1<'a> {
   pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 26;
   pub const VT_LAST_L0_SEQ: flatbuffers::VOffsetT = 28;
   pub const VT_WAL_OBJECT_STORE_URI: flatbuffers::VOffsetT = 30;
-  pub const VT_RETENTION_MIN_SEQ: flatbuffers::VOffsetT = 32;
+  pub const VT_RECENT_SNAPSHOT_MIN_SEQ: flatbuffers::VOffsetT = 32;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1218,7 +1218,7 @@ impl<'a> ManifestV1<'a> {
     args: &'args ManifestV1Args<'args>
   ) -> flatbuffers::WIPOffset<ManifestV1<'bldr>> {
     let mut builder = ManifestV1Builder::new(_fbb);
-    builder.add_retention_min_seq(args.retention_min_seq);
+    builder.add_recent_snapshot_min_seq(args.recent_snapshot_min_seq);
     builder.add_last_l0_seq(args.last_l0_seq);
     builder.add_last_l0_clock_tick(args.last_l0_clock_tick);
     builder.add_wal_id_last_seen(args.wal_id_last_seen);
@@ -1336,11 +1336,11 @@ impl<'a> ManifestV1<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(ManifestV1::VT_WAL_OBJECT_STORE_URI, None)}
   }
   #[inline]
-  pub fn retention_min_seq(&self) -> u64 {
+  pub fn recent_snapshot_min_seq(&self) -> u64 {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<u64>(ManifestV1::VT_RETENTION_MIN_SEQ, Some(0)).unwrap()}
+    unsafe { self._tab.get::<u64>(ManifestV1::VT_RECENT_SNAPSHOT_MIN_SEQ, Some(0)).unwrap()}
   }
 }
 
@@ -1365,7 +1365,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<Checkpoint>>>>("checkpoints", Self::VT_CHECKPOINTS, true)?
      .visit_field::<u64>("last_l0_seq", Self::VT_LAST_L0_SEQ, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("wal_object_store_uri", Self::VT_WAL_OBJECT_STORE_URI, false)?
-     .visit_field::<u64>("retention_min_seq", Self::VT_RETENTION_MIN_SEQ, false)?
+     .visit_field::<u64>("recent_snapshot_min_seq", Self::VT_RECENT_SNAPSHOT_MIN_SEQ, false)?
      .finish();
     Ok(())
   }
@@ -1385,7 +1385,7 @@ pub struct ManifestV1Args<'a> {
     pub checkpoints: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Checkpoint<'a>>>>>,
     pub last_l0_seq: u64,
     pub wal_object_store_uri: Option<flatbuffers::WIPOffset<&'a str>>,
-    pub retention_min_seq: u64,
+    pub recent_snapshot_min_seq: u64,
 }
 impl<'a> Default for ManifestV1Args<'a> {
   #[inline]
@@ -1405,7 +1405,7 @@ impl<'a> Default for ManifestV1Args<'a> {
       checkpoints: None, // required field
       last_l0_seq: 0,
       wal_object_store_uri: None,
-      retention_min_seq: 0,
+      recent_snapshot_min_seq: 0,
     }
   }
 }
@@ -1472,8 +1472,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_WAL_OBJECT_STORE_URI, wal_object_store_uri);
   }
   #[inline]
-  pub fn add_retention_min_seq(&mut self, retention_min_seq: u64) {
-    self.fbb_.push_slot::<u64>(ManifestV1::VT_RETENTION_MIN_SEQ, retention_min_seq, 0);
+  pub fn add_recent_snapshot_min_seq(&mut self, recent_snapshot_min_seq: u64) {
+    self.fbb_.push_slot::<u64>(ManifestV1::VT_RECENT_SNAPSHOT_MIN_SEQ, recent_snapshot_min_seq, 0);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestV1Builder<'a, 'b, A> {
@@ -1510,7 +1510,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("checkpoints", &self.checkpoints());
       ds.field("last_l0_seq", &self.last_l0_seq());
       ds.field("wal_object_store_uri", &self.wal_object_store_uri());
-      ds.field("retention_min_seq", &self.retention_min_seq());
+      ds.field("recent_snapshot_min_seq", &self.recent_snapshot_min_seq());
       ds.finish()
   }
 }

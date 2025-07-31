@@ -435,7 +435,7 @@ impl CompactorEventHandler {
             ssts,
             sorted_runs,
             compaction_ts: db_state.last_l0_clock_tick,
-            retention_min_seq: db_state.retention_min_seq,
+            retention_min_seq: db_state.recent_snapshot_min_seq,
             is_dest_last_run,
         };
         self.progress_tracker
