@@ -336,7 +336,9 @@ pub(crate) struct CoreDbState {
     /// it's persisted in the manifest, and only updated when a new L0
     /// SST is created in the manifest.
     pub(crate) last_l0_seq: u64,
-    /// The recent seq that is safe for retention.
+    /// Minimum sequence number across all recent in-memory (write) snapshots. The compactor
+    /// needs this to determine whether it's safe to drop duplicate key writes. If a recent snapshot
+    /// still references an older version of a key, it should not be dropped.
     pub(crate) recent_snapshot_min_seq: Option<u64>,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) wal_object_store_uri: Option<String>,
