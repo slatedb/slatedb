@@ -100,7 +100,6 @@ impl KeyValueIterator for TestIterator {
     }
 }
 
-// TODO can we get rid of TestClock?
 #[derive(Debug)]
 pub(crate) struct TestClock {
     pub(crate) ticker: AtomicI64,

@@ -207,7 +207,13 @@ impl SystemClock for MockSystemClock {
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         self.current_ts
             .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
-        Box::pin(async move {})
+        Box::pin(async move {
+            // An empty async block always returns Poll::Ready(()) because nothing inside
+            // the block can yield control to other tasks. Calling advance() in a tight loop
+            // would prevent other tasks from running in this case. Yielding control to other
+            // tasks explicitly so we avoid this issue.
+            tokio::task::yield_now().await;
+        })
     }
 
     /// Sleeps for the specified duration. Note that sleep() does not advance the clock.
@@ -272,7 +278,40 @@ impl LogicalClock for DefaultLogicalClock {
     }
 }
 
-/// A clock that enforces that LogicalClock ticks are monotonically increasing.
+/// A mock logical clock implementation that uses an atomic i64 to track time.
+/// The clock always starts at i64::MIN and increments by 1 on each call to now().
+/// It is fully deterministic.
+#[cfg(feature = "test-util")]
+#[derive(Debug)]
+pub struct MockLogicalClock {
+    current_tick: AtomicI64,
+}
+
+#[cfg(feature = "test-util")]
+impl Default for MockLogicalClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl MockLogicalClock {
+    pub fn new() -> Self {
+        Self {
+            current_tick: AtomicI64::new(i64::MIN),
+        }
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl LogicalClock for MockLogicalClock {
+    fn now(&self) -> i64 {
+        self.current_tick.fetch_add(1, Ordering::SeqCst)
+    }
+}
+
+/// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
+/// from the underlying implementation are monotonically increasing.
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
     pub(crate) last_durable_tick: AtomicI64,

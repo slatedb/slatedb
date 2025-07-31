@@ -352,6 +352,7 @@ impl CompactionExecuteBench {
         };
         let start = self.system_clock.now();
         info!("start compaction job");
+        #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
         while let Some(msg) = rx.recv().await {
             if let WorkerToOrchestratorMsg::CompactionFinished { id: _, result } = msg {
