@@ -2460,22 +2460,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_with_options_wal() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_with_options_wal";
         let mut options = test_db_options(0, 1024, None);
         // Larger memtable to avoid memtable flushes
         options.flush_interval = Some(Duration::from_secs(u64::MAX));
+        // Fail all memtable writes before the DB starts, so we can be sure that
+        // only the WAL is flushed.
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "return").unwrap();
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(options)
+            .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
-
-        let initial_immutable_memtable_flushes = kv_store
-            .metrics()
-            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
-            .unwrap()
-            .get();
 
         // Write some data to populate the WAL buffer
         let key1 = b"wal_test_key_1";
@@ -2534,16 +2533,8 @@ mod tests {
             "WAL ID should not decrease after flush"
         );
 
-        // Verify that the memtable has not been flushed
-        let immutable_memtable_flushes = kv_store
-            .metrics()
-            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
-            .unwrap()
-            .get();
-        assert_eq!(
-            immutable_memtable_flushes,
-            initial_immutable_memtable_flushes
-        );
+        // Verify that the memtable has not been flushed by checking the db for error state
+        assert!(kv_store.inner.check_error().is_ok(), "DB should not have an error state");
     }
 
     #[tokio::test]
