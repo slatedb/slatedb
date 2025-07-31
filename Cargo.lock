@@ -3195,6 +3195,7 @@ dependencies = [
  "tokio-test",
  "tokio-util",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "ulid",
  "uuid",
@@ -3217,6 +3218,7 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 
@@ -3233,8 +3235,27 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "slatedb-dst"
+version = "0.7.0"
+dependencies = [
+ "chrono",
+ "ctor",
+ "futures",
+ "log",
+ "object_store",
+ "rand 0.9.1",
+ "rstest",
+ "slatedb",
+ "tokio",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
 ]
 
 [[package]]

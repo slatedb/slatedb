@@ -68,6 +68,7 @@ rstest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-test = { workspace = true }
+tracing-log = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [features]
@@ -94,3 +95,6 @@ bench = false
 [[bench]]
 name = "db_operations"
 harness = false
+
+[lints]
+workspace = true
