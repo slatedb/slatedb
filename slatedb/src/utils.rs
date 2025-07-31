@@ -316,6 +316,106 @@ pub async fn timeout<T>(
     }
 }
 
+/// A simple bit-level writer that packs bits into a `[u8]`
+pub(crate) struct BitWriter {
+    buf: Vec<u8>,
+    cur: u8, // the currently assembling byte
+    n: u8, // the number of "filled" bytes in `cur`
+}
+
+impl BitWriter {
+    pub(crate) fn new() -> Self {
+        BitWriter { buf: Vec::new(), cur: 0, n: 0}
+    }
+
+    /// Push a single bit into the buffer
+    pub(crate) fn push(&mut self, bit: bool) {
+        if bit {
+            self.cur |= 1 << (7 - self.n);
+        }
+        self.n += 1;
+        if self.n == 8 {
+            self.flush_byte();
+        }
+    }
+
+    /// Push up to a u64 into the buffer, only considering
+    /// the first `bits` number of bits
+    pub(crate) fn push_bits(&mut self, value: u64, bits: u8) {
+        // writes the lowest `bits` bits from `value` into
+        // the current buffer (most significant bits first)
+        for i in (0..bits).rev() {
+            let bit = ((value >> i) & 1) != 0;
+            self.push(bit);
+        }
+    }
+
+    fn flush_byte(&mut self) {
+        self.buf.push(self.cur);
+        self.cur = 0;
+        self.n = 0;
+    }
+
+    /// Extrat the finalized buffer from the writer
+    pub(crate) fn finish(mut self) -> Vec<u8> {
+        if self.n > 0 {
+            self.buf.push(self.cur);
+        }
+        self.buf
+    }
+}
+
+pub(crate) struct BitReader<'a> {
+    buf: &'a [u8],
+    byte_pos: usize,
+    bit_pos: u8, // 0..8; next bit to read is at (7 - bit_pos)
+}
+
+impl<'a> BitReader<'a> {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
+        BitReader {
+            buf,
+            byte_pos: 0,
+            bit_pos: 0,
+        }
+    }
+
+    /// Read one bit, or None if we've exhausted the buffer.
+    pub(crate) fn read_bit(&mut self) -> Option<bool> {
+        if self.byte_pos >= self.buf.len() {
+            return None;
+        }
+        let byte = self.buf[self.byte_pos];
+        let bit = ((byte >> (7 - self.bit_pos)) & 1) != 0;
+        self.bit_pos += 1;
+        if self.bit_pos == 8 {
+            self.bit_pos = 0;
+            self.byte_pos += 1;
+        }
+        Some(bit)
+    }
+
+    /// Read `bits` bits, MSB first, returning them as the low `bits` of a u64.
+    pub(crate) fn read_bits(&mut self, bits: u8) -> Option<u64> {
+        let mut val = 0u64;
+        for _ in 0..bits {
+            val <<= 1;
+            match self.read_bit() {
+                Some(true) => val |= 1,
+                Some(false) => (),
+                None => return None,
+            }
+        }
+        Some(val)
+    }
+}
+
+/// Sign‐extend the low `bits` of `val` into a full i64.
+pub(crate) fn sign_extend(val: u64, bits: u8) -> i64 {
+    let shift = 64 - bits;
+    ((val << shift) as i64) >> shift
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -326,6 +426,7 @@ mod tests {
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
         WatchableOnceCell,
+        spawn_bg_thread, WatchableOnceCell, BitWriter,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -579,7 +680,6 @@ mod tests {
         assert_ne!(clamped.as_ptr(), slice.as_ptr());
     }
 
-    #[tokio::test]
     #[cfg(feature = "test-util")]
     async fn test_timeout_completes_before_expiry() {
         use crate::{clock::MockSystemClock, utils::timeout};
@@ -654,5 +754,49 @@ mod tests {
         // rather than timing out, even though both are ready
         let result = timeout_future.await;
         assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn test_should_write_bits_and_flush_bytes() {
+        // Given: a new BitWriter
+        let mut writer = BitWriter::new();
+        
+        // When: we push alternating bits to create a full byte
+        for i in 0..8 {
+            writer.push(i % 2 == 0);
+        }
+        let result = writer.finish();
+        
+        // Then: it should return a vector with one byte containing 0xAA (10101010)
+        assert_eq!(result, vec![0xAA]);
+    }
+
+    #[test]
+    fn test_should_push_bits_from_u64_value() {
+        // Given: a new BitWriter
+        let mut writer = BitWriter::new();
+        
+        // When: we push 8 bits from a u64 value
+        writer.push_bits(0xAB, 8);
+        let result = writer.finish();
+        
+        // Then: it should return a vector with one byte containing 0xAB
+        assert_eq!(result, vec![0xAB]);
+    }
+
+    #[test]
+    fn test_should_handle_partial_bytes_and_multiple_bytes() {
+        // Given: a new BitWriter
+        let mut writer = BitWriter::new();
+        
+        // When: we push individual bits and then push_bits to create partial and full bytes
+        writer.push(true);
+        writer.push(false);
+        writer.push_bits(0x3F, 6); // 111111
+        writer.push_bits(0xCD, 8); // Full second byte
+        let result = writer.finish();
+        
+        // Then: it should return a vector with two bytes: 0xBF (10111111) and 0xCD
+        assert_eq!(result, vec![0xBF, 0xCD]);
     }
 }

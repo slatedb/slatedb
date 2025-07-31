@@ -1,6 +1,9 @@
 use std::cmp;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::utils::{sign_extend, BitReader, BitWriter};
 
 #[derive(PartialEq)]
 pub(crate) enum FindOption {
@@ -11,7 +14,7 @@ pub(crate) enum FindOption {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct TieredSequenceTracker {
     /// The data, tiered by step size where the step size
-    /// indicates the granularity at which the sequence 
+    /// indicates the granularity at which the sequence
     /// numbers are tracked. The tiers are ordered by the
     /// granularity (i.e. `tiers[0]` has the lowest step)
     tiers: Vec<Tier>,
@@ -65,6 +68,10 @@ struct Tier {
     capacity: usize,
     /// the actual timestamps, the value at `timestamps[i]` is the
     /// timestamp for the sequence number `first_seq + i * step`
+    #[serde(
+        serialize_with = "serialize_timestamps",
+        deserialize_with = "deserialize_timestamps"
+    )]
     timestamps: Vec<i64>,
 }
 
@@ -84,7 +91,7 @@ impl Tier {
         assert!(ts >= *self.timestamps.last().unwrap_or(&ts));
 
         if !(seq % self.step == 0) {
-            return
+            return;
         }
 
         if (self.timestamps.is_empty()) {
@@ -134,6 +141,121 @@ impl Tier {
 
         None
     }
+}
+
+/// Custom serialization function for timestamps that uses the Gorilla
+/// encoding scheme, which is appropriate for timeseries data
+fn serialize_timestamps<S>(timestamps: &Vec<i64>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut w = BitWriter::new();
+
+    if !timestamps.is_empty() {
+        // first encode the full initial timestamp
+        w.push_bits(timestamps[0] as u64, 64);
+
+        // for each subsequent encode the delta-of-deltas
+        let mut prev_ts = timestamps[0];
+        let mut prev_delta: i64 = 0;
+
+        for &ts in &timestamps[1..] {
+            let delta = ts - prev_ts;
+            let dod = delta - prev_delta;
+
+            // this is the gorilla encoding scheme, you can see
+            // [this paper](https://www.vldb.org/pvldb/vol8/p1816-teller.pdf)
+            // on page 1820 for the full algorithm
+            match dod {
+                0 => w.push(false),
+                -63..=64 => {
+                    w.push_bits(0b10, 2);
+                    w.push_bits((dod as u64) & 0x7F, 7);
+                }
+                -255..=256 => {
+                    w.push_bits(0b110, 3);
+                    w.push_bits((dod as u64) & 0x1FF, 9);
+                }
+                -2047..=2048 => {
+                    w.push_bits(0b1110, 4);
+                    w.push_bits((dod as u64) & 0xFFF, 12);
+                }
+                _ => {
+                    w.push_bits(0b1111, 4);
+                    w.push_bits((dod as u64) & 0xFFFFFFFF, 32);
+                }
+            }
+
+            prev_ts = ts;
+            prev_delta = delta;
+        }
+    }
+
+    serializer.serialize_bytes(&w.finish())
+}
+
+/// Indicates how many bytes to read given the Gorilla prefix,
+/// where the valid prefixes are 0, 10, 110, 1110, 1111
+const GORILLA_PREFIX_BYTES: [u8; 5] = [0, 7, 9, 12, 32];
+
+/// Custom serialization function for timestamps that uses the Gorilla
+/// encoding scheme, which is appropriate for timeseries data
+fn deserialize_timestamps<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let buf: Vec<u8> = Vec::deserialize(deserializer)?;
+    let mut timestamps = Vec::new();
+
+    if !buf.is_empty() {
+        let mut reader = BitReader::new(&buf);
+        let first_bits = reader.read_bits(64).ok_or_else(|| {
+            <D::Error as de::Error>::custom("Unexpected EOF: fist ts should be 64 bit")
+        })?;
+        let first = first_bits as i64;
+        timestamps.push(first);
+
+        let mut prev_ts = first;
+        let mut prev_delta: i64 = 0;
+
+        while let Some(prefix) = reader.read_bit() {
+            let dod = if !prefix {
+                0
+            } else {
+                let mut count = 1;
+                while count < 4 {
+                    match reader.read_bit() {
+                        Some(true) => count += 1,
+                        Some(false) => break,
+                        None => {
+                            return Err(<D::Error as de::Error>::custom(
+                                "Unexpected EOF decoding Gorilla prefix",
+                            ))
+                        }
+                    }
+                }
+
+                let bits = GORILLA_PREFIX_BYTES[count];
+                let raw = reader.read_bits(bits).ok_or_else(|| {
+                    <D::Error as de::Error>::custom(format!(
+                        "Unexpected EOF reading {}-bit delta-of-delta",
+                        bits
+                    ))
+                })?;
+
+                sign_extend(raw, bits)
+            };
+
+            let delta = prev_delta + dod;
+            let ts = prev_ts + delta;
+            timestamps.push(ts);
+
+            prev_delta = delta;
+            prev_ts = ts;
+        }
+    }
+
+    Ok(timestamps)
 }
 
 #[cfg(test)]
