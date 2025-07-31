@@ -190,8 +190,8 @@ impl Compactor {
     /// ## Returns
     /// * `Result<(), SlateDBError>` - The result of the compaction event loop.
     pub async fn run_async_task(&self, compactor_runtime: Handle) -> Result<(), SlateDBError> {
-        let mut db_runs_log_ticker = self.system_clock.ticker(Duration::from_secs(10));
-        let mut manifest_poll_ticker = self.system_clock.ticker(self.options.poll_interval);
+        let db_runs_log_ticker = self.system_clock.ticker(Duration::from_secs(10));
+        let manifest_poll_ticker = self.system_clock.ticker(self.options.poll_interval);
         let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let executor = Arc::new(TokioCompactionExecutor::new(
