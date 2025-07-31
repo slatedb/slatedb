@@ -12,7 +12,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -97,24 +97,6 @@ where
         result
     });
     handle.spawn(wrapped)
-}
-
-pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
-    match system_time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
-        Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
-    }
-}
-
-pub(crate) fn system_time_from_millis(ms: i64) -> SystemTime {
-    if ms >= 0 {
-        // positive or zero: just add
-        UNIX_EPOCH + Duration::from_millis(ms as u64)
-    } else {
-        // negative (including i64::MIN): convert to i128, take abs, cast back to u64
-        let abs_ms = (ms as i128).unsigned_abs() as u64;
-        UNIX_EPOCH - Duration::from_millis(abs_ms)
-    }
 }
 
 pub(crate) async fn get_now_for_read(
@@ -299,7 +281,7 @@ impl<R: RngCore> IdGenerator for R {
     /// Generates a random ULID using the provided RNG. The clock is used to generate
     /// the timestamp component of the ULID.
     fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid {
-        let now = u64::try_from(system_time_to_millis(clock.now()))
+        let now = u64::try_from(clock.now().timestamp_millis())
             .expect("timestamp outside u64 range in gen_ulid");
         let random_bytes = self.random::<u128>();
         Ulid::from_parts(now, random_bytes)

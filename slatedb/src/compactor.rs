@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::UNIX_EPOCH;
 
 use crossbeam_skiplist::SkipMap;
+use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
 use tracing::instrument;
-use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -83,7 +81,7 @@ impl CompactionProgressTracker {
             self.processed_bytes
                 .insert(id, (bytes_processed, total_bytes));
         } else {
-            warn!(%id, "compaction progress tracker missing for job");
+            warn!(id:%; "compaction progress tracker missing for job");
         }
     }
 
@@ -94,10 +92,10 @@ impl CompactionProgressTracker {
             let (processed_bytes, total_bytes) = entry.value();
             let percentage = (processed_bytes * 100 / total_bytes) as u32;
             debug!(
-                id = %id,
-                current_percentage = format!("{percentage}%"),
-                processed_bytes = processed_bytes,
-                estimated_total_bytes = total_bytes,
+                id:%,
+                current_percentage:% = format!("{percentage}%"),
+                processed_bytes,
+                estimated_total_bytes = total_bytes;
                 "compaction progress"
             );
         }
@@ -323,11 +321,24 @@ impl CompactorEventHandler {
 
     async fn stop_executor(&self) -> Result<(), SlateDBError> {
         let this_executor = self.executor.clone();
-        tokio::task::spawn_blocking(move || {
+        // Explicitly allow spawn_blocking for compactors since we can't trust them
+        // not to block the runtime. This could cause non-determinism, since it creates
+        // a race between the executor's first .await call and the runtime awaiting
+        // on the join handle. We use tokio::spawn for DST since we need full determinism.
+        #[cfg(not(dst))]
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
             this_executor.stop();
         })
         .await
-        .map_err(|_| SlateDBError::CompactionExecutorFailed)
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        #[cfg(dst)]
+        let result = tokio::spawn(async move {
+            this_executor.stop();
+        })
+        .await
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        result
     }
 
     fn is_executor_stopped(&self) -> bool {
@@ -441,11 +452,24 @@ impl CompactorEventHandler {
         self.progress_tracker
             .add_job(id, job.estimated_source_bytes());
         let this_executor = self.executor.clone();
-        tokio::task::spawn_blocking(move || {
+        // Explicitly allow spawn_blocking for compactors since we can't trust them
+        // not to block the runtime. This could cause non-determinism, since it creates
+        // a race between the executor's first .await call and the runtime awaiting
+        // on the join handle. We use tokio::spawn for DST since we need full determinism.
+        #[cfg(not(dst))]
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
             this_executor.start_compaction(job);
         })
         .await
-        .map_err(|_| SlateDBError::CompactionExecutorFailed)
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        #[cfg(dst)]
+        let result = tokio::spawn(async move {
+            this_executor.start_compaction(job);
+        })
+        .await
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        result
     }
 
     // state writers
@@ -465,13 +489,9 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         self.write_manifest_safely().await?;
         self.maybe_schedule_compactions().await?;
-        self.stats.last_compaction_ts.set(
-            self.system_clock
-                .now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
+        self.stats
+            .last_compaction_ts
+            .set(self.system_clock.now().timestamp() as u64);
         Ok(())
     }
 

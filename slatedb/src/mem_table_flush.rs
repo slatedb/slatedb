@@ -6,11 +6,12 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
+use log::{error, info, warn};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::Sender;
-use tracing::{error, info, instrument, warn};
+use tracing::instrument;
 
 #[derive(Debug)]
 pub(crate) enum MemtableFlushMsg {

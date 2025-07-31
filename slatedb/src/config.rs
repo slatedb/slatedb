@@ -224,7 +224,7 @@ pub enum DurabilityLevel {
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -260,7 +260,7 @@ impl ReadOptions {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ScanOptions {
     /// Specifies the minimum durability level for data returned by this scan. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -320,9 +320,36 @@ impl ScanOptions {
     }
 }
 
+/// Enum representing the type of flush to perform.
+#[derive(Clone)]
+pub enum FlushType {
+    /// Freeze the active memtable [crate::mem_table::KVTable] and write
+    /// all immutable memtable entries (including the formerly active
+    /// memtable) to the object store.
+    MemTable,
+    /// Freeze the active WAL [crate::mem_table::KVTable] and write all
+    /// immutable WAL entries (including the formerly active WAL) to the
+    /// object store.
+    Wal,
+}
+
+#[derive(Clone)]
+pub struct FlushOptions {
+    /// The type of flush to perform.
+    pub flush_type: FlushType,
+}
+
+impl Default for FlushOptions {
+    fn default() -> Self {
+        Self {
+            flush_type: FlushType::Wal,
+        }
+    }
+}
+
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
