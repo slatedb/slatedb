@@ -34,7 +34,7 @@ use std::{
 };
 
 use crate::error::SlateDBError;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use log::info;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
@@ -58,27 +58,54 @@ pub trait SystemClock: Debug + Send + Sync {
 /// specified duration has elapsed. This is to mimic Tokio's ticker behavior.
 pub struct SystemClockTicker<'a> {
     clock: &'a dyn SystemClock,
-    duration: Duration,
-    first_tick: bool,
+    duration: TimeDelta,
+    last_tick: AtomicI64,
 }
 
 impl<'a> SystemClockTicker<'a> {
     fn new(clock: &'a dyn SystemClock, duration: Duration) -> Self {
+        let duration = TimeDelta::from_std(duration).expect("duration is out of range");
         Self {
             clock,
             duration,
-            first_tick: true,
+            last_tick: AtomicI64::new(i64::MIN),
         }
     }
 
-    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        // Tokio's ticker ticks immediately when the first tick() is called.
-        // Let's emulate that behavior in our ticker.
-        if self.first_tick {
-            self.first_tick = false;
-            Box::pin(async {})
+    /// Returns a future that emits a signal every `duration` interval. The next tick is
+    /// calculated as last_tick + duration. The first tick will complete immediately.
+    /// This is to mimic Tokio's ticker behavior.
+    ///
+    /// If the clock advances more than the duration between `tick()` calls, the ticker
+    /// will tick immediately.
+    pub fn tick(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let sleep_duration = self.calc_duration();
+            let sleep_duration = sleep_duration.to_std().expect("duration is out of range");
+            self.clock.sleep(sleep_duration).await;
+            let now_dt = self.clock.now().timestamp_millis();
+            self.last_tick.store(now_dt, Ordering::SeqCst);
+        })
+    }
+
+    /// Calculates the duration until the next tick.
+    ///
+    /// The duration is calculated as `duration - (now - last_tick)`.
+    fn calc_duration(&self) -> TimeDelta {
+        let zero = TimeDelta::milliseconds(0);
+        let last_tick_ts = self.last_tick.load(Ordering::SeqCst);
+        if last_tick_ts == i64::MIN {
+            // Tokio's ticker ticks immediately when the first tick() is called.
+            // Let's emulate that behavior in our ticker.
+            zero
         } else {
-            self.clock.sleep(self.duration)
+            let now_dt = self.clock.now();
+            let last_tick_dt =
+                DateTime::<Utc>::from_timestamp_millis(last_tick_ts).expect("invalid timestamp");
+            let elapsed = now_dt.signed_duration_since(last_tick_dt);
+            assert!(elapsed >= zero, "elapsed time is negative");
+            // If we've already passed the next tick, sleep for 0ms to tick immediately.
+            TimeDelta::max(self.duration - elapsed, zero)
         }
     }
 }
@@ -416,7 +443,7 @@ mod tests {
         let tick_duration = Duration::from_millis(100);
 
         // Create a ticker
-        let mut ticker = clock.ticker(tick_duration);
+        let ticker = clock.ticker(tick_duration);
 
         // First tick should complete immediately
         assert!(
@@ -437,10 +464,9 @@ mod tests {
         // The the ticker future before we advance the clock so it's end time is
         // now + 100. Then advance the clock by 100ms and verify the tick
         // completes.
-        let tick_handle = ticker.tick();
         clock.clone().set(100);
         assert!(
-            timeout(Duration::from_millis(10000), tick_handle)
+            timeout(Duration::from_millis(10000), ticker.tick())
                 .await
                 .is_ok(),
             "Tick should complete when time has advanced by at least tick duration"
@@ -489,7 +515,7 @@ mod tests {
         let tick_duration = Duration::from_millis(10);
 
         // Create a ticker
-        let mut ticker = clock.ticker(tick_duration);
+        let ticker = clock.ticker(tick_duration);
 
         // First tick should complete immediately
         assert!(

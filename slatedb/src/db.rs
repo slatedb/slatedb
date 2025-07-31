@@ -1103,6 +1103,7 @@ impl DbRead for Db {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use chrono::TimeDelta;
     use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
@@ -3757,7 +3758,7 @@ mod tests {
 
         let mut options = test_db_options(0, 32, None);
         options.flush_interval = None;
-        options.manifest_poll_interval = Duration::MAX;
+        options.manifest_poll_interval = TimeDelta::MAX.to_std().unwrap();
 
         let db1 = Db::builder(path, object_store.clone())
             .with_settings(options.clone())
