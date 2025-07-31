@@ -11,7 +11,7 @@ pub(crate) enum FindOption {
     RoundDown,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub(crate) struct TieredSequenceTracker {
     /// The data, tiered by step size where the step size
     /// indicates the granularity at which the sequence
@@ -53,18 +53,16 @@ impl TieredSequenceTracker {
 /// of 10, for example, would contain the timestamps for
 /// sequence numbers 10, 14, 16, ... until the capacity
 /// of the tier
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct Tier {
     /// distance between stored sequence numbers
     step: u64,
     /// the first sequence number for which a timestamp is stored
     first_seq: u64,
-    /// the last sequence number stored in this tier, used as a
-    /// convenience to round across tiers
-    #[serde(skip)]
+    /// the last sequence number stored in this tier
     last_seq: u64,
-    #[serde(skip)]
     /// how many elements can fit in this tier
+    #[serde(skip)]
     capacity: usize,
     /// the actual timestamps, the value at `timestamps[i]` is the
     /// timestamp for the sequence number `first_seq + i * step`
@@ -149,7 +147,13 @@ fn serialize_timestamps<S>(timestamps: &Vec<i64>, serializer: S) -> Result<S::Ok
 where
     S: Serializer,
 {
+    let encoded = encode_timestamps_to_bytes(timestamps);
+    serializer.serialize_bytes(&encoded)
+}
+
+fn encode_timestamps_to_bytes(timestamps: &[i64]) -> Vec<u8> {
     let mut w = BitWriter::new();
+    w.push_bits(timestamps.len() as u64, 64);
 
     if !timestamps.is_empty() {
         // first encode the full initial timestamp
@@ -191,7 +195,7 @@ where
         }
     }
 
-    serializer.serialize_bytes(&w.finish())
+    w.finish()
 }
 
 /// Indicates how many bytes to read given the Gorilla prefix,
@@ -205,14 +209,22 @@ where
     D: Deserializer<'de>,
 {
     let buf: Vec<u8> = Vec::deserialize(deserializer)?;
-    let mut timestamps = Vec::new();
+    decode_timestamps_from_bytes(&buf).map_err(|e| <D::Error as de::Error>::custom(e))
+}
 
-    if !buf.is_empty() {
-        let mut reader = BitReader::new(&buf);
-        let first_bits = reader.read_bits(64).ok_or_else(|| {
-            <D::Error as de::Error>::custom("Unexpected EOF: fist ts should be 64 bit")
-        })?;
+fn decode_timestamps_from_bytes(buf: &[u8]) -> Result<Vec<i64>, String> {
+    let mut timestamps = Vec::new();
+    let mut reader = BitReader::new(buf);
+
+    let mut remaining = reader.read_bits(64).ok_or("Expected count first")? as u64;
+
+    if remaining > 0 {
+        let first_bits = reader
+            .read_bits(64)
+            .ok_or("Unexpected EOF: first ts should be 64 bit")?;
         let first = first_bits as i64;
+
+        remaining -= 1;
         timestamps.push(first);
 
         let mut prev_ts = first;
@@ -228,20 +240,15 @@ where
                         Some(true) => count += 1,
                         Some(false) => break,
                         None => {
-                            return Err(<D::Error as de::Error>::custom(
-                                "Unexpected EOF decoding Gorilla prefix",
-                            ))
+                            return Err("Unexpected EOF decoding Gorilla prefix".to_string());
                         }
                     }
                 }
 
                 let bits = GORILLA_PREFIX_BYTES[count];
-                let raw = reader.read_bits(bits).ok_or_else(|| {
-                    <D::Error as de::Error>::custom(format!(
-                        "Unexpected EOF reading {}-bit delta-of-delta",
-                        bits
-                    ))
-                })?;
+                let raw = reader
+                    .read_bits(bits)
+                    .ok_or_else(|| format!("Unexpected EOF reading {}-bit delta-of-delta", bits))?;
 
                 sign_extend(raw, bits)
             };
@@ -252,6 +259,14 @@ where
 
             prev_delta = delta;
             prev_ts = ts;
+
+            // there may be some padding at the end of the [u8]
+            // so we track how many we've read / still need to read
+            remaining -= 1;
+
+            if remaining == 0 {
+                break;
+            }
         }
     }
 
@@ -335,5 +350,38 @@ mod tests {
         assert_eq!(tier.step, 4); // step doubled
         assert_eq!(tier.timestamps, vec![100, 300]); // downsampled
         assert_eq!(tier.last_seq, 8);
+    }
+
+    #[test]
+    fn round_trip_empty_timestamps() {
+        let timestamps: Vec<i64> = vec![];
+        let encoded = encode_timestamps_to_bytes(&timestamps);
+        let decoded = decode_timestamps_from_bytes(&encoded).unwrap();
+        assert_eq!(decoded, timestamps);
+    }
+
+    #[test]
+    fn round_trip_single_timestamp() {
+        let timestamps = vec![1234567890];
+        let encoded = encode_timestamps_to_bytes(&timestamps);
+        let decoded = decode_timestamps_from_bytes(&encoded).unwrap();
+        assert_eq!(decoded, timestamps);
+    }
+
+    #[test]
+    fn round_trip_timestamps_with_various_deltas() {
+        // Given timestamps that will exercise each branch of the Gorilla encoding:
+        let timestamps = vec![1000, 1100, 1100, 1150, 3150, 103150];
+        let encoded = encode_timestamps_to_bytes(&timestamps);
+
+        // When:
+        let decoded = decode_timestamps_from_bytes(&encoded).unwrap();
+
+        // Then:
+        assert_eq!(decoded, timestamps);
+
+        // a naive encoding of 8 bytes per timestamp would be 48 bytes
+        // but this should fit in 27
+        assert_eq!(encoded.len(), 27);
     }
 }
