@@ -80,8 +80,10 @@ impl<'a> SystemClockTicker<'a> {
     /// will tick immediately.
     pub fn tick(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            let sleep_duration = self.calc_duration();
-            let sleep_duration = sleep_duration.to_std().expect("duration is out of range");
+            let sleep_duration = self
+                .calc_duration()
+                .to_std()
+                .expect("duration is out of range");
             self.clock.sleep(sleep_duration).await;
             let now_dt = self.clock.now().timestamp_millis();
             self.last_tick.store(now_dt, Ordering::SeqCst);
