@@ -371,7 +371,7 @@ impl DbReaderInner {
             this: Arc<DbReaderInner>,
             thread_rx: &mut UnboundedReceiver<ManifestPollerMsg>,
         ) -> Result<(), SlateDBError> {
-            let ticker = this
+            let mut ticker = this
                 .system_clock
                 .ticker(this.options.manifest_poll_interval);
             loop {

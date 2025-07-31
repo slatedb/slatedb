@@ -59,7 +59,7 @@ pub trait SystemClock: Debug + Send + Sync {
 pub struct SystemClockTicker<'a> {
     clock: &'a dyn SystemClock,
     duration: TimeDelta,
-    last_tick: AtomicI64,
+    last_tick: DateTime<Utc>,
 }
 
 impl<'a> SystemClockTicker<'a> {
@@ -68,7 +68,7 @@ impl<'a> SystemClockTicker<'a> {
         Self {
             clock,
             duration,
-            last_tick: AtomicI64::new(i64::MIN),
+            last_tick: DateTime::<Utc>::MIN_UTC,
         }
     }
 
@@ -78,15 +78,14 @@ impl<'a> SystemClockTicker<'a> {
     ///
     /// If the clock advances more than the duration between `tick()` calls, the ticker
     /// will tick immediately.
-    pub fn tick(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             let sleep_duration = self
                 .calc_duration()
                 .to_std()
                 .expect("duration is out of range");
             self.clock.sleep(sleep_duration).await;
-            let now_dt = self.clock.now().timestamp_millis();
-            self.last_tick.store(now_dt, Ordering::SeqCst);
+            self.last_tick = self.clock.now();
         })
     }
 
@@ -95,20 +94,11 @@ impl<'a> SystemClockTicker<'a> {
     /// The duration is calculated as `duration - (now - last_tick)`.
     fn calc_duration(&self) -> TimeDelta {
         let zero = TimeDelta::milliseconds(0);
-        let last_tick_ts = self.last_tick.load(Ordering::SeqCst);
-        if last_tick_ts == i64::MIN {
-            // Tokio's ticker ticks immediately when the first tick() is called.
-            // Let's emulate that behavior in our ticker.
-            zero
-        } else {
-            let now_dt = self.clock.now();
-            let last_tick_dt =
-                DateTime::<Utc>::from_timestamp_millis(last_tick_ts).expect("invalid timestamp");
-            let elapsed = now_dt.signed_duration_since(last_tick_dt);
-            assert!(elapsed >= zero, "elapsed time is negative");
-            // If we've already passed the next tick, sleep for 0ms to tick immediately.
-            TimeDelta::max(self.duration - elapsed, zero)
-        }
+        let now_dt = self.clock.now();
+        let elapsed = now_dt.signed_duration_since(self.last_tick);
+        assert!(elapsed >= zero, "elapsed time is negative");
+        // If we've already passed the next tick, sleep for 0ms to tick immediately.
+        TimeDelta::max(self.duration - elapsed, zero)
     }
 }
 
@@ -484,7 +474,7 @@ mod tests {
         let tick_duration = Duration::from_millis(100);
 
         // Create a ticker
-        let ticker = clock.ticker(tick_duration);
+        let mut ticker = clock.ticker(tick_duration);
 
         // First tick should complete immediately
         assert!(
@@ -556,7 +546,7 @@ mod tests {
         let tick_duration = Duration::from_millis(10);
 
         // Create a ticker
-        let ticker = clock.ticker(tick_duration);
+        let mut ticker = clock.ticker(tick_duration);
 
         // First tick should complete immediately
         assert!(
