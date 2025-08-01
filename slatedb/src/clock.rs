@@ -1,7 +1,26 @@
+//! This module contains utility methods and structs for handling time.
+//!
+//! SlateDB has two concepts of time:
+//!
+//! 1. The [SystemClock], which is used to measure wall-clock time for things
+//!    like garbage collection schedule ticks, compaction schedule ticks, and so
+//!    on.
+//! 2. The [LogicalClock], which is a monotonically increasing number used to order
+//!    writes in the database. This could represent a logical sequence number
+//!    (LSN) from a database, a Kafka offset, a `created_at` timestamp
+//!    associated with the write, and so on.
+//!
+//! We've chosen to implement our own [SystemClock] so we can mock it for testing
+//! purposes. Mocks are available when the `test-util` feature is enabled.
+//!
+//! [DefaultSystemClock] and [DefaultLogicalClock] are both provided as well.
+//! [DefaultSystemClock] implements a system clock that uses Tokio's clock to measure
+//! time duration. [DefaultLogicalClock] implements a logical clock that wraps
+//! the [DefaultSystemClock] and returns the number of milliseconds since the
+//! Unix epoch.
+
 #![allow(clippy::disallowed_methods)]
 
-#[cfg(feature = "test-util")]
-use std::time::UNIX_EPOCH;
 use std::{
     cmp,
     fmt::Debug,
@@ -11,20 +30,18 @@ use std::{
         atomic::{AtomicI64, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
-use crate::{
-    error::SlateDBError,
-    utils::{self, system_time_from_millis, system_time_to_millis},
-};
-use tracing::info;
+use crate::error::SlateDBError;
+use chrono::{DateTime, TimeDelta, Utc};
+use log::info;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
 /// like garbage collection schedule ticks, compaction schedule ticks, and so on.
 pub trait SystemClock: Debug + Send + Sync {
     /// Returns the current time
-    fn now(&self) -> SystemTime;
+    fn now(&self) -> DateTime<Utc>;
     /// Advances the clock by the specified duration
     #[cfg(feature = "test-util")]
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -34,51 +51,74 @@ pub trait SystemClock: Debug + Send + Sync {
     fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a>;
 }
 
+/// A ticker that emits a signal every `duration` interval. This allows us to use our
+/// clock to control ticking.
+///
+/// The first tick will complete immediately. Subsequent ticks will complete after the
+/// specified duration has elapsed. This is to mimic Tokio's ticker behavior.
 pub struct SystemClockTicker<'a> {
     clock: &'a dyn SystemClock,
-    duration: Duration,
-    first_tick: bool,
+    duration: TimeDelta,
+    last_tick: DateTime<Utc>,
 }
 
 impl<'a> SystemClockTicker<'a> {
     fn new(clock: &'a dyn SystemClock, duration: Duration) -> Self {
+        let duration = TimeDelta::from_std(duration).expect("duration is out of range");
         Self {
             clock,
             duration,
-            first_tick: true,
+            last_tick: DateTime::<Utc>::MIN_UTC,
         }
     }
 
-    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        // Tokio's ticker ticks immediately when the first tick() is called.
-        // Let's emulate that behavior in our ticker.
-        if self.first_tick {
-            self.first_tick = false;
-            Box::pin(async {})
-        } else {
-            self.clock.sleep(self.duration)
-        }
+    /// Returns a future that emits a signal every `duration` interval. The next tick is
+    /// calculated as last_tick + duration. The first tick will complete immediately.
+    /// This is to mimic Tokio's ticker behavior.
+    ///
+    /// If the clock advances more than the duration between `tick()` calls, the ticker
+    /// will tick immediately.
+    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let sleep_duration = self
+                .calc_duration()
+                .to_std()
+                .expect("duration is out of range");
+            self.clock.sleep(sleep_duration).await;
+            self.last_tick = self.clock.now();
+        })
+    }
+
+    /// Calculates the duration until the next tick.
+    ///
+    /// The duration is calculated as `duration - (now - last_tick)`.
+    fn calc_duration(&self) -> TimeDelta {
+        let zero = TimeDelta::milliseconds(0);
+        let now_dt = self.clock.now();
+        let elapsed = now_dt.signed_duration_since(self.last_tick);
+        assert!(elapsed >= zero, "elapsed time is negative");
+        // If we've already passed the next tick, sleep for 0ms to tick immediately.
+        TimeDelta::max(self.duration - elapsed, zero)
     }
 }
 
 /// A system clock implementation that uses tokio::time::Instant to measure time duration.
-/// SystemTime::now() is used to track the initial timestamp (ms since Unix epoch). This
-/// timestamp is used to convert the tokio::time::Instant to a SystemTime when now() is
-/// called.
+/// Utc::now() is used to track the initial timestamp (ms since Unix epoch). This DateTime
+/// is used to convert the tokio::time::Instant to a DateTime when now() is called.
 ///
 /// Note that, becasue we're using tokio::time::Instant, manipulating tokio's clock with
 /// tokio::time::pause(), tokio::time::advance(), and so on will affect the
 /// DefaultSystemClock's time as well.
 #[derive(Debug)]
 pub struct DefaultSystemClock {
-    initial_ts: i64,
+    initial_ts: DateTime<Utc>,
     initial_instant: tokio::time::Instant,
 }
 
 impl DefaultSystemClock {
     pub fn new() -> Self {
         Self {
-            initial_ts: utils::system_time_to_millis(SystemTime::now()),
+            initial_ts: Utc::now(),
             initial_instant: tokio::time::Instant::now(),
         }
     }
@@ -91,9 +131,9 @@ impl Default for DefaultSystemClock {
 }
 
 impl SystemClock for DefaultSystemClock {
-    fn now(&self) -> SystemTime {
+    fn now(&self) -> DateTime<Utc> {
         let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
-        system_time_from_millis(self.initial_ts + elapsed.as_millis() as i64)
+        self.initial_ts + elapsed
     }
 
     #[cfg(feature = "test-util")]
@@ -149,21 +189,27 @@ impl MockSystemClock {
 
 #[cfg(feature = "test-util")]
 impl SystemClock for MockSystemClock {
-    fn now(&self) -> SystemTime {
-        if self.current_ts.load(Ordering::SeqCst) < 0 {
-            UNIX_EPOCH
-                - Duration::from_millis(self.current_ts.load(Ordering::SeqCst).unsigned_abs())
-        } else {
-            UNIX_EPOCH + Duration::from_millis(self.current_ts.load(Ordering::SeqCst) as u64)
-        }
+    #[allow(clippy::panic)]
+    fn now(&self) -> DateTime<Utc> {
+        let current_ts = self.current_ts.load(Ordering::SeqCst);
+        DateTime::from_timestamp_millis(current_ts)
+            .unwrap_or_else(|| panic!("invalid timestamp: {}", current_ts))
     }
 
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         self.current_ts
             .fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
-        Box::pin(async move {})
+        Box::pin(async move {
+            // An empty async block always returns Poll::Ready(()) because nothing inside
+            // the block can yield control to other tasks. Calling advance() in a tight loop
+            // would prevent other tasks from running in this case. Yielding control to other
+            // tasks explicitly so we avoid this issue.
+            tokio::task::yield_now().await;
+        })
     }
 
+    /// Sleeps for the specified duration. Note that sleep() does not advance the clock.
+    /// Another thread or task must call advance() to advance the clock to unblock the sleep.
     fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         let end_time = self.current_ts.load(Ordering::SeqCst) + duration.as_millis() as i64;
         Box::pin(async move {
@@ -182,17 +228,19 @@ impl SystemClock for MockSystemClock {
 /// Defines the logical clock that SlateDB will use to measure time for things
 /// like TTL expiration.
 pub trait LogicalClock: Debug + Send + Sync {
-    /// Returns a timestamp (typically measured in millis since the unix epoch),
-    /// must return monotonically increasing numbers (this is enforced
+    /// Returns a timestamp (typically measured in millis since the unix epoch).
+    /// Must return monotonically increasing numbers (this is enforced
     /// at runtime and will panic if the invariant is broken).
     ///
     /// Note that this clock does not need to return a number that
-    /// represents the unix timestamp; the only requirement is that
+    /// represents a unix timestamp; the only requirement is that
     /// it represents a sequence that can attribute a logical ordering
     /// to actions on the database.
     fn now(&self) -> i64;
 }
 
+/// A logical clock implementation that wraps the [DefaultSystemClock]
+/// and returns the number of milliseconds since the Unix epoch.
 #[derive(Debug)]
 pub struct DefaultLogicalClock {
     last_ts: AtomicI64,
@@ -216,14 +264,46 @@ impl DefaultLogicalClock {
 
 impl LogicalClock for DefaultLogicalClock {
     fn now(&self) -> i64 {
-        let current_ts = system_time_to_millis(self.inner.now());
+        let current_ts = self.inner.now().timestamp_millis();
         self.last_ts.fetch_max(current_ts, Ordering::SeqCst);
         self.last_ts.load(Ordering::SeqCst)
     }
 }
 
+/// A mock logical clock implementation that uses an atomic i64 to track time.
+/// The clock always starts at i64::MIN and increments by 1 on each call to now().
+/// It is fully deterministic.
+#[cfg(feature = "test-util")]
+#[derive(Debug)]
+pub struct MockLogicalClock {
+    current_tick: AtomicI64,
+}
+
+#[cfg(feature = "test-util")]
+impl Default for MockLogicalClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl MockLogicalClock {
+    pub fn new() -> Self {
+        Self {
+            current_tick: AtomicI64::new(i64::MIN),
+        }
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl LogicalClock for MockLogicalClock {
+    fn now(&self) -> i64 {
+        self.current_tick.fetch_add(1, Ordering::SeqCst)
+    }
+}
+
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
-/// from the underlying implementation are monotonically increasing
+/// from the underlying implementation are monotonically increasing.
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
     pub(crate) last_durable_tick: AtomicI64,
@@ -294,7 +374,7 @@ mod tests {
     async fn test_mock_system_clock_default() {
         let clock = MockSystemClock::default();
         assert_eq!(
-            system_time_to_millis(clock.now()),
+            clock.now().timestamp_millis(),
             0,
             "Default MockSystemClock should start at timestamp 0"
         );
@@ -309,7 +389,7 @@ mod tests {
         let positive_ts = 1625097600000i64; // 2021-07-01T00:00:00Z in milliseconds
         clock.clone().set(positive_ts);
         assert_eq!(
-            system_time_to_millis(clock.now()),
+            clock.now().timestamp_millis(),
             positive_ts,
             "MockSystemClock should return the timestamp set with set_now"
         );
@@ -318,7 +398,7 @@ mod tests {
         let negative_ts = -1625097600000; // Before Unix epoch
         clock.clone().set(negative_ts);
         assert_eq!(
-            system_time_to_millis(clock.now()),
+            clock.now().timestamp_millis(),
             negative_ts,
             "MockSystemClock should handle negative timestamps correctly"
         );
@@ -339,7 +419,7 @@ mod tests {
 
         // Check that time advanced correctly
         assert_eq!(
-            system_time_to_millis(clock.now()),
+            clock.now().timestamp_millis(),
             initial_ts + 500,
             "MockSystemClock should advance time by the specified duration"
         );
@@ -415,10 +495,9 @@ mod tests {
         // The the ticker future before we advance the clock so it's end time is
         // now + 100. Then advance the clock by 100ms and verify the tick
         // completes.
-        let tick_handle = ticker.tick();
         clock.clone().set(100);
         assert!(
-            timeout(Duration::from_millis(10000), tick_handle)
+            timeout(Duration::from_millis(10000), ticker.tick())
                 .await
                 .is_ok(),
             "Tick should complete when time has advanced by at least tick duration"

@@ -6,11 +6,12 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
+use log::{error, info, warn};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::Sender;
-use tracing::{error, info, instrument, warn};
+use tracing::instrument;
 
 #[derive(Debug)]
 pub(crate) enum MemtableFlushMsg {
@@ -104,7 +105,12 @@ impl MemtableFlusher {
                 rguard.state().imm_memtable.back().cloned()
             }
         } {
-            let id = SsTableId::Compacted(self.db_inner.rand.rng().gen_ulid());
+            let id = SsTableId::Compacted(
+                self.db_inner
+                    .rand
+                    .rng()
+                    .gen_ulid(self.db_inner.system_clock.as_ref()),
+            );
             let sst_handle = self
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)

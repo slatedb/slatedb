@@ -27,7 +27,7 @@ flate2 = { workspace = true, optional = true }
 flatbuffers = { workspace = true }
 foyer = { workspace = true, features = ["serde"], optional = true }
 futures = { workspace = true }
-log = { workspace = true, features = ["std"] }
+log = { workspace = true, features = ["kv"] }
 lz4_flex = { workspace = true, optional = true }
 moka = { workspace = true, features = ["future"], optional = true }
 object_store = { workspace = true }
@@ -68,6 +68,7 @@ rstest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-test = { workspace = true }
+tracing-log = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [features]
@@ -94,3 +95,6 @@ bench = false
 [[bench]]
 name = "db_operations"
 harness = false
+
+[lints]
+workspace = true

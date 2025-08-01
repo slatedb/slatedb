@@ -16,6 +16,7 @@ use crate::transactional_object_store::{
 use crate::utils;
 use chrono::Utc;
 use futures::StreamExt;
+use log::{debug, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore};
@@ -24,7 +25,6 @@ use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, warn};
 use uuid::Uuid;
 
 /// Represents a local view of the manifest that is in the process of being updated
@@ -609,7 +609,7 @@ impl ManifestStore {
         }
 
         let manifest_path = &self.get_manifest_path(id);
-        debug!(%manifest_path, "deleting manifest");
+        debug!(manifest_path:%; "deleting manifest");
         self.object_store.delete(manifest_path).await?;
         Ok(())
     }
@@ -766,10 +766,11 @@ mod tests {
     use crate::error;
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     const ROOT: &str = "/root/path";
 
@@ -1084,21 +1085,16 @@ mod tests {
         Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
     }
 
-    fn now_rounded_to_nearest_sec() -> SystemTime {
-        let now_secs = DefaultSystemClock::default()
-            .now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
-    }
-
     fn new_checkpoint(manifest_id: u64) -> Checkpoint {
+        let create_time = DefaultSystemClock::default()
+            .now()
+            .with_nanosecond(0)
+            .unwrap();
         Checkpoint {
             id: uuid::Uuid::new_v4(),
             manifest_id,
             expire_time: None,
-            create_time: now_rounded_to_nearest_sec(),
+            create_time,
         }
     }
 

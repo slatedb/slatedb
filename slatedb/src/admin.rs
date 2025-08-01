@@ -139,7 +139,9 @@ impl Admin {
         let jh = tracker.spawn(async move { gc.run_async_task().await });
         tracker.close();
         tracker.wait().await;
-        jh.await.unwrap().map_err(Into::into)
+        jh.await
+            .expect("Failed to finish garbage collector task")
+            .map_err(Into::into)
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the

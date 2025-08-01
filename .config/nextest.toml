@@ -9,3 +9,11 @@ command = "../scripts/backtrace-on-timeout.sh"
 [[profile.ci.scripts]]
 filter = "all()"
 run-wrapper = "backtrace-on-timeout"
+
+[profile.dst]
+slow-timeout = { period = "30m", terminate-after = 1 }
+default-filter = "package(slatedb-dst) & test(dst)"
+
+[[profile.dst.scripts]]
+filter = "all()"
+run-wrapper = "backtrace-on-timeout"

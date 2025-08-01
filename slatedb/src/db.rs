@@ -36,7 +36,9 @@ use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
-use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
+use crate::config::{
+    FlushOptions, FlushType, PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions,
+};
 use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
 use crate::db_snapshot::DbSnapshot;
@@ -56,7 +58,7 @@ use crate::transaction_manager::TransactionManager;
 use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use tracing::{info, trace, warn};
+use log::{info, trace, warn};
 
 pub mod builder;
 pub use builder::DbBuilder;
@@ -295,7 +297,7 @@ impl DbInner {
                 total_mem_size_bytes,
                 wal_size_bytes,
                 imm_memtable_size_bytes,
-                max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                max_unflushed_bytes = self.settings.max_unflushed_bytes;
                 "checking backpressure",
             );
 
@@ -305,7 +307,7 @@ impl DbInner {
                     total_mem_size_bytes,
                     wal_size_bytes,
                     imm_memtable_size_bytes,
-                    max_unflushed_bytes = self.settings.max_unflushed_bytes,
+                    max_unflushed_bytes = self.settings.max_unflushed_bytes;
                     "Unflushed memtable size exceeds max_unflushed_bytes. Applying backpressure.",
                 );
 
@@ -1029,9 +1031,14 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// Flush the database to disk.
-    /// If WAL is enabled, flushes the WAL to disk.
-    /// If WAL is disabled, flushes the memtables to disk.
+    /// Flush in-memory writes to disk. This function blocks until the in-memory
+    /// data has been durably written to object storage.
+    ///
+    /// If WAL is enabled, this method is equivalent to:
+    /// `flush_with_options(FlushOptions { flush_type: FlushType::Wal })`
+    ///
+    /// If WAL is disabled, this method is equivalent to:
+    /// `flush_with_options(FlushOptions { flush_type: FlushType::Memtable })`.
     ///
     /// ## Errors
     /// - `Error`: if there was an error flushing the database
@@ -1053,10 +1060,65 @@ impl Db {
     /// ```
     pub async fn flush(&self) -> Result<(), crate::Error> {
         if self.inner.wal_enabled {
-            self.inner.flush_wals().await.map_err(Into::into)
+            self.flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
         } else {
-            self.inner.flush_memtables().await.map_err(Into::into)
+            self.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
         }
+    }
+
+    /// Flush in-memory writes to disk with custom options.
+    ///
+    /// An error will be returned if `options.flush_type` is `FlushType::Wal` and the WAL
+    /// is disabled.
+    ///
+    /// `FlushType::Memtable` is allowed even if WAL is enabled.
+    ///
+    /// ## Arguments
+    /// - `options`: the flush options
+    ///
+    /// ## Returns
+    /// - `Result<(), crate::Error>`: the result of the flush operation.
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error flushing the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::config::{FlushOptions, FlushType};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.flush_with_options(FlushOptions {
+    ///         flush_type: FlushType::Wal,
+    ///     })
+    ///     .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
+        match options.flush_type {
+            FlushType::Wal => {
+                if self.inner.wal_enabled {
+                    self.inner.flush_wals().await
+                } else {
+                    Err(SlateDBError::WalDisabled)
+                }
+            }
+            FlushType::MemTable => self.inner.flush_memtables().await,
+        }
+        .map_err(Into::into)
     }
 
     /// Get the metrics registry for the database.
@@ -1091,6 +1153,7 @@ impl DbRead for Db {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use chrono::TimeDelta;
     use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
@@ -2323,6 +2386,278 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_flush_memtable_with_wal_enabled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_with_options";
+        let mut options = test_db_options(0, 256, None);
+        options.flush_interval = Some(Duration::from_secs(u64::MAX));
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let sst_format = SsTableFormat {
+            min_filter_keys: 10,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            sst_format,
+            path,
+            None,
+        ));
+
+        // Write some data to populate the memtable
+        let key1 = b"test_key_1";
+        let value1 = b"test_value_1";
+        kv_store
+            .put_with_options(
+                key1,
+                value1,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        let key2 = b"test_key_2";
+        let value2 = b"test_value_2";
+        kv_store
+            .put_with_options(
+                key2,
+                value2,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Get initial state
+        let initial_manifest = stored_manifest.refresh().await.unwrap();
+        let initial_l0_count = initial_manifest.core.l0.len();
+
+        let initial_flush_count = kv_store
+            .metrics()
+            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+            .unwrap()
+            .get();
+
+        // Flush memtable using flush_with_options
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        // Wait for the flush to complete and manifest to be updated
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.l0.len() > initial_l0_count,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        // Verify that a new SST was created in L0
+        assert_eq!(db_state.l0.len(), initial_l0_count + 1);
+
+        // Verify that the flush metrics were updated
+        let final_flush_count = kv_store
+            .metrics()
+            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+            .unwrap()
+            .get();
+        assert!(final_flush_count > initial_flush_count);
+
+        // Verify tha the WAL has not been flushed
+        let recent_flushed_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert_eq!(recent_flushed_wal_id, 0);
+
+        // Verify that the data is still accessible after flush
+        let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
+        assert_eq!(retrieved_value1.as_ref(), value1);
+
+        let retrieved_value2 = kv_store.get(key2).await.unwrap().unwrap();
+        assert_eq!(retrieved_value2.as_ref(), value2);
+
+        // Verify the data exists in the newly created SST
+        let latest_sst = db_state.l0.back().unwrap();
+        let sst_iter_options = SstIteratorOptions::default();
+        let mut iter =
+            SstIterator::new_borrowed(.., latest_sst, table_store.clone(), sst_iter_options)
+                .await
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
+
+        // Collect all key-value pairs from the SST
+        let mut found_keys = std::collections::HashSet::new();
+        while let Some(kv) = iter.next().await.unwrap() {
+            found_keys.insert(kv.key.to_vec());
+        }
+
+        // Verify our keys are in the SST
+        assert!(found_keys.contains(key1.as_slice()));
+        assert!(found_keys.contains(key2.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn test_flush_with_options_wal() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_with_options_wal";
+        let mut options = test_db_options(0, 1024, None);
+        // Larger memtable to avoid memtable flushes
+        options.flush_interval = Some(Duration::from_secs(u64::MAX));
+        // Fail all memtable writes before the DB starts, so we can be sure that
+        // only the WAL is flushed.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Write some data to populate the WAL buffer
+        let key1 = b"wal_test_key_1";
+        let value1 = b"wal_test_value_1";
+        kv_store
+            .put_with_options(
+                key1,
+                value1,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        let key2 = b"wal_test_key_2";
+        let value2 = b"wal_test_value_2";
+        kv_store
+            .put_with_options(
+                key2,
+                value2,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Get initial WAL ID to verify flush occurred
+        let initial_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+
+        // Flush WAL using flush_with_options - this should succeed without error
+        let flush_result = kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await;
+
+        // Verify the flush operation completed successfully
+        assert!(flush_result.is_ok(), "WAL flush should succeed");
+
+        // Verify that the data is still accessible after WAL flush
+        let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
+        assert_eq!(retrieved_value1.as_ref(), value1);
+
+        let retrieved_value2 = kv_store.get(key2).await.unwrap().unwrap();
+        assert_eq!(retrieved_value2.as_ref(), value2);
+
+        // Verify that the WAL buffer is in a consistent state after flush
+        // The recent_flushed_wal_id should be at least as high as before
+        let final_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert!(
+            final_wal_id >= initial_wal_id,
+            "WAL ID should not decrease after flush"
+        );
+
+        // Verify that the memtable has not been flushed by checking the db for error state
+        assert!(
+            kv_store.inner.check_error().is_ok(),
+            "DB should not have an error state"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_flush_with_options_wal_disabled_error() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_with_options_wal_disabled";
+        let mut options = test_db_options(0, 1024, None);
+        options.wal_enabled = false; // Disable WAL
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        // Write some data to the database
+        let key1 = b"test_key_1";
+        let value1 = b"test_value_1";
+        kv_store
+            .put_with_options(
+                key1,
+                value1,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Attempt to flush WAL on a WAL-disabled database
+        let flush_result = kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await;
+
+        // Verify that we get the WalDisabled error
+        assert!(flush_result.is_err(), "Expected WalDisabled error");
+        let error = flush_result.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("attempted a WAL operation when the WAL is disabled"),
+            "Expected WalDisabled error message, got: {}",
+            error
+        );
+
+        // Verify that memtable flush still works when WAL is disabled
+        let memtable_flush_result = kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await;
+        assert!(
+            memtable_flush_result.is_ok(),
+            "Memtable flush should work even when WAL is disabled"
+        );
+
+        // Verify that the data is still accessible
+        let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
+        assert_eq!(retrieved_value1.as_ref(), value1);
+    }
+
     // 2 threads so we can can wait on the write_with_options (main) thread
     // while the write_batch (background) thread is blocked on writing the
     // WAL SST.
@@ -3472,7 +3807,7 @@ mod tests {
 
         let mut options = test_db_options(0, 32, None);
         options.flush_interval = None;
-        options.manifest_poll_interval = Duration::MAX;
+        options.manifest_poll_interval = TimeDelta::MAX.to_std().unwrap();
 
         let db1 = Db::builder(path, object_store.clone())
             .with_settings(options.clone())

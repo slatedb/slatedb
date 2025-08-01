@@ -10,6 +10,7 @@ use crate::error::SlateDBError;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
+use log::warn;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -130,7 +131,7 @@ impl Manifest {
                 if let Some(range) = range {
                     ranges.push((manifest, range));
                 } else {
-                    tracing::warn!("Manifest {:?} has no SST files", manifest);
+                    warn!("Manifest {:?} has no SST files", manifest);
                 }
             }
             ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());

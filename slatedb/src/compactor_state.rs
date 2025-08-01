@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
-use tracing::info;
+use log::info;
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -183,6 +183,7 @@ impl CompactorState {
             last_l0_seq: remote_manifest.core.last_l0_seq,
             checkpoints: remote_manifest.core.checkpoints.clone(),
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
+            recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
         };
         remote_manifest.core = merged;
         self.manifest = remote_manifest;
@@ -554,8 +555,15 @@ mod tests {
     where
         F: FnMut() -> Option<T>,
     {
-        let now = DefaultSystemClock::default().now();
-        while now.elapsed().unwrap() < duration {
+        let clock = DefaultSystemClock::default();
+        let start = clock.now();
+        while clock
+            .now()
+            .signed_duration_since(start)
+            .to_std()
+            .expect("duration < 0 not allowed")
+            < duration
+        {
             let maybe_result = f();
             if maybe_result.is_some() {
                 return maybe_result;
