@@ -112,7 +112,7 @@ impl TransactionManager {
         }
     }
 
-    fn min_retention_seq(&self) -> Option<u64> {
+    fn min_active_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
         inner
             .active_txns
@@ -121,7 +121,9 @@ impl TransactionManager {
             .min()
     }
 
-    async fn sync_min_retention_seq(&self) -> Result<(), SlateDBError> {
+    // [`sync_manifest`] syncs the manifest with the latest min active seq. It's called by the background task
+    // when the duration since the last sync exceeds the [`sync_manifest_duration`] on a txn is dropped.
+    async fn sync_manifest(&self) -> Result<(), SlateDBError> {
         // TODO: update manifest with the latest min retention seq
         Ok(())
     }
@@ -140,7 +142,7 @@ impl TransactionManager {
                     };
                     match work {
                         TransactionBackgroundWork::SyncManifest => {
-                            match self.sync_min_retention_seq().await {
+                            match self.sync_manifest().await {
                                 Ok(_) => {}
                                 Err(e) => {
                                     warn!("failed to sync min retention seq to manifest: {:?}", e);
