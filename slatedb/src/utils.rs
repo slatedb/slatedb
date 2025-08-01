@@ -339,11 +339,20 @@ impl BitWriter {
         }
     }
 
-    /// Push up to a u64 into the buffer, only considering
+    /// Push up to a u32 into the buffer, only considering
     /// the first `bits` number of bits
-    pub(crate) fn push_bits(&mut self, value: u64, bits: u8) {
+    pub(crate) fn push32(&mut self, value: u32, bits: u8) {
         // writes the lowest `bits` bits from `value` into
         // the current buffer (most significant bits first)
+        for i in (0..bits).rev() {
+            let bit = ((value >> i) & 1) != 0;
+            self.push(bit);
+        }
+    }
+
+    /// Push up to a u32 into the buffer, only considering
+    /// the first `bits` number of bits
+    pub(crate) fn push64(&mut self, value: u64, bits: u8) {
         for i in (0..bits).rev() {
             let bit = ((value >> i) & 1) != 0;
             self.push(bit);
@@ -395,8 +404,22 @@ impl<'a> BitReader<'a> {
         Some(bit)
     }
 
+    /// Read `bits` bits, MSB first, returning them as the low `bits` of a u32.
+    pub(crate) fn read32(&mut self, bits: u8) -> Option<u32> {
+        let mut val = 0u32;
+        for _ in 0..bits {
+            val <<= 1;
+            match self.read_bit() {
+                Some(true) => val |= 1,
+                Some(false) => (),
+                None => return None,
+            }
+        }
+        Some(val) 
+    }
+
     /// Read `bits` bits, MSB first, returning them as the low `bits` of a u64.
-    pub(crate) fn read_bits(&mut self, bits: u8) -> Option<u64> {
+    pub(crate) fn read64(&mut self, bits: u8) -> Option<u64> {
         let mut val = 0u64;
         for _ in 0..bits {
             val <<= 1;
@@ -410,10 +433,10 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// Sign‐extend the low `bits` of `val` into a full i64.
-pub(crate) fn sign_extend(val: u64, bits: u8) -> i64 {
-    let shift = 64 - bits;
-    ((val << shift) as i64) >> shift
+/// Sign‐extend the low `bits` of `val` into a full i32.
+pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
+    let shift = 32 - bits;
+    ((val << shift) as i32) >> shift
 }
 
 #[cfg(test)]
@@ -425,8 +448,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        WatchableOnceCell,
-        spawn_bg_thread, WatchableOnceCell, BitWriter,
+        WatchableOnceCell, BitWriter,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -777,7 +799,7 @@ mod tests {
         let mut writer = BitWriter::new();
         
         // When: we push 8 bits from a u64 value
-        writer.push_bits(0xAB, 8);
+        writer.push32(0xAB, 8);
         let result = writer.finish();
         
         // Then: it should return a vector with one byte containing 0xAB
@@ -792,8 +814,8 @@ mod tests {
         // When: we push individual bits and then push_bits to create partial and full bytes
         writer.push(true);
         writer.push(false);
-        writer.push_bits(0x3F, 6); // 111111
-        writer.push_bits(0xCD, 8); // Full second byte
+        writer.push32(0x3F, 6); // 111111
+        writer.push32(0xCD, 8); // Full second byte
         let result = writer.finish();
         
         // Then: it should return a vector with two bytes: 0xBF (10111111) and 0xCD

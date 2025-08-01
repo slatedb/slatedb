@@ -1,5 +1,6 @@
 use std::cmp;
 
+use chrono::{DateTime, Utc};
 use serde::de::{self};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -37,12 +38,16 @@ impl TieredSequenceTracker {
         Self { tiers }
     }
 
-    pub(crate) fn insert(&mut self, seq: u64, ts: i64) {
-        self.tiers[0].insert(seq, ts);
+    pub(crate) fn insert(&mut self, seq: u64, ts: DateTime<Utc>) {
+        self.tiers[0].insert(seq, ts.timestamp());
     }
 
-    pub(crate) fn find_ts(&self, seq: u64, find_opt: FindOption) -> Option<i64> {
-        self.tiers[0].find_ts(seq, find_opt)
+    pub(crate) fn find_ts(&self, seq: u64, find_opt: FindOption) -> Option<DateTime<Utc>> {
+        if let Some(ts) = self.tiers[0].find_ts(seq, find_opt) {
+            DateTime::from_timestamp(ts, 0)
+        } else {
+            None
+        }
     }
 }
 
@@ -153,11 +158,11 @@ where
 
 fn encode_timestamps_to_bytes(timestamps: &[i64]) -> Vec<u8> {
     let mut w = BitWriter::new();
-    w.push_bits(timestamps.len() as u64, 64);
+    w.push32(timestamps.len() as u32, 32);
 
     if !timestamps.is_empty() {
         // first encode the full initial timestamp
-        w.push_bits(timestamps[0] as u64, 64);
+        w.push64(timestamps[0] as u64, 64);
 
         // for each subsequent encode the delta-of-deltas
         let mut prev_ts = timestamps[0];
@@ -173,20 +178,20 @@ fn encode_timestamps_to_bytes(timestamps: &[i64]) -> Vec<u8> {
             match dod {
                 0 => w.push(false),
                 -63..=64 => {
-                    w.push_bits(0b10, 2);
-                    w.push_bits((dod as u64) & 0x7F, 7);
+                    w.push32(0b10, 2);
+                    w.push32((dod as u32) & 0x7F, 7);
                 }
                 -255..=256 => {
-                    w.push_bits(0b110, 3);
-                    w.push_bits((dod as u64) & 0x1FF, 9);
+                    w.push32(0b110, 3);
+                    w.push32((dod as u32) & 0x1FF, 9);
                 }
                 -2047..=2048 => {
-                    w.push_bits(0b1110, 4);
-                    w.push_bits((dod as u64) & 0xFFF, 12);
+                    w.push32(0b1110, 4);
+                    w.push32((dod as u32) & 0xFFF, 12);
                 }
                 _ => {
-                    w.push_bits(0b1111, 4);
-                    w.push_bits((dod as u64) & 0xFFFFFFFF, 32);
+                    w.push32(0b1111, 4);
+                    w.push32((dod as u32) & 0xFFFFFFFF, 32);
                 }
             }
 
@@ -216,19 +221,19 @@ fn decode_timestamps_from_bytes(buf: &[u8]) -> Result<Vec<i64>, String> {
     let mut timestamps = Vec::new();
     let mut reader = BitReader::new(buf);
 
-    let mut remaining = reader.read_bits(64).ok_or("Expected count first")? as u64;
+    let mut remaining = reader.read32(32).ok_or("Expected count first")? as u32;
 
     if remaining > 0 {
-        let first_bits = reader
-            .read_bits(64)
+        let first_ts_bits = reader
+            .read64(64)
             .ok_or("Unexpected EOF: first ts should be 64 bit")?;
-        let first = first_bits as i64;
+        let first = first_ts_bits as i64;
 
         remaining -= 1;
         timestamps.push(first);
 
         let mut prev_ts = first;
-        let mut prev_delta: i64 = 0;
+        let mut prev_delta: i32 = 0;
 
         while let Some(prefix) = reader.read_bit() {
             let dod = if !prefix {
@@ -247,14 +252,14 @@ fn decode_timestamps_from_bytes(buf: &[u8]) -> Result<Vec<i64>, String> {
 
                 let bits = GORILLA_PREFIX_BYTES[count];
                 let raw = reader
-                    .read_bits(bits)
+                    .read32(bits)
                     .ok_or_else(|| format!("Unexpected EOF reading {}-bit delta-of-delta", bits))?;
 
                 sign_extend(raw, bits)
             };
 
             let delta = prev_delta + dod;
-            let ts = prev_ts + delta;
+            let ts = prev_ts + (delta as i64);
             timestamps.push(ts);
 
             prev_delta = delta;
@@ -371,7 +376,9 @@ mod tests {
     #[test]
     fn round_trip_timestamps_with_various_deltas() {
         // Given timestamps that will exercise each branch of the Gorilla encoding:
-        let timestamps = vec![1000, 1100, 1100, 1150, 3150, 103150];
+        // Using real Unix timestamps (seconds since epoch) that don't fit in i32
+        // to test the encoding dods using i32s
+        let timestamps = vec![2145916800, 2145916900, 2145916900, 2145916950, 2145918950, 2146018950];
         let encoded = encode_timestamps_to_bytes(&timestamps);
 
         // When:
@@ -381,7 +388,7 @@ mod tests {
         assert_eq!(decoded, timestamps);
 
         // a naive encoding of 8 bytes per timestamp would be 48 bytes
-        // but this should fit in 27
-        assert_eq!(encoded.len(), 27);
+        // but this should fit in 23
+        assert_eq!(encoded.len(), 23);
     }
 }
