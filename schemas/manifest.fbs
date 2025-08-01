@@ -90,6 +90,11 @@ table ManifestV1 {
 
     // The URI of the object store dedicated specifically for WAL, if any.
     wal_object_store_uri: string;
+
+    // Minimum sequence number across all recent in-memory (write) snapshots. The compactor
+    // needs this to determine whether it's safe to drop duplicate key writes. If a recent snapshot
+    // still references an older version of a key, it should not be dropped.
+    recent_snapshot_min_seq: ulong;
 }
 
 table CompactedSstId {

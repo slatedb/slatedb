@@ -251,6 +251,7 @@ impl CompactionExecuteBench {
             ssts,
             sorted_runs: vec![],
             compaction_ts: manifest.db_state().last_l0_clock_tick,
+            retention_min_seq: manifest.db_state().recent_snapshot_min_seq,
             is_dest_last_run,
         })
     }
@@ -284,6 +285,7 @@ impl CompactionExecuteBench {
             ssts: vec![],
             sorted_runs: srs,
             compaction_ts: state.last_l0_clock_tick,
+            retention_min_seq: state.recent_snapshot_min_seq,
             is_dest_last_run,
         }
     }

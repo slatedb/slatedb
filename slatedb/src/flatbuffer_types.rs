@@ -223,6 +223,11 @@ impl FlatBufferManifestCodec {
                 .expect("invalid timestamp"),
             })
             .collect();
+        let recent_snapshot_min_seq = if manifest.recent_snapshot_min_seq() == 0 {
+            None
+        } else {
+            Some(manifest.recent_snapshot_min_seq())
+        };
         let core = CoreDbState {
             initialized: manifest.initialized(),
             l0_last_compacted,
@@ -234,6 +239,7 @@ impl FlatBufferManifestCodec {
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
+            recent_snapshot_min_seq,
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -488,6 +494,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 checkpoints: Some(checkpoints),
                 last_l0_seq: core.last_l0_seq,
                 wal_object_store_uri,
+                recent_snapshot_min_seq: core.recent_snapshot_min_seq.unwrap_or(0),
             },
         );
         self.builder.finish(manifest, None);
@@ -718,6 +725,7 @@ mod tests {
                 last_l0_clock_tick: 0,
                 last_l0_seq: 0,
                 wal_object_store_uri: None,
+                recent_snapshot_min_seq: 0,
             },
         );
         fbb.finish(manifest, None);
@@ -762,5 +770,30 @@ mod tests {
         let decoded = codec.decode(&bytes).unwrap();
 
         assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn test_should_encode_decode_retention_min_seq() {
+        let mut manifest = Manifest::initial(CoreDbState::new());
+        manifest.core.recent_snapshot_min_seq = Some(12345);
+
+        let codec = FlatBufferManifestCodec {};
+        let bytes = codec.encode(&manifest);
+        let decoded = codec.decode(&bytes).unwrap();
+
+        assert_eq!(
+            manifest.core.recent_snapshot_min_seq,
+            decoded.core.recent_snapshot_min_seq
+        );
+        assert_eq!(decoded.core.recent_snapshot_min_seq, Some(12345));
+
+        // Test None case
+        let mut manifest_none = Manifest::initial(CoreDbState::new());
+        manifest_none.core.recent_snapshot_min_seq = None;
+
+        let bytes_none = codec.encode(&manifest_none);
+        let decoded_none = codec.decode(&bytes_none).unwrap();
+
+        assert_eq!(decoded_none.core.recent_snapshot_min_seq, None);
     }
 }
