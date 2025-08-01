@@ -1,31 +1,5 @@
 include "sst.fbs";
 
-enum SourceIdType : byte {
-    SortedRun = 0,
-    Sst = 1;
-}
-
-table SourceId {
-    type: SourceIdType;
-    sorted_run_id: uint32;  // Only used if type == SortedRun
-    sst_ulid: string;       // Only used if type == Sst
-}
-
-table SsTableHandle {
-    id: SsTableId (required);
-    info: SsTableInfo (required);
-    visible_range: BytesRange;
-    effective_range: BytesRange;
-}
-
-table SortedRun {
-    // SortedRun Identifier 
-    id: uint32;
-
-    // List of ordered SSTables in the sorted run 
-    ssts: [SsTableHandle] (required);
-}
-
 enum CompactionType : byte { Internal = 0, External; }
 
 enum CompactionStatus : byte {
@@ -43,27 +17,9 @@ enum CompactionPriority : byte {
     Low;       // Background maintenance priority
 }
 
-table CompactionProgress {
-    input_ssts_processed: uint32;
-    total_input_ssts: uint32;
-    output_ssts_written: uint32;
-    bytes_processed: uint64;
-    completion_percentage: float64;
-    estimated_completion_ms: uint64;  // Optional timestamp
-}
-
 table CompactionJob {
     // CompactorJob ID
     job_id: ulong;
-
-    // Destination Sorted Run ID
-    destination: u32 (required);
-
-    // input L0 SSTables
-    ssts: [SsTableHandle]; 
-
-    // input Sorted Runs
-    sorted_runs: [SortedRun];
 
     compaction_ts: i64; 
 
@@ -73,10 +29,10 @@ table CompactionJob {
     created_ts: uint64
     
     // InputSSTables completed
-    completed_input_ssts:[uint64];
+    completed_input_ssts:[CompactedSsTable];
 
-    // Output SSTs to be persisted   
-    output_ssts_written:[uint64];
+    // Output SSTs to be persisted in destination SR  
+    output_ssts_written:[CompactedSsTable];
 
     // Current CompactionJob Status
     current_status: CompactionStatus;
@@ -89,11 +45,14 @@ table Compaction {
     // Compaction Status visible to public API
     status: CompactionStatus;
 
-    // Input L0 SSTables and SRs to be compressed
-    sources: [SourceId];
+    // Destination Sorted Run ID
+    destination: u32 (required);
 
-    // Output Source Destination
-    destination: uint32;
+    // input L0 SSTables
+    ssts: [CompactedSsTable]; 
+
+    // input Sorted Runs
+    sorted_runs: [SortedRun];
 
     // Identifier to reference a Compaction
     compaction_id: uint64;
