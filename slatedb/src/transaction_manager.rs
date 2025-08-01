@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tokio::{select, sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -30,6 +31,8 @@ pub struct TransactionManager {
     sync_manifest_duration: Duration,
     /// Reference to the db inner for updating manifest retention information
     db_inner: Arc<DbInner>,
+    /// Reference to the fenceable manifest for updating retention information
+    manifest: Mutex<FenceableManifest>,
 }
 
 struct TransactionManagerInner {
@@ -40,8 +43,6 @@ struct TransactionManagerInner {
     background_task: Option<JoinHandle<Result<(), SlateDBError>>>,
     /// The last min retention seq that has been synced to the object store.
     last_sync_manifest_time: Option<Instant>,
-    /// Reference to the fenceable manifest for updating retention information
-    manifest: FenceableManifest,
 }
 
 impl TransactionManager {
@@ -56,10 +57,10 @@ impl TransactionManager {
                 work_tx: None,
                 background_task: None,
                 last_sync_manifest_time: None,
-                manifest,
             })),
             cancellation_token,
             sync_manifest_duration: Duration::from_secs(30),
+            manifest: Mutex::new(manifest),
             db_inner,
         }
     }
@@ -139,7 +140,21 @@ impl TransactionManager {
     async fn sync_manifest(&self) -> Result<(), SlateDBError> {
         let min_seq = self.min_active_seq();
 
-        // TODO
+        // 1. update the in-memory db state
+        {
+            let mut state_guard = self.db_inner.state.write();
+            state_guard.update_recent_snapshot_min_seq(min_seq);
+        }
+
+        // 2. get the updated in-memory state for persistence
+        let dirty = {
+            let rguard_state = self.db_inner.state.read();
+            rguard_state.state().manifest.clone()
+        };
+
+        // 3. persist the manifest to the manifest store
+        self.manifest.lock().await.update_manifest(dirty).await?;
+
         Ok(())
     }
 
