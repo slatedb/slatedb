@@ -1,3 +1,5 @@
+use crate::db::DbInner;
+use crate::db_state::DbState;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::spawn_bg_task;
@@ -26,8 +28,8 @@ pub struct TransactionManager {
     cancellation_token: CancellationToken,
     /// The duration to sync the manifest.
     sync_manifest_duration: Duration,
-    /// Reference to the fenceable manifest for updating retention information
-    manifest: Option<Arc<tokio::sync::Mutex<FenceableManifest>>>,
+    /// Reference to the db inner for updating manifest retention information
+    db_inner: Arc<DbInner>,
 }
 
 struct TransactionManagerInner {
@@ -38,26 +40,28 @@ struct TransactionManagerInner {
     background_task: Option<JoinHandle<Result<(), SlateDBError>>>,
     /// The last min retention seq that has been synced to the object store.
     last_sync_manifest_time: Option<Instant>,
+    /// Reference to the fenceable manifest for updating retention information
+    manifest: FenceableManifest,
 }
 
 impl TransactionManager {
-    pub fn new(cancellation_token: CancellationToken) -> Self {
+    pub fn new(
+        cancellation_token: CancellationToken,
+        db_inner: Arc<DbInner>,
+        manifest: FenceableManifest,
+    ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
                 work_tx: None,
                 background_task: None,
                 last_sync_manifest_time: None,
+                manifest,
             })),
             cancellation_token,
             sync_manifest_duration: Duration::from_secs(30),
-            manifest: None,
+            db_inner,
         }
-    }
-
-    /// Set the fenceable manifest reference for updating retention information
-    pub fn set_manifest(&mut self, manifest: Arc<tokio::sync::Mutex<FenceableManifest>>) {
-        self.manifest = Some(manifest);
     }
 
     /// Start the background task for transaction management
@@ -134,18 +138,8 @@ impl TransactionManager {
     // when the duration since the last sync exceeds the [`sync_manifest_duration`] on a txn is dropped.
     async fn sync_manifest(&self) -> Result<(), SlateDBError> {
         let min_seq = self.min_active_seq();
-        
-        if let Some(ref manifest) = self.manifest {
-            let mut manifest_guard = manifest.lock().await;
-            manifest_guard
-                .maybe_apply_manifest_update(|stored_manifest| {
-                    let mut dirty = stored_manifest.prepare_dirty();
-                    dirty.core.recent_snapshot_min_seq = min_seq;
-                    Ok(Some(dirty))
-                })
-                .await?;
-        }
-        
+
+        // TODO
         Ok(())
     }
 
