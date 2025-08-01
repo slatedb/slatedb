@@ -167,33 +167,16 @@ Note:
 #### **4. Recovery Strategy**
 - Resume from last completed output SST
 
-#### **5. Migrate `compaction_epoch` from Manifest to CompactionState**
+The section below is under discussion here: https://github.com/slatedb/slatedb/pull/695/files#r2239561471
+
+<!-- #### **5. Migrate `compaction_epoch` from Manifest to CompactionState**
 **Decision**: Deprecate `compaction_epoch` from Manifest.
 
 **Rationale**: 
 - Clean separation: DB state vs process coordination
 - Process independence: Compactor can run separately
-- Logical grouping: Epoch lives with compaction concerns
+- Logical grouping: Epoch lives with compaction concerns -->
 
-### **Data Model**
-```
-Compaction (1) ──→ (N) CompactionJob
-    ├── sources: Vec<SourceId>
-    ├── destination: u32  
-    ├── job_attempts: Vec<CompactionJob>
-    └── current_status: CompactionStatus
-    └── created_ts: u64
-    └── updated_ts: u64
-
-CompactionJob
-    ├── attempt_number: u32
-    ├── progress: CompactionProgress  
-    ├── current_status: CompactionJobStatus
-    └── existing_output_ssts: Option<Vec<SsTableId>>
-    └── input_ssts_completed: Vec<SsTableId>          // To skip completed L0 SSTs if any
-    └── output_ssts_written: Vec<SsTableId>           // Single output SR with a collection of SSTs
-    └── created_ts: u64
-```
 
 ### **Persistent State Storage**
 
@@ -321,14 +304,6 @@ Extend compaction system to support operator-initiated compactions:
 - **Normal**: Regular size-tiered compactions  
 - **Low**: Background maintenance
 
-### **Manual Compaction API**
-```
-submit_manual_compaction(sources, target_level, priority, deadline)
-cancel_compaction(compaction_id)  
-get_compaction_status(compaction_id)
-list_active_compactions()
-```
-
 ## Public API
 
 ### **Manual Compaction Management**
@@ -437,11 +412,12 @@ pub async fn list_compactions(
 
 ```        
 
-### **Garbage Collection Integration**
+This would depend on how we plan to partial compaction
+<!-- ### **Garbage Collection Integration**
 - The garbage collector would be responsible to delete the entries in the compaction state files based on the two conditions:
   - min_age
   - CompactionJob associated with the compaction state is `Complete` or `Attempts_Exhausted`
-- As mentioned in the earlier section, the manifest update with the compacted SRs would only happen when the `CompactionJob` completes successfully.
+- As mentioned in the earlier section, the manifest update with the compacted SRs would only happen when the `CompactionJob` completes successfully. -->
 
 ## Observability Enhancements
 
