@@ -1,4 +1,5 @@
 use crate::error::SlateDBError;
+use crate::manifest::store::FenceableManifest;
 use crate::utils::spawn_bg_task;
 use log::info;
 use log::warn;
@@ -25,6 +26,8 @@ pub struct TransactionManager {
     cancellation_token: CancellationToken,
     /// The duration to sync the manifest.
     sync_manifest_duration: Duration,
+    /// Reference to the fenceable manifest for updating retention information
+    manifest: Option<Arc<tokio::sync::Mutex<FenceableManifest>>>,
 }
 
 struct TransactionManagerInner {
@@ -48,7 +51,13 @@ impl TransactionManager {
             })),
             cancellation_token,
             sync_manifest_duration: Duration::from_secs(30),
+            manifest: None,
         }
+    }
+
+    /// Set the fenceable manifest reference for updating retention information
+    pub fn set_manifest(&mut self, manifest: Arc<tokio::sync::Mutex<FenceableManifest>>) {
+        self.manifest = Some(manifest);
     }
 
     /// Start the background task for transaction management
@@ -124,7 +133,19 @@ impl TransactionManager {
     // [`sync_manifest`] syncs the manifest with the latest min active seq. It's called by the background task
     // when the duration since the last sync exceeds the [`sync_manifest_duration`] on a txn is dropped.
     async fn sync_manifest(&self) -> Result<(), SlateDBError> {
-        // TODO: update manifest with the latest min retention seq
+        let min_seq = self.min_active_seq();
+        
+        if let Some(ref manifest) = self.manifest {
+            let mut manifest_guard = manifest.lock().await;
+            manifest_guard
+                .maybe_apply_manifest_update(|stored_manifest| {
+                    let mut dirty = stored_manifest.prepare_dirty();
+                    dirty.core.recent_snapshot_min_seq = min_seq;
+                    Ok(Some(dirty))
+                })
+                .await?;
+        }
+        
         Ok(())
     }
 
@@ -157,8 +178,6 @@ impl TransactionManager {
                 }
             };
         }
-
-        Ok(())
     }
 }
 
