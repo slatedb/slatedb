@@ -22,6 +22,9 @@ pub(crate) enum MemtableFlushMsg {
         options: CheckpointOptions,
         sender: Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
+    WriteRecentSnapshotMinSeq {
+        seq: u64,
+    },
     Shutdown,
 }
 
@@ -75,6 +78,17 @@ impl MemtableFlusher {
                 return result;
             }
         }
+    }
+
+    pub(crate) async fn write_recent_snapshot_min_seq(
+        &mut self,
+        seq: u64,
+    ) -> Result<(), SlateDBError> {
+        {
+            let mut state_guard = self.db_inner.state.write();
+            state_guard.set_recent_snapshot_min_seq(seq);
+        }
+        self.write_manifest_safely().await
     }
 
     pub(crate) async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
@@ -207,6 +221,9 @@ impl DbInner {
                                 if let Err(Err(e)) = sender.send(write_result) {
                                     error!("Failed to send checkpoint error: {e}");
                                 }
+                            },
+                            MemtableFlushMsg::WriteRecentSnapshotMinSeq { seq } => {
+                                flusher.write_recent_snapshot_min_seq(seq).await?;
                             }
                         }
                     },
