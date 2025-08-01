@@ -283,11 +283,13 @@ External processes that need to trigger compactions coordinate through the persi
 
 **Manual Compaction Submission**:
 1. External process submits a CompactionRequest
-2. The request is processed  by calling a method analogous to `maybeScheduleCompaction()`. However, this method would take the input source SSTs/SRs provided and return a `Compaction`. This could be a wrapper method deciding which method to call based on `CompactionType`
+2. The request is processed  by calling a method analogous to `maybeScheduleCompaction()`. However, this method would take the input source SSTs/SRs provided and return a `Compaction`. This could be a wrapper method deciding which method to call based on `CompactionType`. 
+3. The `compaction` needs to be persisted in `activeCompaction` before proceeding ahead.
+4. In case of manual comapactions, a signal can be sent to the client via a channel with the compactionId and the status.
 (Post this step the regular Compaction workflow begins.)
-3. If the count of ongoing Compactions is less than the threshold, the `Compaction` is submitted for compaction to the `submitCompaction()` 
-4. Once it passes the validations in the `submitCompaction()`, the event handler proceeds with the `startCompaction()` converting the compaction into a compactionJob.
-4. The compactionJob is then executed in a blocking task and the terminal state of the execution is then handled by the event handler.
+5. If the count of ongoing Compactions is less than the threshold, the `Compaction` is submitted for compaction to the `submitCompaction()` 
+6. Once it passes the validations in the `submitCompaction()`, the event handler proceeds with the `startCompaction()` converting the compaction into a compactionJob.
+7. The compactionJob is then executed in a blocking task and the terminal state of the execution is then handled by the event handler.
 
 **Administrative Commands**:
 - `slatedb compaction submit --sources SR1,SR2 --priority high` - Submit manual compaction
