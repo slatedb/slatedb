@@ -103,6 +103,7 @@ mod rand;
 mod reader;
 mod retention_iterator;
 mod row_codec;
+mod seq_tracker;
 mod sorted_run_iterator;
 mod sst;
 mod sst_iter;

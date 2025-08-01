@@ -32,6 +32,7 @@ use tokio::runtime::Handle;
 use tracing::instrument;
 
 use crate::config::WriteOptions;
+use crate::seq_tracker::TrackedSeq;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
 use crate::{
@@ -90,7 +91,12 @@ impl DbInner {
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
-        self.wal_buffer.track_last_applied_seq(seq).await;
+        self.wal_buffer
+            .track_last_applied_seq(TrackedSeq {
+                seq,
+                ts: self.system_clock.now(),
+            })
+            .await;
 
         // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
         // otherwise, we'll use the memtable's durable watcher.

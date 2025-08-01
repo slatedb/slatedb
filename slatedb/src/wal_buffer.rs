@@ -13,17 +13,7 @@ use tokio::{
 use tracing::instrument;
 
 use crate::{
-    clock::{MonotonicClock, SystemClock},
-    db_state::{DbState, SsTableId},
-    db_stats::DbStats,
-    error::SlateDBError,
-    iter::KeyValueIterator,
-    mem_table::KVTable,
-    oracle::Oracle,
-    tablestore::TableStore,
-    types::RowEntry,
-    utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader},
-    wal_id::WalIdStore,
+    clock::{MonotonicClock, SystemClock}, db_state::{DbState, SsTableId}, db_stats::DbStats, error::SlateDBError, iter::KeyValueIterator, mem_table::KVTable, oracle::Oracle, seq_tracker::TrackedSeq, tablestore::TableStore, types::RowEntry, utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader}, wal_id::WalIdStore
 };
 
 /// [`WalBufferManager`] buffers write operations in memory before flushing them to persistent storage.
@@ -74,7 +64,7 @@ struct WalBufferManagerInner {
     background_task: Option<JoinHandle<Result<(), SlateDBError>>>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
     /// the immutable wal can be recycled in memory.
-    last_applied_seq: Option<u64>,
+    last_applied_seq: Option<TrackedSeq>,
     /// The flusher will update the recent_flushed_wal_id and last_flushed_seq when the flush is done.
     recent_flushed_wal_id: u64,
     /// The oracle to track the last flushed sequence number.
@@ -464,12 +454,16 @@ impl WalBufferManager {
     /// This infomation of the last applied seq is used to determine if the immutable wals can be recycled.
     ///
     /// It's the caller's duty to ensure the seq is monotonically increasing.
-    pub async fn track_last_applied_seq(&self, seq: u64) {
+    pub async fn track_last_applied_seq(&self, seq: TrackedSeq) {
         {
             let mut inner = self.inner.write();
             inner.last_applied_seq = Some(seq);
         }
         self.maybe_release_immutable_wals().await;
+    }
+
+    pub fn last_applied_seq(&self) -> Option<TrackedSeq> {
+        self.inner.read().last_applied_seq
     }
 
     /// Recycle the immutable WALs that are applied to the memtable and flushed to the remote storage.
@@ -487,7 +481,7 @@ impl WalBufferManager {
         for (_, wal) in inner.immutable_wals.iter() {
             if wal
                 .last_seq()
-                .map(|seq| seq <= last_applied_seq && seq <= last_flushed_seq)
+                .map(|seq| seq <= last_applied_seq.seq && seq <= last_flushed_seq)
                 .unwrap_or(false)
             {
                 releaseable_count += 1;
@@ -529,6 +523,7 @@ mod tests {
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::MonotonicSeq;
     use bytes::Bytes;
+    use chrono::Utc;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -686,7 +681,7 @@ mod tests {
         assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 100);
 
-        wal_buffer.track_last_applied_seq(50).await;
+        wal_buffer.track_last_applied_seq(TrackedSeq { seq: 50, ts: Utc::now() }).await;
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
     }
 
@@ -707,7 +702,7 @@ mod tests {
             wal_buffer.append(&[entry]).await.unwrap();
             wal_buffer.flush().await.unwrap();
         }
-        wal_buffer.track_last_applied_seq(50).await;
+        wal_buffer.track_last_applied_seq(TrackedSeq { seq: 50, ts: Utc::now() }).await;
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
         assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
 
@@ -716,7 +711,7 @@ mod tests {
             let inner = wal_buffer.inner.write();
             inner.oracle.last_remote_persisted_seq.store(80);
         }
-        wal_buffer.track_last_applied_seq(90).await;
+        wal_buffer.track_last_applied_seq(TrackedSeq { seq: 90, ts: Utc::now() }).await;
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 20);
     }
 }

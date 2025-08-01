@@ -1116,7 +1116,8 @@ mod tests {
     };
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
-    use crate::clock::DefaultSystemClock;
+    #[cfg(feature = "test-util")]
+    use crate::clock::{DefaultSystemClock, MockSystemClock};
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
@@ -1130,6 +1131,7 @@ mod tests {
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
+    use crate::seq_tracker::FindOption;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -3925,5 +3927,68 @@ mod tests {
             garbage_collector_options: None,
             default_ttl: ttl,
         }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    async fn test_manifest_sequence_tracker_after_flush() {
+        use chrono::{TimeZone, Utc};
+
+        let clock = Arc::new(MockSystemClock::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+        let options = test_db_options(0, 32, None);
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // seq 1
+        clock.advance(Duration::from_secs(100)).await;
+        db.put(&[b'a'; 4], &[b'j'; 28])
+            .await
+            .expect("write batch failed");
+
+        // seq 2
+        clock.advance(Duration::from_secs(100)).await;
+        db.put(&[b'a'; 4], &[b'j'; 28])
+            .await
+            .expect("write batch failed");
+
+        // seq 3
+        clock.advance(Duration::from_secs(100)).await;
+        db.put(&[b'a'; 4], &[b'j'; 28])
+            .await
+            .expect("write batch failed");
+
+        // close the db to flush the manifest
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        let options = test_db_options(0, 32, None);
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        let state = db.inner.state.read().state();
+        let tracker = state.core().seq_tracker.as_ref().unwrap();
+
+        assert_eq!(
+            tracker.find_ts(1, FindOption::RoundDown),
+            Some(Utc.timestamp_opt(100, 0).unwrap())
+        );
+        assert_eq!(
+            tracker.find_ts(2, FindOption::RoundDown),
+            Some(Utc.timestamp_opt(200, 0).unwrap())
+        );
+        assert_eq!(
+            tracker.find_ts(3, FindOption::RoundDown),
+            Some(Utc.timestamp_opt(300, 0).unwrap())
+        );
     }
 }
