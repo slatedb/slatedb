@@ -679,6 +679,7 @@ mod tests {
             checkpoints: vec![],
             wal_object_store_uri: None,
             recent_snapshot_min_seq: None,
+            seq_tracker: None,
         }
     }
 

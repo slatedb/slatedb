@@ -147,6 +147,12 @@ impl MemtableFlusher {
                         modifier.state.manifest.core.last_l0_seq = seq;
                     };
 
+                    if let Some(tracked_seq) = self.db_inner.wal_buffer.last_applied_seq() {
+                        if let Some(seq_tracker) = &mut modifier.state.manifest.core.seq_tracker {
+                            seq_tracker.insert(tracked_seq);
+                        }
+                    }
+
                     Ok(())
                 })?;
             }

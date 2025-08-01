@@ -184,6 +184,7 @@ impl CompactorState {
             checkpoints: remote_manifest.core.checkpoints.clone(),
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
             recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
+            seq_tracker: my_db_state.seq_tracker.clone(),
         };
         remote_manifest.core = merged;
         self.manifest = remote_manifest;

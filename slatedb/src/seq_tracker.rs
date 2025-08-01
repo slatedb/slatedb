@@ -6,6 +6,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::utils::{sign_extend, BitReader, BitWriter};
 
+#[derive(PartialEq, Clone, Copy)]
+pub(crate) struct TrackedSeq {
+    pub(crate) seq: u64,
+    pub(crate) ts: DateTime<Utc>,
+}
+
 #[derive(PartialEq)]
 pub(crate) enum FindOption {
     RoundUp,
@@ -18,11 +24,11 @@ pub(crate) struct TieredSequenceTracker {
     /// indicates the granularity at which the sequence
     /// numbers are tracked. The tiers are ordered by the
     /// granularity (i.e. `tiers[0]` has the lowest step)
-    tiers: Vec<Tier>,
+    pub(crate) tiers: Vec<Tier>,
 }
 
 impl TieredSequenceTracker {
-    pub(crate) fn new(num_tiers: usize, capacity: usize) -> Self {
+    pub(crate) fn new(num_tiers: u32, capacity: u32) -> Self {
         // only support a single tier for now because the
         // downsampling algorithm for fixed size multi-tiered
         // sequence tracking is a little more complicated, but
@@ -38,8 +44,8 @@ impl TieredSequenceTracker {
         Self { tiers }
     }
 
-    pub(crate) fn insert(&mut self, seq: u64, ts: DateTime<Utc>) {
-        self.tiers[0].insert(seq, ts.timestamp());
+    pub(crate) fn insert(&mut self, seq: TrackedSeq) {
+        self.tiers[0].insert(seq.seq, seq.ts.timestamp());
     }
 
     pub(crate) fn find_ts(&self, seq: u64, find_opt: FindOption) -> Option<DateTime<Utc>> {
@@ -48,6 +54,10 @@ impl TieredSequenceTracker {
         } else {
             None
         }
+    }
+
+    pub(crate) fn find_seq(&self, ts: DateTime<Utc>, find_opt: FindOption) -> Option<u64> {
+        self.tiers[0].find_seq(ts.timestamp(), find_opt)
     }
 }
 
@@ -59,33 +69,32 @@ impl TieredSequenceTracker {
 /// sequence numbers 10, 14, 16, ... until the capacity
 /// of the tier
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-struct Tier {
+pub(crate) struct Tier {
     /// distance between stored sequence numbers
-    step: u64,
+    pub(crate) step: u64,
     /// the first sequence number for which a timestamp is stored
-    first_seq: u64,
+    pub(crate) first_seq: u64,
     /// the last sequence number stored in this tier
-    last_seq: u64,
+    pub(crate) last_seq: u64,
     /// how many elements can fit in this tier
-    #[serde(skip)]
-    capacity: usize,
+    pub(crate) capacity: u32,
     /// the actual timestamps, the value at `timestamps[i]` is the
     /// timestamp for the sequence number `first_seq + i * step`
     #[serde(
         serialize_with = "serialize_timestamps",
         deserialize_with = "deserialize_timestamps"
     )]
-    timestamps: Vec<i64>,
+    pub(crate) timestamps: Vec<i64>,
 }
 
 impl Tier {
-    fn new(step: u64, capacity: usize) -> Self {
+    fn new(step: u64, capacity: u32) -> Self {
         Self {
             step,
             first_seq: 0,
             last_seq: 0,
             capacity,
-            timestamps: Vec::with_capacity(capacity),
+            timestamps: Vec::with_capacity(capacity as usize),
         }
     }
 
@@ -97,7 +106,7 @@ impl Tier {
             return;
         }
 
-        if (self.timestamps.is_empty()) {
+        if self.timestamps.is_empty() {
             self.first_seq = seq;
         }
 
@@ -106,7 +115,7 @@ impl Tier {
 
         // if we've exceeded the capacity then downsample the
         // sequence numbers and double the step size
-        if self.timestamps.len() > self.capacity {
+        if self.timestamps.len() as u32 > self.capacity {
             let old = std::mem::take(&mut self.timestamps);
             let mut downsampled = Vec::with_capacity((old.len() + 1) / 2);
             for (i, &ts) in old.iter().enumerate() {
@@ -144,6 +153,26 @@ impl Tier {
 
         None
     }
+
+    /// finds the sequence number associated with `ts`
+    fn find_seq(&self, ts: i64, find_opt: FindOption) -> Option<u64> {
+        if self.timestamps.is_empty() {
+            return None;
+        }
+
+        match self.timestamps.binary_search(&ts) {
+            Ok(idx) => Some(self.first_seq + (idx as u64) * self.step),
+            Err(idx) => match find_opt {
+                FindOption::RoundUp if idx < self.timestamps.len() => {
+                    Some(self.first_seq + (idx as u64) * self.step)
+                }
+                FindOption::RoundDown if idx > 0 => {
+                    Some(self.first_seq + ((idx - 1) as u64) * self.step)
+                }
+                _ => None,
+            },
+        }
+    }
 }
 
 /// Custom serialization function for timestamps that uses the Gorilla
@@ -156,7 +185,7 @@ where
     serializer.serialize_bytes(&encoded)
 }
 
-fn encode_timestamps_to_bytes(timestamps: &[i64]) -> Vec<u8> {
+pub(crate) fn encode_timestamps_to_bytes(timestamps: &[i64]) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.push32(timestamps.len() as u32, 32);
 
@@ -217,7 +246,7 @@ where
     decode_timestamps_from_bytes(&buf).map_err(|e| <D::Error as de::Error>::custom(e))
 }
 
-fn decode_timestamps_from_bytes(buf: &[u8]) -> Result<Vec<i64>, String> {
+pub(crate) fn decode_timestamps_from_bytes(buf: &[u8]) -> Result<Vec<i64>, String> {
     let mut timestamps = Vec::new();
     let mut reader = BitReader::new(buf);
 
@@ -341,6 +370,51 @@ mod tests {
     }
 
     #[test]
+    fn should_find_exact_sequence_number_for_timestamp() {
+        // given
+        let mut tier = Tier::new(4, 10);
+        tier.insert(4, 100);
+        tier.insert(8, 200);
+        tier.insert(12, 300);
+
+        // when
+        let result_down = tier.find_seq(200, FindOption::RoundDown);
+        let result_up = tier.find_seq(200, FindOption::RoundUp);
+
+        // then
+        assert_eq!(result_down, Some(8));
+        assert_eq!(result_up, Some(8));
+    }
+
+    #[test]
+    fn should_round_up_to_next_sequence_number() {
+        // given
+        let mut tier = Tier::new(4, 10);
+        tier.insert(4, 100);
+        tier.insert(8, 200);
+
+        // when
+        let result = tier.find_seq(150, FindOption::RoundUp);
+
+        // then
+        assert_eq!(result, Some(8));
+    }
+
+    #[test]
+    fn should_round_down_to_previous_sequence_number() {
+        // given
+        let mut tier = Tier::new(4, 10);
+        tier.insert(4, 100);
+        tier.insert(8, 200);
+
+        // when
+        let result = tier.find_seq(150, FindOption::RoundDown);
+
+        // then
+        assert_eq!(result, Some(4));
+    }
+
+    #[test]
     fn should_downsample_when_capacity_exceeded() {
         // given
         let mut tier = Tier::new(2, 3);
@@ -378,7 +452,9 @@ mod tests {
         // Given timestamps that will exercise each branch of the Gorilla encoding:
         // Using real Unix timestamps (seconds since epoch) that don't fit in i32
         // to test the encoding dods using i32s
-        let timestamps = vec![2145916800, 2145916900, 2145916900, 2145916950, 2145918950, 2146018950];
+        let timestamps = vec![
+            2145916800, 2145916900, 2145916900, 2145916950, 2145918950, 2146018950,
+        ];
         let encoded = encode_timestamps_to_bytes(&timestamps);
 
         // When:
