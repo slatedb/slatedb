@@ -481,6 +481,10 @@ impl DbState {
         self.modify(|modifier| modifier.merge_remote_manifest(remote_manifest));
     }
 
+    pub fn set_recent_snapshot_min_seq(&mut self, seq: u64) {
+        self.modify(|modifier| modifier.state.manifest.core.recent_snapshot_min_seq = Some(seq));
+    }
+
     pub fn modify<F, R>(&mut self, fun: F) -> R
     where
         F: FnOnce(&mut StateModifier<'_>) -> R,
@@ -502,12 +506,6 @@ impl<'a> StateModifier<'a> {
     fn new(db_state: &'a mut DbState) -> Self {
         let state = db_state.state.as_ref().clone();
         Self { db_state, state }
-    }
-
-    pub fn set_recent_snapshot_min_seq(&mut self, seq: u64) {
-        let mut state = self.state_copy();
-        state.manifest.core.recent_snapshot_min_seq = Some(seq);
-        self.update_state(state);
     }
 
     pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
