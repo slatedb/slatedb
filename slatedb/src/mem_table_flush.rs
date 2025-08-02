@@ -7,6 +7,7 @@ use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
 use log::{error, info, warn};
+use std::cmp;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -136,7 +137,37 @@ impl MemtableFlusher {
                 .await?;
             {
                 let mut guard = self.db_inner.state.write();
-                guard.move_imm_memtable_to_l0(imm_memtable.clone(), sst_handle)?;
+                guard.modify(|modifier| {
+                    let popped = modifier
+                        .state
+                        .imm_memtable
+                        .pop_back()
+                        .expect("expected imm memtable");
+                    assert!(Arc::ptr_eq(&popped, &imm_memtable));
+                    modifier.state.manifest.core.l0.push_front(sst_handle);
+                    modifier.state.manifest.core.replay_after_wal_id =
+                        imm_memtable.recent_flushed_wal_id();
+
+                    // ensure the persisted manifest tick never goes backwards in time
+                    let memtable_tick = imm_memtable.table().last_tick();
+                    modifier.state.manifest.core.last_l0_clock_tick = cmp::max(
+                        modifier.state.manifest.core.last_l0_clock_tick,
+                        memtable_tick,
+                    );
+                    if modifier.state.manifest.core.last_l0_clock_tick != memtable_tick {
+                        return Err(SlateDBError::InvalidClockTick {
+                            last_tick: modifier.state.manifest.core.last_l0_clock_tick,
+                            next_tick: memtable_tick,
+                        });
+                    }
+
+                    // update the persisted manifest last_l0_seq as the latest seq in the imm.
+                    if let Some(seq) = imm_memtable.table().last_seq() {
+                        modifier.state.manifest.core.last_l0_seq = seq;
+                    };
+
+                    Ok(())
+                })?;
             }
             imm_memtable.notify_flush_to_l0(Ok(()));
             match self.write_manifest_safely().await {
