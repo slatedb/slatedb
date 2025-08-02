@@ -1,0 +1,86 @@
+---
+template: splash
+lastUpdated: false
+editUrl: false
+
+title: SlateDB
+pagination: false
+next: false
+prev: false
+
+head:
+    - tag: title
+      content: 'SlateDB - An embedded database built on object storage'
+
+hero:
+    title: 'An embedded database built on object storage'
+    tagline: |
+        Unlike traditional LSM-tree storage engines, SlateDB writes data to object storage to
+        provide bottomless storage capacity, high durability, and easy replication.
+    actions:
+        - text: Get started
+          icon: right-arrow
+          link: /#getting-started
+        - text: Read the docs
+          icon: open-book
+          variant: secondary
+          link: /docs/introduction/
+        - text: View on GitHub
+          icon: external
+          variant: minimal
+          link: https://github.com/slatedb/slatedb
+---
+
+import { CardGrid, LinkButton, Steps } from '@astrojs/starlight/components';
+import Card from '../../components/Card.astro';
+
+<CardGrid>
+    <Card title="Object Storage Durability" icon="infinity">
+        SlateDB inherits your object store's durability. Yup, 99.999999999% durability.
+    </Card>
+    <Card title="Zero-Disk Architecture" icon="floppy">
+        SlateDB runs without disks. No more disk failures, no more disk corruption.
+    </Card>
+    <Card title="Simple Replication" icon="replace">
+        Why write complex replication protocols when you can let your object store handle it?
+    </Card>
+    <Card title="Tunable Performance" icon="adjustments">
+        Configure SlateDB to optimize for low latency, low cost, or high durability.
+    </Card>
+    <Card title="Scalable Readers" icon="arrows">
+        Supports a single writer and multiple readers. SlateDB detects and fences zombie writers.
+    </Card>
+    <Card title="Built in Rust" icon="rust">
+        SlateDB is an embeddable library built in Rust. Use SlateDB with the language of your choice.
+    </Card>
+</CardGrid>
+
+<div id="getting-started" class="getting-started">
+    <h2>Getting Started</h2>
+
+    <Steps>
+    1. Add the SlateDB crate to your project:
+        ```sh
+        cargo add slatedb
+        ```
+    2. Connect the database to your object store:
+        ```rust
+        // main.rs
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::open("/tmp/slatedb", object_store).await?;
+        ```
+    3. Write and read data:
+        ```rust
+        // main.rs
+        db.put(b"key", b"value").await?;
+        assert_eq!(db.get(b"key").await?, Some("value".into()));
+        ```
+    </Steps>
+
+    <LinkButton
+        href="https://github.com/slatedb/slatedb?tab=readme-ov-file#get-started"
+        variant="secondary"
+        icon="external">
+        See a full example
+    </LinkButton>
+</div>
