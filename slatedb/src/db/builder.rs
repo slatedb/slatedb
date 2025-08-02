@@ -290,9 +290,15 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
-            info!(path:?, settings:? = settings_json; "Opening SlateDB database");
+            info!(
+                "opening SlateDB database [path={}, settings={}]",
+                path, settings_json
+            );
         } else {
-            info!(path:?, settings:? = self.settings; "Opening SlateDB database");
+            info!(
+                "opening SlateDB database [path={}, settings={:?}]",
+                path, self.settings
+            );
         }
 
         let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());

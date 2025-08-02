@@ -287,21 +287,21 @@ impl DbInner {
             let total_mem_size_bytes = wal_size_bytes + imm_memtable_size_bytes;
 
             trace!(
+                "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
                 total_mem_size_bytes,
                 wal_size_bytes,
                 imm_memtable_size_bytes,
-                max_unflushed_bytes = self.settings.max_unflushed_bytes;
-                "checking backpressure",
+                self.settings.max_unflushed_bytes,
             );
 
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();
                 warn!(
+                    "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
                     total_mem_size_bytes,
                     wal_size_bytes,
                     imm_memtable_size_bytes,
-                    max_unflushed_bytes = self.settings.max_unflushed_bytes;
-                    "Unflushed memtable size exceeds max_unflushed_bytes. Applying backpressure.",
+                    self.settings.max_unflushed_bytes,
                 );
 
                 let maybe_oldest_unflushed_memtable = {
@@ -344,7 +344,7 @@ impl DbInner {
                     result = await_flush_memtable => result?,
                     result = await_flush_wal => result?,
                     _ = timeout_fut => {
-                        warn!("Backpressure timeout: waited 30s, no memtable/WAL flushed yet");
+                        warn!("backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
                 };
             } else {

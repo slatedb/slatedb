@@ -253,7 +253,7 @@ impl TableStore {
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        debug!(path:%; "deleting SST");
+        debug!("deleting SST [path={}]", path);
         object_store.delete(&path).await.map_err(SlateDBError::from)
     }
 

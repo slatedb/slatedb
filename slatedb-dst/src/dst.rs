@@ -507,12 +507,12 @@ impl Dst {
         for (step_count, _) in (0..iterations).enumerate() {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
+                "run_simulation [step_count={}, simulated_time={}, btree_size={}, btree_entries={}, step_action={}]",
                 step_count,
-                simulated_time:% = self.system_clock.now().signed_duration_since(start_time),
-                btree_size:% = utils::pretty_bytes(self.state.size_bytes),
-                btree_entries = self.state.len(),
-                step_action:% = step_action;
-                "run_simulation"
+                self.system_clock.now().signed_duration_since(start_time),
+                utils::pretty_bytes(self.state.size_bytes),
+                self.state.len(),
+                step_action,
             );
             match step_action {
                 DstAction::Write(write_ops, write_options) => {
@@ -607,7 +607,7 @@ impl Dst {
     }
 
     async fn advance_time(&self, duration: Duration) {
-        debug!(duration:?; "advance_time");
+        debug!("advance_time [duration={:?}]", duration);
         self.system_clock.clone().advance(duration).await;
     }
 

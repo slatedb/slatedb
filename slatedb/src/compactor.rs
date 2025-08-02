@@ -81,7 +81,7 @@ impl CompactionProgressTracker {
             self.processed_bytes
                 .insert(id, (bytes_processed, total_bytes));
         } else {
-            warn!(id:%; "compaction progress tracker missing for job");
+            warn!("compaction progress tracker missing for job [id={}]", id);
         }
     }
 
@@ -92,11 +92,11 @@ impl CompactionProgressTracker {
             let (processed_bytes, total_bytes) = entry.value();
             let percentage = (processed_bytes * 100 / total_bytes) as u32;
             debug!(
-                id:%,
-                current_percentage:% = format!("{percentage}%"),
+                "compaction progress [id={}, current_percentage={}%, processed_bytes={}, estimated_total_bytes={}]",
+                id,
+                percentage,
                 processed_bytes,
-                estimated_total_bytes = total_bytes;
-                "compaction progress"
+                total_bytes,
             );
         }
     }
