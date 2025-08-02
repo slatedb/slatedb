@@ -22,6 +22,10 @@ pub(crate) enum MemtableFlushMsg {
         options: CheckpointOptions,
         sender: Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
+    // TODO: Consider factoring out manifest operations into a dedicated component like called `ManifestFlusher`.
+    // The current `MemtableFlusher` handles both memtable flushing and manifest operations (checkpoints, manifest
+    // updates, snapshot sequence writes). A separate `ManifestFlusher` might be good to improve separation of
+    // concerns and allow independent management of the manifest operations, making it easier to test.
     #[allow(dead_code)]
     WriteRecentSnapshotMinSeq {
         seq: u64,
