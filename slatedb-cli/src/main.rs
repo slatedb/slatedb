@@ -14,7 +14,6 @@ mod args;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_log::LogTracer::init().expect("failed to initialize tracing");
     tracing_subscriber::fmt::init();
 
     let args: CliArgs = parse_args();
