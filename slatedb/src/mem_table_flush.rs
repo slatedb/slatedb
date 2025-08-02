@@ -22,6 +22,7 @@ pub(crate) enum MemtableFlushMsg {
         options: CheckpointOptions,
         sender: Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
+    #[allow(dead_code)]
     WriteRecentSnapshotMinSeq {
         seq: u64,
     },
@@ -223,7 +224,9 @@ impl DbInner {
                                 }
                             },
                             MemtableFlushMsg::WriteRecentSnapshotMinSeq { seq } => {
-                                flusher.write_recent_snapshot_min_seq(seq).await?;
+                                if let Err(err) = flusher.write_recent_snapshot_min_seq(seq).await {
+                                    error!("error writing recent snapshot min seq: {err}");
+                                }
                             }
                         }
                     },
