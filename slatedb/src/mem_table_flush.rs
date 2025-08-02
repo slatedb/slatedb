@@ -23,6 +23,14 @@ pub(crate) enum MemtableFlushMsg {
         options: CheckpointOptions,
         sender: Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
+    // TODO: Consider factoring out manifest operations into a dedicated component like called `ManifestFlusher`.
+    // The current `MemtableFlusher` handles both memtable flushing and manifest operations (checkpoints, manifest
+    // updates, snapshot sequence writes). A separate `ManifestFlusher` might be good to improve separation of
+    // concerns and allow independent management of the manifest operations, making it easier to test.
+    #[allow(dead_code)]
+    WriteRecentSnapshotMinSeq {
+        seq: u64,
+    },
     Shutdown,
 }
 
@@ -76,6 +84,19 @@ impl MemtableFlusher {
                 return result;
             }
         }
+    }
+
+    pub(crate) async fn write_recent_snapshot_min_seq(
+        &mut self,
+        seq: u64,
+    ) -> Result<(), SlateDBError> {
+        {
+            let mut state_guard = self.db_inner.state.write();
+            state_guard.modify(|modifier| {
+                modifier.state.manifest.core.recent_snapshot_min_seq = Some(seq);
+            });
+        }
+        self.write_manifest_safely().await
     }
 
     pub(crate) async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
@@ -237,6 +258,11 @@ impl DbInner {
                                 let write_result = flusher.write_checkpoint_safely(&options).await;
                                 if let Err(Err(e)) = sender.send(write_result) {
                                     error!("Failed to send checkpoint error: {e}");
+                                }
+                            },
+                            MemtableFlushMsg::WriteRecentSnapshotMinSeq { seq } => {
+                                if let Err(err) = flusher.write_recent_snapshot_min_seq(seq).await {
+                                    error!("error writing recent snapshot min seq: {err}");
                                 }
                             }
                         }
