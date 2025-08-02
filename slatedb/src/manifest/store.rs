@@ -639,7 +639,10 @@ impl ManifestStore {
                         size: file.size as u32,
                     });
                 }
-                Err(_) => warn!("Unknown file in manifest directory: {:?}", file.location),
+                Err(_) => warn!(
+                    "unknown file in manifest directory [location={:?}]",
+                    file.location
+                ),
                 _ => {}
             }
         }

@@ -84,7 +84,7 @@ impl GcTask for CompactedGcTask {
 
         for id in sst_ids_to_delete {
             if let Err(e) = self.table_store.delete_sst(&id).await {
-                error!("Error deleting SST: {}", e);
+                error!("error deleting SST [id={:?}, error={}]", id, e);
             } else {
                 self.stats.gc_compacted_count.inc();
             }

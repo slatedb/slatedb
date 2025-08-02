@@ -281,9 +281,15 @@ impl DbCacheWrapper {
             }
         };
         if log_at_err {
-            error!("error getting {} from cache: {}", block_type, err);
+            error!(
+                "error getting block from cache [block_type={} error={:?}]",
+                block_type, err
+            );
         } else {
-            debug!("error getting {} from cache: {}", block_type, err);
+            debug!(
+                "error getting block from cache [block_type={} error={:?}]",
+                block_type, err
+            );
         }
         self.stats.get_error.inc();
     }

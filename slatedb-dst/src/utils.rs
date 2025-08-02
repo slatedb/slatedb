@@ -151,7 +151,7 @@ pub async fn run_simulation(
     dst_opts: DstOptions,
 ) -> Result<(), Error> {
     let seed = rand.seed();
-    info!("running simulation with seed {}", seed);
+    info!("running simulation [seed={}]", seed);
     let mut dst = build_dst(
         system_clock.clone(),
         logical_clock.clone(),
@@ -162,7 +162,7 @@ pub async fn run_simulation(
     match dst.run_simulation(iterations).await {
         Ok(_) => Ok(()),
         Err(e) => {
-            error!("simulation failed with seed {}: {}", seed, e);
+            error!("simulation failed [seed={}, error={}]", seed, e);
             Err(e)
         }
     }

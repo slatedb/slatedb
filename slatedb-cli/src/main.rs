@@ -33,8 +33,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         tokio::signal::ctrl_c()
             .await
-            .expect("Failed to install CTRL+C signal handler");
-        debug!("Intercepted SIGINT ... shutting down background processes");
+            .expect("failed to install CTRL+C signal handler");
+        debug!("intercepted SIGINT ... shutting down background processes");
         // if we cant send a shutdown message it's probably because it's already closed
         ct.cancel();
     });
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn exec_read_manifest(admin: &Admin, id: Option<u64>) -> Result<(), Box<dyn Error>> {
     match admin.read_manifest(id).await? {
         None => {
-            println!("No manifest file found.")
+            println!("no manifest file found")
         }
         Some(manifest) => {
             println!("{}", manifest);

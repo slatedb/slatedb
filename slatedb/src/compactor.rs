@@ -306,7 +306,7 @@ impl CompactorEventHandler {
                     .await
                     .expect("fatal error finishing compaction"),
                 Err(err) => {
-                    error!("error executing compaction: {:#?}", err);
+                    error!("error executing compaction [error={:#?}]", err);
                     self.finish_failed_compaction(id);
                 }
             },
@@ -505,7 +505,7 @@ impl CompactorEventHandler {
                 self.start_compaction(id, compaction).await?;
             }
             Err(err) => {
-                warn!("invalid compaction: {:?}", err);
+                warn!("invalid compaction [error={:?}]", err);
             }
         }
         Ok(())
@@ -522,7 +522,7 @@ impl CompactorEventHandler {
         self.state.db_state().log_db_runs();
         let compactions = self.state.compactions();
         for compaction in compactions.iter() {
-            info!("in-flight compaction: {}", compaction);
+            info!("in-flight compaction [compaction={}]", compaction);
         }
     }
 }

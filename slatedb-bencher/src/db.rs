@@ -294,7 +294,7 @@ impl Task {
                         puts += 1;
                         puts_bytes += self.val_len as u64;
                     }
-                    Err(e) => warn!("put failed: {}", e),
+                    Err(e) => warn!("put failed [error={}]", e),
                 }
             } else {
                 let key = if random.random_range(0..100) < self.get_hit_percentage {
@@ -308,7 +308,7 @@ impl Task {
                         gets_hits += val.is_some() as u64;
                         gets_bytes += key.len() as u64 + val.map(|v| v.len() as u64).unwrap_or(0);
                     }
-                    Err(e) => warn!("get failed: {}", e),
+                    Err(e) => warn!("get failed [error={}]", e),
                 }
             }
             if last_report.elapsed() >= REPORT_INTERVAL {

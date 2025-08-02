@@ -297,7 +297,7 @@ impl TokioCompactionExecutorInner {
             for result in results {
                 match result {
                     Err(e) if !e.is_cancelled() => {
-                        error!("Shutdown error in compaction task: {:?}", e);
+                        error!("shutdown error in compaction task [error={:?}]", e);
                     }
                     _ => {}
                 }

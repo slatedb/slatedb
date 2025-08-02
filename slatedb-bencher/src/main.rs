@@ -94,7 +94,7 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
     );
     bencher.run().await;
 
-    db.close().await.expect("Failed to close db");
+    db.close().await.expect("failed to close db");
 }
 
 async fn exec_benchmark_compaction(
@@ -114,7 +114,7 @@ async fn exec_benchmark_compaction(
                     load_args.compression_codec,
                 )
                 .await
-                .expect("Failed to run load");
+                .expect("failed to run load");
         }
         CompactionSubcommands::Run(run_args) => {
             compaction_execute_bench
@@ -125,13 +125,13 @@ async fn exec_benchmark_compaction(
                     run_args.compression_codec,
                 )
                 .await
-                .expect("Failed to run bench");
+                .expect("failed to run bench");
         }
         CompactionSubcommands::Clear(clear_args) => {
             compaction_execute_bench
                 .run_clear(clear_args.num_ssts)
                 .await
-                .expect("Failed to run clear");
+                .expect("failed to run clear");
         }
     }
 }
@@ -142,18 +142,18 @@ async fn create_cleanup_lock(
     path: &Path,
 ) -> Result<PutResult, ObjectStoreError> {
     if (object_store.list(Some(path)).next().await.transpose()?).is_some() {
-        warn!("Path {} is not empty but `--clean` is set. Failing since cleanup could cause data loss.", path);
+        warn!("path is not empty but `--clean` is set. failing since cleanup could cause data loss. [path={}]", path);
         return Err(ObjectStoreError::Generic {
             store: "local",
             source: Box::new(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
-                format!("Path {} is not empty", path),
+                format!("path {} is not empty", path),
             )),
         });
     }
 
     let temp_path = path.child(CLEANUP_NAME);
-    info!("Creating cleanup lock file at: {}", temp_path);
+    info!("creating cleanup lock file [path={}]", temp_path);
     object_store
         .put(
             &temp_path,
@@ -169,13 +169,13 @@ async fn cleanup_data(
 ) -> Result<(), Box<dyn Error>> {
     let temp_path = path.child(CLEANUP_NAME);
     if object_store.head(&temp_path).await.is_ok() {
-        info!("Cleaning up test data in: {}", path);
+        info!("cleaning up test data [path={}]", path);
         if let Err(e) = delete_objects_with_prefix(object_store.clone(), Some(path)).await {
-            error!("Error cleaning up test data: {}", e);
+            error!("error cleaning up test data [path={}, error={}]", path, e);
         }
     } else {
         warn!(
-            "Cleanup lock file not found at {}. Skipping cleanup to prevent data corruption.",
+            "cleanup lock file not found. skipping cleanup to prevent data corruption. [path={}]",
             temp_path
         );
     }

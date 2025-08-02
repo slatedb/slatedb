@@ -145,7 +145,7 @@ impl CompactorState {
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
-        info!("accepted submitted compaction: {:?}", compaction);
+        info!("accepted submitted compaction [compaction={}]", compaction);
         self.compactions.insert(id, compaction);
         Ok(id)
     }
@@ -195,7 +195,7 @@ impl CompactorState {
 
     pub(crate) fn finish_compaction(&mut self, id: Uuid, output_sr: SortedRun) {
         if let Some(compaction) = self.compactions.get(&id) {
-            info!("finished compaction: {:?}", compaction);
+            info!("finished compaction [compaction={}]", compaction);
             // reconstruct l0
             let compaction_l0s: HashSet<Ulid> = compaction
                 .sources

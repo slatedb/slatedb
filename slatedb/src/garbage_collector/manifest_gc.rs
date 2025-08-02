@@ -79,7 +79,10 @@ impl GcTask for ManifestGcTask {
                     .delete_manifest(manifest_metadata.id)
                     .await
                 {
-                    error!("Error deleting manifest: {}", e);
+                    error!(
+                        "error deleting manifest [id={:?}, error={}]",
+                        manifest_metadata.id, e
+                    );
                 } else {
                     self.stats.gc_manifest_count.inc();
                 }

@@ -358,7 +358,7 @@ impl DbReaderInner {
                 .refresh_checkpoint(checkpoint.id, self.options.checkpoint_lifetime)
                 .await?;
             info!(
-                "Refreshed checkpoint {} to expire at {:?}",
+                "refreshed checkpoint [checkpoint_id={}, expire_time={:?}]",
                 checkpoint.id, refreshed_checkpoint.expire_time
             )
         }
@@ -399,7 +399,7 @@ impl DbReaderInner {
                                 ).await?;
                                 let checkpoint_id = this.state.read().checkpoint.id;
                                 if Some(checkpoint_id) != this.user_checkpoint_id {
-                                    info!("Deleting reader established checkpoint {} for shutdown", checkpoint_id);
+                                    info!("deleting reader established checkpoint for shutdown [checkpoint_id={}]", checkpoint_id);
                                     manifest.delete_checkpoint(checkpoint_id).await?;
                                 }
                                 Ok(())
@@ -413,7 +413,7 @@ impl DbReaderInner {
         let (thread_tx, mut thread_rx) = tokio::sync::mpsc::unbounded_channel();
         let fut = async move {
             let result = core_poll_loop(this, &mut thread_rx).await;
-            info!("Manifest poll thread exiting with result {:?}", result);
+            info!("manifest poll thread exiting [result={:?}]", result);
             result
         };
 
@@ -421,7 +421,7 @@ impl DbReaderInner {
         let join_handle = utils::spawn_bg_task(
             &Handle::current(),
             move |result| {
-                warn!("manifest polling thread exited with {:?}", result);
+                warn!("manifest polling thread exited [result={:?}]", result);
                 if let Err(err) = result {
                     this.error_watcher.write(err.clone());
                 }
@@ -838,8 +838,8 @@ impl DbReader {
                 let mut guard = poller.join_handle.lock();
                 guard.take()
             } {
-                let result = join_handle.await.expect("Failed to join manifest poller");
-                info!("Manifest poller exited with {:?}", result);
+                let result = join_handle.await.expect("failed to join manifest poller");
+                info!("manifest poller exited [result={:?}]", result);
             }
         }
         Ok(())

@@ -72,7 +72,7 @@ async fn test_concurrent_writers_and_readers() {
                     .expect("Failed to write value");
 
                     if i % 10 == 0 {
-                        log::info!("Writer {} wrote {} values", writer_id, i);
+                        log::info!("wrote values [writer_id={}, write_count={}]", writer_id, i);
                     }
                 }
             })

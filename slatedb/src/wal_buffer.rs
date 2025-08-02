@@ -497,7 +497,10 @@ impl WalBufferManager {
         }
 
         if releaseable_count > 0 {
-            trace!("draining immutable wals: ..{}", releaseable_count);
+            trace!(
+                "draining immutable wals [releaseable_count={}]",
+                releaseable_count
+            );
             inner.immutable_wals.drain(..releaseable_count);
         }
     }
