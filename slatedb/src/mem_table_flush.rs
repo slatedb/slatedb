@@ -92,7 +92,9 @@ impl MemtableFlusher {
     ) -> Result<(), SlateDBError> {
         {
             let mut state_guard = self.db_inner.state.write();
-            state_guard.set_recent_snapshot_min_seq(seq);
+            state_guard.modify(|modifier| {
+                modifier.state.manifest.core.recent_snapshot_min_seq = Some(seq);
+            });
         }
         self.write_manifest_safely().await
     }
