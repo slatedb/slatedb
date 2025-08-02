@@ -1,0 +1,95 @@
+include "sst.fbs";
+
+enum CompactionType : byte { Internal = 0, External; }
+
+enum CompactionStatus : byte {
+    Submitted = 0,      // Waiting to be scheduled
+    InProgress,     // Currently executing
+    Completed,      // Successfully finished
+    Failed,         // Failed with error
+    Cancelled;      // Cancelled by request
+}
+
+enum CompactionPriority : byte {
+    Critical = 0,  // Preempts all other compactions
+    High,      // Preempts normal/low compactions  
+    Normal,    // Standard automatic compaction priority
+    Low;       // Background maintenance priority
+}
+
+table CompactionJob {
+    // CompactorJob ID
+    job_id: ulong;
+
+    compaction_ts: i64; 
+
+    is_dest_last_run: bool;
+
+    // Timestamp when CompactionJob was created
+    created_ts: uint64
+    
+    // InputSSTables completed
+    completed_input_ssts:[CompactedSsTable];
+
+    // Output SSTs to be persisted in destination SR  
+    output_ssts_written:[CompactedSsTable];
+
+    // Current CompactionJob Status
+    current_status: CompactionStatus;
+
+    // Tracking Compaction Progress
+    job_progress: CompactionProgress;
+}
+
+table Compaction {
+    // Compaction Status visible to public API
+    status: CompactionStatus;
+
+    // Destination Sorted Run ID
+    destination: u32 (required);
+
+    // input L0 SSTables
+    ssts: [CompactedSsTable]; 
+
+    // input Sorted Runs
+    sorted_runs: [SortedRun];
+
+    // Identifier to reference a Compaction
+    compaction_id: uint64;
+
+    // Compaction Type to distinguish between internal or external
+    compaction_type: CompactionType (required);
+
+    // Priority to handle external compaction requests
+    compaction_priority: CompactionPriority;
+
+    // List of CompactionJob Retries
+    job_attempts:[CompactionJob];
+
+    // Creation Timestamp of Compaction
+    created_ts: uint64
+
+    // Creation Timestamp of Compaction
+    updated_ts: uint64
+}
+
+
+table CompactionState {
+    // Identifier of the compaction state
+    compaction_state_id: uint64;
+
+    // Fencing token to ensure single active compactor
+    compactor_epoch: uint64;
+
+    // Next state ID to use for CAS operations
+    // Current state ID = this value - 1
+    next_compactor_state_id: uint64 (required);
+
+    // Compactions in scheduled, in_progress and recently completed compactions
+    active_compactions: [Compaction];
+
+    // Creation Timestamp of CompactionState
+    created_at: uint64
+}
+
+root_type CompactionState;
