@@ -20,6 +20,9 @@ action_options:
 KEYS = ["k0", "k1"]
 VALUES = ["v0", "v1", ""]
 
+DURABILITY_MEMORY = 0
+DURABILITY_REMOTE = 2
+
 role KeyValueStore:
 
 
@@ -36,21 +39,39 @@ role KeyValueStore:
     # Get operation - reads the most recent value for a key
     action Get:
         key = any KEYS
+        dirty = any [true, false]  # Whether to allow reading uncommitted data
+        durability_filter = any [DURABILITY_MEMORY, DURABILITY_REMOTE]
+        
+        # Calculate maximum readable sequence number
+        max_seq = none
+        if durability_filter == DURABILITY_REMOTE:
+            max_seq = self.last_remote_persisted_seq
+        
+        if not dirty:
+            if max_seq == none:
+                max_seq = self.last_committed_seq
+            else:
+                if self.last_committed_seq < max_seq:
+                    max_seq = self.last_committed_seq
+        
         # Search in memtable (most recent first)
         for entry in reversed(self.memtable):
             if entry[0] == key:
-                return entry[1]
+                if max_seq == none or entry[2] <= max_seq:
+                    return entry[1]
         
         # Search in immutable memtable
         for entry in reversed(self.immutable_memtable):
             if entry[0] == key:
-                return entry[1]
+                if max_seq == none or entry[2] <= max_seq:
+                    return entry[1]
         
         # Search in L0 levels (most recent first)
         for level in reversed(self.l0):
             for entry in reversed(level):
                 if entry[0] == key:
-                    return entry[1]
+                    if max_seq == none or entry[2] <= max_seq:
+                        return entry[1]
         
         return ""
 
@@ -59,7 +80,8 @@ role KeyValueStore:
         require self.next_seq <= 20  # Limit sequence numbers
         key = any KEYS
         value = any VALUES
-        sync = any [true, false]  # Whether to sync/flush WAL immediately
+        sync = any [DURABILITY_MEMORY, DURABILITY_REMOTE]
+
         seq = self.next_seq
         self.next_seq = self.next_seq + 1
         
@@ -69,10 +91,10 @@ role KeyValueStore:
         # Add to memtable
         self.memtable = self.memtable + [(key, value, seq)]
         
-        # If sync is true, flush WAL immediately
-        if sync:
+        # If sync is REMOTE, flush WAL immediately
+        if sync == DURABILITY_REMOTE:
             self.doFlushWAL()
-        
+ 
         # Update committed sequence
         self.last_committed_seq = seq
 
