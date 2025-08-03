@@ -118,7 +118,7 @@ role KeyValueStore:
         self.immutable_memtable = []
 
     # Helper function to flush WAL
-    func doFlushWAL():
+    atomic func doFlushWAL():
         self.flushed_wal = self.flushed_wal + self.wal_buffer
         self.wal_buffer = []
         if len(self.flushed_wal) > 0:
@@ -174,13 +174,17 @@ always assertion ReadDurabilityRespected:
     # This is enforced by the Get action logic, but we can verify the invariant
     return store.last_remote_persisted_seq <= store.last_committed_seq
 
-always assertion StorageConsistency:
-    # Ensure that data flows correctly through the storage hierarchy
-    # WAL buffer should contain the most recent writes
-    # Memtable should contain all writes
-    # Immutable memtable should contain frozen writes
-    # L0 should contain flushed writes
-    return True  # This is a placeholder for more complex consistency checks
+always assertion FlushedWalStorageConsistency:
+    # All entries in flushed_wal should have sequence numbers <= last_remote_persisted_seq
+    # and last_remote_persisted_seq should be >= the highest sequence number in flushed_wal
+    if len(store.flushed_wal) > 0:
+        max_flushed_seq = 0
+        for entry in store.flushed_wal:
+            if entry[2] > max_flushed_seq:
+                max_flushed_seq = entry[2]
+        if store.last_remote_persisted_seq < max_flushed_seq:
+            return False
+    return True
 
 always assertion OperationOrdering:
     # Ensure that operations maintain proper ordering
