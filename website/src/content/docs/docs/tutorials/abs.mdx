@@ -62,78 +62,10 @@ If you see "`object_store::path::Path` and `object_store::path::Path` have simil
 
 This code demonstrates puts that wait for results to be durable, and then puts that do not wait.
 
-```rust
-use object_store::azure::MicrosoftAzureBuilder;
-use object_store::path::Path;
-use object_store::ObjectStore;
-use slatedb::config::DbOptions;
-use slatedb::db::Db;
-use std::sync::Arc;
+import { Code } from '@astrojs/starlight/components';
+import absExample from '/../slatedb/examples/azure_blob_storage.rs?raw'
 
-#[tokio::main]
-async fn main() {
-    // construct azure blob object store.
-    let blob_store: Arc<dyn ObjectStore>  = Arc::new(MicrosoftAzureBuilder::new()
-        .with_account("<REPLACEWITHACCOUNTNAME>")
-        .with_access_key("<REPLACEWITHACCOUNTKEY>")
-        .with_container_name("<REPLACEWITHCONTAINERNAME>")
-        .build()
-        .unwrap());
-
-    // create the db.
-    let db_options = DbOptions::default();
-    let path = Path::from("test_slateDB");
-
-    println!("Opening the db");
-    let db = Db::open_with_opts(path.clone(), db_options, blob_store.clone())
-        .await
-        .expect("failed to open db");
-
-    // Put a value and wait for the flush.
-    println!("Writing a value and waiting for flush");
-    db.put(b"k1", b"value1").await;
-    println!("{:?}", db.get(b"k1").await.unwrap());
-
-    // Put 1000 keys, do not wait for it to be durable
-    println!("Writing 1000 keys without waiting for flush");
-    let write_options = slatedb::config::WriteOptions {
-        await_durable: false,
-    };
-    for i in 0..1000 {
-        db.put_with_options(
-            format!("key{}", i).as_bytes(),
-            format!("value{}", i).as_bytes(),
-            &write_options,
-        )
-        .await;
-    }
-
-    // flush to make the writes durable.
-    println!("Flushing the writes and closing the db");
-    db.flush().await.expect("failed to flush");
-    db.close().await.expect("failed to close db");
-
-    // reopen the db and read the value.
-    println!("Reopening the db");
-    let db_reopened = Db::open_with_opts(path.clone(), DbOptions::default(), blob_store.clone())
-        .await
-        .expect("failed to open db");
-    println!("Reading the value from the reopened db");
-
-    // read 20 keys
-    for i in 0..20 {
-        println!(
-            "{:?}",
-            db_reopened
-                .get(format!("key{}", i).as_bytes())
-                .await
-                .unwrap()
-        );
-    }
-    db_reopened.close().await.expect("failed to close db");
-}
-
-```
+<Code code={absExample} lang="rust" title="main.rs" />
 
 ## Check the blob contents
 

@@ -31,8 +31,9 @@ hero:
           link: https://github.com/slatedb/slatedb
 ---
 
-import { CardGrid, LinkButton, Steps } from '@astrojs/starlight/components';
+import { CardGrid, Code, LinkButton, Steps } from '@astrojs/starlight/components';
 import Card from '../../components/Card.astro';
+import simpleExample from '/../slatedb/examples/simple_example.rs?raw'
 
 <CardGrid>
     <Card title="Object Storage Durability" icon="infinity">
@@ -59,26 +60,18 @@ import Card from '../../components/Card.astro';
     <h2>Getting Started</h2>
 
     <Steps>
-    1. Add the SlateDB crate to your project:
+    1. Add the SlateDB crate and other dependencies to your project:
         ```sh
-        cargo add slatedb
+        cargo add slatedb tokio --features tokio/macros
         ```
-    2. Connect the database to your object store:
-        ```rust
-        // main.rs
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::open("/tmp/slatedb", object_store).await?;
-        ```
-    3. Write and read data:
-        ```rust
-        // main.rs
-        db.put(b"key", b"value").await?;
-        assert_eq!(db.get(b"key").await?, Some("value".into()));
-        ```
+    2. Initialize the database and start storing and retrieving data:
+
+        <Code code={simpleExample} lang="rust" title="main.rs" />
+
     </Steps>
 
     <LinkButton
-        href="https://github.com/slatedb/slatedb?tab=readme-ov-file#get-started"
+        href="/docs/quickstart/#usage"
         variant="secondary"
         icon="external">
         See a full example

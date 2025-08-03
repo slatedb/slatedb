@@ -1,7 +1,11 @@
 ---
 import { Icon } from '@astrojs/starlight/components';
 
-const links = [
+const links: Array<{
+    label: string;
+    href: string;
+    icon: 'github' | 'discord';
+}> = [
     {
         label: 'GitHub',
         href: 'https://github.com/slatedb/slatedb',

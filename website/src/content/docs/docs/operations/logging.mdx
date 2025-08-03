@@ -1,0 +1,15 @@
+---
+title: Logging
+description: Learn how to configure logging and tracing in SlateDB
+---
+
+import { Code } from '@astrojs/starlight/components';
+import tracingSubscriber from '/../slatedb/examples/tracing_subscriber.rs?raw'
+
+## Tracing in SlateDB
+
+SlateDB uses the [`tracing`](https://github.com/tokio-rs/tracing) library for logging and diagnostics. This provides structured, contextual logging that helps debug and monitor your database operations.
+
+Here's a basic example showing how to consume tracing logs with `tracing_subscriber` and SlateDB:
+
+<Code code={tracingSubscriber} lang="rust" title="main.rs" />

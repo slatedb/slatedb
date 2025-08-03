@@ -2,8 +2,11 @@
 import { SlatedbIcons } from './Icons';
 
 interface Props {
-	icon: string;
+	icon: keyof typeof SlatedbIcons;
 	title: string;
+	label?: string;
+	color?: string;
+	size?: string;
 }
 
 const { icon, title, label, color, size = '3em' } = Astro.props;

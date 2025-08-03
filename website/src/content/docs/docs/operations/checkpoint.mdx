@@ -1,0 +1,30 @@
+---
+title: Checkpoint and Restore
+description: Learn how to checkpoint and restore SlateDB databases
+---
+
+import { Code } from '@astrojs/starlight/components';
+import createCheckpoint from '/../slatedb/examples/create_checkpoint.rs?raw';
+import refreshCheckpoint from '/../slatedb/examples/refresh_checkpoint.rs?raw';
+import deleteCheckpoint from '/../slatedb/examples/delete_checkpoint.rs?raw';
+
+## Creating a Checkpoint
+
+To create a checkpoint, use the `create_checkpoint` function provided by SlateDB.  
+This operation captures a consistent and durable view of the database state, anchored to a specific manifest version.
+
+<Code code={createCheckpoint} lang="rust" title="main.rs" />
+
+## Refreshing a Checkpoint
+
+To extend the lifetime of an existing checkpoint, use `Db::refresh_checkpoint`. 
+This updates the checkpoint’s expiration time, ensuring that the referenced SSTs remain protected from garbage collection for the specified duration.
+
+<Code code={refreshCheckpoint} lang="rust" title="main.rs" />
+
+## Deleting a Checkpoint
+
+To remove a checkpoint, use `Db::delete_checkpoint`. 
+This deletes the checkpoint metadata from the manifest, allowing the garbage collector to eventually reclaim any unreferenced SST files associated with that checkpoint.
+
+<Code code={deleteCheckpoint} lang="rust" title="main.rs" />

@@ -63,41 +63,10 @@ aws --endpoint-url=http://localhost:4566 s3api create-bucket --bucket slatedb --
 
 Stick this into your `src/main.rs` file:
 
-```rust
-use object_store::aws::S3ConditionalPut;
-use object_store::path::Path;
-use object_store::ObjectStore;
-use slatedb::config::DbOptions;
-use slatedb::Db;
-use std::sync::Arc;
+import { Code } from '@astrojs/starlight/components';
+import s3Example from '/../slatedb/examples/s3_compatible.rs?raw'
 
-#[tokio::main]
-async fn main() {
-    let db_options = DbOptions::default();
-    let path = Path::from("test");
-    let os: Arc<dyn ObjectStore> = Arc::new(
-        object_store::aws::AmazonS3Builder::new()
-            // These will be different if you are using real AWS
-            .with_allow_http(true)
-            .with_endpoint("http://localhost:4566")
-            .with_access_key_id("test")
-            .with_secret_access_key("test")
-            .with_bucket_name("slatedb")
-            .with_region("us-east-1")
-            .with_conditional_put(S3ConditionalPut::ETagMatch)
-            .build()
-            .expect("failed to create object store")
-    );
-    let db = Db::open_with_opts(path.clone(), db_options, os.clone())
-        .await
-        .expect("failed to open db");
-
-    // Call db.put with a key and a 64 meg value to trigger L0 SST flush
-    let value: Vec<u8> = vec![0; 64 * 1024 * 1024];
-    db.put(b"k1", value.as_slice()).await.expect("failed to put");
-    db.close().await.expect("failed to close db");
-}
-```
+<Code code={s3Example} lang="rust" title="main.rs" />
 
 :::note
 
