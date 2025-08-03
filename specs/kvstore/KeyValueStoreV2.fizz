@@ -1,15 +1,15 @@
 ---
 deadlock_detection: false
 options:
-    max_actions: 15
-    max_concurrent_actions: 2
+    max_actions: 200
+    max_concurrent_actions: 3
     crash_on_yield: false
 action_options:
     KeyValueStore.Put:
         max_actions: 2
     KeyValueStore.Get:
         max_actions: 1
-    KeyValueStore.FlushWAL:
+    KeyValueStore.BackgroundFlushWAL:
         max_concurrent_actions: 1
     KeyValueStore.FreezeMemtable:
         max_concurrent_actions: 1
@@ -97,9 +97,13 @@ role KeyValueStore:
         # If sync is REMOTE, flush WAL immediately
         if sync == DURABILITY_REMOTE:
             self.doFlushWAL()
+        
+        # Force WAL flush if buffer gets too large (simulating background flush)
+        if len(self.wal_buffer) >= 2:
+            self.doFlushWAL()
 
-    # Flush WAL to remote storage
-    atomic action FlushWAL:
+    # Background WAL flush - can run when there are any entries in buffer
+    atomic action BackgroundFlushWAL:
         require len(self.wal_buffer) > 0
         self.doFlushWAL()
 
@@ -157,9 +161,8 @@ always assertion SequenceNumberInvariant:
     # Committed sequence should be less than or equal to next sequence
     return store.last_committed_seq <= store.next_seq
 
-# always eventually assertion WALFlushed:
-#    # WAL buffer should eventually be empty
-#    return len(store.wal_buffer) == 0
+always eventually assertion WALFlushed:
+    return len(store.wal_buffer) == 0
 
 # always eventually assertion MemtableFlushed:
 #    # Memtable should eventually be empty
