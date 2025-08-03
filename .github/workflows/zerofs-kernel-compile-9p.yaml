@@ -1,0 +1,195 @@
+name: zerofs-kernel-compile-9p
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-Dwarnings"
+
+permissions:
+  contents: read
+
+jobs:
+  zerofs-kernel-compile-9p:
+    name: Compile Linux Kernel on 9P (WAL ${{ matrix.wal_mode }})
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+    strategy:
+      matrix:
+        wal_mode: [enabled, disabled]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-04-12
+          components: rustfmt, clippy, rust-analyzer
+
+      - name: Start MinIO
+        run: |
+          docker run -d \
+            --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+
+          for i in {1..30}; do
+            if curl -f http://localhost:9000/minio/health/live; then
+              echo "MinIO is ready"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc
+
+          sudo modprobe 9p
+          sudo modprobe 9pnet
+          sudo modprobe 9pnet_virtio
+
+          lsmod | grep 9p || echo "No 9p modules loaded yet"
+
+      - name: Setup MinIO bucket
+        run: |
+          wget https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x mc
+          ./mc alias set myminio http://localhost:9000 minioadmin minioadmin
+          ./mc mb myminio/slatedb-test || true
+
+      - name: Clone and configure ZeroFS
+        run: |
+          git clone git@github.com:Barre/ZeroFS.git zerofs
+          cd zerofs
+          
+          git checkout bea734e71b788b4ba7ac7ed4cef324aac3fd4470
+          
+          # Update ZeroFS Cargo.toml to use local SlateDB with current changes
+          if grep -q "slatedb" Cargo.toml; then
+            if [ "${{ matrix.wal_mode }}" = "disabled" ]; then
+              sed -i 's|slatedb = .*|slatedb = { path = "'$GITHUB_WORKSPACE'/slatedb", features = ["wal_disable"] }|' Cargo.toml
+            else
+              sed -i 's|slatedb = .*|slatedb = { path = "'$GITHUB_WORKSPACE'/slatedb" }|' Cargo.toml
+            fi
+          fi
+          
+          # Add wal_enabled field to slatedb::config::Settings
+          SETTINGS_FILE=$(grep -r "slatedb::config::Settings {" --include="*.rs" | head -1 | cut -d: -f1)
+          
+          if [ -n "$SETTINGS_FILE" ]; then
+            if [ "${{ matrix.wal_mode }}" = "disabled" ]; then
+              sed -i '/compression_codec: None.*\/\/ Disable compression/a\            wal_enabled: false,' "$SETTINGS_FILE"
+            else
+              sed -i '/compression_codec: None.*\/\/ Disable compression/a\            wal_enabled: true,' "$SETTINGS_FILE"
+            fi
+          fi
+          
+          cargo build --profile ci
+
+      - name: Start ZeroFS with 9P support
+        run: |
+          cd zerofs
+          
+          mkdir -p /tmp/zerofs-cache
+
+          AWS_ENDPOINT=http://localhost:9000 \
+          AWS_ACCESS_KEY_ID=minioadmin \
+          AWS_SECRET_ACCESS_KEY=minioadmin \
+          AWS_ALLOW_HTTP=true \
+          SLATEDB_CACHE_DIR=/tmp/zerofs-cache \
+          SLATEDB_CACHE_SIZE_GB=5 \
+          ZEROFS_MEMORY_CACHE_SIZE_GB=10 \
+          ZEROFS_ENCRYPTION_PASSWORD=secret \
+          cargo run --profile ci s3://slatedb-test/test &
+
+          echo $! > /tmp/zerofs.pid
+
+          echo "Waiting for ZeroFS 9P server to start..."
+          for i in {1..30}; do
+            if nc -z 127.0.0.1 5564 2>/dev/null; then
+              echo "ZeroFS 9P server is ready"
+              break
+            fi
+            sleep 1
+          done
+
+          if ! nc -z 127.0.0.1 5564 2>/dev/null; then
+            echo "ZeroFS 9P server failed to start"
+            exit 1
+          fi
+
+      - name: Mount 9P filesystem
+        run: |
+          sudo mkdir -p /mnt/zerofs
+
+          sudo mount -t 9p -o trans=tcp,port=5564,version=9p2000.L,msize=1048576,cache=mmap,access=user 127.0.0.1 /mnt/zerofs
+
+          mount | grep zerofs
+
+          touch /mnt/zerofs/test_file && rm /mnt/zerofs/test_file
+
+      - name: Check disk space
+        run: df -h
+
+      - name: Download Linux kernel
+        run: |
+          cd /mnt/zerofs
+          wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.11.tar.xz
+          tar -xf linux-6.11.tar.xz
+          rm linux-6.11.tar.xz
+
+      - name: Compile kernel
+        run: |
+          cd /mnt/zerofs/linux-6.11
+
+          make tinyconfig
+
+          echo "Config size: $(wc -l < .config) lines"
+
+          echo "Starting kernel compilation with $(nproc) cores..."
+          time make -j$(nproc) 2>&1 | tee /tmp/kernel-build.log
+
+          if [ -f vmlinux ]; then
+            echo "Kernel compilation successful!"
+            ls -lh vmlinux
+          else
+            echo "Kernel compilation failed!"
+            exit 1
+          fi
+
+      - name: Collect ZeroFS stats
+        if: always()
+        run: |
+          if [ -f /tmp/zerofs.pid ]; then
+            PID=$(cat /tmp/zerofs.pid)
+            if kill -0 $PID 2>/dev/null; then
+              echo "ZeroFS process stats:"
+              ps aux | grep $PID | grep -v grep || true
+              echo ""
+              echo "ZeroFS memory usage:"
+              cat /proc/$PID/status | grep -E "Vm|Rss" || true
+            fi
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo umount /mnt/zerofs || true
+
+          if [ -f /tmp/zerofs.pid ]; then
+            kill $(cat /tmp/zerofs.pid) || true
+          fi
+          pkill -f "cargo run --profile ci s3://slatedb-test/test" || true
+
+          docker stop minio || true
+          docker rm minio || true
