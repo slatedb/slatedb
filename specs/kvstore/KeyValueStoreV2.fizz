@@ -21,6 +21,8 @@ KEYS = ["k0", "k1"]
 VALUES = ["v0", "v1", ""]
 
 role KeyValueStore:
+
+
     action Init:
         self.wal_buffer = []
         self.flushed_wal = []
@@ -57,6 +59,7 @@ role KeyValueStore:
         require self.next_seq <= 20  # Limit sequence numbers
         key = any KEYS
         value = any VALUES
+        sync = any [true, false]  # Whether to sync/flush WAL immediately
         seq = self.next_seq
         self.next_seq = self.next_seq + 1
         
@@ -66,16 +69,17 @@ role KeyValueStore:
         # Add to memtable
         self.memtable = self.memtable + [(key, value, seq)]
         
+        # If sync is true, flush WAL immediately
+        if sync:
+            self.doFlushWAL()
+        
         # Update committed sequence
         self.last_committed_seq = seq
 
     # Flush WAL to remote storage
     atomic action FlushWAL:
         require len(self.wal_buffer) > 0
-        self.flushed_wal = self.flushed_wal + self.wal_buffer
-        self.wal_buffer = []
-        if len(self.flushed_wal) > 0:
-            self.last_remote_persisted_seq = self.flushed_wal[-1][2]
+        self.doFlushWAL()
 
     # Freeze memtable to immutable memtable
     atomic action FreezeMemtable:
@@ -88,6 +92,13 @@ role KeyValueStore:
         require len(self.immutable_memtable) > 0
         self.l0 = self.l0 + [self.immutable_memtable]
         self.immutable_memtable = []
+
+    # Helper function to flush WAL
+    fun doFlushWAL():
+        self.flushed_wal = self.flushed_wal + self.wal_buffer
+        self.wal_buffer = []
+        if len(self.flushed_wal) > 0:
+            self.last_remote_persisted_seq = self.flushed_wal[-1][2]
 
 # Initialize the system
 action Init:
