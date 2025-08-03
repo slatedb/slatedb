@@ -34,47 +34,46 @@ class SlateDb:
     def get(self, key: str, dirty: bool, durability_filter: DurabilityLevel) -> Optional[str]:
         """Read data"""
         max_seq = self._calculate_max_seq(dirty, durability_filter)
-        
+
         # Search from memtable first
         for entry_key, entry_value, entry_seq in reversed(self.memtable + self.immutable_memtable):
             if entry_key == key and (max_seq is None or entry_seq <= max_seq):
                 return entry_value
-        
+ 
         # Search L0
         for l0_content in reversed(self.l0):
             for entry_key, entry_value, entry_seq in reversed(l0_content):
                 if entry_key == key and (max_seq is None or entry_seq <= max_seq):
                     return entry_value
-        
         return None
     
     def _calculate_max_seq(self, dirty: bool, durability_filter: DurabilityLevel) -> Optional[int]:
         """Calculate maximum readable sequence number"""
         max_seq = None
-        
+ 
         # durability_filter controls persistence level
         if durability_filter == DurabilityLevel.REMOTE:
             max_seq = self.last_remote_persisted_seq
-        
-        # dirty controls commit level
+ 
+        # dirty controls committed or not
         if not dirty:
             if max_seq is None:
                 max_seq = self.last_committed_seq
             else:
                 max_seq = min(max_seq, self.last_committed_seq)
-        
+ 
         return max_seq
-    
+ 
     def flush_wal(self):
         """Flush WAL and trigger commit"""
         if not self.wal_buffer and not self.flushed_wal:
             return
-            
+ 
         # Freeze current WAL
         if self.wal_buffer:
             self.flushed_wal.extend(self.wal_buffer)
             self.wal_buffer.clear()
-        
+ 
         if self.flushed_wal:
             # Process all pending WAL entries
             max_seq = 0
@@ -90,8 +89,8 @@ class SlateDb:
                 self.last_remote_persisted_seq = max_seq
             
             self.flushed_wal.clear()
-    
-    def flush_memtable(self):
+ 
+    def freeze_memtable(self):
         """Flush memtable to L0"""
         if not self.memtable:
             return
@@ -99,7 +98,8 @@ class SlateDb:
         # Freeze current memtable
         self.immutable_memtable.extend(self.memtable)
         self.memtable.clear()
-        
+ 
+    def flush_memtable(self):
         if self.immutable_memtable:
             # Write directly to L0
             self.l0.append(list(self.immutable_memtable))
