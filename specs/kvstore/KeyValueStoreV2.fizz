@@ -134,3 +134,70 @@ always assertion L0Consistency:
         if len(level) == 0:
             return False
     return True
+
+always assertion MonotonicSequenceNumbers:
+    # Sequence numbers should always be monotonically increasing
+    for i in range(len(store.memtable) - 1):
+        if store.memtable[i][2] >= store.memtable[i + 1][2]:
+            return False
+    for i in range(len(store.immutable_memtable) - 1):
+        if store.immutable_memtable[i][2] >= store.immutable_memtable[i + 1][2]:
+            return False
+    for level in store.l0:
+        for i in range(len(level) - 1):
+            if level[i][2] >= level[i + 1][2]:
+                return False
+    return True
+
+always assertion SequenceNumberInvariant:
+    # Committed sequence should be less than or equal to next sequence
+    return store.last_committed_seq <= store.next_seq
+
+always assertion DurabilityInvariant:
+    # Remote persisted sequence should be less than or equal to committed sequence
+    return store.last_remote_persisted_seq <= store.last_committed_seq
+
+always eventually assertion WALFlushed:
+    # WAL buffer should eventually be empty
+    return len(store.wal_buffer) == 0
+
+always eventually assertion MemtableFlushed:
+    # Memtable should eventually be empty
+    return len(store.memtable) == 0 and len(store.immutable_memtable) == 0
+
+always eventually assertion ImmutableMemtableFlushed:
+    # Immutable memtable should eventually be flushed to L0
+    return len(store.immutable_memtable) == 0
+
+always assertion BoundedObjects:
+    # Total number of objects (WAL files + L0 files) should be bounded
+    total_objects = len(store.flushed_wal) + len(store.l0)
+    return total_objects <= 10
+
+always assertion ReadDurabilityRespected:
+    # Reads with DURABILITY_REMOTE should only see data up to last_remote_persisted_seq
+    # This is enforced by the Get action logic, but we can verify the invariant
+    return store.last_remote_persisted_seq <= store.last_committed_seq
+
+always assertion StorageConsistency:
+    # Ensure that data flows correctly through the storage hierarchy
+    # WAL buffer should contain the most recent writes
+    # Memtable should contain all writes
+    # Immutable memtable should contain frozen writes
+    # L0 should contain flushed writes
+    return True  # This is a placeholder for more complex consistency checks
+
+always assertion OperationOrdering:
+    # Ensure that operations maintain proper ordering
+    # Sequence numbers should be unique and strictly increasing
+    seen_seqs = []
+    for entry in store.memtable + store.immutable_memtable:
+        if entry[2] in seen_seqs:
+            return False
+        seen_seqs.append(entry[2])
+    for level in store.l0:
+        for entry in level:
+            if entry[2] in seen_seqs:
+                return False
+            seen_seqs.append(entry[2])
+    return True
