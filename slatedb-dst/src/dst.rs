@@ -273,7 +273,6 @@ impl DefaultDstDistribution {
     fn sample_write(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
         let mut write_ops = Vec::new();
         let write_option = self.get_write_options();
-        // TODO: make this configurable
         let put_probability = 0.8;
         let mut remaining_bytes =
             self.sample_log10_uniform(1..self.options.max_write_batch_bytes) as i64;
@@ -319,7 +318,6 @@ impl DefaultDstDistribution {
         DstAction::Scan(
             start_key.clone(),
             end_key.clone(),
-            // TODO: add ScanOption variation
             ScanOptions::default(),
         )
     }
@@ -422,7 +420,6 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_put_options(&self) -> PutOptions {
-        // TODO: implement ttl support
         PutOptions::default()
     }
 
@@ -440,7 +437,6 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_read_options(&self) -> ReadOptions {
-        // TODO: add random read options
         ReadOptions::default()
     }
 }
@@ -448,7 +444,6 @@ impl DefaultDstDistribution {
 /// Samples an action from the distribution. Actions are sampled with equal probability.
 impl DstDistribution for DefaultDstDistribution {
     fn sample_action(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
-        // TODO: make action weights configurable
         let weights = [1; 5]; // all actions have equal probability for now
         let dist = WeightedIndex::new(weights).expect("non-empty weights and all ≥ 0");
         let action = dist.sample(&mut self.rand.rng());
@@ -524,11 +519,6 @@ impl Dst {
                 }
                 DstAction::Flush => self.run_flush().await?,
                 DstAction::AdvanceTime(duration) => self.advance_time(duration).await,
-                // TODO: add DbReader open, close, get, and scan
-                // TODO: add DbWriter close and open
-                // TODO: add seek
-                // TODO: add checkpointing?
-                // TODO: add fencing?
             }
             self.maybe_shrink_db().await?;
         }
