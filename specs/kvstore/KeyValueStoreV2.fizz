@@ -1,0 +1,35 @@
+---
+deadlock_detection: false
+options:
+    max_actions: 100
+    crash_on_yield: false
+---
+
+role SlateDb:
+    action Init:
+        self.wal = []
+        self.memtable = []
+        self.immutable_memtable = []
+        self.l0 = []
+        self.last_committed_seq = 0
+        self.last_persisted_seq = 0
+        self.last_seq = 0
+
+    atomic func put(k, v):
+        seq = self.last_seq + 1
+        self.memtable.append(k, v, seq)
+        self.wal.append((k, v, seq))
+        self.last_committed_seq = seq
+        self.last_seq = seq
+
+    atomic func get(k, dirty):
+        if dirty == true:
+            for entry in self.memtable:
+                if entry[0] == k:
+                    return entry[1]
+            for entry in self.l0:
+                if entry[0] == k:
+                    return entry[1]
+
+    fair action flushWal:
+        require len(self.wal) > 0
