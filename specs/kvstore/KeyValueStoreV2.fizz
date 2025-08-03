@@ -5,31 +5,78 @@ options:
     crash_on_yield: false
 ---
 
-role SlateDb:
+# Constants
+KEYS = ["k0", "k1", "k2"]
+VALUES = ["v0", "v1", "v2", ""]
+
+role KeyValueStore:
     action Init:
-        self.wal = []
+        self.wal_buffer = []
+        self.flushed_wal = []
         self.memtable = []
         self.immutable_memtable = []
         self.l0 = []
         self.last_committed_seq = 0
-        self.last_persisted_seq = 0
-        self.last_seq = 0
+        self.last_remote_persisted_seq = 0
+        self.next_seq = 1
 
-    atomic func put(k, v):
-        seq = self.last_seq + 1
-        self.memtable.append(k, v, seq)
-        self.wal.append((k, v, seq))
+    # Get operation - reads the most recent value for a key
+    action Get:
+        key = any KEYS
+        # Search in memtable (most recent first)
+        for entry in reversed(self.memtable):
+            if entry[0] == key:
+                return entry[1]
+        
+        # Search in immutable memtable
+        for entry in reversed(self.immutable_memtable):
+            if entry[0] == key:
+                return entry[1]
+        
+        # Search in L0 levels (most recent first)
+        for level in reversed(self.l0):
+            for entry in reversed(level):
+                if entry[0] == key:
+                    return entry[1]
+        
+        return ""
+
+    # Put operation - writes a key-value pair
+    action Put:
+        key = any KEYS
+        value = any VALUES
+        seq = self.next_seq
+        self.next_seq = self.next_seq + 1
+        
+        # Add to WAL buffer
+        self.wal_buffer = self.wal_buffer + [(key, value, seq)]
+        
+        # Add to memtable
+        self.memtable = self.memtable + [(key, value, seq)]
+        
+        # Update committed sequence
         self.last_committed_seq = seq
-        self.last_seq = seq
 
-    atomic func get(k, dirty):
-        if dirty == true:
-            for entry in self.memtable:
-                if entry[0] == k:
-                    return entry[1]
-            for entry in self.l0:
-                if entry[0] == k:
-                    return entry[1]
+    # Flush WAL to remote storage
+    action FlushWAL:
+        if len(self.wal_buffer) > 0:
+            self.flushed_wal = self.flushed_wal + self.wal_buffer
+            self.wal_buffer = []
+            if len(self.flushed_wal) > 0:
+                self.last_remote_persisted_seq = self.flushed_wal[-1][2]
 
-    fair action flushWal:
-        require len(self.wal) > 0
+    # Freeze memtable to immutable memtable
+    action FreezeMemtable:
+        if len(self.memtable) > 0:
+            self.immutable_memtable = self.immutable_memtable + self.memtable
+            self.memtable = []
+
+    # Flush immutable memtable to L0
+    action FlushMemtableToL0:
+        if len(self.immutable_memtable) > 0:
+            self.l0 = self.l0 + [self.immutable_memtable]
+            self.immutable_memtable = []
+
+# Initialize the system
+action Init:
+    store = KeyValueStore()
