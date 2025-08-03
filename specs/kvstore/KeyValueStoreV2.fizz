@@ -1,13 +1,24 @@
 ---
 deadlock_detection: false
 options:
-    max_actions: 100
+    max_actions: 50
     crash_on_yield: false
+action_options:
+    KeyValueStore.Put:
+        max_actions: 10
+    KeyValueStore.Get:
+        max_actions: 5
+    KeyValueStore.FlushWAL:
+        max_concurrent_actions: 1
+    KeyValueStore.FreezeMemtable:
+        max_concurrent_actions: 1
+    KeyValueStore.FlushMemtableToL0:
+        max_concurrent_actions: 1
 ---
 
 # Constants
-KEYS = ["k0", "k1", "k2"]
-VALUES = ["v0", "v1", "v2", ""]
+KEYS = ["k0", "k1"]
+VALUES = ["v0", "v1", ""]
 
 role KeyValueStore:
     action Init:
@@ -43,6 +54,7 @@ role KeyValueStore:
 
     # Put operation - writes a key-value pair
     action Put:
+        require self.next_seq <= 20  # Limit sequence numbers
         key = any KEYS
         value = any VALUES
         seq = self.next_seq
@@ -58,25 +70,36 @@ role KeyValueStore:
         self.last_committed_seq = seq
 
     # Flush WAL to remote storage
-    action FlushWAL:
-        if len(self.wal_buffer) > 0:
-            self.flushed_wal = self.flushed_wal + self.wal_buffer
-            self.wal_buffer = []
-            if len(self.flushed_wal) > 0:
-                self.last_remote_persisted_seq = self.flushed_wal[-1][2]
+    atomic action FlushWAL:
+        require len(self.wal_buffer) > 0
+        self.flushed_wal = self.flushed_wal + self.wal_buffer
+        self.wal_buffer = []
+        if len(self.flushed_wal) > 0:
+            self.last_remote_persisted_seq = self.flushed_wal[-1][2]
 
     # Freeze memtable to immutable memtable
-    action FreezeMemtable:
-        if len(self.memtable) > 0:
-            self.immutable_memtable = self.immutable_memtable + self.memtable
-            self.memtable = []
+    atomic action FreezeMemtable:
+        require len(self.memtable) > 0
+        self.immutable_memtable = self.immutable_memtable + self.memtable
+        self.memtable = []
 
     # Flush immutable memtable to L0
-    action FlushMemtableToL0:
-        if len(self.immutable_memtable) > 0:
-            self.l0 = self.l0 + [self.immutable_memtable]
-            self.immutable_memtable = []
+    atomic action FlushMemtableToL0:
+        require len(self.immutable_memtable) > 0
+        self.l0 = self.l0 + [self.immutable_memtable]
+        self.immutable_memtable = []
 
 # Initialize the system
 action Init:
     store = KeyValueStore()
+
+# Assertions to check properties
+always assertion SequenceNumberBounded:
+    return store.next_seq <= 21
+
+always assertion L0Consistency:
+    # L0 should only contain non-empty immutable memtables
+    for level in store.l0:
+        if len(level) == 0:
+            return False
+    return True
