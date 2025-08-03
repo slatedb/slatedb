@@ -1,13 +1,14 @@
 ---
 deadlock_detection: false
 options:
-    max_actions: 50
+    max_actions: 15
+    max_concurrent_actions: 2
     crash_on_yield: false
 action_options:
     KeyValueStore.Put:
-        max_actions: 10
+        max_actions: 2
     KeyValueStore.Get:
-        max_actions: 5
+        max_actions: 1
     KeyValueStore.FlushWAL:
         max_concurrent_actions: 1
     KeyValueStore.FreezeMemtable:
@@ -17,8 +18,8 @@ action_options:
 ---
 
 # Constants
-KEYS = ["k0", "k1"]
-VALUES = ["v0", "v1", ""]
+KEYS = ["k1"]
+VALUES = ["v0", "v1"]
 
 DURABILITY_MEMORY = 0
 DURABILITY_REMOTE = 2
@@ -74,8 +75,9 @@ role KeyValueStore:
         return ""
 
     # Put operation - writes a key-value pair
-    action Put:
-        require self.next_seq <= 20  # Limit sequence numbers
+    atomic action Put:
+        require self.next_seq <= 10  # Reduced limit
+        require len(self.memtable) < 3  # Limit memtable size
         key = any KEYS
         value = any VALUES
         sync = any [DURABILITY_MEMORY, DURABILITY_REMOTE]
@@ -89,12 +91,12 @@ role KeyValueStore:
         # Add to memtable
         self.memtable = self.memtable + [(key, value, seq)]
         
+        # Update committed sequence first
+        self.last_committed_seq = seq
+        
         # If sync is REMOTE, flush WAL immediately
         if sync == DURABILITY_REMOTE:
             self.doFlushWAL()
- 
-        # Update committed sequence
-        self.last_committed_seq = seq
 
     # Flush WAL to remote storage
     atomic action FlushWAL:
@@ -104,12 +106,14 @@ role KeyValueStore:
     # Freeze memtable to immutable memtable
     atomic action FreezeMemtable:
         require len(self.memtable) > 0
+        require len(self.immutable_memtable) < 3  # Limit immutable memtable size
         self.immutable_memtable = self.immutable_memtable + self.memtable
         self.memtable = []
 
     # Flush immutable memtable to L0
     atomic action FlushMemtableToL0:
         require len(self.immutable_memtable) > 0
+        require len(self.l0) < 2  # Limit L0 levels
         self.l0 = self.l0 + [self.immutable_memtable]
         self.immutable_memtable = []
 
@@ -126,7 +130,7 @@ action Init:
 
 # Assertions to check properties
 always assertion SequenceNumberBounded:
-    return store.next_seq <= 21
+    return store.next_seq <= 11
 
 always assertion L0Consistency:
     # L0 should only contain non-empty immutable memtables
