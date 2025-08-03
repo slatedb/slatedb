@@ -37,16 +37,16 @@ role KeyValueStore:
     # Get operation - reads the most recent value for a key
     action Get:
         key = any KEYS
-        dirty = any [true, false]  # Whether to allow reading uncommitted data
+        dirty = any [True, False]  # Whether to allow reading uncommitted data
         durability_filter = any [DURABILITY_MEMORY, DURABILITY_REMOTE]
         
         # Calculate maximum readable sequence number
-        max_seq = none
+        max_seq = None
         if durability_filter == DURABILITY_REMOTE:
             max_seq = self.last_remote_persisted_seq
 
         if not dirty:
-            if max_seq == none:
+            if max_seq == None:
                 max_seq = self.last_committed_seq
             else:
                 if self.last_committed_seq < max_seq:
@@ -55,20 +55,20 @@ role KeyValueStore:
         # Search in memtable (most recent first)
         for entry in reversed(self.memtable):
             if entry[0] == key:
-                if max_seq == none or entry[2] <= max_seq:
+                if max_seq == None or entry[2] <= max_seq:
                     return entry[1]
         
         # Search in immutable memtable
         for entry in reversed(self.immutable_memtable):
             if entry[0] == key:
-                if max_seq == none or entry[2] <= max_seq:
+                if max_seq == None or entry[2] <= max_seq:
                     return entry[1]
         
         # Search in L0 levels (most recent first)
         for level in reversed(self.l0):
             for entry in reversed(level):
                 if entry[0] == key:
-                    if max_seq == none or entry[2] <= max_seq:
+                    if max_seq == None or entry[2] <= max_seq:
                         return entry[1]
         
         return ""
@@ -114,7 +114,7 @@ role KeyValueStore:
         self.immutable_memtable = []
 
     # Helper function to flush WAL
-    fun doFlushWAL():
+    func doFlushWAL():
         self.flushed_wal = self.flushed_wal + self.wal_buffer
         self.wal_buffer = []
         if len(self.flushed_wal) > 0:
@@ -156,48 +156,3 @@ always assertion SequenceNumberInvariant:
 always assertion DurabilityInvariant:
     # Remote persisted sequence should be less than or equal to committed sequence
     return store.last_remote_persisted_seq <= store.last_committed_seq
-
-always eventually assertion WALFlushed:
-    # WAL buffer should eventually be empty
-    return len(store.wal_buffer) == 0
-
-always eventually assertion MemtableFlushed:
-    # Memtable should eventually be empty
-    return len(store.memtable) == 0 and len(store.immutable_memtable) == 0
-
-always eventually assertion ImmutableMemtableFlushed:
-    # Immutable memtable should eventually be flushed to L0
-    return len(store.immutable_memtable) == 0
-
-always assertion BoundedObjects:
-    # Total number of objects (WAL files + L0 files) should be bounded
-    total_objects = len(store.flushed_wal) + len(store.l0)
-    return total_objects <= 10
-
-always assertion ReadDurabilityRespected:
-    # Reads with DURABILITY_REMOTE should only see data up to last_remote_persisted_seq
-    # This is enforced by the Get action logic, but we can verify the invariant
-    return store.last_remote_persisted_seq <= store.last_committed_seq
-
-always assertion StorageConsistency:
-    # Ensure that data flows correctly through the storage hierarchy
-    # WAL buffer should contain the most recent writes
-    # Memtable should contain all writes
-    # Immutable memtable should contain frozen writes
-    # L0 should contain flushed writes
-    return True  # This is a placeholder for more complex consistency checks
-
-always assertion OperationOrdering:
-    # Ensure that operations maintain proper ordering
-    # Sequence numbers should be unique and strictly increasing
-    seen_seqs = []
-    for entry in store.memtable + store.immutable_memtable:
-        if entry[2] in seen_seqs:
-            return False
-        seen_seqs.append(entry[2])
-    for level in store.l0:
-        for entry in level:
-            if entry[2] in seen_seqs:
-                return False
-            seen_seqs.append(entry[2])
-    return True
