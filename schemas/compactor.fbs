@@ -75,15 +75,11 @@ table Compaction {
 
 
 table CompactionState {
-    // Identifier of the compaction state
+    // Identifier of the compaction state. Compactor file name would be derived from this field
     compaction_state_id: uint64;
 
     // Fencing token to ensure single active compactor
     compactor_epoch: uint64;
-
-    // Next state ID to use for CAS operations
-    // Current state ID = this value - 1
-    next_compactor_state_id: uint64 (required);
 
     // Compactions in scheduled, in_progress and recently completed compactions
     active_compactions: [Compaction];
