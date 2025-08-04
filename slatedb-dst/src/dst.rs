@@ -315,11 +315,7 @@ impl DefaultDstDistribution {
         } else if start_key == end_key {
             end_key.push(b'\0');
         }
-        DstAction::Scan(
-            start_key.clone(),
-            end_key.clone(),
-            ScanOptions::default(),
-        )
+        DstAction::Scan(start_key.clone(), end_key.clone(), ScanOptions::default())
     }
 
     fn sample_flush(&self) -> DstAction {
