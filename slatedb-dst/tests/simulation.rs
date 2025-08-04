@@ -16,7 +16,7 @@ use slatedb::clock::SystemClock;
 use slatedb::DbRand;
 use slatedb::Error;
 use slatedb_dst::utils::{build_dst, build_runtime, run_simulation};
-use slatedb_dst::DstOptions;
+use slatedb_dst::{DstDuration, DstOptions};
 use std::rc::Rc;
 use std::sync::Arc;
 use tracing::error;
@@ -29,37 +29,37 @@ use tracing::info;
 ///
 /// * `system_clock` - The system clock to use for the simulation.
 /// * `rand` - The random number generator to use for the simulation.
-/// * `iterations` - The number of steps to run for the simulation.
+/// * `dst_duration` - The duration to run for the simulation.
 /// * `dst_opts` - The DST options to use for the simulation.
 #[rstest]
 #[case(
     Arc::new(MockSystemClock::new()),
     Rc::new(DbRand::new(1)),
-    100,
+    DstDuration::Iterations(100),
     DstOptions::default()
 )]
 #[case(
     Arc::new(MockSystemClock::new()),
     Rc::new(DbRand::new(2)),
-    100,
+    DstDuration::Iterations(100),
     DstOptions::default()
 )]
 #[case(
     Arc::new(MockSystemClock::new()),
     Rc::new(DbRand::new(3)),
-    100,
+    DstDuration::Iterations(100),
     DstOptions::default()
 )]
 fn test_dst(
     #[case] system_clock: Arc<dyn SystemClock>,
     #[case] rand: Rc<DbRand>,
-    #[case] iterations: u32,
+    #[case] dst_duration: DstDuration,
     #[case] dst_opts: DstOptions,
 ) -> Result<(), Error> {
     let runtime = build_runtime(rand.seed());
     let logical_clock = Arc::new(MockLogicalClock::new());
     runtime.block_on(async move {
-        run_simulation(system_clock, logical_clock, rand, iterations, dst_opts).await
+        run_simulation(system_clock, logical_clock, rand, dst_duration, dst_opts).await
     })
 }
 
@@ -77,22 +77,22 @@ fn test_dst(
 ///
 /// * `seed` - The seed to use for the random number generator and system clock.
 /// * `simulations` - The number of simulations to run.
-/// * `iterations` - The number of iterations to run for each simulation.
+/// * `dst_duration` - The duration to run for each simulation.
 #[rstest]
-#[case(101, 10, 50)]
-#[case(102, 10, 50)]
-#[case(103, 10, 50)]
-#[case(104, 10, 50)]
-#[case(105, 10, 50)]
-#[case(106, 10, 50)]
-#[case(107, 10, 50)]
-#[case(108, 10, 50)]
-#[case(109, 10, 50)]
-#[case(110, 10, 50)]
+#[case(101, 10, DstDuration::Iterations(50))]
+#[case(102, 10, DstDuration::Iterations(50))]
+#[case(103, 10, DstDuration::Iterations(50))]
+#[case(104, 10, DstDuration::Iterations(50))]
+#[case(105, 10, DstDuration::Iterations(50))]
+#[case(106, 10, DstDuration::Iterations(50))]
+#[case(107, 10, DstDuration::Iterations(50))]
+#[case(108, 10, DstDuration::Iterations(50))]
+#[case(109, 10, DstDuration::Iterations(50))]
+#[case(110, 10, DstDuration::Iterations(50))]
 fn test_dst_is_deterministic(
     #[case] seed: u64,
     #[case] simulations: u32,
-    #[case] iterations: u32,
+    #[case] dst_duration: DstDuration,
 ) -> Result<(), Error> {
     use chrono::{DateTime, Utc};
 
@@ -107,7 +107,7 @@ fn test_dst_is_deterministic(
         runtime.block_on(async {
             let mut dst = build_dst(system_clock.clone(), logical_clock.clone(), rand.clone(), DstOptions::default()).await;
             info!(seed, simulation_count, "running simulation");
-            match dst.run_simulation(iterations).await {
+            match dst.run_simulation(dst_duration).await {
                 Ok(()) => {
                     let next_u64 = rand.rng().random::<u64>();
                     let next_time = system_clock.now();

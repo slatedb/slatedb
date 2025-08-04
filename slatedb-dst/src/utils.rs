@@ -21,6 +21,7 @@ use tracing::{error, info};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
+use crate::dst::DstDuration;
 use crate::DefaultDstDistribution;
 use crate::Dst;
 use crate::DstOptions;
@@ -143,7 +144,7 @@ pub async fn run_simulation(
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
     rand: Rc<DbRand>,
-    iterations: u32,
+    dst_duration: DstDuration,
     dst_opts: DstOptions,
 ) -> Result<(), Error> {
     let seed = rand.seed();
@@ -155,7 +156,7 @@ pub async fn run_simulation(
         dst_opts,
     )
     .await;
-    match dst.run_simulation(iterations).await {
+    match dst.run_simulation(dst_duration).await {
         Ok(_) => Ok(()),
         Err(e) => {
             error!("simulation failed with seed {}: {}", seed, e);
