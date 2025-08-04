@@ -143,3 +143,35 @@ fn test_dst_is_deterministic(
     }
     Ok(())
 }
+
+#[test]
+fn test_dst_nightly() -> Result<(), Error> {
+    use slatedb_dst::DstDuration;
+    use sysinfo::System;
+
+    let mut system = System::new();
+    system.refresh_cpu_all();
+    let num_cores = system.cpus().len() as u64;
+    info!("running nightly [num_cores={}]", num_cores);
+    for core in 0..num_cores {
+        let seed = rand::rng().random::<u64>();
+        info!("running simulation [core={}, seed={}]", core, seed);
+        let rand = Rc::new(DbRand::new(seed));
+        let runtime = build_runtime(rand.seed());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let logical_clock = Arc::new(MockLogicalClock::new());
+        let duration = DstDuration::WallClock(std::time::Duration::from_secs(1));
+        runtime.block_on(async move {
+            run_simulation(
+                system_clock,
+                logical_clock,
+                rand,
+                duration,
+                DstOptions::default(),
+            )
+            .await
+        })?
+    }
+    info!("all DSTs passed");
+    Ok(())
+}

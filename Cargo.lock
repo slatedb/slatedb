@@ -3252,6 +3252,7 @@ dependencies = [
  "rand 0.9.1",
  "rstest",
  "slatedb",
+ "sysinfo",
  "tokio",
  "tracing",
  "tracing-log",

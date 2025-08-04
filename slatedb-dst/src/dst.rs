@@ -471,7 +471,7 @@ impl DstDuration {
     pub fn should_run(&self, current_iteration: u32, start_time: std::time::Instant) -> bool {
         match self {
             DstDuration::Iterations(max_iterations) => current_iteration < *max_iterations,
-            DstDuration::WallClock(max_duration) => *max_duration < start_time.elapsed(),
+            DstDuration::WallClock(max_duration) => start_time.elapsed() < *max_duration,
         }
     }
 }
@@ -519,6 +519,10 @@ impl Dst {
         let simulated_time = self.system_clock.now();
         let actual_start_time = std::time::Instant::now();
         let mut step_count = 0;
+        eprintln!(
+            "running simulation [step_count={}, dst_duration={:?}]",
+            step_count, dst_duration
+        );
         while dst_duration.should_run(step_count, actual_start_time) {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
