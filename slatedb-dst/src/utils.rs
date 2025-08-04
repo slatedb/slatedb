@@ -103,16 +103,12 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         l0_sst_size_bytes,
         l0_max_ssts,
         max_unflushed_bytes,
-        // default_ttl,
         compression_codec,
-        // TODO: add object store filesystem cache configs
-        // TODO: add random GC configs
         garbage_collector_options: Some(GarbageCollectorOptions {
             manifest_options: GarbageCollectorOptions::default().manifest_options,
             wal_options: GarbageCollectorOptions::default().wal_options,
             compacted_options: GarbageCollectorOptions::default().compacted_options,
         }),
-        // TODO: add random compactor configs
         compactor_options: Some(CompactorOptions::default()),
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
