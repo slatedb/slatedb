@@ -88,7 +88,6 @@ This RFC extends discussions in the below github issue. It also addresses severa
 1. **1:1 Compaction:Job Cardinality**: Cannot retry failed compactions - entire compaction fails if job fails
 2. **No Progress Tracking**: CompactionJob state isn't persisted, making progress invisible
 3. **No State Persistence**: All compaction state is lost on restart
-4. **SortedRun ID generation**: SortedRun ID is generated depends on the persisted manifest dbState. As a result, there needs to be a sync between compactions and the dbState. Eventual consistency across dbState and CompactionState would be difficult to achive.
 
 ### **Operational Limitations** 
 5. **Manual Compaction Gaps**: No coordination mechanism for operator-triggered compactions ([Issue #288](https://github.com/slatedb/slatedb/issues/288))
@@ -113,37 +112,53 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 - **Minimizes overhead**: Persistence aligns with existing I/O patterns
 - **Scales cost-effectively**: Higher persistence frequency for larger, more valuable compactions
 
-#### Worflow
+## Worflow
 
 ### Compaction Workflow
 
 1. `Compactor` initialises the `CompactionScheduler` and `CompactionEventHandler` during startup. It also initialises event loop that periodically polls manifest, periodically logs and provides progress and handles completed compactions [No change required]
-2.  The `CompactionEventHandler` refreshes the compaction state by merging it with the `current manifest`[Need to refresh and merge with the persisted compaction state]
-3. `CompactionEventHandler` communicates this compaction state to the `CompactionScheduler`(scheduler makes a call `maybeScheduleCompaction` with local database state)
+
+2.  The `CompactionEventHandler` refreshes the compaction state by merging it with the `current manifest`.
+
+3. `CompactionEventHandler` communicates this compaction state to the `CompactionScheduler`(scheduler makes a call `maybeScheduleCompaction` with local database state).
+
 4. `CompactionScheduler` is implemented by `SizeTieredCompactionScheduler` to decide and group L0 SSTs and SRs to be compacted together. It returns a list of `Compaction` that are ready for execution.
-[This logic would require some changes to re-process the partially processed]
-4. `CompactorEventHandler` iterates over the list of compactions and calls `submitCompaction()` if the count of running compaction is below the threshold.
-5. The submitted compaction is validated that it is not being executed( by checking in the local `CompactorState`) and if true, is added to the `CompactorState` struct.
-6. Once the `CompactorEventHandler` receives an affirmation, it calls the `startCompaction()` to start the compaction.
-7. The compaction is now transformed into a `compactionJob` and a blocking task is spawned to execute the `compactionJob` by the `CompactionExecutor`
-8. The task loads all the iterators in a `MergeIterator` struct and runs compactions on it. It discards older expired versions and continues to write to a SST. Once the SST reaches it's threshold size, the SST is written to the active destination SR. Periodically the task also provides stats on task progress. [Need to persist the new SST to the compaction state in object store]
-6. When a task completes compaction execution, the task returns the {destinationId, outputSSTs} to the to a worker channel to act upon the compaction terminal state
-7. The worker task executes the `finishCompaction()` upon successful `CompactionCompletion` and updates the manifests and trigger scheduling of next compactions by calling `maybeScheduleCompaction()`
-8. In case of failure, the compaction_state is updated by calling `finishFailedCompaction()`
-9. GC clears the orphaned states and SSTs during it's run.
+
+5. `CompactorEventHandler` iterates over the list of compactions and calls `submitCompaction()` if the count of running compaction is below the threshold.
+
+6. The submitted compaction is validated that it is not being executed( by checking in the local `CompactorState`) and if true, is added to the `CompactorState` struct.
+
+7. Once the `CompactorEventHandler` receives an affirmation, it calls the `startCompaction()` to start the compaction.
+
+8. The compaction is now transformed into a `compactionJob` and a blocking task is spawned to execute the `compactionJob` by the `CompactionExecutor`
+
+9. The task loads all the iterators in a `MergeIterator` struct and runs compactions on it. It discards older expired versions and continues to write to a SST. Once the SST reaches it's threshold size, the SST is written to the active destination SR. Periodically the task also provides stats on task progress. 
+
+10. When a task completes compaction execution, the task returns the {destinationId, outputSSTs} to the to a worker channel to act upon the compaction terminal state
+
+11. The worker task executes the `finishCompaction()` upon successful `CompactionCompletion` and updates the manifests and trigger scheduling of next compactions by calling `maybeScheduleCompaction()`
+
+12. In case of failure, the compaction_state is updated by calling `finishFailedCompaction()`
+
+13. GC clears the orphaned states and SSTs during it's run.
 
 ### Resuming Partial Compactions
 
 1. When the output SSTs(part of the partially completed destination SR) are fetched, pick the lastEntry(the lastEntry in lexicographic order) from the last SST of the SR. Possible Approaches:
     - Have a index on footer as suggested here:https://github.com/slatedb/slatedb/pull/695/files#r2243447106 similar to first key and iterate to the lastKey of each block using the footer 
+
     - Once on the relevant SST, go to the last block by iterating the indexes. Iterate to the lastKey of the last block of the SST.
-3.Ignore completely iterated L0 SSTs and move the iterator on each SR to a key >= lastKey on SST partition
-4. This is done by doing a binary search on a SR to find the right SST partition and then iterating the blocks of the SST till we find the Entry. 
-5. These {key, seq_number, sst_iterator} tuple is then added to a min_heap to decide the right order across a group of SRs( can be thought of as a way to get a sorted list from all the sorted SR SSTs).
-6. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each. 
+2. Ignore completely iterated L0 SSTs and move the iterator on each SR to a key >= lastKey on SST partition
+
+3. This is done by doing a binary search on a SR to find the right SST partition and then iterating the blocks of the SST till we find the Entry. 
+
+4. These {key, seq_number, sst_iterator} tuple is then added to a min_heap to decide the right order across a group of SRs( can be thought of as a way to get a sorted list from all the sorted SR SSTs).
+
+5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each. 
 
 Note:
  - Step (3) and (4) are already implemented in the `seek()` in merge_iterator. It should handle Tombstones, TTL/Expiration
+ - Ensure the CLI requests are executed on the active Compactor process
 
 
 ### **Key Design Decisions**
@@ -169,13 +184,13 @@ Note:
 
 The section below is under discussion here: https://github.com/slatedb/slatedb/pull/695/files#r2239561471
 
-<!-- #### **5. Migrate `compaction_epoch` from Manifest to CompactionState**
+#### **5. Migrate `compaction_epoch` from Manifest to CompactionState**
 **Decision**: Deprecate `compaction_epoch` from Manifest.
 
 **Rationale**: 
 - Clean separation: DB state vs process coordination
 - Process independence: Compactor can run separately
-- Logical grouping: Epoch lives with compaction concerns -->
+- Logical grouping: Epoch lives with compaction concerns
 
 
 ### **Persistent State Storage**
@@ -184,9 +199,9 @@ The section below is under discussion here: https://github.com/slatedb/slatedb/p
 The compaction state is persisted to the object store following the same CAS pattern as manifests, ensuring consistency and reliability:
 
 ```
-/compactor_state_000000001.compactor  # First compactor state
-/compactor_state_000000002.compactor  # Updated state after compactions
-/compactor_state_000000003.compactor  # Current state
+/000000001.compactor  # First compactor state
+/000000002.compactor  # Updated state after compactions
+/000000003.compactor  # Current state
 ```
 
 #### **CompactionState Structure**
@@ -199,9 +214,9 @@ pub struct CompactionState {
     /// Incremented each time a new compactor takes control
     pub compactor_epoch: u64,
     
-    /// Next state ID to use for CAS operations
-    /// Current state ID = this value - 1
-    pub next_compactor_state_id: u64,
+    /// Compactor state identifier. This would be used for creating
+    /// compactor files and CAS updates
+    pub compactor_state_id: u64,
     
     /// All currently active compactions indexed by ID
     /// Includes queued, running, and recently completed compactions
@@ -212,59 +227,173 @@ pub struct CompactionState {
 }
 ```
 The section below is under discussion here: https://github.com/slatedb/slatedb/pull/695/files#r2239561471
-<!-- #### **CAS-Based Atomic Updates**
 
-CAS based atomic updates can occur in two scenarios. These scenarios are as follows:
-1. Compactor Fencing.
-2. Optimistic Locking of CompactionState
+### Protocol for State Management of Manifest and CompactionState
 
-On startup, a compactor must increment `compactor_epoch` in the `CompactionState`.
+This a proposol for Statement Management of Manifest and CompactionState. The protocol is based on the following principals:
 
-1. List `CompactionState` to find the `CompactionState` with the largest ID.
-2. Read the latest CompactionState (e.g. compaction/00000000000000000002.compactor).
-3. Increment the `compactor_epoch` in the current CompactionState in memory.
-4. CAS based atomic update of the CompactionState with the updated `compactor_epoch` (e.g. compaction/00000000000000000003.compactor).
+- Compaction is an entity owned by the Compactor. Therefore, the `compactor_epoch` and the compacted `SortedRuns` are also owned by the Compactor.
+- CAS based update of the .compactor file ensures consistent view of the compactionState to all the compactor processes.
 
-Now, there are 4 possible outcomes of the CAS-Based Atomic Updates
-- The write is successful.
+#### On startup...
+1. Compactor fetches the latest .manifest file (00005.manifest).
 
-- The write was unsuccessful. Another compactor wrote the `CompactionState` with the same ID and a lower (older) `compactor_epoch`.[OptimisticLockingConflict]
-  1. This case can be reproduced when a new compactor starts, as mentioned in the above state it prepares a `CompactionState` with updated `compaction_epoch`
-  2. However, before the compactor can write the `CompactionState` to the object store, the old compactor persisted `CompactionState` from it's Compaction execution cycle.
-  3. Now, the new Compactor tries to persist the `CompactionState` and finds that the ID matches and the object store `compactor_epoch` is less than the new `compactor_epoch`
-  4. The new Compactor should refresh the local `CompactorState` and increment the `compactor_epoch` in the local `CompactorState`.
-  5 Now, it should again retry writing the `CompactionState` to the object_store. If the write fails, go back to step 4
+2. Compactor now fetches the latest .compactor file (00005.compactor). 
 
-- The write was unsuccessful. Another compactor wrote the `CompactionState` with the same ID and the same `compactor_epoch`.[OptimisticLockingConflict]
-  1. This case can be reproduced when two new compactors starts lets call them c1 and c2, as mentioned in the above state it prepares a `CompactionState` with updated `compaction_epoch`
-  2. Compactor c1 successfully writes the `CompactionState` to object_store
-  3. Now, the Compactor c2 tries to persist the `CompactionState` and finds that the ID and matches and the object store `compactor_epoch` is also equal to the c2's `compactor_epoch`
-  4.The new Compactor should refresh the local `CompactorState` and increment the ID in the local `CompactorState`.
-  5 Now, it should again retry writing the `CompactionState` to the object_store. If the write fails, go back to step 4
+3. It builds a dirty compactionState by merging L0 SSTs and SortedRuns across both files.
 
-- The write was unsuccessful. Another writer wrote the `CompactionState` with the same ID and a higher (newer) `compactor_epoch`.[FencedCompactor]
-  1. This case can be reproduced when the active Compactor is processing a compaction, however another compactor starts and updates the `CompactionState` with updated `compaction_epoch` in the object_store.
-  2. Now, when the active Compactor tries to write the `CompactionState` to the object store, it finds the `compactor_epoch` higher than its `compactor_epoch`
-  3. In this case, the Compactor should gracefully shutdown after clean up.
+    - Copy SortedRuns from .compactor file to compactionState
 
-Once the compactor the process is active, it can encounter following conditions when persisting SRs
+    - Add and delete L0 SSTs of .manifest in compactionState
 
-1. if compactor_epoch in file > then we're fenced
-2. if compactor_epoch in file == panic, this should never happen (we have two processes writing with the same compactor epoch)
-3. if compactor_epoch in file < panic, this should never happen (we somehow went backwards in epochs after the current process fenced any previous epoch writers)
+4. Compactor increments `compactor_epoch` in the dirty CompactionState and writes the dirty CompactionState to the next sequential .compactor position.(00006.compactor). Two level validation:
 
-State updates follow the same CAS pattern as manifest updates for guaranteed atomicity:
+    Epoch Check fails, compactor is fenced
 
-1. **Read current state** and extract `next_compactor_state_id`
-2. **Apply pending updates** to create new state with incremented ID
-3. **Write new state file** using CAS operation with `if-none-match: *`
-4. **Retry entire operation** if CAS fails, ensuring atomic state transitions
+    File version check (in-memory and remote object store), If 00006.compactor exists, 
 
-This approach provides:
-- **Atomic state transitions**: Either entire update succeeds or nothing changes
-- **Natural state history**: All previous states remain available for debugging
-- **Conflict detection**: CAS failures indicate concurrent updates
-- **Consistency with manifests**: Uses proven SlateDB persistence patterns -->
+      - If latest .compactor compactor_epoch > current compactor's epoch, die (fenced)
+
+      - If latest .compactor compactor_epoch == current compactor's epoch, die (fenced)
+
+      ( in case of external processes like CLI sending a compaction request, the compaction persistence in the CompactionState would be done by the active Compactor)
+
+      - If latest .compactor compactor_epoch < current compactor's epoch, increment the .compactor file ID by 1 and retry. This process would continue until successful compactor write.
+
+
+At this point, the compactor has been successfully initialised. Any updates to write a new .compactor file in our case (00006.compactor) by stale compactors would fence them.
+
+#### On compaction initiation...
+
+1. Compactor writes to the next .compactor file the list of scheduled compactions with the empty JobAttempts (00007.compactor in our example).
+
+    If the file exists, die (fenced)
+
+#### On compaction job progress...
+
+1. Compactor writes to the next .compactor file the compactionState(persist when an SST is added to SR) with the latest progress (00008.compactor in our example).
+
+    If the file exists, die (fenced)
+
+#### On compaction job complete...
+
+1. Write the current compactor state (including the completed compaction job) to the next .compactor file (steps (1) and (2) in the "progress" section, above).
+
+2. Update in-memory .manifest state to reflect the latest SRs/SSTs that were created (and remove old SRs/SSTs).
+
+3. Write the in-memory .manifest state to the next sequential .manifest file. If the file exists...
+
+    If it detects manifest version has changed, it could be due to two possibilities:
+
+    - Writer has written a new manifest.
+
+    - Compactor has written a new manifest.
+
+    In both the cases, 
+  
+    - Fetch the latest compactorState.
+
+    - Check if there is a change in the `compactor_epoch` between local and latest compactorState.
+
+    - If yes, the compactor is stale and is fenced. Else go back to Step (2).
+
+### Summarised Protocol
+
+```
+1. Compactor A starts(compactor_epoch = 1)
+
+2. At T = 1, Compactor A fetches the latest .manifest file
+
+3. At T = 2, Compactor A fetches the latest .compactor file
+
+4. At T = 3, Compactor A creates an in-memory dirty manifest by merging fetched .manifest and .compactor file
+
+5. At T = 4, Compactor A updates .compactor file by creating a new sequential file (On this step, Stale compactors get fenced)
+
+6. At T = 5, Update in-memory .manifest state to reflect the latest SRs/SSTs that were created (and remove old SRs/SSTs).
+
+7. At T = 5, Compactor A tries updating .manifest by creating a new sequential file
+
+8. At T = 6, On file version exists error, fetch both latest .compactor and .manifest file. Check the compactor_epoch and fence the current compactor process else retry Step (6)
+
+```
+
+### Possible Race conditions
+
+#### Incorrect Read order of manifest and compactionState
+
+```
+Compactor 1 reads .compactor(compactor_epoch=1, [SR0, SR1, SR2])
+
+Compactor 2 updates .compactor(compactor_epoch=2, [SR0, SR1, SR2])
+
+Compactor 2 updates .compactor(compactor_epoch=2, [SR2])
+
+Compactor 2 updates .manifest(compactor_epoch=2, [SR2])
+
+Compactor 1 reads .manifest ([SR2])
+
+Compactor 1 writes .manifest ([SR1, SR2]) // undoes Compactor 2's change when it should be fenced
+```
+
+### Fenced Compactor Process trying to update manifest
+
+```
+.manifest file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0]
+
+At T = 0, Compactor A starts(compactor_epoch = 1), 
+.manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0]
+
+At T = 1, Compactor A (compactor_epoch = 1), updates .compactor file
+.manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR7(merged), SR3, SR2, SR1, SR0]
+
+At T = 3, Compactor B starts(compactor_epoch = 2), 
+.manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR7(merged), SR3, SR2, SR1, SR0] (Comapactor A is fenced)
+
+At T = 4, Compactor B updates (compactor_epoch = 2), updates .compactor file 
+.manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR5(merged), SR3(merged)]
+
+At T = 5, Compactor B updates .manifest file
+
+At T = 6, Compactor A updates .manifest file (Fenced Compactor updating Manifest)
+```
+
+Note: The protocol still allows fenced compactor to update the manifest if they are in order because compactor is always syncing compaction state. However, it would get fenced if the file already exists. Consider the following case:
+
+### Fenced Compactor Process trying to update manifest
+
+```
+.manifest file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0]
+
+At T = 0, Compactor A starts(compactor_epoch = 1), 
+.manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0]
+
+At T = 1, Compactor A (compactor_epoch = 1), updates .compactor file
+.manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR7(merged), SR3, SR2, SR1, SR0]
+
+At T = 3, Compactor B starts(compactor_epoch = 2), 
+.manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR7(merged), SR3, SR2, SR1, SR0] (Comapactor A is fenced)
+
+At T = 4, Compactor B updates (compactor_epoch = 2), updates .compactor file 
+.manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
+.compactor file : [SR5(merged), SR3(merged)]
+
+At T = 5, Compactor A updates .manifest file [Compactor is fenced but can still update manifest]
+
+At T = 6, Compactor B updates .manifest file
+
+```
+
+Note: The above protocol enables us to use the existing compaction logic for merging L0 SSTs/SRs between manifest and compactionState. Hence, that is not added as part of this protocol.
 
 ### **External Process Integration**
 
@@ -282,10 +411,11 @@ External processes can safely read compaction state without interfering with the
 External processes that need to trigger compactions coordinate through the persistent state:
 
 **Manual Compaction Submission**:
-1. External process submits a CompactionRequest
-2. The request is processed  by calling a method analogous to `maybeScheduleCompaction()`. However, this method would take the input source SSTs/SRs provided and return a `Compaction`. This could be a wrapper method deciding which method to call based on `CompactionType`. 
-3. The `compaction` needs to be persisted in `activeCompaction` before proceeding ahead.
-4. In case of manual comapactions, a signal can be sent to the client via a channel with the compactionId and the status.
+1. External process submits a `ManualCompactionRequest`.
+2. The `ManualCompactionRequest` undergoes validations and is passed to the CLI channel created in the Compactor EventLoop.
+3. The request handler of the channel is responsible to convert the request to a `Compaction` object
+3. The `Compaction` object is then persisted in the .compactor file using CAS update .
+4. A signal is sent to the client via a channel with the compactionId and the status.
 (Post this step the regular Compaction workflow begins.)
 5. If the count of ongoing Compactions is less than the threshold, the `Compaction` is submitted for compaction to the `submitCompaction()` 
 6. Once it passes the validations in the `submitCompaction()`, the event handler proceeds with the `startCompaction()` converting the compaction into a compactionJob.
@@ -325,16 +455,16 @@ pub struct ManualCompactionOptions {
 
 /// Priority levels for compaction scheduling
 #[derive(Debug, Clone, PartialEq)]
-pub enum CompactionRequestPriority {
+pub enum CompactionPriorityRequest {
     Critical,  // Preempts all other compactions
     High,      // Preempts normal/low compactions  
     Normal,    // Standard automatic compaction priority
     Low,       // Background maintenance priority
 }
 
-/// Status of a compaction job
+/// Status of a compaction job to be shown to the customer
 #[derive(Debug, Clone, PartialEq)]
-pub enum CompactionRequestStatus {
+pub enum CompactionStatusResponse {
     Submitted,      // Waiting to be scheduled
     InProgress,     // Currently executing
     Completed,      // Successfully finished
@@ -344,7 +474,7 @@ pub enum CompactionRequestStatus {
 
 /// Progress information for an active compaction
 #[derive(Debug, Clone)]
-pub struct CompactionRequestProgress {
+pub struct CompactionProgressResponse {
     /// Number of input SSTs processed so far
     pub input_ssts_processed: usize,
     /// Total number of input SSTs to process
@@ -414,7 +544,7 @@ pub async fn list_compactions(
 
 ```        
 
-This would depend on how we plan to partial compaction
+<!-- This would depend on how we plan partial Compactions>
 <!-- ### **Garbage Collection Integration**
 - The garbage collector would be responsible to delete the entries in the compaction state files based on the two conditions:
   - min_age
@@ -530,4 +660,4 @@ Using **AWS S3 Standard** pricing:
 ### **Distributed Compaction**
 - Persistent state provides foundation for multi-compactor coordination and work distribution.
 - Define a minimum time boundary between compaction file updates to prevent excessive writes to the file (see https://github.com/slatedb/slatedb/pull/695#discussion_r2229977189)
-- Support for compactor persistence on MVCC supporting SRs.
+- Add last_key to SST metadata to enable efficient range-based SST filtering during compaction source selection and range query execution.
