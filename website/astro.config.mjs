@@ -1,7 +1,8 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
-import starlightLinksValidator from 'starlight-links-validator'
+import starlightLinksValidator from 'starlight-links-validator';
+import starlightLlmsTxt from 'starlight-llms-txt';
 
 const site = 'https://slatedb.io';
 const ogUrl = new URL('/img/slatedb-opengraph.jpg', site).href;
@@ -49,7 +50,10 @@ export default defineConfig({
 					attrs: { property: 'og:image:alt', content: ogImageAlt },
 				},
 			],
-			plugins: [starlightLinksValidator()],
+			plugins: [
+				starlightLinksValidator(),
+				starlightLlmsTxt(),
+			],
 			sidebar: [
 				{
 					label: 'Start Here',
