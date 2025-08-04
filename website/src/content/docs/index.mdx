@@ -33,7 +33,7 @@ hero:
 
 import { CardGrid, Code, LinkButton, Steps } from '@astrojs/starlight/components';
 import Card from '../../components/Card.astro';
-import simpleExample from '/../slatedb/examples/simple_example.rs?raw'
+import simpleExample from '/../slatedb-examples/src/simple_example.rs?raw'
 
 <CardGrid>
     <Card title="Object Storage Durability" icon="infinity">
@@ -64,7 +64,7 @@ import simpleExample from '/../slatedb/examples/simple_example.rs?raw'
         ```sh
         cargo add slatedb tokio --features tokio/macros
         ```
-    2. Initialize the database and start storing and retrieving data:
+    2. Connect the database to your object store, and start working with it:
 
         <Code code={simpleExample} lang="rust" title="main.rs" />
 

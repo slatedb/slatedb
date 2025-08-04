@@ -1,0 +1,57 @@
+[package]
+name = "slatedb-examples"
+description = "A collection of example binaries showcasing SlateDB features."
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "azure-blob-storage"
+path = "src/azure_blob_storage.rs"
+test = false
+
+[[bin]]
+name = "create-checkpoint"
+path = "src/create_checkpoint.rs"
+test = false
+
+[[bin]]
+name = "delete-checkpoint"
+path = "src/delete_checkpoint.rs"
+test = false
+
+[[bin]]
+name = "full-example"
+path = "src/full_example.rs"
+test = false
+
+[[bin]]
+name = "refresh-checkpoint"
+path = "src/refresh_checkpoint.rs"
+test = false
+
+[[bin]]
+name = "s3-compatible"
+path = "src/s3_compatible.rs"
+test = false
+
+[[bin]]
+name = "simple-example"
+path = "src/simple_example.rs"
+test = false
+
+[[bin]]
+name = "tracing-subscriber"
+path = "src/tracing_subscriber.rs"
+test = false
+
+[dependencies]
+anyhow.workspace = true
+object_store = { workspace = true, features = ["azure"] }
+slatedb.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+tracing-subscriber.workspace = true

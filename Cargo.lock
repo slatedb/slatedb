@@ -3256,6 +3256,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "slatedb-examples"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "object_store",
+ "slatedb",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "slatedb-py"
 version = "0.7.0"
 dependencies = [
