@@ -2,9 +2,13 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
+const site = 'https://slatedb.io';
+const ogUrl = new URL('/img/slatedb-opengraph.jpg', site).href;
+const ogImageAlt = 'SlateDB - An embedded database built on object storage';
+
 // https://astro.build/config
 export default defineConfig({
-	site: 'https://slatedb.io',
+	site,
 	integrations: [
 		starlight({
 			title: 'SlateDB',
@@ -34,6 +38,16 @@ export default defineConfig({
 			editLink: {
 				baseUrl: 'https://github.com/slatedb/slatedb/edit/main/website/',
 			},
+			head: [
+				{
+					tag: 'meta',
+					attrs: { property: 'og:image', content: ogUrl },
+				},
+				{
+					tag: 'meta',
+					attrs: { property: 'og:image:alt', content: ogImageAlt },
+				},
+			],
 			sidebar: [
 				{
 					label: 'Start Here',
