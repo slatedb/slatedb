@@ -27,7 +27,7 @@ impl DbSnapshot {
         let txn_state = txn_manager.new_txn(seq);
 
         Arc::new(Self {
-            txn_state: txn_state,
+            txn_state,
             txn_manager,
             db_inner,
         })
@@ -78,9 +78,7 @@ impl DbSnapshot {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_options(range, &ScanOptions::default())
-            .await
-            .map_err(Into::into)
+        self.scan_with_options(range, &ScanOptions::default()).await
     }
 
     /// Scan a range of keys with the provided options.

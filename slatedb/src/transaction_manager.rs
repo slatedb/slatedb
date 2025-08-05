@@ -1,10 +1,8 @@
-use crate::db::DbInner;
 use crate::db_state::DbState;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Weak;
-use tokio::time::Instant;
 use uuid::Uuid;
 
 pub(crate) struct TransactionState {
