@@ -3,134 +3,68 @@ title: FAQ
 description: Frequently asked questions about SlateDB
 ---
 
-## General
+## Is SlateDB for OLTP or OLAP?
 
-### What is SlateDB?
+SlateDB is designed for key/value (KV) online transaction processing (OLTP) workloads. It is optimized for lowish-latency, high-throughput writes. It is not optimized for analytical queries that scan large amounts of columnar data. For online analytical processing (OLAP) workloads, we recommend checking out [Tonbo](https://github.com/tonbo-io/tonbo).
 
-SlateDB is an embedded storage engine built as a log-structured merge-tree (LSM-tree). Unlike traditional LSM-tree storage engines, SlateDB writes all data to object storage.
+## Can't I use S3 as a key-value store?
 
-### Why object storage?
+You can definitely use S3 as a key-value store. An object path would represent a key and the object its value. But then you pay one PUT per write, which gets expensive.
 
-Object storage provides highly-durable, highly-scalable, highly-available storage at a great cost. Recent advancements have made it even more attractive:
+To make writes cheaper, you will probably want to batch writes (write multiple key-value pairs in a single `PUT` call). Batched key-value pairs need to be encoded/decoded, and a sorted strings table (SST) is a natural fit. Once you have SSTs, a log-structured merge-tree (LSM) is a natural fit.
 
-* Google Cloud Storage supports multi-region and dual-region buckets for high availability.
-* All object stores support compare-and-swap (CAS) operations.
-* Amazon Web Service's S3 Express One Zone has single-digit millisecond latency.
+## Why does SlateDB have a write-ahead log?
 
-We believe that the future of object storage are multi-region, low latency buckets that support atomic CAS operations.
+Some developers have asked why SlateDB needs a write-ahead log (WAL) if we're batching writes. Couldn't we just write the batches directly to level 0 (L0) as an SST?
 
-### What object stores does SlateDB support?
+We opted to have the WAL separate from the L0 SST so that we could frequently write SSTs without increasing the number of L0 SSTs we have. Since reads are served from L0 SSTs, having too many of them would result in a very large amount of metadata that needs to be managed in memory. By contrast, we don't serve reads from the durable WAL, we only use it for recovery.
 
-SlateDB supports all object stores that are supported by the [`object_store`](https://docs.rs/object_store/latest/object_store/) crate, including:
+A separate WAL lets SlateDB frequently flush writes to object storage (to reduce durable write latency) without having to worry about the number of L0 SSTs we have.
 
-* Amazon S3
-* Google Cloud Storage
-* Azure Blob Storage
-* MinIO
-* Tigris
-* And many more
+## How is this different from RocksDB-cloud?
 
-### Is SlateDB production ready?
+RocksDB-cloud does not write its write-ahead log (WAL) to object storage. Instead, it supports either local disk, Kafka, or Kinesis for the WAL. Users must decide whether they want to increase operation complexity by adding a distributed system like Kafka or Kinesis to their stack, whether they want to use local disk for the WAL, or whether they want to use EBS or EFS for the WAL.
 
-SlateDB is currently in development and is not yet production ready. We are actively working on features and stability.
+SlateDB, by contrast, writes everything (including the WAL) to object storage. This offers a simpler architecture, better durability, and potentially better availability at the cost of increased write latency (compared to local).
 
-## Architecture
+RocksDB-cloud also does not cache writes, so recently written data must be read from object storage even if reads occur immediately after writes. SlateDB, by contrast, caches recent writes in memory. Eventually, we will also add on-disk caching as well.
 
-### How does SlateDB handle writes?
+Finally, it's unclear how open RocksDB-cloud is to outside contributors. The code is available, but there is very little documentation or community.
 
-SlateDB's write path is as follows:
+## How is this different from RocksDB on EBS?
 
-1. A `put` call is made on the client.
-2. The key/value pair is written to the mutable, in-memory WAL table.
-3. After `flush_ms` milliseconds, the mutable WAL table is frozen and an asynchronous write to object storage is triggered.
-4. When the write succeeds, insert the immutable WAL into the mutable memtable and notify `await`'ing clients.
-5. When the memtable reaches a `l0_sst_size_bytes`, it is frozen and written as an L0 SSTable in the object store's `compacted` directory.
+Amazon Web Services (AWS) elastic block storage (EBS) runs in a single availability zone (AZ). To get SlateDB's durability and availability (when run on S3 standard buckets), you would need to replicate the across three AZs. This complicates the main write path (you would need synchronous replication) and add to cost.
 
-### How does SlateDB handle reads?
+S3 is inherently much more flexible and elastic. You don't need to overprovision, you don't need to manage volume sizes, and you don't have to worry about transient space amplification from compaction.
 
-SlateDB's read path is as follows:
+S3 also allows for more cost/perf/availability tradeoffs. For example, users can sacrifice some availability by running one node in front of S3 and replacing it on a failure. [The Cloud Storage Triad: Latency, Cost, Durability](https://materializedview.io/p/cloud-storage-triad-latency-cost-durability) talks more about these tradeoffs.
 
-1. A `get` call is made on the client.
-2. The value is returned from the mutable memtable if found.
-3. The value is returned from the immutable memtable(s) if found.
-4. The value is returned from the L0 SSTables if found (searched from newest to oldest using bloom filtering).
-5. The value is returned from the sorted runs if found (searched from newest to oldest using bloom filtering).
+## How is this different from RocksDB on EFS?
 
-### How does SlateDB handle compaction?
+Amazon Web Services (AWS) elastic file system (EFS) is very expensive ($0.30/GB-month for storage, $0.03/GB for reads, and $0.06/GB for writes). It's also unclear how well RocksDB works with network file system (NFS) mounted filesystems, and whether [close-to-open consistency](https://docs.aws.amazon.com/efs/latest/ug/features.html#consistency) breaks any internal assumptions in RocksDB.
 
-SlateDB's compactor is responsible for merging SSTs from L0 into lower levels (L1, L2, and so on). These lower levels are referred to as _sorted runs_ in SlateDB. Each SST in a sorted run contains a distinct subset of the keyspace.
+## How is this different from DynamoDB?
 
-### How does SlateDB handle garbage collection?
+DynamoDB has a different cost structure and API than SlateDB. In general, SlateDB will be cheaper. DynamoDB charges $0.1/GiB for storage. If you use S3 standard with SlateDB, storage starts at $0.023/GiB (nearly 5 times cheaper).
 
-SlateDB garbage collects old manifests and SSTables. The collector runs in the client process. It will periodically delete:
+S3 standard charges $0.005 per-1000 writes (PUT, DELETE, etc.) and $0.0004 per-1000 reads. DynamoDB charges in read and write request units (RRU and WRU, respectively). Writes cost $1.25 per-million write units and $0.25 per-million read units. Depending on consistency and data size, a single request can cost multiple units (see [here](https://aws.amazon.com/dynamodb/pricing/on-demand/) for details). SlateDB batches writes by default, so it's usually going to have a less expensive API bill. If you batch DyanmoDB writes, you might be able to get similar fees.
 
-- Manifests older than `min_age` that are not referenced by any current snapshot.
-- WAL SSTables older than `min_age` and older than `wal_id_last_compacted`.
-- L0 SSTables older than `min_age` and not referenced by the current manifest or any active snapshot.
+DynamoDB offers 99.999% SLA while an S3 standard bucket offers 99.99%, so DynamoDB is more available.
 
-## Performance
+DynamoDB also requires partitioning. SlateDB doesn't have partitioning. Instead, you must build a partitioning scheme on top of SlateDB if you need it. Though, since SlateDB fences stale writers, partition management should be fairly straightforward.
 
-### What is the expected write latency?
+SlateDB also offers some unique features like the ability to create snapshot clones of a database at a specific point in time.
 
-SlateDB's write latency is dominated by object store PUT operations. The following table shows expected latencies for different object stores:
+## What happens if the process goes down before SlateDB flushes data to object storage?
 
-| Object Store | Expected Write Latency | Notes |
-|--------------|----------------------|-------|
-| S3 Standard | 50-100ms | Network latency dominates |
-| S3 Express One Zone | 5-10ms | Single-digit millisecond latency |
-| Google Cloud Storage | 50-100ms | Network latency dominates |
-| Azure Blob Storage | 50-100ms | Network latency dominates |
-| MinIO | 5-20ms | Depends on network and disk |
+Any in-flight data that hasn't yet been flushed to object storage will be lost.
 
-### What is the expected read latency?
+To prevent data loss, SlateDB's `put()` API will block until the data has been flushed to object storage. Client processes can block until their data has been durably written. Blocking can be disabled with [`WriteOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.WriteOptions.html) for clients that don't need this durability guarantee.
 
-Read latency is primarily determined by:
+## Does SlateDB support column families?
 
-1. **Bloom filter misses**: If a bloom filter indicates a key might exist in an SST, SlateDB must read the SST from object storage.
-2. **Object store GET latency**: The time it takes to download an SST from object storage.
-3. **SST size**: Larger SSTs take longer to download and parse.
+SlateDB does not support [column families](https://github.com/facebook/rocksdb/wiki/column-families). Opening multiple SlateDB databases is cheap. This is what we recommend if you need to separate data.
 
-### How can I tune SlateDB for better performance?
+## Are there any limits to key and value sizes?
 
-SlateDB provides several configuration options to tune performance:
-
-* **`flush_ms`**: The time to wait before flushing the mutable WAL to object storage. Lower values reduce write latency but increase object store PUT frequency.
-* **`l0_sst_size_bytes`**: The size of L0 SSTs. Larger SSTs provide better compression but take longer to upload.
-* **`bloom_filter_false_positive_rate`**: The false positive rate for bloom filters. Lower values reduce unnecessary SST reads but increase bloom filter size.
-* **`block_size`**: The size of blocks within SSTs. Larger blocks provide better compression but take longer to read individual keys.
-
-## Use Cases
-
-### What use cases is SlateDB good for?
-
-SlateDB is a great fit for use cases that are tolerant to 50-100ms write latency, are tolerant to data loss during failure, or are willing to pay for frequent API PUT calls. Such use cases include:
-
-* Stream processing
-* Serverless functions
-* Durable execution
-* Workflow orchestration
-* Durable caches
-* Data lakes
-
-### What use cases is SlateDB not good for?
-
-SlateDB is not a good fit for use cases that require:
-
-* Sub-millisecond write latency
-* High write throughput (more than 3,500 writes per second)
-* Strong consistency guarantees
-* Low API costs
-
-## Development
-
-### How can I contribute to SlateDB?
-
-We welcome contributions! Please see our [contributing guide](https://github.com/slatedb/slatedb/blob/main/CONTRIBUTING.md) for details.
-
-### Where can I report bugs?
-
-Please report bugs on our [GitHub issues page](https://github.com/slatedb/slatedb/issues).
-
-### Where can I ask questions?
-
-Please ask questions on our [GitHub discussions page](https://github.com/slatedb/slatedb/discussions).
+Keys are limited to a maximum of 65 KiB (65,535 bytes). Values are limited to a maximum of 4 GiB (4,294,967,295 bytes). Larger values require more memory and will take longer to write, so we recommend testing performance at your expected value size to ensure it meets your requirements.

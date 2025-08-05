@@ -89,7 +89,7 @@ export default defineConfig({
 						},
 						{
 							label: 'Checkpoint & Restore',
-							link: '/docs/operations/checkpoint/',
+							link: '/docs/tutorials/checkpoint/',
 						}
 					]
 				},
