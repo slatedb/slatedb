@@ -607,6 +607,7 @@ impl Db {
     /// use slatedb::{Db, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
+    /// use bytes::Bytes;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
@@ -619,14 +620,14 @@ impl Db {
     ///     
     ///     // Snapshot provides read-only access to database state
     ///     let value = snapshot.get(b"key1").await?;
-    ///     assert_eq!(value, Some(b"value1".as_slice()));
+    ///     assert_eq!(value, Some(Bytes::from(b"value1".as_ref())));
     ///     
     ///     // Write more data to original database
     ///     db.put(b"key2", b"value2").await?;
     ///     
     ///     // Snapshot still sees old state, original db sees new data
     ///     assert_eq!(snapshot.get(b"key2").await?, None);
-    ///     assert_eq!(db.get(b"key2").await?, Some(b"value2".as_slice()));
+    ///     assert_eq!(db.get(b"key2").await?, Some(Bytes::from(b"value2".as_ref())));
     ///     
     ///     Ok(())
     /// }
