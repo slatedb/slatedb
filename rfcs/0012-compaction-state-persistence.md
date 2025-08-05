@@ -258,7 +258,8 @@ This a proposol for Statement Management of Manifest and CompactionState. The pr
 
       ( in case of external processes like CLI sending a compaction request, the compaction persistence in the CompactionState would be done by the active Compactor)
 
-      - If latest .compactor compactor_epoch < current compactor's epoch, panic (compactor_epoch going backwards?)
+      - If latest .compactor compactor_epoch < current compactor's epoch, increment the .compactor file ID by 1 and retry. This process would continue until successful compactor write.
+      ( The current active compactor Job would have updated the .compactor file)
 
 
 At this point, the compactor has been successfully initialised. Any updates to write a new .compactor file in our case (00006.compactor) by stale compactors would fence them.

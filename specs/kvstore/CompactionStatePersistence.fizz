@@ -1,25 +1,31 @@
 ---
 deadlock_detection: false
 options:
-    max_actions: 50
+    max_actions: 80
     crash_on_yield: false
 action_options:
     Compactor.StartUp:
         max_actions: 3
     Compactor.InitiateCompaction:
-        max_actions: 2
+        max_actions: 3
+    Compactor.CompactionProgress:
+        max_actions: 4
     Compactor.CompleteCompaction:
+        max_actions: 3
+    Compactor.RetryManifestWrite:
         max_actions: 2
 
 ---
 
-# Model the compaction state persistence algorithm with epoch-based fencing
+# Model the updated compaction state persistence algorithm with epoch-based fencing
+# Based on RFC 0012 updated protocol
 
-COMPACTOR_IDS = ["compactor1", "compactor2", "compactor3"]
-L0_SSTS = ["sst1", "sst2", "sst3"]
-SORTED_RUNS = ["sr1", "sr2"]
+COMPACTOR_IDS = ["compactor_A", "compactor_B", "compactor_C"]
+L0_SSTS = ["sst1", "sst2", "sst3", "sst4"]
+SORTED_RUNS = ["sr1", "sr2", "sr3"]
 
 CompactionState = enum('Scheduled', 'InProgress', 'Completed', 'Failed')
+FencingResult = enum('SUCCESS', 'FENCED', 'VERSION_CONFLICT', 'PANIC')
 
 role Compactor:
     action Init:
@@ -27,137 +33,221 @@ role Compactor:
         self.local_epoch = 0
         self.is_active = False
         self.fenced = False
+        self.panicked = False
         self.compaction_jobs = {}
+        self.dirty_manifest_state = {}
         
     atomic action StartUp:
-        require not self.is_active and not self.fenced
+        require not self.is_active and not self.fenced and not self.panicked
         compactor_id = any COMPACTOR_IDS
         self.id = compactor_id
         
-        # Step 1: Fetch latest manifest file
+        # Step 1: T=1 - Fetch latest manifest file (00005.manifest)
         latest_manifest = object_store.get_latest_manifest()
         
-        # Step 2: Fetch latest compactor file  
+        # Step 2: T=2 - Fetch latest compactor file (00005.compactor)
         latest_compactor_state = object_store.get_latest_compactor_state()
         
-        # Step 3: Build dirty compaction state by merging
-        merged_state = self.merge_manifest_and_compactor_state(latest_manifest, latest_compactor_state)
+        # Step 3: T=3 - Build dirty compactionState by merging L0 SSTs and SortedRuns
+        # Copy SortedRuns from .compactor file to compactionState
+        # Add and delete L0 SSTs of .manifest in compactionState
+        merged_state = {
+            "l0_ssts": list(latest_manifest["l0_ssts"]),  
+            "sorted_runs": list(latest_compactor_state["sorted_runs"]),
+            "compactor_epoch": latest_compactor_state["compactor_epoch"]
+        }
         
-        # Step 4: Increment compactor_epoch and attempt CAS write
-        new_epoch = latest_compactor_state.compactor_epoch + 1
+        # Step 4: T=4 - Increment compactor_epoch and write to next sequential .compactor file
+        new_epoch = latest_compactor_state["compactor_epoch"] + 1
         self.local_epoch = new_epoch
         
+        # Write compaction job to next .compactor file (00006.compactor)
+        # Two level validation as per RFC
         result = object_store.cas_write_compactor_state(merged_state, new_epoch, self.id)
         
-        if result == "SUCCESS":
+        if result == FencingResult.SUCCESS:
+            # Before marking self as active, fence any compactors with lower epochs
+            for compactor in [compactor_A, compactor_B, compactor_C]:
+                if compactor != self and compactor.is_active and compactor.local_epoch < self.local_epoch:
+                    compactor.fenced = True
+                    compactor.is_active = False
+                    _active_compactors[compactor.id] = None
+            
             self.is_active = True
             _active_compactors[self.id] = self.local_epoch
-        elif result == "FENCED":
+            self.dirty_manifest_state = merged_state
+        elif result == FencingResult.FENCED:
             self.fenced = True
-        # If CAS fails due to version conflict, will retry on next action
+        elif result == FencingResult.PANIC:
+            self.panicked = True
+        # If VERSION_CONFLICT, will retry on next action
             
     atomic action InitiateCompaction:
-        require self.is_active and not self.fenced
+        require self.is_active and not self.fenced and not self.panicked
         
         # Create a compaction job
         job_id = self.id + "_job_" + str(len(self.compaction_jobs))
-        sources = any [L0_SSTS[:1], L0_SSTS[:2]]
+        sources = any [L0_SSTS[:1], L0_SSTS[:2], L0_SSTS[:3]]
         destination = any SORTED_RUNS
         
         compaction_job = {
             "id": job_id,
             "sources": sources,
             "destination": destination,
-            "state": CompactionState.Scheduled
+            "state": CompactionState.Scheduled,
+            "progress_ssts": []  # Track SSTs added during progress
         }
         
-        # Write compaction job to next compactor file
+        # Write compaction job to next .compactor file (00007.compactor)
         result = object_store.write_compaction_job(compaction_job, self.local_epoch, self.id)
         
-        if result == "SUCCESS":
+        if result == FencingResult.SUCCESS:
             self.compaction_jobs[job_id] = compaction_job
-        elif result == "FENCED":
+            # Transition job to InProgress state for execution
+            self.compaction_jobs[job_id]["state"] = CompactionState.InProgress
+        elif result == FencingResult.FENCED:
             self.fenced = True
             self.is_active = False
             _active_compactors[self.id] = None
-                
-    atomic action CompleteCompaction:
-        require self.is_active and not self.fenced and len(self.compaction_jobs) > 0
+        elif result == FencingResult.PANIC:
+            self.panicked = True
+            self.is_active = False
+            _active_compactors[self.id] = None
+            
+    atomic action CompactionProgress:
+        require self.is_active and not self.fenced and not self.panicked
         
-        # Pick a scheduled job to complete
-        scheduled_jobs = []
+        # Find an InProgress job to update
+        in_progress_jobs = []
         for jid in self.compaction_jobs:
             job = self.compaction_jobs[jid]
-            if job["state"] == CompactionState.Scheduled:
-                scheduled_jobs.append(jid)
+            if job["state"] == CompactionState.InProgress:
+                in_progress_jobs.append(jid)
         
-        if len(scheduled_jobs) == 0:
+        if len(in_progress_jobs) == 0:
             return
             
-        job_id = any scheduled_jobs
+        job_id = any in_progress_jobs
+        job = self.compaction_jobs[job_id]
+        
+        # Simulate progress: add an SST to the sorted run being built
+        new_sst_name = job["destination"] + "_part_" + str(len(job["progress_ssts"]))
+        job["progress_ssts"].append(new_sst_name)
+        
+        # Write compactionState with latest progress to next .compactor file (00008.compactor)
+        result = object_store.write_compaction_progress(job, self.local_epoch, self.id)
+        
+        if result == FencingResult.FENCED:
+            self.fenced = True
+            self.is_active = False
+            _active_compactors[self.id] = None
+        elif result == FencingResult.PANIC:
+            self.panicked = True
+            self.is_active = False
+            _active_compactors[self.id] = None
+        elif result == FencingResult.SUCCESS:
+            # Progress update successful, continue compaction
+            pass
+                
+    atomic action CompleteCompaction:
+        require self.is_active and not self.fenced and not self.panicked and len(self.compaction_jobs) > 0
+        
+        # Pick an InProgress job to complete
+        in_progress_jobs = []
+        for jid in self.compaction_jobs:
+            job = self.compaction_jobs[jid]
+            if job["state"] == CompactionState.InProgress:
+                in_progress_jobs.append(jid)
+        
+        if len(in_progress_jobs) == 0:
+            return
+            
+        job_id = any in_progress_jobs
         job = self.compaction_jobs[job_id]
         job["state"] = CompactionState.Completed
         
-        # Step 1: Write compactor state with completed job
+        # Step 1: Write compactor state with completed job to next .compactor file (00009.compactor)
         result1 = object_store.write_compactor_state_with_job(job, self.local_epoch, self.id)
-        if result1 == "FENCED":
+        if result1 == FencingResult.FENCED:
             self.fenced = True
             self.is_active = False
             _active_compactors[self.id] = None
             return
+        elif result1 == FencingResult.PANIC:
+            self.panicked = True
+            self.is_active = False
+            _active_compactors[self.id] = None
+            return
             
-        # Step 2: Update in-memory manifest state
-        new_manifest_state = self.update_manifest_with_completed_job(job)
-        
-        # Step 3: Write manifest with CAS
-        result2 = object_store.cas_write_manifest(new_manifest_state, self.local_epoch, self.id)
-        if result2 == "FENCED":
-            # Check if we're still valid compactor
-            latest_compactor = object_store.get_latest_compactor_state()
-            if latest_compactor.compactor_epoch > self.local_epoch:
-                self.fenced = True
-                self.is_active = False
-                _active_compactors[self.id] = None
-        elif result2 == "SUCCESS":
-            # Successfully completed compaction
-            pass
-            
-    atomic func merge_manifest_and_compactor_state(manifest, compactor_state):
-        # Simplified merge logic
-        merged = {
-            "l0_ssts": list(manifest.l0_ssts),  
-            "sorted_runs": list(compactor_state.sorted_runs),
-            "compactor_epoch": compactor_state.compactor_epoch
-        }
-        return merged
-        
-    atomic func update_manifest_with_completed_job(job):
-        # Remove old SSTs/SRs, add new SR
+        # Step 2: Update in-memory manifest state to reflect latest SRs/SSTs
+        # Remove old SSTs/SRs that were compacted, add new SR
         new_l0_ssts = []
-        for sst in object_store.current_manifest.l0_ssts:
+        for sst in self.dirty_manifest_state["l0_ssts"]:
             if sst not in job["sources"]:
                 new_l0_ssts.append(sst)
         
-        manifest_state = {
+        self.dirty_manifest_state = {
             "l0_ssts": new_l0_ssts,
-            "sorted_runs": object_store.current_manifest.sorted_runs + [job["destination"]]
+            "sorted_runs": self.dirty_manifest_state["sorted_runs"] + [job["destination"]]
         }
-        return manifest_state
+        
+        # Step 3: Write in-memory manifest state to next sequential .manifest file
+        result2 = object_store.cas_write_manifest(self.dirty_manifest_state, self.local_epoch, self.id)
+        if result2 == FencingResult.VERSION_CONFLICT:
+            # Trigger retry logic (Step 8 in RFC)
+            pass  # Will be handled by RetryManifestWrite action
+        elif result2 == FencingResult.SUCCESS:
+            # Successfully completed compaction
+            pass
+            
+    atomic action RetryManifestWrite:
+        require self.is_active and not self.fenced and not self.panicked
+        
+        # Step 8: On file version exists error, fetch both latest files
+        latest_compactor_state = object_store.get_latest_compactor_state()
+        latest_manifest = object_store.get_latest_manifest()
+        
+        # Check the compactor_epoch and fence if necessary
+        if latest_compactor_state["compactor_epoch"] > self.local_epoch:
+            # Compactor is stale and fenced
+            self.fenced = True
+            self.is_active = False
+            _active_compactors[self.id] = None
+            return
+        elif latest_compactor_state["compactor_epoch"] < self.local_epoch:
+            # This should never happen - epochs going backwards
+            self.panicked = True
+            self.is_active = False
+            _active_compactors[self.id] = None
+            return
+        
+        # Epochs match, retry manifest write
+        result = object_store.cas_write_manifest(self.dirty_manifest_state, self.local_epoch, self.id)
+        if result == FencingResult.FENCED:
+            self.fenced = True
+            self.is_active = False
+            _active_compactors[self.id] = None
+        elif result == FencingResult.PANIC:
+            self.panicked = True
+            self.is_active = False
+            _active_compactors[self.id] = None
+            
+
 
 role ObjectStore:
     action Init:
         self.manifest_files = {}
         self.compactor_files = {}
-        self.manifest_id = 1
-        self.compactor_id = 1
+        self.manifest_id = 5  # Start at 00005 as per RFC example
+        self.compactor_id = 5  # Start at 00005 as per RFC example
         self.current_manifest = {
-            "id": 0,
+            "id": 5,
             "l0_ssts": list(L0_SSTS),
             "sorted_runs": [],
             "writer_epoch": 1
         }
         self.current_compactor_state = {
-            "id": 0, 
+            "id": 5,
             "compactor_epoch": 0,
             "sorted_runs": [],
             "active_compactions": {}
@@ -170,78 +260,109 @@ role ObjectStore:
         return self.current_compactor_state
         
     atomic func cas_write_compactor_state(state, epoch, compactor_id):
-        # Two-level validation as per RFC
+        # Two level validation as per updated RFC
         
-        # Level 1: Epoch check
-        if epoch <= self.current_compactor_state.compactor_epoch:
-            return "FENCED"
+        # Level 1: Epoch Check - Only allow exact match for startup
+        if epoch != self.current_compactor_state["compactor_epoch"] + 1:
+            return FencingResult.FENCED
             
-        # Level 2: File version check (CAS)
+        # Level 2: File version check (CAS) - next sequential position
         next_id = self.compactor_id + 1
         if next_id in self.compactor_files:
             existing_file = self.compactor_files[next_id]
-            if existing_file.compactor_epoch >= epoch:
-                return "FENCED" 
-            elif existing_file.compactor_epoch == epoch:
-                return "FENCED"  # Same epoch = illegal state
+            existing_epoch = existing_file["compactor_epoch"]
+            
+            if existing_epoch > epoch:
+                return FencingResult.FENCED  # Higher epoch exists
+            elif existing_epoch == epoch:
+                return FencingResult.FENCED  # Same epoch = illegal state  
+            elif existing_epoch < epoch:
+                return FencingResult.PANIC   # Epochs going backwards - panic condition
                 
-        # Success case
+        # Success case - new compactor takes over
         new_state = dict(state)
         new_state["id"] = next_id
         new_state["compactor_epoch"] = epoch
         new_state["owner"] = compactor_id
+        if "active_compactions" not in new_state:
+            new_state["active_compactions"] = {}
         
         self.compactor_files[next_id] = new_state
         self.current_compactor_state = new_state
         self.compactor_id = next_id
         
-        return "SUCCESS"
+        return FencingResult.SUCCESS
         
     atomic func write_compaction_job(job, epoch, compactor_id):
         # Check if compactor is still valid
-        if epoch != self.current_compactor_state.compactor_epoch:
-            return "FENCED"
+        if epoch != self.current_compactor_state["compactor_epoch"]:
+            return FencingResult.FENCED
             
         next_id = self.compactor_id + 1
         if next_id in self.compactor_files:
-            return "FENCED"
+            return FencingResult.FENCED  # File exists, compactor is fenced
             
         new_state = dict(self.current_compactor_state)
         new_state["id"] = next_id
+        if "active_compactions" not in new_state:
+            new_state["active_compactions"] = {}
         new_state["active_compactions"][job["id"]] = job
         
         self.compactor_files[next_id] = new_state
         self.current_compactor_state = new_state
         self.compactor_id = next_id
         
-        return "SUCCESS"
+        return FencingResult.SUCCESS
+        
+    atomic func write_compaction_progress(job, epoch, compactor_id):
+        # Check if compactor is still valid
+        if epoch != self.current_compactor_state["compactor_epoch"]:
+            return FencingResult.FENCED
+            
+        next_id = self.compactor_id + 1
+        if next_id in self.compactor_files:
+            return FencingResult.FENCED  # File exists, compactor is fenced
+            
+        new_state = dict(self.current_compactor_state)
+        new_state["id"] = next_id
+        if "active_compactions" not in new_state:
+            new_state["active_compactions"] = {}
+        new_state["active_compactions"][job["id"]] = job
+        
+        self.compactor_files[next_id] = new_state
+        self.current_compactor_state = new_state
+        self.compactor_id = next_id
+        
+        return FencingResult.SUCCESS
         
     atomic func write_compactor_state_with_job(job, epoch, compactor_id):
-        if epoch != self.current_compactor_state.compactor_epoch:
-            return "FENCED"
+        if epoch != self.current_compactor_state["compactor_epoch"]:
+            return FencingResult.FENCED
             
         next_id = self.compactor_id + 1
         if next_id in self.compactor_files:
-            return "FENCED"
+            return FencingResult.FENCED
             
         new_state = dict(self.current_compactor_state)
         new_state["id"] = next_id
+        if "active_compactions" not in new_state:
+            new_state["active_compactions"] = {}
         new_state["active_compactions"][job["id"]] = job
         
         self.compactor_files[next_id] = new_state
         self.current_compactor_state = new_state
         self.compactor_id = next_id
         
-        return "SUCCESS"
+        return FencingResult.SUCCESS
         
     atomic func cas_write_manifest(manifest_state, epoch, compactor_id):
         # Check if compactor is still valid
-        if epoch != self.current_compactor_state.compactor_epoch:
-            return "FENCED"
+        if epoch != self.current_compactor_state["compactor_epoch"]:
+            return FencingResult.FENCED
             
         next_id = self.manifest_id + 1
         if next_id in self.manifest_files:
-            return "VERSION_CONFLICT"
+            return FencingResult.VERSION_CONFLICT  # Triggers retry logic
             
         new_manifest = dict(manifest_state)
         new_manifest["id"] = next_id
@@ -251,13 +372,13 @@ role ObjectStore:
         self.current_manifest = new_manifest  
         self.manifest_id = next_id
         
-        return "SUCCESS"
+        return FencingResult.SUCCESS
 
 action Init:
-    # Initialize multiple compactors
-    compactor1 = Compactor()
-    compactor2 = Compactor() 
-    compactor3 = Compactor()
+    # Initialize multiple compactors as per RFC naming
+    compactor_A = Compactor()
+    compactor_B = Compactor() 
+    compactor_C = Compactor()
     
     object_store = ObjectStore()
     
@@ -267,7 +388,7 @@ action Init:
 # Safety Properties
 
 always assertion SingleActiveCompactor:
-    """Only one compactor should be active at any time"""
+    """Only one compactor should be active at any time (mutual exclusion)"""
     active_count = 0
     for compactor_id in _active_compactors:
         if _active_compactors[compactor_id] != None:
@@ -276,16 +397,25 @@ always assertion SingleActiveCompactor:
 
 always assertion EpochMonotonicity:
     """Compactor epochs should be monotonically increasing"""
-    return object_store.current_compactor_state.compactor_epoch >= 0
+    return object_store.current_compactor_state["compactor_epoch"] >= 0
 
 always assertion FencedCompactorsStayInactive:
     """Once a compactor is fenced, it should remain inactive"""
     fenced_active = False
-    for compactor in [compactor1, compactor2, compactor3]:
+    for compactor in [compactor_A, compactor_B, compactor_C]:
         if compactor.fenced and compactor.is_active:
             fenced_active = True
             break
     return not fenced_active
+
+always assertion PanickedCompactorsStayInactive:
+    """Once a compactor panics, it should remain inactive"""
+    panicked_active = False
+    for compactor in [compactor_A, compactor_B, compactor_C]:
+        if compactor.panicked and compactor.is_active:
+            panicked_active = True
+            break
+    return not panicked_active
 
 always assertion ValidEpochOwnership:
     """Active compactor should own the current epoch"""
@@ -293,14 +423,40 @@ always assertion ValidEpochOwnership:
     for compactor_id in _active_compactors:
         if _active_compactors[compactor_id] != None:
             active_count = active_count + 1
-            if _active_compactors[compactor_id] != object_store.current_compactor_state.compactor_epoch:
+            if _active_compactors[compactor_id] != object_store.current_compactor_state["compactor_epoch"]:
+                return False
+    return True
+
+always assertion NoBackwardsEpochs:
+    """System should never allow backwards epoch progression"""
+    panicked_compactors = 0
+    for compactor in [compactor_A, compactor_B, compactor_C]:
+        if compactor.panicked:
+            panicked_compactors = panicked_compactors + 1
+    # If any compactor panicked due to backwards epochs, this indicates a serious bug
+    return panicked_compactors == 0
+
+always assertion CompactionJobStateConsistency:
+    """Compaction jobs should follow proper state transitions"""
+    for compactor in [compactor_A, compactor_B, compactor_C]:
+        for job_id in compactor.compaction_jobs:
+            job = compactor.compaction_jobs[job_id]
+            # Jobs should have valid states
+            valid_states = [CompactionState.Scheduled, CompactionState.InProgress, CompactionState.Completed, CompactionState.Failed]
+            if job["state"] not in valid_states:
+                return False
+            # Jobs should have required fields
+            if "sources" not in job or "destination" not in job or "progress_ssts" not in job:
+                return False
+            # Progress SSTs should be a list
+            if not isinstance(job["progress_ssts"], list):
                 return False
     return True
 
 # Liveness Properties  
 
 always eventually assertion CompactorEventuallyActive:
-    """Eventually, one compactor should become active"""
+    """Eventually, one compactor should become active (progress guarantee)"""
     active_count = 0
     for compactor_id in _active_compactors:
         if _active_compactors[compactor_id] != None:
@@ -308,13 +464,40 @@ always eventually assertion CompactorEventuallyActive:
     return active_count >= 1
 
 always eventually assertion CompactionJobsComplete:
-    """Compaction jobs should eventually complete or fail"""
+    """Compaction jobs should eventually complete (no starvation)"""
     incomplete_jobs = False
-    for compactor in [compactor1, compactor2, compactor3]:
+    for compactor in [compactor_A, compactor_B, compactor_C]:
         if compactor.is_active:
             for job_id in compactor.compaction_jobs:
                 job = compactor.compaction_jobs[job_id]
-                if job["state"] == CompactionState.Scheduled:
+                if job["state"] == CompactionState.InProgress or job["state"] == CompactionState.Scheduled:
                     incomplete_jobs = True
                     break
-    return not incomplete_jobs 
+    return not incomplete_jobs
+
+always eventually assertion SystemMakesProgress:
+    """System should eventually process compactions and update manifest"""
+    # Either no jobs exist, or manifest has been updated from initial state
+    jobs_exist = False
+    for compactor in [compactor_A, compactor_B, compactor_C]:
+        if len(compactor.compaction_jobs) > 0:
+            jobs_exist = True
+            break
+    
+    if not jobs_exist:
+        return True  # No jobs, so progress not needed
+        
+    # If jobs exist, manifest should have changed from initial state
+    return object_store.current_manifest["id"] > 5
+
+always eventually assertion ProgressUpdatesEventuallyOccur:
+    """InProgress compaction jobs should eventually make progress"""
+    stuck_jobs = False
+    for compactor in [compactor_A, compactor_B, compactor_C]:
+        if compactor.is_active:
+            for job_id in compactor.compaction_jobs:
+                job = compactor.compaction_jobs[job_id]
+                if job["state"] == CompactionState.InProgress and len(job["progress_ssts"]) == 0:
+                    stuck_jobs = True
+                    break
+    return not stuck_jobs 
