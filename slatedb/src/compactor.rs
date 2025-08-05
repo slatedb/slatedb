@@ -81,7 +81,7 @@ impl CompactionProgressTracker {
             self.processed_bytes
                 .insert(id, (bytes_processed, total_bytes));
         } else {
-            warn!(id:%; "compaction progress tracker missing for job");
+            warn!("compaction progress tracker missing for job [id={}]", id);
         }
     }
 
@@ -92,11 +92,11 @@ impl CompactionProgressTracker {
             let (processed_bytes, total_bytes) = entry.value();
             let percentage = (processed_bytes * 100 / total_bytes) as u32;
             debug!(
-                id:%,
-                current_percentage:% = format!("{percentage}%"),
+                "compaction progress [id={}, current_percentage={}%, processed_bytes={}, estimated_total_bytes={}]",
+                id,
+                percentage,
                 processed_bytes,
-                estimated_total_bytes = total_bytes;
-                "compaction progress"
+                total_bytes,
             );
         }
     }
@@ -306,7 +306,7 @@ impl CompactorEventHandler {
                     .await
                     .expect("fatal error finishing compaction"),
                 Err(err) => {
-                    error!("error executing compaction: {:#?}", err);
+                    error!("error executing compaction [error={:#?}]", err);
                     self.finish_failed_compaction(id);
                 }
             },
@@ -505,7 +505,7 @@ impl CompactorEventHandler {
                 self.start_compaction(id, compaction).await?;
             }
             Err(err) => {
-                warn!("invalid compaction: {:?}", err);
+                warn!("invalid compaction [error={:?}]", err);
             }
         }
         Ok(())
@@ -522,7 +522,7 @@ impl CompactorEventHandler {
         self.state.db_state().log_db_runs();
         let compactions = self.state.compactions();
         for compaction in compactions.iter() {
-            info!("in-flight compaction: {}", compaction);
+            info!("in-flight compaction [compaction={}]", compaction);
         }
     }
 }

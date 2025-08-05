@@ -172,7 +172,7 @@ impl DbInner {
                         SlateDBError::BackgroundTaskShutdown
                     }
                     Err(err) => {
-                        warn!("write task exited with {:?}", err);
+                        warn!("write task exited [error={}]", err);
                         err.clone()
                     }
                 };

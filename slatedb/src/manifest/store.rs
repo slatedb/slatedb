@@ -609,7 +609,7 @@ impl ManifestStore {
         }
 
         let manifest_path = &self.get_manifest_path(id);
-        debug!(manifest_path:%; "deleting manifest");
+        debug!("deleting manifest [manifest_path={}]", manifest_path);
         self.object_store.delete(manifest_path).await?;
         Ok(())
     }
@@ -639,7 +639,10 @@ impl ManifestStore {
                         size: file.size as u32,
                     });
                 }
-                Err(_) => warn!("Unknown file in manifest directory: {:?}", file.location),
+                Err(_) => warn!(
+                    "unknown file in manifest directory [location={:?}]",
+                    file.location
+                ),
                 _ => {}
             }
         }

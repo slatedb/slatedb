@@ -8,14 +8,20 @@ use std::error::Error;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 mod args;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_log::LogTracer::init().expect("failed to initialize tracing");
-    tracing_subscriber::fmt::init();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+        .with_test_writer()
+        .init();
 
     let args: CliArgs = parse_args();
     let path = Path::from(args.path.as_str());
@@ -27,8 +33,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         tokio::signal::ctrl_c()
             .await
-            .expect("Failed to install CTRL+C signal handler");
-        debug!("Intercepted SIGINT ... shutting down background processes");
+            .expect("failed to install CTRL+C signal handler");
+        debug!("intercepted SIGINT ... shutting down background processes");
         // if we cant send a shutdown message it's probably because it's already closed
         ct.cancel();
     });
@@ -60,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn exec_read_manifest(admin: &Admin, id: Option<u64>) -> Result<(), Box<dyn Error>> {
     match admin.read_manifest(id).await? {
         None => {
-            println!("No manifest file found.")
+            println!("no manifest file found")
         }
         Some(manifest) => {
             println!("{}", manifest);

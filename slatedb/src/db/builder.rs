@@ -290,9 +290,15 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
-            info!(path:?, settings:? = settings_json; "Opening SlateDB database");
+            info!(
+                "opening SlateDB database [path={}, settings={}]",
+                path, settings_json
+            );
         } else {
-            info!(path:?, settings:? = self.settings; "Opening SlateDB database");
+            info!(
+                "opening SlateDB database [path={}, settings={:?}]",
+                path, self.settings
+            );
         }
 
         let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
@@ -491,7 +497,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 &tokio_handle,
                 move |result: &Result<(), SlateDBError>| {
                     let err = bg_task_result_into_err(result);
-                    warn!("compactor thread exited with {:?}", err);
+                    warn!("compactor thread exited [error={}]", err);
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
@@ -522,7 +528,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     &gc_handle,
                     move |result| {
                         let err = bg_task_result_into_err(result);
-                        warn!("GC thread exited with {:?}", err);
+                        warn!("GC thread exited [error={}]", err);
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
                     },
