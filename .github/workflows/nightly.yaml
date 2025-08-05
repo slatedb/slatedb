@@ -175,7 +175,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gdb
       - name: Run DST Tests
-        run: cargo nextest run test_dst_nightly -p slatedb-dst --all-features --profile dst-nightly
+        run: cargo nextest run test_dst_nightly -p slatedb-dst --all-features --profile dst-nightly --no-capture
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
 
