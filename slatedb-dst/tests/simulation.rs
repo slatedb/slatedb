@@ -164,7 +164,6 @@ fn test_dst_nightly() -> Result<(), Error> {
     for core in 0..num_cores {
         let handle = std::thread::spawn(move || {
             let seed = rand::rng().random::<u64>();
-            info!("running simulation [core={}, seed={}]", core, seed);
             let rand = Rc::new(DbRand::new(seed));
             let runtime = build_runtime(rand.seed());
             let system_clock = Arc::new(MockSystemClock::new());
