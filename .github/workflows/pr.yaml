@@ -152,3 +152,25 @@ jobs:
           comment-on-alert: true
           summary-always: true
           max-items-in-chart: 30
+
+  test_website:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - shell: bash
+      id: check_website_changed
+      run: |
+        # Check if files under website have changed in the diff
+        test `git diff --name-only HEAD^ HEAD | grep website | wc -l` -gt 0
+
+        # Set the output named "changed"
+        echo "changed=${$?}" >> $GITHUB_OUTPUT
+
+    # Run the step only with "changed" equals "0"
+    - shell: bash
+      # steps.<step_id>.outputs.<output name>
+      if: steps.check_website_changed.outputs.changed == '0'
+      working-directory: ./website
+      run: |
+        npm install
+        npm run build
