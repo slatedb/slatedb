@@ -604,12 +604,12 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     
