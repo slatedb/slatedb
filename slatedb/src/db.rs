@@ -143,7 +143,7 @@ impl DbInner {
             settings.flush_interval,
         ));
 
-        let txn_manager = Arc::new(TransactionManager::new(state.clone()));
+        let txn_manager = Arc::new(TransactionManager::new(state.clone(), rand.clone()));
 
         let db_inner = Self {
             state,

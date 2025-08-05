@@ -1,4 +1,6 @@
 use crate::db_state::DbState;
+use crate::rand::DbRand;
+use crate::utils::IdGenerator;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +17,8 @@ pub struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
     // reference to the db state for updating recent_snapshot_min_seq
     db_state: Arc<RwLock<DbState>>,
+    // random number generator for generating transaction IDs
+    db_rand: Arc<DbRand>,
 }
 
 struct TransactionManagerInner {
@@ -23,18 +27,19 @@ struct TransactionManagerInner {
 }
 
 impl TransactionManager {
-    pub fn new(db_state: Arc<RwLock<DbState>>) -> Self {
+    pub fn new(db_state: Arc<RwLock<DbState>>, db_rand: Arc<DbRand>) -> Self {
         Self {
             db_state,
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
             })),
+            db_rand,
         }
     }
 
     /// Register a transaction state with a specific ID
     pub fn new_txn(&self, seq: u64) -> Arc<TransactionState> {
-        let id = Uuid::new_v4();
+        let id = self.db_rand.rng().gen_uuid();
         let txn_state = Arc::new(TransactionState { id, seq });
         {
             let mut inner = self.inner.write();
