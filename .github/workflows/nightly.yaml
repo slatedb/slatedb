@@ -177,6 +177,7 @@ jobs:
         run: cargo nextest run test_dst_nightly -p slatedb-dst --all-features --profile dst-nightly --no-capture
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
+          SLATEDB_DST_ROOT: "/tmp/slatedb-dst"
 
   # This is an integration test that makes sure SlateDB works with ZeroFS.
   # ZeroFS has discovered some issues with SlateDB so we want to make sure

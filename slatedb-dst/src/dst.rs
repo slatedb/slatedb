@@ -75,7 +75,7 @@
 //!         distr,
 //!         dst_opts,
 //!     );
-//!     dst.run_simulation(10).await.unwrap();
+//!     dst.run_simulation(DstDuration::Iterations(10)).await.unwrap();
 //! });
 //! # }
 //! ```
