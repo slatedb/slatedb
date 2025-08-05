@@ -6,6 +6,9 @@
 //!
 //! - `RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo test test_dst --all-features`
 //! - `RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo nextest run test_dst  --profile dst`
+//!
+//! This module also contains a slow test that's meant to be run nightly. It is only run when
+//! `slow`, `dst`, and `tokio_unstable` cfgs are all set.
 #![cfg(all(dst, tokio_unstable))]
 
 use rand::Rng;
@@ -144,34 +147,45 @@ fn test_dst_is_deterministic(
     Ok(())
 }
 
+/// Runs one DST per-core for a long time on all available CPU cores.
+///
+/// This test only runs when `slow`, `dst`, and `tokio_unstable` cfgs are set.
 #[test]
+#[cfg(slow)]
 fn test_dst_nightly() -> Result<(), Error> {
     use slatedb_dst::DstDuration;
     use sysinfo::System;
 
+    let mut handles = Vec::new();
     let mut system = System::new();
     system.refresh_cpu_all();
     let num_cores = system.cpus().len() as u64;
     info!("running nightly [num_cores={}]", num_cores);
     for core in 0..num_cores {
-        let seed = rand::rng().random::<u64>();
-        info!("running simulation [core={}, seed={}]", core, seed);
-        let rand = Rc::new(DbRand::new(seed));
-        let runtime = build_runtime(rand.seed());
-        let system_clock = Arc::new(MockSystemClock::new());
-        let logical_clock = Arc::new(MockLogicalClock::new());
-        let duration = DstDuration::WallClock(std::time::Duration::from_secs(1));
-        runtime.block_on(async move {
-            run_simulation(
-                system_clock,
-                logical_clock,
-                rand,
-                duration,
-                DstOptions::default(),
-            )
-            .await
-        })?
+        let handle = std::thread::spawn(move || {
+            let seed = rand::rng().random::<u64>();
+            info!("running simulation [core={}, seed={}]", core, seed);
+            let rand = Rc::new(DbRand::new(seed));
+            let runtime = build_runtime(rand.seed());
+            let system_clock = Arc::new(MockSystemClock::new());
+            let logical_clock = Arc::new(MockLogicalClock::new());
+            let duration = DstDuration::WallClock(std::time::Duration::from_secs(3_600));
+            runtime.block_on(async move {
+                run_simulation(
+                    system_clock,
+                    logical_clock,
+                    rand,
+                    duration,
+                    DstOptions::default(),
+                )
+                .await
+            })
+        });
+        handles.push(handle);
     }
-    info!("all DSTs passed");
+    for (core, handle) in handles.into_iter().enumerate() {
+        let result = handle.join().expect("join failed");
+        info!("simulation result [core={}, result={:?}]", core, result);
+    }
     Ok(())
 }

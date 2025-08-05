@@ -88,4 +88,12 @@ tempfile = "3.3"
 tokio-test = "0.4.4"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "allow", check-cfg = ['cfg(dst)', 'cfg(tokio_unstable)'] }
+unexpected_cfgs = { level = "allow", check-cfg = [
+    # Enables deterministic simulation tests in slatedb-dst
+    'cfg(dst)',
+    # Enables slow tests
+    'cfg(slow)',
+    # Enables tokio unstable features, which are required for DST
+    # (see slatedb-dst/src/utils.rs for details)
+    'cfg(tokio_unstable)'
+] }

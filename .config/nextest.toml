@@ -1,5 +1,6 @@
 experimental = ["wrapper-scripts"]
 
+# PR unit/CI profile
 [profile.ci]
 slow-timeout = { period = "30s", terminate-after = 4 }
 
@@ -10,10 +11,20 @@ command = "../scripts/backtrace-on-timeout.sh"
 filter = "all()"
 run-wrapper = "backtrace-on-timeout"
 
+# PR DST profile
 [profile.dst]
 slow-timeout = { period = "30m", terminate-after = 1 }
-default-filter = "package(slatedb-dst) & test(dst)"
+default-filter = "package(slatedb-dst) & test(test_dst)"
 
 [[profile.dst.scripts]]
+filter = "all()"
+run-wrapper = "backtrace-on-timeout"
+
+# Nightly DST profile
+[profile.dst-nightly]
+slow-timeout = { period = "90m", terminate-after = 1 }
+default-filter = "package(slatedb-dst) & test(test_dst_nightly)"
+
+[[profile.dst-nightly.scripts]]
 filter = "all()"
 run-wrapper = "backtrace-on-timeout"
