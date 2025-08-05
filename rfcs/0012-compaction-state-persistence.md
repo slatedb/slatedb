@@ -342,25 +342,25 @@ Compactor 1 writes .manifest ([SR1, SR2]) // undoes Compactor 2's change when it
 .manifest file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
 .compactor file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0]
 
-At T = 0, Compactor A starts(compactor_epoch = 1), 
+At T = 0, Compactor A starts(compactor_epoch = 1), updates by creating a sequential .compactor file
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
 .compactor file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0]
 
-At T = 1, Compactor A (compactor_epoch = 1), updates .compactor file
+At T = 1, Compactor A (compactor_epoch = 1), updates by creating a sequential .compactor file
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
 .compactor file : [SR7(merged), SR3, SR2, SR1, SR0]
 
-At T = 3, Compactor B starts(compactor_epoch = 2), 
+At T = 3, Compactor B starts(compactor_epoch = 2), updates by creating a sequential .compactor file (Comapactor A is fenced)
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
-.compactor file : [SR7(merged), SR3, SR2, SR1, SR0] (Comapactor A is fenced)
+.compactor file : [SR7(merged), SR3, SR2, SR1, SR0] 
 
-At T = 4, Compactor B updates (compactor_epoch = 2), updates .compactor file 
+At T = 4, Compactor B (compactor_epoch = 2), updates by creating a sequential .compactor file
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
 .compactor file : [SR5(merged), SR3(merged)]
 
-At T = 5, Compactor B updates .manifest file
+At T = 5, Compactor B updates by creating a sequential .manifest file
 
-At T = 6, Compactor A updates .manifest file (Fenced Compactor updating Manifest)
+At T = 6, Compactor A updates by creating a sequential .manifest file (Fenced Compactor updating Manifest)
 ```
 
 Note: The protocol still allows fenced compactor to update the manifest if they are in order because compactor is always syncing compaction state. However, it would get fenced if the file already exists. Consider the following case:
@@ -375,7 +375,7 @@ At T = 0, Compactor A starts(compactor_epoch = 1),
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
 .compactor file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0]
 
-At T = 1, Compactor A (compactor_epoch = 1), updates .compactor file
+At T = 1, Compactor A (compactor_epoch = 1), updates by creating a sequential .compactor file
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
 .compactor file : [SR7(merged), SR3, SR2, SR1, SR0]
 
