@@ -454,6 +454,28 @@ impl DstDistribution for DefaultDstDistribution {
     }
 }
 
+/// The duration to run the simulation for. This can be either an iteration count or a
+/// wall-clock duration. "wall-clock" means the actual time on the machine, not the
+/// simulated time.
+#[derive(Debug, Copy, Clone)]
+pub enum DstDuration {
+    /// Run for the given number of iterations.
+    Iterations(u32),
+    /// Run for the given wall-clock duration. "wall-clock" means the actual time on the
+    /// machine, not the simulated time.
+    WallClock(Duration),
+}
+
+impl DstDuration {
+    /// Returns true if the duration has not been exceeded.
+    pub fn should_run(&self, current_iteration: u32, start_time: std::time::Instant) -> bool {
+        match self {
+            DstDuration::Iterations(max_iterations) => current_iteration < *max_iterations,
+            DstDuration::WallClock(max_duration) => start_time.elapsed() < *max_duration,
+        }
+    }
+}
+
 /// The main struct that runs the simulation.
 pub struct Dst {
     /// The SlateDB instance to simulate on.
@@ -488,19 +510,25 @@ impl Dst {
         }
     }
 
-    /// Runs the simulation for the given number of iterations.
+    /// Runs the simulation for the given duration.
     ///
     /// Each iteration is a single step in the simulation. Each step samples an action
     /// from the action sampler and runs it. Reads (get and scan) are verified against the
     /// in-memory state. Writes are run against the DB and the in-memory state.
-    pub async fn run_simulation(&mut self, iterations: u32) -> Result<(), Error> {
-        let start_time = self.system_clock.now();
-        for (step_count, _) in (0..iterations).enumerate() {
+    pub async fn run_simulation(&mut self, dst_duration: DstDuration) -> Result<(), Error> {
+        let simulated_time = self.system_clock.now();
+        let actual_start_time = std::time::Instant::now();
+        let mut step_count = 0;
+        eprintln!(
+            "running simulation [step_count={}, dst_duration={:?}]",
+            step_count, dst_duration
+        );
+        while dst_duration.should_run(step_count, actual_start_time) {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
                 "run_simulation [step_count={}, simulated_time={}, btree_size={}, btree_entries={}, step_action={}]",
                 step_count,
-                self.system_clock.now().signed_duration_since(start_time),
+                self.system_clock.now().signed_duration_since(simulated_time),
                 utils::pretty_bytes(self.state.size_bytes),
                 self.state.len(),
                 step_action,
@@ -517,6 +545,7 @@ impl Dst {
                 DstAction::AdvanceTime(duration) => self.advance_time(duration).await,
             }
             self.maybe_shrink_db().await?;
+            step_count += 1;
         }
         Ok(())
     }

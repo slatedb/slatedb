@@ -161,6 +161,24 @@ jobs:
           git commit -m "Update microbenchmark pprof for job id ${GITHUB_RUN_ID}"
           git push
 
+  deterministic-simulation-test:
+    runs-on: warp-ubuntu-latest-x64-16x
+    # Stop running tests at 57m to stay within the 1 hour warp build billing window
+    timeout-minutes: 57
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.98
+      - name: Install gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdb
+      - name: Run DST Tests
+        run: cargo nextest run test_dst_nightly -p slatedb-dst --all-features --profile dst-nightly
+        env:
+          RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
+
   # This is an integration test that makes sure SlateDB works with ZeroFS.
   # ZeroFS has discovered some issues with SlateDB so we want to make sure
   # we catch them early. Moreover, ZeroFS is an important project in the

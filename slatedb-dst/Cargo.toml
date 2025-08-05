@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 rstest = { workspace = true }
+sysinfo = { workspace = true }
 
 [lints]
 workspace = true
