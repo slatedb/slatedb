@@ -163,8 +163,7 @@ jobs:
 
   deterministic-simulation-test:
     runs-on: warp-ubuntu-latest-x64-16x
-    # Stop running tests at 57m to stay within the 1 hour warp build billing window
-    timeout-minutes: 57
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2

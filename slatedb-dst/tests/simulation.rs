@@ -5,7 +5,7 @@
 //! These tests can only be run when DST is enabled. Use one of the following commands to run them:
 //!
 //! - `RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo test test_dst --all-features`
-//! - `RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo nextest run test_dst  --profile dst`
+//! - `RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo nextest run test_dst --profile dst`
 //!
 //! This module also contains a slow test that's meant to be run nightly. It is only run when
 //! `slow`, `dst`, and `tokio_unstable` cfgs are all set.
@@ -159,18 +159,20 @@ fn test_dst_nightly() -> Result<(), Error> {
     let mut handles = Vec::new();
     let mut system = System::new();
     system.refresh_cpu_all();
-    let num_cores = system.cpus().len() as u64;
+    // 90% of the cores because GH actions were being killed at 100%
+    let num_cores = (system.cpus().len() as f64 * 0.9).floor() as u64;
     info!("running nightly [num_cores={}]", num_cores);
     for core in 0..num_cores {
         let handle = std::thread::spawn(move || {
             let seed = rand::rng().random::<u64>();
-            info!("running simulation [core={}, seed={}]", core, seed);
             let rand = Rc::new(DbRand::new(seed));
             let runtime = build_runtime(rand.seed());
             let system_clock = Arc::new(MockSystemClock::new());
             let logical_clock = Arc::new(MockLogicalClock::new());
             let duration = DstDuration::WallClock(std::time::Duration::from_secs(3_000)); // 50m
             runtime.block_on(async move {
+                let span = tracing::info_span!("run_simulation", core = core, seed = seed);
+                let _enter = span.enter();
                 run_simulation(
                     system_clock,
                     logical_clock,
