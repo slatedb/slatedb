@@ -148,7 +148,7 @@ pub async fn run_simulation(
     dst_opts: DstOptions,
 ) -> Result<(), Error> {
     let seed = rand.seed();
-    info!("running simulation with seed {}", seed);
+    info!("running simulation [seed={}]", seed);
     let mut dst = build_dst(
         system_clock.clone(),
         logical_clock.clone(),
@@ -159,7 +159,7 @@ pub async fn run_simulation(
     match dst.run_simulation(dst_duration).await {
         Ok(_) => Ok(()),
         Err(e) => {
-            error!("simulation failed with seed {}: {}", seed, e);
+            error!("simulation failed [seed={}, error={}]", seed, e);
             Err(e)
         }
     }
@@ -187,7 +187,6 @@ static INIT_LOGGING: Once = Once::new();
 fn init_tracing() {
     INIT_LOGGING.call_once(|| {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        tracing_log::LogTracer::init().expect("failed to initialize tracing");
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)

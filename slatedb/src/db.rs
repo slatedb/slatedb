@@ -287,21 +287,21 @@ impl DbInner {
             let total_mem_size_bytes = wal_size_bytes + imm_memtable_size_bytes;
 
             trace!(
+                "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
                 total_mem_size_bytes,
                 wal_size_bytes,
                 imm_memtable_size_bytes,
-                max_unflushed_bytes = self.settings.max_unflushed_bytes;
-                "checking backpressure",
+                self.settings.max_unflushed_bytes,
             );
 
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();
                 warn!(
+                    "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
                     total_mem_size_bytes,
                     wal_size_bytes,
                     imm_memtable_size_bytes,
-                    max_unflushed_bytes = self.settings.max_unflushed_bytes;
-                    "Unflushed memtable size exceeds max_unflushed_bytes. Applying backpressure.",
+                    self.settings.max_unflushed_bytes,
                 );
 
                 let maybe_oldest_unflushed_memtable = {
@@ -344,7 +344,7 @@ impl DbInner {
                     result = await_flush_memtable => result?,
                     result = await_flush_wal => result?,
                     _ = timeout_fut => {
-                        warn!("Backpressure timeout: waited 30s, no memtable/WAL flushed yet");
+                        warn!("backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
                 };
             } else {
@@ -528,8 +528,8 @@ impl Db {
             let mut maybe_compactor_task = self.compactor_task.lock();
             maybe_compactor_task.take()
         } {
-            let result = compactor_task.await.expect("Failed to join compactor task");
-            info!("compactor task exited with: {:?}", result);
+            let result = compactor_task.await.expect("failed to join compactor task");
+            info!("compactor task exited [result={:?}]", result);
         }
 
         if let Some(garbage_collector_task) = {
@@ -538,8 +538,8 @@ impl Db {
         } {
             let result = garbage_collector_task
                 .await
-                .expect("Failed to join garbage collector task");
-            info!("garbage collector task exited with: {:?}", result);
+                .expect("failed to join garbage collector task");
+            info!("garbage collector task exited [result={:?}]", result);
         }
 
         // Shutdown the write batch thread.
@@ -555,8 +555,8 @@ impl Db {
             let mut write_task = self.write_task.lock();
             write_task.take()
         } {
-            let result = write_task.await.expect("Failed to join write thread");
-            info!("write task exited with {:?}", result);
+            let result = write_task.await.expect("failed to join write thread");
+            info!("write task exited [result={:?}]", result);
         }
 
         // Shutdown the WAL flush thread.
@@ -564,7 +564,7 @@ impl Db {
             .wal_buffer
             .close()
             .await
-            .expect("Failed to close WAL buffer");
+            .expect("failed to close WAL buffer");
 
         // Shutdown the memtable flush thread.
         self.inner
@@ -581,8 +581,8 @@ impl Db {
         } {
             let result = memtable_flush_task
                 .await
-                .expect("Failed to join memtable flush thread");
-            info!("mem table flush task exited with: {:?}", result);
+                .expect("failed to join memtable flush thread");
+            info!("mem table flush task exited [result={:?}]", result);
         }
 
         Ok(())

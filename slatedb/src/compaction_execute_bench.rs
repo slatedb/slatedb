@@ -138,7 +138,7 @@ impl CompactionExecuteBench {
                     if retries >= 3 {
                         return Err(err);
                     } else {
-                        error!("error loading sst: {:?}", err)
+                        error!("error loading sst [retry={}]: {:?}", retries, err)
                     }
                 }
             }
@@ -177,7 +177,7 @@ impl CompactionExecuteBench {
             .now()
             .signed_duration_since(start)
             .num_milliseconds();
-        info!("wrote sst with id: {:?} {:?}ms", &sst.id, elapsed_ms);
+        info!("wrote sst [id={:?}, elapsed_ms={}]", &sst.id, elapsed_ms);
         Ok(())
     }
 
@@ -198,7 +198,7 @@ impl CompactionExecuteBench {
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => return Err(SlateDBError::from(err).into()),
-                Err(err) => panic!("task failed: {:?}", err),
+                Err(err) => panic!("task failed [error={:?}]", err),
             }
         }
         Ok(())
@@ -365,7 +365,7 @@ impl CompactionExecuteBench {
                             .now()
                             .signed_duration_since(start)
                             .num_milliseconds();
-                        info!(elapsed_ms; "compaction finished");
+                        info!("compaction finished [elapsed_ms={}]", elapsed_ms);
                     }
                     Err(err) => return Err(err.into()),
                 }

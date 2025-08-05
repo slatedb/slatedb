@@ -99,7 +99,7 @@ impl GcTask for WalGcTask {
 
         for id in sst_ids_to_delete {
             if let Err(e) = self.table_store.delete_sst(&id).await {
-                error!("Error deleting WAL SST: {}", e);
+                error!("error deleting WAL SST [id={:?}, error={}]", id, e);
             } else {
                 self.stats.gc_wal_count.inc();
             }

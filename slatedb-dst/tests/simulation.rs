@@ -117,7 +117,7 @@ fn test_dst_is_deterministic(
                     if let Some(expected_u64) = expected_u64 {
                         assert_eq!(
                             next_u64, expected_u64,
-                            "non-determinism detected: seed={}, simulation_count={}, next_u64={}, expected_u64={}",
+                            "non-determinism detected [seed={}, simulation_count={}, next_u64={}, expected_u64={}]",
                             seed, simulation_count, next_u64, expected_u64
                         );
                     }
@@ -125,7 +125,7 @@ fn test_dst_is_deterministic(
                         assert_eq!(
                             next_time,
                             expected_time,
-                            "non-determinism detected: seed={}, simulation_count={}, next_time={:?}, expected_time={:?}",
+                            "non-determinism detected [seed={}, simulation_count={}, next_time={:?}, expected_time={:?}]",
                             seed,
                             simulation_count,
                             next_time,
@@ -138,7 +138,7 @@ fn test_dst_is_deterministic(
                     Ok(())
                 }
                 Err(e) => {
-                    error!("simulation failed with seed {}: {}", seed, e);
+                    error!("simulation failed [seed={}, error={}]", seed, e);
                     Err(e)
                 }
             }
