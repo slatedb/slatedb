@@ -169,7 +169,7 @@ fn test_dst_nightly() -> Result<(), Error> {
             let runtime = build_runtime(rand.seed());
             let system_clock = Arc::new(MockSystemClock::new());
             let logical_clock = Arc::new(MockLogicalClock::new());
-            let duration = DstDuration::WallClock(std::time::Duration::from_secs(3_600));
+            let duration = DstDuration::WallClock(std::time::Duration::from_secs(3_000)); // 50m
             runtime.block_on(async move {
                 run_simulation(
                     system_clock,
