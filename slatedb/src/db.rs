@@ -144,7 +144,8 @@ impl DbInner {
             settings.flush_interval,
         ));
 
-        let txn_manager = Arc::new(TransactionManager::new(cancellation_token));
+        let txn_manager = Arc::new(TransactionManager::new(state.clone()));
+
         let db_inner = Self {
             state,
             settings,

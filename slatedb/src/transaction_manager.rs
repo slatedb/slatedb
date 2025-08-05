@@ -1,4 +1,5 @@
 use crate::db::DbInner;
+use crate::db_state::DbState;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,26 +14,23 @@ pub(crate) struct TransactionState {
 
 /// Manages the lifecycle of DbSnapshot objects, tracking all living transaction states
 pub struct TransactionManager {
-    /// Map of transaction state ID to weak reference
     inner: Arc<RwLock<TransactionManagerInner>>,
-    /// Reference to the db inner for updating manifest retention information
-    db_inner: Arc<DbInner>,
+    // reference to the db state for updating recent_snapshot_min_seq
+    db_state: Arc<RwLock<DbState>>,
 }
 
 struct TransactionManagerInner {
+    /// Map of transaction state ID to weak reference
     active_txns: HashMap<Uuid, Weak<TransactionState>>,
-    /// The last min retention seq that has been synced to the object store.
-    last_sync_manifest_time: Option<Instant>,
 }
 
 impl TransactionManager {
-    pub fn new(db_inner: Arc<DbInner>) -> Self {
+    pub fn new(db_state: Arc<RwLock<DbState>>) -> Self {
         Self {
+            db_state,
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
-                last_sync_manifest_time: None,
             })),
-            db_inner,
         }
     }
 
@@ -71,8 +69,8 @@ impl TransactionManager {
 
         // update recent_snapshot_min_seq in the db state. the editted db state will be persisted
         // to the manifest store when memtable is flushed.
-        let mut state_guard = self.db_inner.state.write();
-        state_guard.modify(|state| {
+        let mut guard = self.db_state.write();
+        guard.modify(|state| {
             state.state.manifest.core.recent_snapshot_min_seq = min_seq;
         });
     }

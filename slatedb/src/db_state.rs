@@ -504,12 +504,6 @@ impl<'a> StateModifier<'a> {
         Self { db_state, state }
     }
 
-    pub fn update_recent_snapshot_min_seq(&mut self, min_seq: Option<u64>) {
-        let mut state = self.state_copy();
-        state.manifest.core.recent_snapshot_min_seq = min_seq;
-        self.update_state(state);
-    }
-
     pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
