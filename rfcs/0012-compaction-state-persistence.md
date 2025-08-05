@@ -318,7 +318,7 @@ At this point, the compactor has been successfully initialised. Any updates to w
 
 ```
 
-### Possible Race conditions
+### Race conditions handled in the protocol 
 
 #### Incorrect Read order of manifest and compactionState
 
