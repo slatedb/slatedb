@@ -208,7 +208,7 @@ impl TableStore {
             .map_err(|e| match e {
                 object_store::Error::AlreadyExists { path: _, source: _ } => match id {
                     SsTableId::Wal(_) => {
-                        debug!("Path {path} already exists");
+                        debug!("path already exists [path={}]", path);
                         SlateDBError::Fenced
                     }
                     SsTableId::Compacted(_) => SlateDBError::from(e),
@@ -253,7 +253,7 @@ impl TableStore {
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        debug!(path:%; "deleting SST");
+        debug!("deleting SST [path={}]", path);
         object_store.delete(&path).await.map_err(SlateDBError::from)
     }
 
@@ -288,11 +288,14 @@ impl TableStore {
                     }
                 }
                 Err(e) => {
-                    warn!("Error while parsing file id: {}", e);
+                    warn!(
+                        "error while parsing file id [location={}, error={}]",
+                        file.location, e
+                    );
                 }
                 _ => {
                     warn!(
-                        "Unexpected file found in compacted directory: {:?}",
+                        "unexpected file found in compacted directory [location={}]",
                         file.location
                     );
                 }

@@ -273,7 +273,6 @@ impl DefaultDstDistribution {
     fn sample_write(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
         let mut write_ops = Vec::new();
         let write_option = self.get_write_options();
-        // TODO: make this configurable
         let put_probability = 0.8;
         let mut remaining_bytes =
             self.sample_log10_uniform(1..self.options.max_write_batch_bytes) as i64;
@@ -316,12 +315,7 @@ impl DefaultDstDistribution {
         } else if start_key == end_key {
             end_key.push(b'\0');
         }
-        DstAction::Scan(
-            start_key.clone(),
-            end_key.clone(),
-            // TODO: add ScanOption variation
-            ScanOptions::default(),
-        )
+        DstAction::Scan(start_key.clone(), end_key.clone(), ScanOptions::default())
     }
 
     fn sample_flush(&self) -> DstAction {
@@ -422,7 +416,6 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_put_options(&self) -> PutOptions {
-        // TODO: implement ttl support
         PutOptions::default()
     }
 
@@ -440,7 +433,6 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_read_options(&self) -> ReadOptions {
-        // TODO: add random read options
         ReadOptions::default()
     }
 }
@@ -448,7 +440,6 @@ impl DefaultDstDistribution {
 /// Samples an action from the distribution. Actions are sampled with equal probability.
 impl DstDistribution for DefaultDstDistribution {
     fn sample_action(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
-        // TODO: make action weights configurable
         let weights = [1; 5]; // all actions have equal probability for now
         let dist = WeightedIndex::new(weights).expect("non-empty weights and all ≥ 0");
         let action = dist.sample(&mut self.rand.rng());
@@ -459,6 +450,28 @@ impl DstDistribution for DefaultDstDistribution {
             3 => self.sample_flush(),
             4 => self.sample_advance_time(),
             _ => unreachable!(),
+        }
+    }
+}
+
+/// The duration to run the simulation for. This can be either an iteration count or a
+/// wall-clock duration. "wall-clock" means the actual time on the machine, not the
+/// simulated time.
+#[derive(Debug, Copy, Clone)]
+pub enum DstDuration {
+    /// Run for the given number of iterations.
+    Iterations(u32),
+    /// Run for the given wall-clock duration. "wall-clock" means the actual time on the
+    /// machine, not the simulated time.
+    WallClock(Duration),
+}
+
+impl DstDuration {
+    /// Returns true if the duration has not been exceeded.
+    pub fn should_run(&self, current_iteration: u32, start_time: std::time::Instant) -> bool {
+        match self {
+            DstDuration::Iterations(max_iterations) => current_iteration < *max_iterations,
+            DstDuration::WallClock(max_duration) => start_time.elapsed() < *max_duration,
         }
     }
 }
@@ -497,22 +510,28 @@ impl Dst {
         }
     }
 
-    /// Runs the simulation for the given number of iterations.
+    /// Runs the simulation for the given duration.
     ///
     /// Each iteration is a single step in the simulation. Each step samples an action
     /// from the action sampler and runs it. Reads (get and scan) are verified against the
     /// in-memory state. Writes are run against the DB and the in-memory state.
-    pub async fn run_simulation(&mut self, iterations: u32) -> Result<(), Error> {
-        let start_time = self.system_clock.now();
-        for (step_count, _) in (0..iterations).enumerate() {
+    pub async fn run_simulation(&mut self, dst_duration: DstDuration) -> Result<(), Error> {
+        let simulated_time = self.system_clock.now();
+        let actual_start_time = std::time::Instant::now();
+        let mut step_count = 0;
+        eprintln!(
+            "running simulation [step_count={}, dst_duration={:?}]",
+            step_count, dst_duration
+        );
+        while dst_duration.should_run(step_count, actual_start_time) {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
+                "run_simulation [step_count={}, simulated_time={}, btree_size={}, btree_entries={}, step_action={}]",
                 step_count,
-                simulated_time:% = self.system_clock.now().signed_duration_since(start_time),
-                btree_size:% = utils::pretty_bytes(self.state.size_bytes),
-                btree_entries = self.state.len(),
-                step_action:% = step_action;
-                "run_simulation"
+                self.system_clock.now().signed_duration_since(simulated_time),
+                utils::pretty_bytes(self.state.size_bytes),
+                self.state.len(),
+                step_action,
             );
             match step_action {
                 DstAction::Write(write_ops, write_options) => {
@@ -524,13 +543,9 @@ impl Dst {
                 }
                 DstAction::Flush => self.run_flush().await?,
                 DstAction::AdvanceTime(duration) => self.advance_time(duration).await,
-                // TODO: add DbReader open, close, get, and scan
-                // TODO: add DbWriter close and open
-                // TODO: add seek
-                // TODO: add checkpointing?
-                // TODO: add fencing?
             }
             self.maybe_shrink_db().await?;
+            step_count += 1;
         }
         Ok(())
     }
@@ -607,7 +622,7 @@ impl Dst {
     }
 
     async fn advance_time(&self, duration: Duration) {
-        debug!(duration:?; "advance_time");
+        debug!("advance_time [duration={:?}]", duration);
         self.system_clock.clone().advance(duration).await;
     }
 

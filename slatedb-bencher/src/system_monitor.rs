@@ -31,11 +31,11 @@ impl SystemMonitor {
     /// Starts the system monitoring in a background thread.
     pub fn start(&mut self) {
         if self.handle.is_some() {
-            info!("System monitoring is already running");
+            info!("system monitoring is already running");
             return;
         }
 
-        info!("Starting system resource monitoring");
+        info!("starting system resource monitoring");
         self.running.store(true, Ordering::SeqCst);
         let running = Arc::clone(&self.running);
 
@@ -151,20 +151,20 @@ impl SystemMonitor {
                 }
             }
 
-            info!("System resource monitoring stopped");
+            info!("system resource monitoring stopped");
         }));
     }
 
     /// Stops the system monitoring and waits for the thread to finish.
     pub fn stop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            info!("Stopping system resource monitoring");
+            info!("stopping system resource monitoring");
             self.running.store(false, Ordering::SeqCst);
             if let Err(e) = handle.join() {
-                info!("Error joining system monitor thread: {:?}", e);
+                info!("error joining system monitor thread [error={:?}]", e);
             }
         } else {
-            info!("System monitoring is not running");
+            info!("system monitoring is not running");
         }
     }
 }

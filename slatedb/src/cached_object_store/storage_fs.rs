@@ -492,7 +492,7 @@ impl FsCacheEvictorInner {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    warn!("evictor: failed to walk the cache folder: {}", err);
+                    warn!("evictor failed to walk the cache folder [error={}]", err);
                     continue;
                 }
             };
@@ -504,7 +504,8 @@ impl FsCacheEvictorInner {
                 Ok(metadata) => metadata,
                 Err(err) => {
                     warn!(
-                        "evictor: failed to get the metadata of the cache file: {}",
+                        "evictor failed to get the metadata of the cache file [path={:?}, error={}]",
+                        entry.path(),
                         err
                     );
                     continue;
@@ -589,14 +590,14 @@ impl FsCacheEvictorInner {
         // if the file is not found, still try to remove it from the cache_entries, and decrease the cache_size_bytes.
         // this might happen when the file is removed by other processes, but the cache_entries is not updated yet.
         if let Err(err) = tokio::fs::remove_file(&target).await {
-            warn!("evictor: failed to remove the cache file: {}", err);
+            warn!("evictor failed to remove the cache file [error={}]", err);
             if err.kind() != std::io::ErrorKind::NotFound {
                 return 0;
             }
         }
 
         debug!(
-            "evictor: evicted cache file: {:?}, bytes: {}",
+            "evictor evicted cache file [path={:?}, bytes={}]",
             target, target_bytes
         );
 

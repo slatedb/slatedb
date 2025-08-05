@@ -37,3 +37,19 @@ $ RUSTFLAGS="--cfg dst --cfg tokio_unstable" \
   RUSTDOCFLAGS="--cfg tokio_unstable" \
   cargo nextest run -p slatedb-dst --profile dst
 ```
+
+## Nightly
+
+This crate also contains a longer-running test that's meant to be run every
+night. It is only run when `slow`, `dst`, and `tokio_unstable` cfgs are all set.
+
+The `.github/workflows/nightly.yaml` is configured to run this test.
+
+To run it locally, you must set the `RUSTFLAGS` environment variable to include
+`--cfg dst --cfg tokio_unstable --cfg slow`.
+
+```bash
+$ RUSTFLAGS="--cfg dst --cfg tokio_unstable --cfg slow" \
+  RUSTDOCFLAGS="--cfg tokio_unstable" \
+  cargo test test_dst_nightly -p slatedb-dst --all-features
+```

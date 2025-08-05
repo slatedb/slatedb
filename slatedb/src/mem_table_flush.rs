@@ -7,6 +7,7 @@ use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
 use log::{error, info, warn};
+use std::cmp;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -95,7 +96,7 @@ impl MemtableFlusher {
             let rguard = self.db_inner.state.read();
             if rguard.state().core().l0.len() >= self.db_inner.settings.l0_max_ssts {
                 warn!(
-                    "too many l0 files {} >= {}. Won't flush imm to l0",
+                    "won't flush imm to l0 because too many l0 files [l0_len={}, l0_max_ssts={}]",
                     rguard.state().core().l0.len(),
                     self.db_inner.settings.l0_max_ssts
                 );
@@ -117,7 +118,37 @@ impl MemtableFlusher {
                 .await?;
             {
                 let mut guard = self.db_inner.state.write();
-                guard.move_imm_memtable_to_l0(imm_memtable.clone(), sst_handle)?;
+                guard.modify(|modifier| {
+                    let popped = modifier
+                        .state
+                        .imm_memtable
+                        .pop_back()
+                        .expect("expected imm memtable");
+                    assert!(Arc::ptr_eq(&popped, &imm_memtable));
+                    modifier.state.manifest.core.l0.push_front(sst_handle);
+                    modifier.state.manifest.core.replay_after_wal_id =
+                        imm_memtable.recent_flushed_wal_id();
+
+                    // ensure the persisted manifest tick never goes backwards in time
+                    let memtable_tick = imm_memtable.table().last_tick();
+                    modifier.state.manifest.core.last_l0_clock_tick = cmp::max(
+                        modifier.state.manifest.core.last_l0_clock_tick,
+                        memtable_tick,
+                    );
+                    if modifier.state.manifest.core.last_l0_clock_tick != memtable_tick {
+                        return Err(SlateDBError::InvalidClockTick {
+                            last_tick: modifier.state.manifest.core.last_l0_clock_tick,
+                            next_tick: memtable_tick,
+                        });
+                    }
+
+                    // update the persisted manifest last_l0_seq as the latest seq in the imm.
+                    if let Some(seq) = imm_memtable.table().last_seq() {
+                        modifier.state.manifest.core.last_l0_seq = seq;
+                    };
+
+                    Ok(())
+                })?;
             }
             imm_memtable.notify_flush_to_l0(Ok(()));
             match self.write_manifest_safely().await {
@@ -127,7 +158,10 @@ impl MemtableFlusher {
                 Err(err) => {
                     if matches!(err, SlateDBError::Fenced) {
                         if let Err(delete_err) = self.db_inner.table_store.delete_sst(&id).await {
-                            warn!("failed to delete fenced SST {id:?}: {delete_err}");
+                            warn!(
+                                "failed to delete fenced SST [id={:?}, error={}]",
+                                id, delete_err
+                            );
                         }
                         // refresh manifest and state so that local state reflects remote
                         self.load_manifest().await?;
@@ -148,7 +182,7 @@ impl DbInner {
     ) -> Result<(), SlateDBError> {
         let result = flusher.flush_imm_memtables_to_l0().await;
         if let Err(err) = &result {
-            error!("error from memtable flush: {err}");
+            error!("error from memtable flush [error={}]", err);
         } else {
             self.db_stats.immutable_memtable_flushes.inc();
         }
@@ -182,7 +216,7 @@ impl DbInner {
                     }
                     _ = manifest_poll_interval.tick() => {
                         if let Err(err) = flusher.load_manifest().await {
-                            error!("error loading manifest: {err}");
+                            error!("error loading manifest [error={}]", err);
                             return Err(err);
                         }
                         this.flush_and_record(flusher).await?
@@ -198,14 +232,14 @@ impl DbInner {
                                 if let Some(rsp_sender) = sender {
                                     let res = rsp_sender.send(Ok(()));
                                     if let Err(Err(err)) = res {
-                                        error!("error sending flush response: {err}");
+                                        error!("error sending flush response [error={}]", err);
                                     }
                                 }
                             },
                             MemtableFlushMsg::CreateCheckpoint { options, sender } => {
                                 let write_result = flusher.write_checkpoint_safely(&options).await;
                                 if let Err(Err(e)) = sender.send(write_result) {
-                                    error!("Failed to send checkpoint error: {e}");
+                                    error!("Failed to send checkpoint error [error={}]", e);
                                 }
                             }
                         }
@@ -238,10 +272,10 @@ impl DbInner {
             Self::drain_messages(&mut flush_rx, &pending_error).await;
 
             if let Err(err) = flusher.write_manifest_safely().await {
-                error!("error writing manifest on shutdown: {}", err);
+                error!("error writing manifest on shutdown [err={}]", err);
             }
 
-            info!("memtable flush thread exiting with {:?}", result);
+            info!("memtable flush thread exiting [result={:?}]", result);
             result
         };
 
@@ -250,15 +284,16 @@ impl DbInner {
             tokio_handle,
             move |result| {
                 let err = bg_task_result_into_err(result);
-                warn!("memtable flush task exited with {:?}", err);
+                warn!("memtable flush task exited with error [error={}]", err);
                 let mut state = this.state.write();
                 state.record_fatal_error(err.clone());
                 info!("notifying in-memory memtable of error");
                 state.memtable().table().notify_durable(Err(err.clone()));
                 for imm_table in state.state().imm_memtable.iter() {
                     info!(
-                        "notifying imm memtable (last_wal_id={}) of error",
-                        imm_table.recent_flushed_wal_id()
+                        "notifying imm memtable of error [last_wal_id={}, error={}]",
+                        imm_table.recent_flushed_wal_id(),
+                        err,
                     );
                     imm_table.notify_flush_to_l0(Err(err.clone()));
                     imm_table.table().notify_durable(Err(err.clone()));

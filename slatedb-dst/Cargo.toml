@@ -14,17 +14,17 @@ publish = false
 chrono = { workspace = true }
 ctor = { workspace = true }
 futures = { workspace = true }
-log = { workspace = true, features = ["kv"] }
+log = { workspace = true }
 object_store = { workspace = true }
 rand = { workspace = true }
 slatedb = { workspace = true, features = ["lz4", "snappy", "test-util", "wal_disable", "zlib", "zstd"] }
 tokio = { workspace = true, features = ["macros", "test-util", "rt"] }
 tracing = { workspace = true }
-tracing-log = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 rstest = { workspace = true }
+sysinfo = { workspace = true }
 
 [lints]
 workspace = true

@@ -21,6 +21,7 @@ use tracing::{error, info};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
+use crate::dst::DstDuration;
 use crate::DefaultDstDistribution;
 use crate::Dst;
 use crate::DstOptions;
@@ -103,16 +104,12 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         l0_sst_size_bytes,
         l0_max_ssts,
         max_unflushed_bytes,
-        // default_ttl,
         compression_codec,
-        // TODO: add object store filesystem cache configs
-        // TODO: add random GC configs
         garbage_collector_options: Some(GarbageCollectorOptions {
             manifest_options: GarbageCollectorOptions::default().manifest_options,
             wal_options: GarbageCollectorOptions::default().wal_options,
             compacted_options: GarbageCollectorOptions::default().compacted_options,
         }),
-        // TODO: add random compactor configs
         compactor_options: Some(CompactorOptions::default()),
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
@@ -147,11 +144,11 @@ pub async fn run_simulation(
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
     rand: Rc<DbRand>,
-    iterations: u32,
+    dst_duration: DstDuration,
     dst_opts: DstOptions,
 ) -> Result<(), Error> {
     let seed = rand.seed();
-    info!("running simulation with seed {}", seed);
+    info!("running simulation [seed={}]", seed);
     let mut dst = build_dst(
         system_clock.clone(),
         logical_clock.clone(),
@@ -159,10 +156,10 @@ pub async fn run_simulation(
         dst_opts,
     )
     .await;
-    match dst.run_simulation(iterations).await {
+    match dst.run_simulation(dst_duration).await {
         Ok(_) => Ok(()),
         Err(e) => {
-            error!("simulation failed with seed {}: {}", seed, e);
+            error!("simulation failed [seed={}, error={}]", seed, e);
             Err(e)
         }
     }
@@ -190,7 +187,6 @@ static INIT_LOGGING: Once = Once::new();
 fn init_tracing() {
     INIT_LOGGING.call_once(|| {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        tracing_log::LogTracer::init().expect("failed to initialize tracing");
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)

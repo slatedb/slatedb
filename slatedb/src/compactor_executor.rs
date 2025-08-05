@@ -184,7 +184,7 @@ impl TokioCompactionExecutorInner {
         &self,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
-        debug!(compaction:?; "executing compaction");
+        debug!("executing compaction [compaction={:?}]", compaction);
         let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
@@ -297,7 +297,7 @@ impl TokioCompactionExecutorInner {
             for result in results {
                 match result {
                     Err(e) if !e.is_cancelled() => {
-                        error!("Shutdown error in compaction task: {:?}", e);
+                        error!("shutdown error in compaction task [error={:?}]", e);
                     }
                     _ => {}
                 }
