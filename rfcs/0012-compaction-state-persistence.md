@@ -114,7 +114,7 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 - **Minimizes overhead**: Persistence aligns with existing I/O patterns
 - **Scales cost-effectively**: Higher persistence frequency for larger, more valuable compactions
 
-## Worflow
+## Workflow
 
 ### Compaction Workflow
 
