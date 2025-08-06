@@ -51,5 +51,6 @@ To run it locally, you must set the `RUSTFLAGS` environment variable to include
 ```bash
 $ RUSTFLAGS="--cfg dst --cfg tokio_unstable --cfg slow" \
   RUSTDOCFLAGS="--cfg tokio_unstable" \
+  SLATEDB_DST_ROOT="/tmp/slatedb-dst" \
   cargo test test_dst_nightly -p slatedb-dst --all-features
 ```
