@@ -26,3 +26,4 @@ rstest = { workspace = true }
 [[bin]]
 name = "slatedb"
 path = "src/main.rs"
+bench = false
