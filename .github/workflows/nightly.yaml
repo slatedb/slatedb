@@ -83,6 +83,12 @@ jobs:
           echo -e "Deleting 1 gig file"
           time aws s3 rm --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig
 
+      - name: Download previous mermaid plots
+        uses: actions/cache/restore@v4
+        with:
+          path: ./target/bencher/results/mermaid
+          key: ${{ runner.os }}-mermaid-plots
+
       - name: Run benchmark
         env:
           CLOUD_PROVIDER: aws
@@ -95,6 +101,31 @@ jobs:
         run: |
           aws s3 rm --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }} --recursive
           ./slatedb-bencher/benchmark-db.sh
+
+      - name: Save mermaid plots cache
+        uses: actions/cache/save@v4
+        with:
+          path: ./target/bencher/results/mermaid
+          key: ${{ runner.os }}-mermaid-plots
+
+      - name: Add mermaid diagrams to summary
+        run: |
+          echo "# SlateDB Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Add each mermaid diagram to the summary
+          for mermaid_file in target/bencher/results/mermaid/*.mermaid; do
+            if [ -f "$mermaid_file" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```mermaid' >> $GITHUB_STEP_SUMMARY
+              cat "$mermaid_file" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "Mermaid diagrams added to GitHub Actions summary!"
+          echo "Total diagrams: $(ls -1 target/bencher/results/mermaid/*.mermaid 2>/dev/null | wc -l)"
 
   microbenchmark-pprofs:
     runs-on: ubuntu-latest
