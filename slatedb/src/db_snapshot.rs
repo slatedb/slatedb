@@ -141,11 +141,19 @@ mod tests {
     use std::pin::Pin;
     use std::time::Duration;
 
-    struct SnapshotTestCase {
+    struct SnapshotGetTestCase {
         name: &'static str,
         setup: fn(&Db) -> Pin<Box<dyn Future<Output = Result<Arc<DbSnapshot>, Error>> + Send + '_>>,
         expected_snapshot_results: Vec<(&'static str, Option<&'static str>)>,
         expected_db_results: Option<Vec<(&'static str, Option<&'static str>)>>,
+    }
+
+    struct SnapshotScanTestCase {
+        name: &'static str,
+        setup: fn(&Db) -> Pin<Box<dyn Future<Output = Result<Arc<DbSnapshot>, Error>> + Send + '_>>,
+        scan_start_key: &'static str,
+        expected_snapshot_results: Vec<(&'static str, &'static str)>, // (key, value) pairs
+        expected_db_results: Option<Vec<(&'static str, &'static str)>>,
     }
 
     async fn create_test_db() -> Db {
@@ -172,7 +180,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case(SnapshotTestCase {
+    #[case(SnapshotGetTestCase {
         name: "snapshot_after_put",
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
@@ -181,7 +189,7 @@ mod tests {
         expected_snapshot_results: vec![("key1", Some("value1"))],
         expected_db_results: None,
     })]
-    #[case(SnapshotTestCase {
+    #[case(SnapshotGetTestCase {
         name: "snapshot_after_delete", 
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
@@ -191,7 +199,7 @@ mod tests {
         expected_snapshot_results: vec![("key1", None)],
         expected_db_results: None,
     })]
-    #[case(SnapshotTestCase {
+    #[case(SnapshotGetTestCase {
         name: "write_after_snapshot",
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"original").await?;
@@ -203,7 +211,7 @@ mod tests {
         expected_snapshot_results: vec![("key1", Some("original")), ("key2", None)],
         expected_db_results: Some(vec![("key1", Some("modified")), ("key2", Some("new_value"))]),
     })]
-    #[case(SnapshotTestCase {
+    #[case(SnapshotGetTestCase {
         name: "snapshot_overwrites",
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
@@ -214,7 +222,7 @@ mod tests {
         expected_snapshot_results: vec![("key1", Some("final_value"))],
         expected_db_results: None,
     })]
-    #[case(SnapshotTestCase {
+    #[case(SnapshotGetTestCase {
         name: "overwrite_after_snapshot",
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"original").await?;
@@ -226,7 +234,7 @@ mod tests {
         expected_snapshot_results: vec![("key1", Some("original"))],
         expected_db_results: Some(vec![("key1", Some("overwrite2"))]),
     })]
-    #[case(SnapshotTestCase {
+    #[case(SnapshotGetTestCase {
         name: "delete_after_snapshot",
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
@@ -239,7 +247,7 @@ mod tests {
         expected_snapshot_results: vec![("key1", Some("value1")), ("key2", Some("value2")), ("key3", None)],
         expected_db_results: Some(vec![("key1", None), ("key2", Some("value2")), ("key3", Some("value3"))]),
     })]
-    #[case(SnapshotTestCase {
+    #[case(SnapshotGetTestCase {
         name: "missing_keys",
         setup: |db| Box::pin(async move {
             db.put(b"existing", b"value").await?;
@@ -249,7 +257,7 @@ mod tests {
         expected_db_results: None,
     })]
     #[tokio::test]
-    async fn test_snapshot_operations(#[case] test_case: SnapshotTestCase) -> Result<(), Error> {
+    async fn test_snapshot_operations(#[case] test_case: SnapshotGetTestCase) -> Result<(), Error> {
         let db = create_test_db().await;
         let snapshot = (test_case.setup)(&db).await?;
 
@@ -305,6 +313,142 @@ mod tests {
 
         let result3 = snapshot3.get(b"key1").await?;
         assert_eq!(result3, Some(Bytes::from("version3")));
+
+        Ok(())
+    }
+
+    #[rstest]
+    #[case(SnapshotScanTestCase {
+        name: "scan_from_start",
+        setup: |db| Box::pin(async move {
+            db.put(b"key1", b"value1").await?;
+            db.put(b"key2", b"value2").await?;
+            db.put(b"key3", b"value3").await?;
+            Ok(db.snapshot().await?)
+        }),
+        scan_start_key: "key1",
+        expected_snapshot_results: vec![("key1", "value1"), ("key2", "value2"), ("key3", "value3")],
+        expected_db_results: None,
+    })]
+    #[case(SnapshotScanTestCase {
+        name: "scan_from_middle",
+        setup: |db| Box::pin(async move {
+            db.put(b"key1", b"value1").await?;
+            db.put(b"key2", b"value2").await?;
+            db.put(b"key3", b"value3").await?;
+            db.put(b"key4", b"value4").await?;
+            Ok(db.snapshot().await?)
+        }),
+        scan_start_key: "key2",
+        expected_snapshot_results: vec![("key2", "value2"), ("key3", "value3"), ("key4", "value4")],
+        expected_db_results: None,
+    })]
+    #[case(SnapshotScanTestCase {
+        name: "scan_after_write_isolation",
+        setup: |db| Box::pin(async move {
+            db.put(b"key1", b"original1").await?;
+            db.put(b"key2", b"original2").await?;
+            let snapshot = db.snapshot().await?;
+            db.put(b"key1", b"modified1").await?;
+            db.put(b"key3", b"new_value").await?;
+            Ok(snapshot)
+        }),
+        scan_start_key: "key1",
+        expected_snapshot_results: vec![("key1", "original1"), ("key2", "original2")],
+        expected_db_results: Some(vec![("key1", "modified1"), ("key2", "original2"), ("key3", "new_value")]),
+    })]
+    #[case(SnapshotScanTestCase {
+        name: "scan_empty_range",
+        setup: |db| Box::pin(async move {
+            db.put(b"key1", b"value1").await?;
+            Ok(db.snapshot().await?)
+        }),
+        scan_start_key: "key5",
+        expected_snapshot_results: vec![],
+        expected_db_results: None,
+    })]
+    #[case(SnapshotScanTestCase {
+        name: "scan_with_delete_after_snapshot",
+        setup: |db| Box::pin(async move {
+            db.put(b"key1", b"value1").await?;
+            db.put(b"key2", b"value2").await?;
+            db.put(b"key3", b"value3").await?;
+            let snapshot = db.snapshot().await?;
+            db.delete(b"key2").await?;
+            Ok(snapshot)
+        }),
+        scan_start_key: "key1",
+        expected_snapshot_results: vec![("key1", "value1"), ("key2", "value2"), ("key3", "value3")],
+        expected_db_results: Some(vec![("key1", "value1"), ("key3", "value3")]),
+    })]
+    #[tokio::test]
+    async fn test_snapshot_scan_operations(#[case] test_case: SnapshotScanTestCase) -> Result<(), Error> {
+        let db = create_test_db().await;
+        let snapshot = (test_case.setup)(&db).await?;
+
+        // Verify snapshot scan results
+        let mut iterator = snapshot.scan(test_case.scan_start_key.as_bytes()..).await?;
+        let mut actual_results = Vec::new();
+        while let Some(kv) = iterator.next().await? {
+            actual_results.push((
+                String::from_utf8(kv.key.to_vec()).unwrap(),
+                String::from_utf8(kv.value.to_vec()).unwrap(),
+            ));
+        }
+
+        assert_eq!(
+            actual_results.len(),
+            test_case.expected_snapshot_results.len(),
+            "test_case: {}, snapshot scan result count mismatch",
+            test_case.name
+        );
+
+        for (i, ((actual_key, actual_value), (expected_key, expected_value))) in 
+            actual_results.iter().zip(test_case.expected_snapshot_results.iter()).enumerate() {
+            assert_eq!(
+                actual_key, expected_key,
+                "test_case: {}, snapshot scan key mismatch at index {}",
+                test_case.name, i
+            );
+            assert_eq!(
+                actual_value, expected_value,
+                "test_case: {}, snapshot scan value mismatch at index {}",
+                test_case.name, i
+            );
+        }
+
+        // Verify DB scan results if specified
+        if let Some(db_expected) = &test_case.expected_db_results {
+            let mut db_iterator = db.scan(test_case.scan_start_key.as_bytes()..).await?;
+            let mut db_actual_results = Vec::new();
+            while let Some(kv) = db_iterator.next().await? {
+                db_actual_results.push((
+                    String::from_utf8(kv.key.to_vec()).unwrap(),
+                    String::from_utf8(kv.value.to_vec()).unwrap(),
+                ));
+            }
+
+            assert_eq!(
+                db_actual_results.len(),
+                db_expected.len(),
+                "test_case: {}, DB scan result count mismatch",
+                test_case.name
+            );
+
+            for (i, ((actual_key, actual_value), (expected_key, expected_value))) in 
+                db_actual_results.iter().zip(db_expected.iter()).enumerate() {
+                assert_eq!(
+                    actual_key, expected_key,
+                    "test_case: {}, DB scan key mismatch at index {}",
+                    test_case.name, i
+                );
+                assert_eq!(
+                    actual_value, expected_value,
+                    "test_case: {}, DB scan value mismatch at index {}",
+                    test_case.name, i
+                );
+            }
+        }
 
         Ok(())
     }
