@@ -257,7 +257,11 @@ mod tests {
         for (key, expected_value) in &test_case.expected_snapshot_results {
             let result = snapshot.get(key.as_bytes()).await?;
             let expected = expected_value.map(|v| Bytes::from(v));
-            assert_eq!(result, expected, "Key: {}", key);
+            assert_eq!(
+                result, expected,
+                "test_case: {}, snapshot key: {}",
+                test_case.name, key
+            );
         }
 
         // Verify DB results if specified
@@ -265,7 +269,11 @@ mod tests {
             for (key, expected_value) in db_expected {
                 let result = db.get(key.as_bytes()).await?;
                 let expected = expected_value.map(|v| Bytes::from(v));
-                assert_eq!(result, expected, "DB Key: {}", key);
+                assert_eq!(
+                    result, expected,
+                    "test_case: {}, DB Key: {}",
+                    test_case.name, key
+                );
             }
         }
 
