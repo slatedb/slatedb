@@ -339,7 +339,7 @@ Compactor 1 reads .manifest ([SR2])
 Compactor 1 writes .manifest ([SR1, SR2]) // undoes Compactor 2's change when it should be fenced
 ```
 
-### Fenced Compactor Process trying to update manifest
+#### Fenced Compactor Process trying to update manifest
 
 ```
 .manifest file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
@@ -368,7 +368,7 @@ At T = 6, Compactor A updates by creating a sequential .manifest file (Fenced Co
 
 Note: The protocol still allows fenced compactor to update the manifest if they are in order because compactor is always syncing compaction state. However, it would get fenced if the file already exists. Consider the following case:
 
-### Fenced Compactor Process trying to update manifest
+#### Fenced Compactor Process trying to update manifest
 
 ```
 .manifest file : [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
@@ -660,7 +660,6 @@ Using **AWS S3 Standard** pricing:
 
 ## Future Extensions
 
-### **Distributed Compaction**
 - Persistent state provides foundation for multi-compactor coordination and work distribution.
 - Define a minimum time boundary between compaction file updates to prevent excessive writes to the file (see https://github.com/slatedb/slatedb/pull/695#discussion_r2229977189)
 - Add last_key to SST metadata to enable efficient range-based SST filtering during compaction source selection and range query execution.
