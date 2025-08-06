@@ -18,3 +18,8 @@
 .sl-markdown-content img {
     background-color: var(--sl-image-bg-color);
 }
+
+/* Hide the theme selector */
+starlight-theme-select {
+    display: none;
+}
