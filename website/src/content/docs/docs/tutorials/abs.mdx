@@ -1,0 +1,100 @@
+---
+title: Connect SlateDB to Azure Blob Storage
+description: Learn how to connect SlateDB to Azure Blob Storage
+---
+
+This tutorial shows you how to use SlateDB on Azure Blob Storage (ABS). You would need an ABS account to complete the tutorial.
+
+## Setup
+
+[Install](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) the Azure CLI.
+
+## Create Storage account
+
+The following steps creates a storage account and list the keys. This section can be skipped if you already have a storage account created.
+
+```bash
+# Set storage account names
+StorageAccountName=<ReplaceWithAccountName>
+ContainerName=<ReplaceWithContainerName>
+ResourceGroupName=<ReplaceWithResourceGroupName>
+
+# Login
+az login
+
+# Create Resource Group in the default subscription.
+az group create --name $ResourceGroupName --location westus
+
+# Create Azure Storage account.
+az storage account create --name $StorageAccountName --resource-group $ResourceGroupName --location westus --sku Standard_LRS
+
+# Create a storage container
+az storage container create --name $ContainerName --account-name $StorageAccountName
+
+# Get the keys.
+az storage account keys list --resource-group $ResourceGroupName --account-name $StorageAccountName
+```
+
+## Create a project
+
+Let's start by creating a new Rust project:
+
+```bash
+cargo init slatedb-abs
+cd slatedb-abs
+```
+
+## Add dependencies
+
+Now add SlateDB and the `object_store` crate to your `Cargo.toml`:
+
+```bash
+cargo add slatedb object-store --features object-store/azure
+```
+
+:::note
+
+If you see "`object_store::path::Path` and `object_store::path::Path` have similar names, but are actually distinct types", you might need to pin the `object_store` version to match `slatedb`'s `object_store` version. SlateDB also exports `slatedb::object_store` for convenience, if you'd rather use that.
+
+:::
+
+## Write some code
+
+This code demonstrates puts that wait for results to be durable, and then puts that do not wait.
+
+import { Code } from '@astrojs/starlight/components';
+import absExample from '/../examples/src/azure_blob_storage.rs?raw'
+
+<Code code={absExample} lang="rust" title="main.rs" />
+
+## Check the blob contents
+
+```bash
+az storage blob list --container-name $ContainerName --account-name $StorageAccountName --prefix "test_slateDB/" --delimiter "/" --output table
+                           wal/
+                           manifest/
+```
+
+There are three folders:
+
+- `manifest`: Contains the manifest files. Manifest files defines the state of the DB, including the set of SSTs that are part of the DB.
+- `wal`: Contains the write-ahead log files.
+- `compacted`: Contains the compacted SST files. This short example does not create compacted files.
+
+Let's check the `wal` folder. 
+
+```bash
+az storage blob list --container-name $ContainerName --account-name $StorageAccountName --prefix "test_slateDB/wal/" --delimiter "/" --output table
+
+Name                                       Blob Type    Blob Tier    Length    Content Type              Last Modified              Snapshot
+-----------------------------------------  -----------  -----------  --------  ------------------------  -------------------------  ----------
+test_slateDB/wal/00000000000000000001.sst  BlockBlob    Hot          64        application/octet-stream  2024-09-07T01:15:49+00:00
+test_slateDB/wal/00000000000000000002.sst  BlockBlob    Hot          138       application/octet-stream  2024-09-07T01:15:49+00:00
+test_slateDB/wal/00000000000000000003.sst  BlockBlob    Hot          23388     application/octet-stream  2024-09-07T01:15:49+00:00
+test_slateDB/wal/00000000000000000004.sst  BlockBlob    Hot          64        application/octet-stream  2024-09-07T01:15:50+00:00
+
+```
+
+Each of these SST files is a write-ahead log (WAL) entry. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.
+
+```

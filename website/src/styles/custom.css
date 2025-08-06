@@ -1,0 +1,20 @@
+:root {
+    --sl-social-icon-color: white;
+    --sl-social-icon-hover-color: #faed27;
+    --sl-social-icon-size: 1.5rem;
+    --sl-color-yellow: #faed27;
+    --sl-color-yellow-low: #faec2746;
+    --sl-image-bg-color: white;
+}
+
+.getting-started {
+    padding-block: clamp(2.5rem, 1rem, 10rem);
+}
+
+.expressive-code {
+    margin-top: 1.25rem;
+}
+
+.sl-markdown-content img {
+    background-color: var(--sl-image-bg-color);
+}
