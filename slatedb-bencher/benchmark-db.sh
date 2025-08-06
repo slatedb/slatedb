@@ -83,11 +83,10 @@ generate_mermaid () {
 config:
   themeVariables:
     xyChart:
-      showDataLabel: true
       plotColorPalette: '#1e81b0, #e28743'
 ---
 xychart-beta
-    title "SlateDB [puts=${put_percentage}%, threads=${concurrency}] [blue=puts, orange=get]"
+    title "SlateDB [puts=${put_percentage}%, threads=${concurrency}, 🔵=puts, 🟠=get]"
     x-axis ["$x_entry"]
     line [$put_value]
     line [$get_value]
@@ -173,8 +172,7 @@ EOF
 config:
   themeVariables:
     xyChart:
-      showDataLabel: true
-      plotColorPalette: '#ff0000, #00ff00'
+      plotColorPalette: '#1e81b0, #e28743'
 ---
 xychart-beta
     $title_line
