@@ -198,8 +198,8 @@ if [ "$CLOUD_PROVIDER" = "local" ]; then
     echo "Using local path: $LOCAL_PATH"
 fi
 
-for put_percentage in 20; do
-  for concurrency in 32; do
+for put_percentage in 20 40 60 80 100; do
+  for concurrency in 1 32; do
     log_file="$OUT/logs/${put_percentage}_${concurrency}.log"
     dat_file="$OUT/dats/${put_percentage}_${concurrency}.dat"
     mermaid_file="$OUT/mermaid/${put_percentage}_${concurrency}.mermaid"
