@@ -10,7 +10,8 @@ use uuid::Uuid;
 pub(crate) struct TransactionState {
     /// id is used to track the lifecycle of a transaction. when a snapshot/transaction
     /// ends, we can remove the transaction state from the transaction manager by this
-    /// id.
+    /// id. we can not use seq as the txn id, because it's possible to start multiple
+    /// transactions with the same seq number.
     id: Uuid,
     /// seq is the sequence number when the transaction started. this is used to establish
     /// a snapshot of this transaction. we should ensure the compactor cannot recycle
