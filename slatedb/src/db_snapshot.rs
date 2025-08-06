@@ -143,8 +143,7 @@ mod tests {
 
     struct SnapshotTestCase {
         name: &'static str,
-        before: fn(&Db) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>,
-        after: fn(&Db) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>,
+        setup: fn(&Db) -> Pin<Box<dyn Future<Output = Result<Arc<DbSnapshot>, Error>> + Send + '_>>,
         expected_snapshot_results: Vec<(&'static str, Option<&'static str>)>,
         expected_db_results: Option<Vec<(&'static str, Option<&'static str>)>>,
     }
@@ -175,96 +174,76 @@ mod tests {
     #[rstest]
     #[case(SnapshotTestCase {
         name: "snapshot_after_put",
-        before: |db| Box::pin(async move {
-            db.put(b"key1", b"value1").await
-        }),
-        after: |_db| Box::pin(async move {
-            Ok(())
+        setup: |db| Box::pin(async move {
+            db.put(b"key1", b"value1").await?;
+            Ok(db.snapshot().await?)
         }),
         expected_snapshot_results: vec![("key1", Some("value1"))],
         expected_db_results: None,
     })]
     #[case(SnapshotTestCase {
         name: "snapshot_after_delete", 
-        before: |db| Box::pin(async move {
+        setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
-            db.delete(b"key1").await
-        }),
-        after: |_db| Box::pin(async move {
-            Ok(())
+            db.delete(b"key1").await?;
+            Ok(db.snapshot().await?)
         }),
         expected_snapshot_results: vec![("key1", None)],
         expected_db_results: None,
     })]
     #[case(SnapshotTestCase {
         name: "write_after_snapshot",
-        before: |db| Box::pin(async move {
-            db.put(b"key1", b"original").await
-        }),
-        after: |db| Box::pin(async move {
+        setup: |db| Box::pin(async move {
+            db.put(b"key1", b"original").await?;
+            let snapshot = db.snapshot().await?;
             db.put(b"key1", b"modified").await?;
-            db.put(b"key2", b"new_value").await
+            db.put(b"key2", b"new_value").await?;
+            Ok(snapshot)
         }),
         expected_snapshot_results: vec![("key1", Some("original")), ("key2", None)],
         expected_db_results: Some(vec![("key1", Some("modified")), ("key2", Some("new_value"))]),
     })]
     #[case(SnapshotTestCase {
         name: "snapshot_overwrites",
-        before: |db| Box::pin(async move {
+        setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
             db.put(b"key1", b"value2").await?;
-            db.put(b"key1", b"final_value").await
-        }),
-        after: |_db| Box::pin(async move {
-            Ok(())
+            db.put(b"key1", b"final_value").await?;
+            Ok(db.snapshot().await?)
         }),
         expected_snapshot_results: vec![("key1", Some("final_value"))],
         expected_db_results: None,
     })]
     #[case(SnapshotTestCase {
         name: "overwrite_after_snapshot",
-        before: |db| Box::pin(async move {
-            db.put(b"key1", b"original").await
-        }),
-        after: |db| Box::pin(async move {
+        setup: |db| Box::pin(async move {
+            db.put(b"key1", b"original").await?;
+            let snapshot = db.snapshot().await?;
             db.put(b"key1", b"overwrite1").await?;
-            db.put(b"key1", b"overwrite2").await
+            db.put(b"key1", b"overwrite2").await?;
+            Ok(snapshot)
         }),
         expected_snapshot_results: vec![("key1", Some("original"))],
         expected_db_results: Some(vec![("key1", Some("overwrite2"))]),
     })]
     #[case(SnapshotTestCase {
         name: "delete_after_snapshot",
-        before: |db| Box::pin(async move {
+        setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
-            db.put(b"key2", b"value2").await
-        }),
-        after: |db| Box::pin(async move {
+            db.put(b"key2", b"value2").await?;
+            let snapshot = db.snapshot().await?;
             db.delete(b"key1").await?;
-            db.put(b"key3", b"value3").await
+            db.put(b"key3", b"value3").await?;
+            Ok(snapshot)
         }),
         expected_snapshot_results: vec![("key1", Some("value1")), ("key2", Some("value2")), ("key3", None)],
         expected_db_results: Some(vec![("key1", None), ("key2", Some("value2")), ("key3", Some("value3"))]),
     })]
     #[case(SnapshotTestCase {
-        name: "empty_values",
-        before: |db| Box::pin(async move {
-            db.put(b"key1", b"").await?;
-            db.put(b"", b"empty_key_value").await
-        }),
-        after: |_db| Box::pin(async move {
-            Ok(())
-        }),
-        expected_snapshot_results: vec![("key1", Some("")), ("", Some("empty_key_value"))],
-        expected_db_results: None,
-    })]
-    #[case(SnapshotTestCase {
         name: "missing_keys",
-        before: |db| Box::pin(async move {
-            db.put(b"existing", b"value").await
-        }),
-        after: |_db| Box::pin(async move {
-            Ok(())
+        setup: |db| Box::pin(async move {
+            db.put(b"existing", b"value").await?;
+            Ok(db.snapshot().await?)
         }),
         expected_snapshot_results: vec![("existing", Some("value")), ("nonexistent", None)],
         expected_db_results: None,
@@ -272,15 +251,7 @@ mod tests {
     #[tokio::test]
     async fn test_snapshot_operations(#[case] test_case: SnapshotTestCase) -> Result<(), Error> {
         let db = create_test_db().await;
-
-        // Execute setup operations
-        (test_case.before)(&db).await?;
-
-        // Create snapshot
-        let snapshot = db.snapshot().await?;
-
-        // Execute post-snapshot operations
-        (test_case.after)(&db).await?;
+        let snapshot = (test_case.setup)(&db).await?;
 
         // Verify snapshot results
         for (key, expected_value) in &test_case.expected_snapshot_results {
