@@ -165,16 +165,19 @@ mod tests {
     use std::pin::Pin;
     use std::time::Duration;
 
+    type SnapshotTestCaseSetupFunc =
+        fn(&Db) -> Pin<Box<dyn Future<Output = Result<Arc<DbSnapshot>, Error>> + Send + '_>>;
+
     struct SnapshotGetTestCase {
         name: &'static str,
-        setup: fn(&Db) -> Pin<Box<dyn Future<Output = Result<Arc<DbSnapshot>, Error>> + Send + '_>>,
+        setup: SnapshotTestCaseSetupFunc,
         expected_snapshot_results: Vec<(&'static str, Option<&'static str>)>,
         expected_db_results: Option<Vec<(&'static str, Option<&'static str>)>>,
     }
 
     struct SnapshotScanTestCase {
         name: &'static str,
-        setup: fn(&Db) -> Pin<Box<dyn Future<Output = Result<Arc<DbSnapshot>, Error>> + Send + '_>>,
+        setup: SnapshotTestCaseSetupFunc,
         scan_start_key: &'static str,
         expected_snapshot_results: Vec<(&'static str, &'static str)>, // (key, value) pairs
         expected_db_results: Option<Vec<(&'static str, &'static str)>>,
@@ -208,7 +211,7 @@ mod tests {
         name: "snapshot_after_put",
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
-            Ok(db.snapshot().await?)
+            db.snapshot().await
         }),
         expected_snapshot_results: vec![("key1", Some("value1"))],
         expected_db_results: None,
@@ -218,7 +221,7 @@ mod tests {
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
             db.delete(b"key1").await?;
-            Ok(db.snapshot().await?)
+            db.snapshot().await
         }),
         expected_snapshot_results: vec![("key1", None)],
         expected_db_results: None,
@@ -241,7 +244,7 @@ mod tests {
             db.put(b"key1", b"value1").await?;
             db.put(b"key1", b"value2").await?;
             db.put(b"key1", b"final_value").await?;
-            Ok(db.snapshot().await?)
+            db.snapshot().await
         }),
         expected_snapshot_results: vec![("key1", Some("final_value"))],
         expected_db_results: None,
@@ -275,7 +278,7 @@ mod tests {
         name: "missing_keys",
         setup: |db| Box::pin(async move {
             db.put(b"existing", b"value").await?;
-            Ok(db.snapshot().await?)
+            db.snapshot().await
         }),
         expected_snapshot_results: vec![("existing", Some("value")), ("nonexistent", None)],
         expected_db_results: None,
@@ -344,7 +347,7 @@ mod tests {
         // Verify snapshot results
         for (key, expected_value) in &test_case.expected_snapshot_results {
             let result = snapshot.get(key.as_bytes()).await?;
-            let expected = expected_value.map(|v| Bytes::from(v));
+            let expected = expected_value.map(Bytes::from);
             assert_eq!(
                 result, expected,
                 "test_case: {}, snapshot key: {}",
@@ -356,7 +359,7 @@ mod tests {
         if let Some(db_expected) = &test_case.expected_db_results {
             for (key, expected_value) in db_expected {
                 let result = db.get(key.as_bytes()).await?;
-                let expected = expected_value.map(|v| Bytes::from(v));
+                let expected = expected_value.map(Bytes::from);
                 assert_eq!(
                     result, expected,
                     "test_case: {}, DB Key: {}",
@@ -404,7 +407,7 @@ mod tests {
             db.put(b"key1", b"value1").await?;
             db.put(b"key2", b"value2").await?;
             db.put(b"key3", b"value3").await?;
-            Ok(db.snapshot().await?)
+            db.snapshot().await
         }),
         scan_start_key: "key1",
         expected_snapshot_results: vec![("key1", "value1"), ("key2", "value2"), ("key3", "value3")],
@@ -417,7 +420,7 @@ mod tests {
             db.put(b"key2", b"value2").await?;
             db.put(b"key3", b"value3").await?;
             db.put(b"key4", b"value4").await?;
-            Ok(db.snapshot().await?)
+            db.snapshot().await
         }),
         scan_start_key: "key2",
         expected_snapshot_results: vec![("key2", "value2"), ("key3", "value3"), ("key4", "value4")],
@@ -441,7 +444,7 @@ mod tests {
         name: "scan_empty_range",
         setup: |db| Box::pin(async move {
             db.put(b"key1", b"value1").await?;
-            Ok(db.snapshot().await?)
+            db.snapshot().await
         }),
         scan_start_key: "key5",
         expected_snapshot_results: vec![],
