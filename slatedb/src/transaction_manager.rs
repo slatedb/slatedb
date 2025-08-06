@@ -8,7 +8,13 @@ use std::sync::Weak;
 use uuid::Uuid;
 
 pub(crate) struct TransactionState {
+    /// id is used to track the lifecycle of a transaction. when a snapshot/transaction
+    /// ends, we can remove the transaction state from the transaction manager by this
+    /// id.
     id: Uuid,
+    /// seq is the sequence number when the transaction started. this is used to establish
+    /// a snapshot of this transaction. we should ensure the compactor cannot recycle
+    /// the row versions that are below any seq number of active transactions.
     pub(crate) seq: u64,
 }
 
@@ -22,7 +28,7 @@ pub struct TransactionManager {
 }
 
 struct TransactionManagerInner {
-    /// Map of transaction state ID to weak reference
+    /// Map of transaction state ID to weak reference.
     active_txns: HashMap<Uuid, Weak<TransactionState>>,
 }
 
@@ -70,7 +76,7 @@ impl TransactionManager {
     fn save_recent_snapshot_min_seq(&self) {
         let min_seq = self.min_active_seq();
 
-        // update recent_snapshot_min_seq in the db state. the editted db state will be persisted
+        // update recent_snapshot_min_seq in the db state. the edited db state will be persisted
         // to the manifest store when memtable is flushed.
         let mut guard = self.db_state.write();
         guard.modify(|state| {
