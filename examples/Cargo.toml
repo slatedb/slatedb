@@ -13,41 +13,49 @@ publish = false
 name = "azure-blob-storage"
 path = "src/azure_blob_storage.rs"
 test = false
+bench = false
 
 [[bin]]
 name = "create-checkpoint"
 path = "src/create_checkpoint.rs"
 test = false
+bench = false
 
 [[bin]]
 name = "delete-checkpoint"
 path = "src/delete_checkpoint.rs"
 test = false
+bench = false
 
 [[bin]]
 name = "full-example"
 path = "src/full_example.rs"
 test = false
+bench = false
 
 [[bin]]
 name = "refresh-checkpoint"
 path = "src/refresh_checkpoint.rs"
 test = false
+bench = false
 
 [[bin]]
 name = "s3-compatible"
 path = "src/s3_compatible.rs"
 test = false
+bench = false
 
 [[bin]]
 name = "simple-example"
 path = "src/simple_example.rs"
 test = false
+bench = false
 
 [[bin]]
 name = "tracing-subscriber"
 path = "src/tracing_subscriber.rs"
 test = false
+bench = false
 
 [dependencies]
 anyhow.workspace = true
