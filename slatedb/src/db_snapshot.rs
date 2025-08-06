@@ -8,6 +8,7 @@ use crate::db_iter::DbIterator;
 
 use crate::db::DbInner;
 use crate::transaction_manager::{TransactionManager, TransactionState};
+use crate::DbRead;
 
 pub struct DbSnapshot {
     /// txn_state holds the seq number of the transaction that created this snapshot
@@ -121,9 +122,32 @@ impl DbSnapshot {
     }
 }
 
+#[async_trait::async_trait]
+impl DbRead for DbSnapshot {
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, crate::Error> {
+        self.get_with_options(key, options).await
+    }
+
+    async fn scan_with_options<K, T>(
+        &self,
+        range: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        T: RangeBounds<K> + Send,
+    {
+        self.scan_with_options(range, options).await
+    }
+}
+
+/// Unregister from transaction manager when dropped.
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
-        // Unregister from transaction manager when dropped
         self.txn_manager.remove_txn(self.txn_state.as_ref());
     }
 }
