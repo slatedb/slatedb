@@ -127,3 +127,145 @@ impl Drop for DbSnapshot {
         self.txn_manager.remove_txn(self.txn_state.as_ref());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+    use crate::config::{CompactorOptions, Settings};
+    use crate::object_store::memory::InMemory;
+    use crate::object_store::ObjectStore;
+    use crate::{Db, Error};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::time::Duration;
+
+    struct SnapshotTestCase {
+        name: &'static str,
+        before: fn(&Db) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>,
+        after: fn(&Db) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>,
+        expected_snapshot_results: Vec<(&'static str, Option<&'static str>)>,
+        expected_db_results: Option<Vec<(&'static str, Option<&'static str>)>>,
+    }
+
+    async fn create_test_db() -> Db {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let config = Settings {
+            flush_interval: Some(Duration::from_millis(100)),
+            manifest_poll_interval: Duration::from_millis(100),
+            manifest_update_timeout: Duration::from_secs(300),
+            compactor_options: Some(CompactorOptions {
+                poll_interval: Duration::from_millis(100),
+                ..Default::default()
+            }),
+            max_unflushed_bytes: 16 * 1024,
+            min_filter_keys: 0,
+            l0_sst_size_bytes: 4 * 4096,
+            ..Default::default()
+        };
+
+        Db::builder("/tmp/snapshot_test", object_store)
+            .with_settings(config)
+            .build()
+            .await
+            .expect("Failed to create test database")
+    }
+
+    #[rstest]
+    #[case(SnapshotTestCase {
+        name: "snapshot_after_put",
+        before: |db| Box::pin(async move {
+            db.put(b"key1", b"value1").await
+        }),
+        after: |_db| Box::pin(async move {
+            Ok(())
+        }),
+        expected_snapshot_results: vec![("key1", Some("value1"))],
+        expected_db_results: None,
+    })]
+    #[case(SnapshotTestCase {
+        name: "snapshot_after_delete", 
+        before: |db| Box::pin(async move {
+            db.put(b"key1", b"value1").await?;
+            db.delete(b"key1").await
+        }),
+        after: |_db| Box::pin(async move {
+            Ok(())
+        }),
+        expected_snapshot_results: vec![("key1", None)],
+        expected_db_results: None,
+    })]
+    #[case(SnapshotTestCase {
+        name: "write_after_snapshot",
+        before: |db| Box::pin(async move {
+            db.put(b"key1", b"original").await
+        }),
+        after: |db| Box::pin(async move {
+            db.put(b"key1", b"modified").await?;
+            db.put(b"key2", b"new_value").await
+        }),
+        expected_snapshot_results: vec![("key1", Some("original")), ("key2", None)],
+        expected_db_results: Some(vec![("key1", Some("modified")), ("key2", Some("new_value"))]),
+    })]
+    #[tokio::test]
+    async fn test_snapshot_operations(#[case] test_case: SnapshotTestCase) -> Result<(), Error> {
+        let db = create_test_db().await;
+
+        // Execute setup operations
+        (test_case.before)(&db).await?;
+
+        // Create snapshot
+        let snapshot = db.snapshot().await?;
+
+        // Execute post-snapshot operations
+        (test_case.after)(&db).await?;
+
+        // Verify snapshot results
+        for (key, expected_value) in &test_case.expected_snapshot_results {
+            let result = snapshot.get(key.as_bytes()).await?;
+            let expected = expected_value.map(|v| Bytes::from(v));
+            assert_eq!(result, expected, "Key: {}", key);
+        }
+
+        // Verify DB results if specified
+        if let Some(db_expected) = &test_case.expected_db_results {
+            for (key, expected_value) in db_expected {
+                let result = db.get(key.as_bytes()).await?;
+                let expected = expected_value.map(|v| Bytes::from(v));
+                assert_eq!(result, expected, "DB Key: {}", key);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multiple_snapshots() -> Result<(), Error> {
+        let db = create_test_db().await;
+
+        // Version 1
+        db.put(b"key1", b"version1").await?;
+        let snapshot1 = db.snapshot().await?;
+
+        // Version 2
+        db.put(b"key1", b"version2").await?;
+        let snapshot2 = db.snapshot().await?;
+
+        // Version 3
+        db.put(b"key1", b"version3").await?;
+        let snapshot3 = db.snapshot().await?;
+
+        // Verify each snapshot sees its respective version
+        let result1 = snapshot1.get(b"key1").await?;
+        assert_eq!(result1, Some(Bytes::from("version1")));
+
+        let result2 = snapshot2.get(b"key1").await?;
+        assert_eq!(result2, Some(Bytes::from("version2")));
+
+        let result3 = snapshot3.get(b"key1").await?;
+        assert_eq!(result3, Some(Bytes::from("version3")));
+
+        Ok(())
+    }
+}
