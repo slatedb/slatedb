@@ -96,20 +96,6 @@ jobs:
           aws s3 rm --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }} --recursive
           ./slatedb-bencher/benchmark-db.sh
 
-      - name: Update benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: slatedb-bencher/benchmark-db.sh
-          tool: 'customBiggerIsBetter'
-          output-file-path: target/bencher/results/benchmark-data.json
-          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          fail-on-alert: true
-          summary-always: true
-          max-items-in-chart: 30
-          auto-push: true
-          gh-repository: github.com/slatedb/slatedb-website
-          benchmark-data-dir-path: performance/benchmarks/main
-
   microbenchmark-pprofs:
     runs-on: ubuntu-latest
     steps:
@@ -177,6 +163,7 @@ jobs:
         run: cargo nextest run test_dst_nightly -p slatedb-dst --all-features --profile dst-nightly --no-capture
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
+          RUST_LOG: "warn"
           SLATEDB_DST_ROOT: "/tmp/slatedb-dst"
 
   # This is an integration test that makes sure SlateDB works with ZeroFS.

@@ -41,14 +41,8 @@ generate_dat() {
 
     echo "Parsing stats for $input_file -> $output_file"
 
-    # Extract elapsed time, puts/s, and gets/s using awk to handle additional fields like MiB/s and hit rate
-    awk '/stats dump/ {
-        if (match($0, /elapsed ([0-9.]+)/, a) &&
-            match($0, /put\/s: ([0-9.]+)/, b) &&
-            match($0, /get\/s: ([0-9.]+)/, c)) {
-            printf "%s %s %s\n", a[1], b[1], c[1];
-        }
-    }' "$input_file" > "$output_file"
+    # Extract elapsed time, puts/s, and gets/s using sed and awk for cross-platform compatibility
+    grep "stats dump" "$input_file" | sed -E 's/.*elapsed ([0-9.]+).*put\/s: ([0-9.]+).*get\/s: ([0-9.]+).*/\1 \2 \3/' > "$output_file"
 }
 
 generate_mermaid () {
@@ -85,8 +79,15 @@ generate_mermaid () {
     if [ ! -f "$mermaid_file" ]; then
         # Create new mermaid file
         cat > "$mermaid_file" << EOF
+---
+config:
+  themeVariables:
+    xyChart:
+      showDataLabel: true
+      plotColorPalette: '#1e81b0, #e28743'
+---
 xychart-beta
-    title "SlateDB ${put_percentage}% Puts ${concurrency} Threads"
+    title "SlateDB [puts=${put_percentage}%, threads=${concurrency}] [blue=puts, orange=get]"
     x-axis ["$x_entry"]
     line [$put_value]
     line [$get_value]
@@ -96,7 +97,7 @@ EOF
         local temp_file=$(mktemp)
 
         # Read current content
-        local title_line=$(grep "title" "$mermaid_file")
+        local title_line=$(grep "title" "$mermaid_file" | sed 's/^[[:space:]]*//')
         local x_axis_line=$(grep "x-axis" "$mermaid_file")
         local put_line=$(grep -m1 "line" "$mermaid_file")
         local get_line=$(grep "line" "$mermaid_file" | tail -n1)
@@ -168,6 +169,13 @@ EOF
 
         # Write updated mermaid file
         cat > "$mermaid_file" << EOF
+---
+config:
+  themeVariables:
+    xyChart:
+      showDataLabel: true
+      plotColorPalette: '#ff0000, #00ff00'
+---
 xychart-beta
     $title_line
     $new_x_axis
@@ -190,8 +198,8 @@ if [ "$CLOUD_PROVIDER" = "local" ]; then
     echo "Using local path: $LOCAL_PATH"
 fi
 
-for put_percentage in 20 40 60 80 100; do
-  for concurrency in 1 32; do
+for put_percentage in 20; do
+  for concurrency in 32; do
     log_file="$OUT/logs/${put_percentage}_${concurrency}.log"
     dat_file="$OUT/dats/${put_percentage}_${concurrency}.dat"
     mermaid_file="$OUT/mermaid/${put_percentage}_${concurrency}.mermaid"
