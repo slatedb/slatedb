@@ -847,6 +847,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "examples"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "object_store",
+ "slatedb",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fail-parallel"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3252,17 +3263,6 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "slatedb-examples"
-version = "0.7.0"
-dependencies = [
- "anyhow",
- "object_store",
- "slatedb",
- "tokio",
  "tracing-subscriber",
 ]
 

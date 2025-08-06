@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
+    "examples",
     "slatedb",
     "slatedb-bencher",
     "slatedb-cli",
     "slatedb-dst",
-    "slatedb-examples",
     "slatedb-py",
 ]
 

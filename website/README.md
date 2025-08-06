@@ -54,7 +54,7 @@ To contribute to the website:
 
 ### Adding code examples
 
-If you're going to add a code example, we encourage you to add it to [SlateDB's examples collection](../slatedb-examples/). That way, the example is fully compiled with our tests, and we prevent it going out of sync.
+If you're going to add a code example, we encourage you to add it to [SlateDB's examples collection](../examples/src/). That way, the example is fully compiled with our tests, and we prevent it going out of sync.
 
 Once you have a full executable in that directory, you can load the code in the documentation using Astro's Code component:
 
@@ -65,7 +65,7 @@ Once you have a full executable in that directory, you can load the code in the 
     ```
 3. Import the raw code example (notice that the path starts with `/../` to make it relative to the `website` directory):
     ```js
-    import example from '/../slatedb-examples/src/my_example.rs?raw'
+    import example from '/../examples/src/my_example.rs?raw'
     ```
 4. Render the code:
     ```js

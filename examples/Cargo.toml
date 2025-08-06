@@ -1,5 +1,5 @@
 [package]
-name = "slatedb-examples"
+name = "examples"
 description = "A collection of example binaries showcasing SlateDB features."
 readme = "README.md"
 version.workspace = true

@@ -64,7 +64,7 @@ aws --endpoint-url=http://localhost:4566 s3api create-bucket --bucket slatedb --
 Stick this into your `src/main.rs` file:
 
 import { Code } from '@astrojs/starlight/components';
-import s3Example from '/../slatedb-examples/src/s3_compatible.rs?raw'
+import s3Example from '/../examples/src/s3_compatible.rs?raw'
 
 <Code code={s3Example} lang="rust" title="main.rs" />
 
