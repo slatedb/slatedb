@@ -883,7 +883,7 @@ mod tests {
             let next_bit = reader.read_bit();
             if let Some(bit) = next_bit {
                 // If there are remaining bits, they should be padding (false)
-                assert!(bit);
+                assert!(!bit);
             }
         }
     }
