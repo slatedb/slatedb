@@ -81,6 +81,9 @@ table CompactionState {
     // Fencing token to ensure single active compactor
     compactor_epoch: uint64;
 
+    // current Sorted Runs
+    current_sorted_runs: [SortedRun];
+
     // Compactions in scheduled, in_progress and recently completed compactions
     active_compactions: [Compaction];
 
