@@ -23,8 +23,6 @@ table CompactionJob {
 
     compaction_ts: i64; 
 
-    is_dest_last_run: bool;
-
     // Timestamp when CompactionJob was created
     created_ts: uint64
     
@@ -36,9 +34,6 @@ table CompactionJob {
 
     // Current CompactionJob Status
     current_status: CompactionStatus;
-
-    // Tracking Compaction Progress
-    job_progress: CompactionProgress;
 }
 
 table Compaction {
@@ -47,6 +42,9 @@ table Compaction {
 
     // Destination Sorted Run ID
     destination: u32 (required);
+
+    // Destination Sorted Run
+    output_sorted_run: SortedRun
 
     // input L0 SSTables
     ssts: [CompactedSsTable]; 
