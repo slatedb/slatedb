@@ -184,7 +184,7 @@ mod tests {
     }
 
     async fn create_test_db() -> Db {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let config = Settings {
             flush_interval: Some(Duration::from_millis(100)),
             manifest_poll_interval: Duration::from_millis(100),
