@@ -144,6 +144,71 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 13. GC clears the orphaned states and SSTs during it's run.
 
+### Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant C as Compactor
+    participant CEH as CompactionEventHandler
+    participant CS as CompactionScheduler
+    participant CE as CompactionExecutor
+    participant WC as WorkerChannel
+    participant M as Manifest
+    participant GC as GarbageCollector
+
+    Note over C: Startup Phase
+    C->>CEH: Initialize CompactionEventHandler
+    C->>CS: Initialize CompactionScheduler
+    C->>C: Initialize event loop<br/>(polls manifest, logs, handles completions)
+
+    Note over C,M: Event Loop Processing
+    loop Event Loop
+        CEH->>M: Poll current manifest
+        CEH->>CEH: Merge compaction state<br/>with current manifest
+        CEH->>CS: Communicate compaction state<br/>maybeScheduleCompaction(local_db_state)
+        CS->>CS: Group L0 SSTs and SRs<br/>(SizeTieredCompactionScheduler)
+        CS->>CEH: Return list of Compaction objects
+        
+        loop For each compaction
+            alt Running compactions < threshold
+                CEH->>CEH: submitCompaction()
+                CEH->>CEH: Validate not already executing<br/>(check local CompactorState)
+                CEH->>CEH: Add to CompactorState struct
+                CEH->>CEH: startCompaction()
+                
+                Note over CEH,CE: Execution Phase
+                CEH->>CE: Transform to compactionJob<br/>spawn blocking task
+                CE->>CE: Load iterators into MergeIterator
+                CE->>CE: Run compaction<br/>(discard expired versions)
+                
+                loop SST Writing
+                    CE->>CE: Write to SST
+                    alt SST reaches threshold size
+                        CE->>CE: Write SST to destination SR
+                        CE->>CEH: Provide progress stats
+                    end
+                end
+                
+                alt Compaction Success
+                    CE->>WC: Send {destinationId, outputSSTs}
+                    WC->>CEH: Process CompactionCompletion
+                    CEH->>CEH: finishCompaction()
+                    CEH->>M: Update manifests
+                    CEH->>CS: Trigger next scheduling<br/>maybeScheduleCompaction()
+                else Compaction Failure
+                    CE->>WC: Send failure notification
+                    WC->>CEH: Process failure
+                    CEH->>CEH: finishFailedCompaction()
+                    CEH->>CEH: Update compaction_state
+                end
+            end
+        end
+    end
+    
+    Note over GC: Cleanup Phase
+    GC->>GC: Clear orphaned states and SSTs
+```
+
 ### Resuming Partial Compactions
 
 1. When the output SSTs(part of the partially completed destination SR) are fetched, pick the lastEntry(the lastEntry in lexicographic order) from the last SST of the SR. Possible Approaches:
