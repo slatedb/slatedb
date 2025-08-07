@@ -147,36 +147,42 @@ jobs:
           CARGO_PROFILE_BENCH_DEBUG: true
           SLATE_BENCH_PROFILE: true
         run: |
-          # Get list of benchmarks
           BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true and (.target.kind | contains(["bench"]))) | .target.name' | sort -u)
-
-          # Create pprofs for each benchmark
           for bench in $BENCHMARKS; do
             cargo bench --bench $bench -- --profile-time 10
           done
+          find . -name "*.pb" -exec gzip {} \;
 
-      - name: Checkout website repository
-        uses: actions/checkout@v4
-        with:
-          repository: slatedb/slatedb-website
-          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          path: slatedb-website
-          ref: gh-pages
-
-      - name: Update website with new pprofs
-        env:
-          PPROF_WEBSITE_DIR: performance/microbenchmark-pprofs/main
+      # install instructions from https://github.com/polarsignals/pprofme/tree/main
+      - name: Install pprofme
         run: |
-          cd slatedb-website
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          # Remove old .pb files
-          rm -f $PPROF_WEBSITE_DIR/*.pb
-          # Copy pprof to $PPROF_WEBSITE_DIR/<benchmark_name>.pb
-          find ../target/criterion -name "profile.pb" -exec sh -c 'cp "$1" "$PPROF_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).pb"' sh {} \;
-          git add $PPROF_WEBSITE_DIR
-          git commit -m "Update microbenchmark pprof for job id ${GITHUB_RUN_ID}"
-          git push
+          curl -LO https://github.com/polarsignals/pprofme/releases/latest/download/pprofme_$(uname)_$(uname -m)
+          curl -sL https://github.com/polarsignals/pprofme/releases/latest/download/pprofme_checksums.txt | shasum --ignore-missing -a 256 --check
+          chmod a+x pprofme_$(uname)_$(uname -m)
+          sudo mv pprofme_$(uname)_$(uname -m) /usr/local/bin/pprofme
+
+      - name: Upload pprofs and add links to summary
+        run: |
+          echo "## 🔥 Microbenchmark Performance Profiles" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The following pprof profiles were generated from nightly microbenchmarks:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          PPROF_FILES=$(find . -name "*.pb.gz" -type f 2>/dev/null || true)
+          if [ -z "$PPROF_FILES" ]; then
+            echo "⚠️ No pprof files found" >> $GITHUB_STEP_SUMMARY
+          else
+            for pprof_file in $PPROF_FILES; do
+              bench_name=$(basename "$pprof_file" .pb.gz)
+              description="SlateDB Nightly Microbenchmark: $bench_name ($(date -u +%Y-%m-%d))"
+              upload_url=$(pprofme upload -d "$description" "$pprof_file" 2>&1 | grep -o 'https://pprof.me/[a-zA-Z0-9]*' | head -1)
+              if [ -n "$upload_url" ]; then
+                echo "- [$bench_name]($upload_url)" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ❌ Failed to upload $bench_name" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
 
   deterministic-simulation-test:
     runs-on: warp-ubuntu-latest-x64-16x
