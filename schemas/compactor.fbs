@@ -21,7 +21,8 @@ table CompactionJob {
     // CompactorJob ID
     job_id: ulong;
 
-    compaction_ts: i64; 
+    // Reference to the compaction to which this job belongs
+    compaction_id: uint64
 
     // Timestamp when CompactionJob was created
     created_ts: uint64
