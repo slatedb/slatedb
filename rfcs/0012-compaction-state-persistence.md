@@ -219,6 +219,9 @@ pub struct CompactionState {
     /// Compactor state identifier. This would be used for creating
     /// compactor files and CAS updates
     pub compactor_state_id: u64,
+
+    // current Sorted Runs
+    pub current_sorted_runs: [SortedRun];
     
     /// All currently active compactions indexed by ID
     /// Includes queued, running, and recently completed compactions
