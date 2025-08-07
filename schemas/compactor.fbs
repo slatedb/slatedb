@@ -28,7 +28,10 @@ table CompactionJob {
     created_ts: uint64
     
     // InputSSTables completed before the job started
-    completed_input_ssts:[CompactedSsTable];
+    completed_input_sst_ids:[CompactedSstId];
+
+    // InputSortedRuns completed before the job started
+    completed_input_sr_ids:[uint32];
 
     // Output SSTs to be persisted in destination SR  
     output_ssts_written:[CompactedSsTable];
