@@ -1,0 +1,77 @@
+---
+import { SlatedbIcons } from './Icons';
+
+interface Props {
+	icon: keyof typeof SlatedbIcons;
+	title: string;
+	label?: string;
+	color?: string;
+	size?: string;
+}
+
+const { icon, title, label, color, size = '3em' } = Astro.props;
+const a11yAttrs = label ? ({ 'aria-label': label } as const) : ({ 'aria-hidden': 'true' } as const);
+---
+
+<article class="card sl-flex">
+	<p class="title sl-flex">
+	<>
+	    <svg
+		    {...a11yAttrs}
+		    class="icon"
+		    width="144"
+		    height="144"
+		    viewBox="0 0 24 24"
+		    fill="none"
+            stroke="currentColor"
+            stroke-width="2" 
+            stroke-linecap="round"
+            stroke-linejoin="round"
+		    set:html={SlatedbIcons[icon]}
+		/>
+	</>
+		<span set:html={title} />
+	</p>
+	<div class="body"><slot /></div>
+</article>
+
+<style define:vars={{ 'sl-icon-color': color, 'sl-icon-size': size }}>
+	@layer starlight.components {
+		.card {
+			--sl-card-border: var(--sl-color-yellow);
+			--sl-card-bg: var(--sl-color-yellow-low);
+			border: 1px solid var(--sl-color-gray-5);
+			background-color: var(--sl-color-black);
+			padding: clamp(1rem, calc(0.125rem + 3vw), 2.5rem);
+			flex-direction: column;
+			gap: clamp(0.5rem, calc(0.125rem + 1vw), 1rem);
+		}
+
+		.title {
+			font-weight: 600;
+			font-size: var(--sl-text-h4);
+			color: var(--sl-color-white);
+			line-height: var(--sl-line-height-headings);
+			gap: 1rem;
+			align-items: center;
+		}
+		.card .icon {
+			border: 1px solid var(--sl-card-border);
+			background-color: var(--sl-card-bg);
+			padding: 0.2em;
+			border-radius: 0.25rem;
+			flex-shrink: 0;
+		}
+		.card .body {
+			margin: 0;
+			font-size: clamp(var(--sl-text-sm), calc(0.5rem + 1vw), var(--sl-text-body));
+		}
+
+        svg {
+			color: var(--sl-icon-color);
+			font-size: var(--sl-icon-size, 1em);
+			width: 1em;
+			height: 1em;
+		}
+	}
+</style>

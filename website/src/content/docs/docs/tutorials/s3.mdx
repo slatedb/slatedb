@@ -1,0 +1,121 @@
+---
+title: Connect SlateDB to S3
+description: Learn how to connect SlateDB to Amazon S3 using LocalStack
+---
+
+This tutorial shows you how to connect SlateDB to S3. We'll use LocalStack to simulate S3.
+
+## Create a project
+
+Let's start by creating a new Rust project:
+
+```bash
+cargo init slatedb-playground
+cd slatedb-playground
+```
+
+## Add dependencies
+
+Now add SlateDB and the `object_store` crate to your `Cargo.toml`:
+
+```bash
+cargo add slatedb object-store tokio --features object-store/aws
+```
+
+:::note
+
+If you see "`object_store::path::Path` and `object_store::path::Path` have similar names, but are actually distinct types", you might need to pin the `object_store` version to match `slatedb`'s `object_store` version. SlateDB also exports `slatedb::object_store` for convenience, if you'd rather use that.
+
+:::
+
+## Setup
+
+You will need to have [LocalStack](https://localstack.cloud/) running. You can install it using [Homebrew](https://brew.sh/):
+
+```bash
+brew install localstack/tap/localstack-cli
+```
+
+```bash
+localstack start -d
+```
+
+For a more detailed setup, see the [LocalStack documentation](https://docs.localstack.cloud/).
+
+You'll also need the AWS CLI:
+
+```bash
+brew install awscli
+```
+
+## Initialize AWS
+
+SlateDB requires a bucket to work with S3.
+
+### Create your S3 bucket:
+
+```bash
+# Create S3 bucket
+aws --endpoint-url=http://localhost:4566 s3api create-bucket --bucket slatedb --region us-east-1
+```
+
+## Write some code
+
+Stick this into your `src/main.rs` file:
+
+import { Code } from '@astrojs/starlight/components';
+import s3Example from '/../examples/src/s3_compatible.rs?raw'
+
+<Code code={s3Example} lang="rust" title="main.rs" />
+
+:::note
+
+Our code example writes a 64 MiB value to object storage to trigger an L0 SST flush. This is just to show the
+`compacted` directory in your bucket.
+
+:::
+
+## Run the code
+
+Now you can run the code:
+
+```bash
+cargo run
+```
+
+This will write a 64 MiB value to SlateDB.
+
+## Check the results
+
+Now' let's check the root of the bucket:
+
+```bash
+% aws --endpoint-url=http://localhost:4566 s3 ls s3://slatedb/test/
+                           PRE compacted/
+                           PRE manifest/
+                           PRE wal/
+```
+
+There are three folders:
+
+- `compacted`: Contains the compacted SST files.
+- `manifest`: Contains the manifest files.
+- `wal`: Contains the write-ahead log files.
+
+Let's check the `wal` folder:
+
+```bash
+% aws --endpoint-url=http://localhost:4566 s3 ls s3://slatedb/test/wal/
+2024-09-04 18:05:57         64 00000000000000000001.sst
+2024-09-04 18:05:58   67108996 00000000000000000002.sst
+```
+
+Each of these SST files is a write-ahead log entry. They get flushed based on the `flush_interval` config. The last entry is 64 MiB, which is the value we wrote.
+
+Finally, let's check the `compacted` folder:
+
+```bash
+% aws --endpoint-url=http://localhost:4566 s3 ls s3://slatedb/test/compacted/ 
+2024-09-04 18:05:59   67108996 01J6ZVEZ394GCJT1PHZYY1NZGP.sst
+```
+Again, we see the 64 MiB SST file. This is the L0 SST file that was flushed with our value. Over time, the WAL entries will be removed, and the L0 SSTs will be compacted into higher levels.

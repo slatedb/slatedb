@@ -10,6 +10,11 @@ homepage.workspace = true
 # Skipping publication for this test crate for now. We can publish if users want.
 publish = false
 
+[lib]
+# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
+# See https://bheisler.github.io/criterion.rs/book/faq.html
+bench = false
+
 [dependencies]
 chrono = { workspace = true }
 ctor = { workspace = true }

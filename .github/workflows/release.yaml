@@ -84,3 +84,6 @@ jobs:
           else
             cargo publish
           fi
+
+      - name: Publish website
+        uses: ./.github/workflows/release-website.yaml

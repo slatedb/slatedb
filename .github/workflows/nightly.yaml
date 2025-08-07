@@ -83,6 +83,12 @@ jobs:
           echo -e "Deleting 1 gig file"
           time aws s3 rm --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }}/1gig
 
+      - name: Download previous mermaid plots
+        uses: actions/cache/restore@v4
+        with:
+          path: ./target/bencher/results/mermaid
+          key: ${{ runner.os }}-mermaid-plots
+
       - name: Run benchmark
         env:
           CLOUD_PROVIDER: aws
@@ -96,19 +102,30 @@ jobs:
           aws s3 rm --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }} --recursive
           ./slatedb-bencher/benchmark-db.sh
 
-      - name: Update benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
+      - name: Save mermaid plots cache
+        uses: actions/cache/save@v4
         with:
-          name: slatedb-bencher/benchmark-db.sh
-          tool: 'customBiggerIsBetter'
-          output-file-path: target/bencher/results/benchmark-data.json
-          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          fail-on-alert: true
-          summary-always: true
-          max-items-in-chart: 30
-          auto-push: true
-          gh-repository: github.com/slatedb/slatedb-website
-          benchmark-data-dir-path: performance/benchmarks/main
+          path: ./target/bencher/results/mermaid
+          key: ${{ runner.os }}-mermaid-plots
+
+      - name: Add mermaid diagrams to summary
+        run: |
+          echo "# SlateDB Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Add each mermaid diagram to the summary
+          for mermaid_file in target/bencher/results/mermaid/*.mermaid; do
+            if [ -f "$mermaid_file" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```mermaid' >> $GITHUB_STEP_SUMMARY
+              cat "$mermaid_file" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "Mermaid diagrams added to GitHub Actions summary!"
+          echo "Total diagrams: $(ls -1 target/bencher/results/mermaid/*.mermaid 2>/dev/null | wc -l)"
 
   microbenchmark-pprofs:
     runs-on: ubuntu-latest
@@ -130,36 +147,42 @@ jobs:
           CARGO_PROFILE_BENCH_DEBUG: true
           SLATE_BENCH_PROFILE: true
         run: |
-          # Get list of benchmarks
           BENCHMARKS=$(cargo bench --no-run --message-format=json | jq -r 'select(.profile.test == true and (.target.kind | contains(["bench"]))) | .target.name' | sort -u)
-
-          # Create pprofs for each benchmark
           for bench in $BENCHMARKS; do
             cargo bench --bench $bench -- --profile-time 10
           done
+          find . -name "*.pb" -exec gzip {} \;
 
-      - name: Checkout website repository
-        uses: actions/checkout@v4
-        with:
-          repository: slatedb/slatedb-website
-          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          path: slatedb-website
-          ref: gh-pages
-
-      - name: Update website with new pprofs
-        env:
-          PPROF_WEBSITE_DIR: performance/microbenchmark-pprofs/main
+      # install instructions from https://github.com/polarsignals/pprofme/tree/main
+      - name: Install pprofme
         run: |
-          cd slatedb-website
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          # Remove old .pb files
-          rm -f $PPROF_WEBSITE_DIR/*.pb
-          # Copy pprof to $PPROF_WEBSITE_DIR/<benchmark_name>.pb
-          find ../target/criterion -name "profile.pb" -exec sh -c 'cp "$1" "$PPROF_WEBSITE_DIR/$(basename $(dirname $(dirname "$1"))).pb"' sh {} \;
-          git add $PPROF_WEBSITE_DIR
-          git commit -m "Update microbenchmark pprof for job id ${GITHUB_RUN_ID}"
-          git push
+          curl -LO https://github.com/polarsignals/pprofme/releases/latest/download/pprofme_$(uname)_$(uname -m)
+          curl -sL https://github.com/polarsignals/pprofme/releases/latest/download/pprofme_checksums.txt | shasum --ignore-missing -a 256 --check
+          chmod a+x pprofme_$(uname)_$(uname -m)
+          sudo mv pprofme_$(uname)_$(uname -m) /usr/local/bin/pprofme
+
+      - name: Upload pprofs and add links to summary
+        run: |
+          echo "## 🔥 Microbenchmark Performance Profiles" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The following pprof profiles were generated from nightly microbenchmarks:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          PPROF_FILES=$(find . -name "*.pb.gz" -type f 2>/dev/null || true)
+          if [ -z "$PPROF_FILES" ]; then
+            echo "⚠️ No pprof files found" >> $GITHUB_STEP_SUMMARY
+          else
+            for pprof_file in $PPROF_FILES; do
+              bench_name=$(basename "$pprof_file" .pb.gz)
+              description="SlateDB Nightly Microbenchmark: $bench_name ($(date -u +%Y-%m-%d))"
+              upload_url=$(pprofme upload -d "$description" "$pprof_file" 2>&1 | grep -o 'https://pprof.me/[a-zA-Z0-9]*' | head -1)
+              if [ -n "$upload_url" ]; then
+                echo "- [$bench_name]($upload_url)" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ❌ Failed to upload $bench_name" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
 
   deterministic-simulation-test:
     runs-on: warp-ubuntu-latest-x64-16x
@@ -177,6 +200,7 @@ jobs:
         run: cargo nextest run test_dst_nightly -p slatedb-dst --all-features --profile dst-nightly --no-capture
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
+          RUST_LOG: "warn"
           SLATEDB_DST_ROOT: "/tmp/slatedb-dst"
 
   # This is an integration test that makes sure SlateDB works with ZeroFS.
