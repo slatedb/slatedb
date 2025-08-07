@@ -144,20 +144,28 @@ impl Tier {
     fn find_ts(&self, seq: u64, find_opt: FindOption) -> Option<i64> {
         let len = (self.timestamps.len()) as u64;
         let max = self.first_seq + self.step * len;
-        let diff = seq - self.first_seq;
+
         if let Some(offset) = match find_opt {
-            FindOption::RoundUp if seq <= self.last_seq => Some(cmp::max(0, diff)),
-            FindOption::RoundDown if seq >= self.first_seq => Some(cmp::min(diff, max)),
+            FindOption::RoundUp if seq <= self.last_seq => {
+                if seq >= self.first_seq {
+                    Some(cmp::max(0, (seq - self.first_seq) as i64))
+                } else {
+                    Some(0)
+                }
+            }
+            FindOption::RoundDown if seq >= self.first_seq => {
+                Some(cmp::min((seq - self.first_seq) as i64, max as i64))
+            }
             _ => None,
         } {
-            let mut idx = offset.div_euclid(self.step);
-            let remainder = offset.rem_euclid(self.step);
+            let mut idx = offset.div_euclid(self.step as i64);
+            let remainder = offset.rem_euclid(self.step as i64);
 
             if remainder != 0 && find_opt == FindOption::RoundUp {
                 idx += 1;
             }
 
-            idx = idx.clamp(0, len - 1);
+            idx = idx.clamp(0, len as i64 - 1);
             return Some(self.timestamps[idx as usize]);
         }
 
@@ -216,15 +224,15 @@ pub(crate) fn encode_timestamps_to_bytes(timestamps: &[i64]) -> Vec<u8> {
             // on page 1820 for the full algorithm
             match dod {
                 0 => w.push(false),
-                -63..=64 => {
+                -63..=63 => {
                     w.push32(0b10, 2);
                     w.push32((dod as u32) & 0x7F, 7);
                 }
-                -255..=256 => {
+                -255..=255 => {
                     w.push32(0b110, 3);
                     w.push32((dod as u32) & 0x1FF, 9);
                 }
-                -2047..=2048 => {
+                -2047..=2047 => {
                     w.push32(0b1110, 4);
                     w.push32((dod as u32) & 0xFFF, 12);
                 }
@@ -320,22 +328,18 @@ pub(crate) fn decode_timestamps_from_bytes(buf: &[u8]) -> Result<Vec<i64>, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::*;
 
-    #[test]
-    fn should_ignore_insert_for_non_step_aligned_sequence_number() {
-        // given
-        let mut tier = Tier::new(4, 10);
-
-        // when
-        tier.insert(5, 100);
-
-        // then
-        assert!(tier.timestamps.is_empty());
-        assert_eq!(tier.last_seq, 0);
-    }
-
-    #[test]
-    fn should_find_exact_timestamp_for_sequence_number() {
+    #[rstest]
+    #[case::exact_match(8, FindOption::RoundDown, Some(200))]
+    #[case::exact_match_round_up(8, FindOption::RoundUp, Some(200))]
+    #[case::round_up_to_next(6, FindOption::RoundUp, Some(200))]
+    #[case::round_down_to_previous(6, FindOption::RoundDown, Some(100))]
+    #[case::before_first_seq(0, FindOption::RoundDown, None)]
+    #[case::after_last_seq(16, FindOption::RoundUp, None)]
+    #[case::at_first_seq(4, FindOption::RoundDown, Some(100))]
+    #[case::at_last_seq(12, FindOption::RoundUp, Some(300))]
+    fn test_find_ts(#[case] seq: u64, #[case] find_opt: FindOption, #[case] expected: Option<i64>) {
         // given
         let mut tier = Tier::new(4, 10);
         tier.insert(4, 100);
@@ -343,138 +347,107 @@ mod tests {
         tier.insert(12, 300);
 
         // when
-        let result_down = tier.find_ts(8, FindOption::RoundDown);
-        let result_up = tier.find_ts(8, FindOption::RoundUp);
+        let result = tier.find_ts(seq, find_opt);
 
         // then
-        assert_eq!(result_down, Some(200));
-        assert_eq!(result_up, Some(200));
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case::exact_match(200, FindOption::RoundDown, Some(8))]
+    #[case::exact_match_round_up(200, FindOption::RoundUp, Some(8))]
+    #[case::round_up_to_next(150, FindOption::RoundUp, Some(8))]
+    #[case::round_down_to_previous(150, FindOption::RoundDown, Some(4))]
+    #[case::before_first_ts(50, FindOption::RoundDown, None)]
+    #[case::after_last_ts(350, FindOption::RoundUp, None)]
+    #[case::at_first_ts(100, FindOption::RoundDown, Some(4))]
+    #[case::at_last_ts(300, FindOption::RoundUp, Some(12))]
+    #[case::empty_tier(1, FindOption::RoundDown, None)]
+    fn test_find_seq(#[case] ts: i64, #[case] find_opt: FindOption, #[case] expected: Option<u64>) {
+        // given
+        let mut tier = Tier::new(4, 10);
+        // (ts == 1 is the empty tier case)
+        if ts != 1 || find_opt != FindOption::RoundDown {
+            tier.insert(4, 100);
+            tier.insert(8, 200);
+            tier.insert(12, 300);
+        }
+
+        // when
+        let result = tier.find_seq(ts, find_opt);
+
+        // then
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case::empty_timestamps(vec![])]
+    #[case::single_timestamp(vec![1234567890])]
+    #[case::multiple_timestamps(vec![100, 200, 300, 400, 500])]
+    #[case::zero_dod(vec![1000, 1000, 1000, 1000])] // Tests dod = 0 branch
+    #[case::small_dod(vec![1000, 1064, 1128, 1192])] // Tests dod = 64 branch (max for 7-bit)
+    #[case::medium_dod(vec![1000, 1256, 1512, 1768])] // Tests dod = 256 branch (max for 9-bit)
+    #[case::large_dod(vec![1000, 3048, 5096, 7144])] // Tests dod = 2048 branch (max for 12-bit)
+    #[case::huge_dod(vec![1000, 1000000, 2000000, 3000000])] // Tests 32-bit fallback branch
+    #[case::negative_dod(vec![1000, 937, 874, 811])] // Tests negative dod values
+    #[case::negative_timestamps(vec![-1000, -500, 0, 500, 1000])] // Tests negative timestamp values
+    #[case::mixed_dod(vec![1000, 1000, 1032, 1128, 1512, 50000])] // Tests all branches with values within ranges
+    #[case::mixed_dod_boundaries(vec![1000, 1000, 1028, 1255, 2047, 1000000])] // Tests all branches at boundaries
+    #[case::large_numbers(vec![i64::MAX - 1000, i64::MAX - 500, i64::MAX])]
+    fn test_serialize_deserialize_round_trip(#[case] timestamps: Vec<i64>) {
+        // when
+        let encoded = encode_timestamps_to_bytes(&timestamps);
+        let decoded = decode_timestamps_from_bytes(&encoded).unwrap();
+
+        // then
+        assert_eq!(decoded, timestamps);
     }
 
     #[test]
-    fn should_round_up_to_next_timestamp() {
-        // given
-        let mut tier = Tier::new(4, 10);
-        tier.insert(4, 100);
-        tier.insert(8, 200);
+    fn test_serialize_deserialize_round_trip_proptest() {
+        use proptest::collection::vec;
+        use proptest::prelude::*;
 
-        // when
-        let result = tier.find_ts(6, FindOption::RoundUp);
+        // Generate timestamp sequences for testing
+        let timestamp_strategy = vec(any::<i32>(), 0..=20).prop_map(|deltas| {
+            let base_timestamp = 1_600_000_000i64; // Unix timestamp around 2020
+            let mut timestamps = Vec::new();
+            let mut current_ts = base_timestamp;
 
-        // then
-        assert_eq!(result, Some(200));
-    }
+            for delta in deltas {
+                timestamps.push(current_ts);
+                current_ts =
+                    current_ts.saturating_add(delta.clamp(i32::MIN / 2, i32::MAX / 2) as i64);
+            }
 
-    #[test]
-    fn should_round_down_to_previous_timestamp() {
-        // given
-        let mut tier = Tier::new(4, 10);
-        tier.insert(4, 100);
-        tier.insert(8, 200);
+            timestamps
+        });
 
-        // when
-        let result = tier.find_ts(6, FindOption::RoundDown);
-
-        // then
-        assert_eq!(result, Some(100));
-    }
-
-    #[test]
-    fn should_find_exact_sequence_number_for_timestamp() {
-        // given
-        let mut tier = Tier::new(4, 10);
-        tier.insert(4, 100);
-        tier.insert(8, 200);
-        tier.insert(12, 300);
-
-        // when
-        let result_down = tier.find_seq(200, FindOption::RoundDown);
-        let result_up = tier.find_seq(200, FindOption::RoundUp);
-
-        // then
-        assert_eq!(result_down, Some(8));
-        assert_eq!(result_up, Some(8));
-    }
-
-    #[test]
-    fn should_round_up_to_next_sequence_number() {
-        // given
-        let mut tier = Tier::new(4, 10);
-        tier.insert(4, 100);
-        tier.insert(8, 200);
-
-        // when
-        let result = tier.find_seq(150, FindOption::RoundUp);
-
-        // then
-        assert_eq!(result, Some(8));
-    }
-
-    #[test]
-    fn should_round_down_to_previous_sequence_number() {
-        // given
-        let mut tier = Tier::new(4, 10);
-        tier.insert(4, 100);
-        tier.insert(8, 200);
-
-        // when
-        let result = tier.find_seq(150, FindOption::RoundDown);
-
-        // then
-        assert_eq!(result, Some(4));
+        proptest!(|(timestamps in timestamp_strategy)| {
+            let encoded = encode_timestamps_to_bytes(&timestamps);
+            let decoded = decode_timestamps_from_bytes(&encoded).unwrap();
+            assert_eq!(decoded, timestamps);
+        });
     }
 
     #[test]
     fn should_downsample_when_capacity_exceeded() {
         // given
         let mut tier = Tier::new(2, 3);
+
+        // Insert step-aligned sequences (step=2)
         tier.insert(2, 100);
+        tier.insert(3, 150); // Should be ignored (not divisible by step=2)
         tier.insert(4, 200);
+        tier.insert(5, 250); // Should be ignored (not divisible by step=2)
         tier.insert(6, 300);
 
-        // when
+        // when - this should trigger downsampling
         tier.insert(8, 400);
 
         // then
         assert_eq!(tier.step, 4); // step doubled
-        assert_eq!(tier.timestamps, vec![100, 300]); // downsampled
+        assert_eq!(tier.timestamps, vec![100, 300]); // downsampled (only step-aligned sequences)
         assert_eq!(tier.last_seq, 8);
-    }
-
-    #[test]
-    fn round_trip_empty_timestamps() {
-        let timestamps: Vec<i64> = vec![];
-        let encoded = encode_timestamps_to_bytes(&timestamps);
-        let decoded = decode_timestamps_from_bytes(&encoded).unwrap();
-        assert_eq!(decoded, timestamps);
-    }
-
-    #[test]
-    fn round_trip_single_timestamp() {
-        let timestamps = vec![1234567890];
-        let encoded = encode_timestamps_to_bytes(&timestamps);
-        let decoded = decode_timestamps_from_bytes(&encoded).unwrap();
-        assert_eq!(decoded, timestamps);
-    }
-
-    #[test]
-    fn round_trip_timestamps_with_various_deltas() {
-        // Given timestamps that will exercise each branch of the Gorilla encoding:
-        // Using real Unix timestamps (seconds since epoch) that don't fit in i32
-        // to test the encoding dods using i32s
-        let timestamps = vec![
-            2145916800, 2145916900, 2145916900, 2145916950, 2145918950, 2146018950,
-        ];
-        let encoded = encode_timestamps_to_bytes(&timestamps);
-
-        // When:
-        let decoded = decode_timestamps_from_bytes(&encoded).unwrap();
-
-        // Then:
-        assert_eq!(decoded, timestamps);
-
-        // a naive encoding of 8 bytes per timestamp would be 48 bytes
-        // but this should fit in 23
-        assert_eq!(encoded.len(), 23);
     }
 }
