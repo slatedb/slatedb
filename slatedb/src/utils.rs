@@ -452,7 +452,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        BitWriter, WatchableOnceCell,
+        BitReader, BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -783,47 +783,125 @@ mod tests {
         assert_eq!(result.unwrap(), 42);
     }
 
-    #[test]
-    fn test_should_write_bits_and_flush_bytes() {
+    #[rstest]
+    #[case("alternating_bits", vec![true, false, true, false, true, false, true, false], vec![], vec![], vec![0xAA])]
+    #[case("u64_value", vec![], vec![(0xAB, 8)], vec![], vec![0xAB])]
+    #[case("partial_and_multiple_bytes", vec![true, false], vec![(0x3F, 6), (0xCD, 8)], vec![], vec![0xBF, 0xCD])]
+    #[case("empty_writer", vec![], vec![], vec![], vec![])]
+    #[case("single_bit_true", vec![true], vec![], vec![], vec![0x80])]
+    #[case("single_bit_false", vec![false], vec![], vec![], vec![0x00])]
+    #[case("all_zeros", vec![false, false, false, false, false, false, false, false], vec![], vec![], vec![0x00])]
+    #[case("all_ones", vec![true, true, true, true, true, true, true, true], vec![], vec![], vec![0xFF])]
+    #[case("partial_byte_padding", vec![true, false, true], vec![], vec![], vec![0xA0])]
+    #[case("push32_single_bit", vec![], vec![(1, 1)], vec![], vec![0x80])]
+    #[case("push32_zero_bits", vec![], vec![(0xFF, 0)], vec![], vec![])]
+    #[case("push32_max_bits", vec![], vec![(0xDEADBEEF, 32)], vec![], vec![0xDE, 0xAD, 0xBE, 0xEF])]
+    #[case("push64_operations", vec![], vec![], vec![(0x123456789ABCDEF0, 64)], vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0])]
+    #[case("push64_partial", vec![], vec![], vec![(0xABCD, 12)], vec![0xBC, 0xD0])]
+    #[case("mixed_operations", vec![true], vec![(0x7F, 7)], vec![], vec![0xFF])]
+    #[case("boundary_crossing", vec![true, false, true, false], vec![(0xF0, 4)], vec![], vec![0xA0])]
+    #[case("multiple_partial_bytes", vec![true], vec![(0x5, 3), (0x2, 2), (0x1, 2)], vec![], vec![0xD9])]
+    fn test_bit_writer(
+        #[case] _description: &str,
+        #[case] individual_bits: Vec<bool>,
+        #[case] push32_operations: Vec<(u32, u8)>,
+        #[case] push64_operations: Vec<(u64, u8)>,
+        #[case] expected: Vec<u8>,
+    ) {
         // Given: a new BitWriter
         let mut writer = BitWriter::new();
 
-        // When: we push alternating bits to create a full byte
-        for i in 0..8 {
-            writer.push(i % 2 == 0);
+        // When: we perform the specified operations
+        // Push individual bits first
+        for bit in individual_bits {
+            writer.push(bit);
+        }
+        // Then push32 operations
+        for (value, bits) in push32_operations {
+            writer.push32(value, bits);
+        }
+        // Finally push64 operations
+        for (value, bits) in push64_operations {
+            writer.push64(value, bits);
         }
         let result = writer.finish();
 
-        // Then: it should return a vector with one byte containing 0xAA (10101010)
-        assert_eq!(result, vec![0xAA]);
+        // Then: it should return the expected result
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case("alternating_bits", vec![0xAA], vec![true, false, true, false, true, false, true, false], vec![], vec![])]
+    #[case("u64_value", vec![0xAB], vec![], vec![(0xAB, 8)], vec![])]
+    #[case("partial_and_multiple_bytes", vec![0xBF, 0xCD], vec![true, false], vec![(0x3F, 6), (0xCD, 8)], vec![])]
+    #[case("empty_reader", vec![], vec![], vec![], vec![])]
+    #[case("single_bit_true", vec![0x80], vec![true], vec![], vec![])]
+    #[case("single_bit_false", vec![0x00], vec![false], vec![], vec![])]
+    #[case("all_zeros", vec![0x00], vec![false, false, false, false, false, false, false, false], vec![], vec![])]
+    #[case("all_ones", vec![0xFF], vec![true, true, true, true, true, true, true, true], vec![], vec![])]
+    #[case("partial_byte_padding", vec![0xA0], vec![true, false, true], vec![], vec![])]
+    #[case("push32_single_bit", vec![0x80], vec![], vec![(1, 1)], vec![])]
+    #[case("push32_zero_bits", vec![], vec![], vec![], vec![])]
+    #[case("push32_max_bits", vec![0xDE, 0xAD, 0xBE, 0xEF], vec![], vec![(0xDEADBEEF, 32)], vec![])]
+    #[case("push64_operations", vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0], vec![], vec![], vec![(0x123456789ABCDEF0, 64)])]
+    #[case("push64_partial", vec![0xBC, 0xD0], vec![], vec![], vec![(0xBCD, 12)])]
+    #[case("mixed_operations", vec![0xFF], vec![true], vec![(0x7F, 7)], vec![])]
+    #[case("boundary_crossing", vec![0xA0], vec![true, false, true, false], vec![(0x0, 4)], vec![])]
+    #[case("multiple_partial_bytes", vec![0xD9], vec![true], vec![(0x5, 3), (0x2, 2), (0x1, 2)], vec![])]
+    fn test_bit_reader(
+        #[case] _description: &str,
+        #[case] input_bytes: Vec<u8>,
+        #[case] expected_individual_bits: Vec<bool>,
+        #[case] expected_read32_operations: Vec<(u32, u8)>,
+        #[case] expected_read64_operations: Vec<(u64, u8)>,
+    ) {
+        // Given: a BitReader with the input bytes
+
+        let mut reader = BitReader::new(&input_bytes);
+
+        // When: we read individual bits
+        for expected_bit in expected_individual_bits {
+            let actual_bit = reader.read_bit();
+            assert_eq!(actual_bit, Some(expected_bit));
+        }
+
+        // Then: read32 operations
+        for (expected_value, bits) in expected_read32_operations {
+            let actual_value = reader.read32(bits);
+            assert_eq!(actual_value, Some(expected_value));
+        }
+
+        // Finally: read64 operations
+        for (expected_value, bits) in expected_read64_operations {
+            let actual_value = reader.read64(bits);
+            assert_eq!(actual_value, Some(expected_value));
+        }
+
+        // Verify we've consumed all bits for non-empty inputs
+        if !input_bytes.is_empty() {
+            // For partial bytes, there might be padding bits we should be able to read as false
+            let next_bit = reader.read_bit();
+            if let Some(bit) = next_bit {
+                // If there are remaining bits, they should be padding (false)
+                assert_eq!(bit, false);
+            }
+        }
     }
 
     #[test]
-    fn test_should_push_bits_from_u64_value() {
-        // Given: a new BitWriter
-        let mut writer = BitWriter::new();
+    fn test_bit_reader_exhaustion() {
+        // Test that BitReader properly returns None when exhausted
+        let bytes = vec![0xFF]; // Single byte with all bits set
+        let mut reader = BitReader::new(&bytes);
 
-        // When: we push 8 bits from a u64 value
-        writer.push32(0xAB, 8);
-        let result = writer.finish();
+        // Read all 8 bits
+        for _ in 0..8 {
+            assert_eq!(reader.read_bit(), Some(true));
+        }
 
-        // Then: it should return a vector with one byte containing 0xAB
-        assert_eq!(result, vec![0xAB]);
-    }
-
-    #[test]
-    fn test_should_handle_partial_bytes_and_multiple_bytes() {
-        // Given: a new BitWriter
-        let mut writer = BitWriter::new();
-
-        // When: we push individual bits and then push_bits to create partial and full bytes
-        writer.push(true);
-        writer.push(false);
-        writer.push32(0x3F, 6); // 111111
-        writer.push32(0xCD, 8); // Full second byte
-        let result = writer.finish();
-
-        // Then: it should return a vector with two bytes: 0xBF (10111111) and 0xCD
-        assert_eq!(result, vec![0xBF, 0xCD]);
+        // Next read should return None
+        assert_eq!(reader.read_bit(), None);
+        assert_eq!(reader.read32(1), None);
+        assert_eq!(reader.read64(1), None);
     }
 }
