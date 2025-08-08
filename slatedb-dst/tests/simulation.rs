@@ -182,8 +182,7 @@ fn test_dst_nightly() -> Result<(), Error> {
     let mut handles = Vec::new();
     let mut system = System::new();
     system.refresh_cpu_all();
-    // 90% of the cores because GH actions were being killed at 100%
-    let num_cores = (system.cpus().len() as f64 * 0.9).floor() as u64;
+    let num_cores = system.cpus().len();
     info!("running nightly [num_cores={}]", num_cores);
     for core in 0..num_cores {
         let test_dir = test_root.join(format!("core-{}", core));
