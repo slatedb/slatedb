@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types, clippy::disallowed_methods, clippy::disallowed_macros)]
 use slatedb::admin::AdminBuilder;
 use slatedb::config::CheckpointOptions;
 use slatedb::object_store::memory::InMemory;

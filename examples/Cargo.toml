@@ -63,6 +63,3 @@ object_store = { workspace = true, features = ["azure"] }
 slatedb.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 tracing-subscriber.workspace = true
-
-[lints]
-clippy = { disallowed_macros = "allow", disallowed_types = "allow", disallowed_methods = "allow" }

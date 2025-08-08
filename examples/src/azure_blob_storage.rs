@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types, clippy::disallowed_methods, clippy::disallowed_macros)]
 use object_store::azure::MicrosoftAzureBuilder;
 use slatedb::{config::PutOptions, Db};
 use std::sync::Arc;

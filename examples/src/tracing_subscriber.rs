@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types, clippy::disallowed_methods, clippy::disallowed_macros)]
 use slatedb::{bytes::Bytes, object_store::memory::InMemory, Db};
 use std::sync::Arc;
 

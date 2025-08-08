@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types, clippy::disallowed_methods, clippy::disallowed_macros)]
 use object_store::aws::S3ConditionalPut;
 use slatedb::Db;
 use std::sync::Arc;
