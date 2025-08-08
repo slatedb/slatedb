@@ -186,13 +186,9 @@ impl CachedObjectStore {
                                 // We ignore evicted bytes in PUT operations since we're
                                 // not trying to limit cache size during normal operations
                             }
-                            Err(e) => {
+                            Err(_e) => {
                                 // Log warning but don't fail the operation
                                 // TODO: add proper logging
-                                eprintln!(
-                                    "Warning: Failed to save cache part {}: {}",
-                                    part_number, e
-                                );
                                 break;
                             }
                         }
@@ -201,10 +197,9 @@ impl CachedObjectStore {
                         part_number += 1;
                     }
                 }
-                Err(e) => {
+                Err(_e) => {
                     // Log warning but don't fail the PUT operation
                     // TODO: add proper logging
-                    eprintln!("Warning: Failed to get metadata for caching: {}", e);
                 }
             }
         }
