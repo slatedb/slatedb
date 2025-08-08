@@ -323,32 +323,37 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         // Setup object store with optional caching
-        let maybe_cached_main_object_store =
-            match &self.settings.object_store_cache_options.root_folder {
-                None => self.main_object_store.clone(),
-                Some(cache_root_folder) => {
-                    let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
-                    let cache_storage = Arc::new(FsCacheStorage::new(
-                        cache_root_folder.clone(),
-                        self.settings
-                            .object_store_cache_options
-                            .max_cache_size_bytes,
-                        self.settings.object_store_cache_options.scan_interval,
-                        stats.clone(),
-                        system_clock.clone(),
-                        rand.clone(),
-                    ));
+        let cached_object_store = match &self.settings.object_store_cache_options.root_folder {
+            None => None,
+            Some(cache_root_folder) => {
+                let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
+                let cache_storage = Arc::new(FsCacheStorage::new(
+                    cache_root_folder.clone(),
+                    self.settings
+                        .object_store_cache_options
+                        .max_cache_size_bytes,
+                    self.settings.object_store_cache_options.scan_interval,
+                    stats.clone(),
+                    system_clock.clone(),
+                    rand.clone(),
+                ));
 
-                    let cached_main_object_store = CachedObjectStore::new(
-                        self.main_object_store.clone(),
-                        cache_storage,
-                        self.settings.object_store_cache_options.part_size_bytes,
-                        stats.clone(),
-                    )?;
-                    cached_main_object_store.start_evictor().await;
-                    cached_main_object_store
-                }
-            };
+                let cached_object_store = CachedObjectStore::new(
+                    self.main_object_store.clone(),
+                    cache_storage,
+                    self.settings.object_store_cache_options.part_size_bytes,
+                    self.settings.object_store_cache_options.cache_puts,
+                    stats.clone(),
+                )?;
+                cached_object_store.start_evictor().await;
+                Some(cached_object_store)
+            }
+        };
+
+        let maybe_cached_main_object_store = match &cached_object_store {
+            Some(cached_store) => cached_store.clone(),
+            None => self.main_object_store.clone(),
+        };
 
         // Setup the manifest store and load latest manifest
         let manifest_store = Arc::new(ManifestStore::new(
@@ -383,6 +388,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let path_resolver_for_preload = path_resolver.clone(); // Clone for preloading
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
@@ -464,7 +470,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.wal_object_store.clone(),
             ),
             sst_format,
-            path_resolver,
+            path_resolver.clone(),
             self.fp_registry.clone(),
             None,
         ));
@@ -541,6 +547,89 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Replay WAL
         inner.replay_wal().await?;
+
+        // Preload cache if enabled
+        if let Some(cached_obj_store) = cached_object_store {
+            let current_state = inner.state.read().state();
+            let max_cache_size = self
+                .settings
+                .object_store_cache_options
+                .max_cache_size_bytes
+                .unwrap_or(usize::MAX);
+
+            // Preload compacted files if enabled (this includes L0 and all compacted levels)
+            if self
+                .settings
+                .object_store_cache_options
+                .preload_disk_cache_fully_on_startup
+            {
+                // Calculate total capacity needed to avoid reallocations
+                let l0_count = current_state.manifest.core.l0.len();
+                let compacted_count: usize = current_state
+                    .manifest
+                    .core
+                    .compacted
+                    .iter()
+                    .map(|level| level.ssts.len())
+                    .sum();
+                let total_capacity = l0_count + compacted_count;
+
+                let mut all_sst_paths: Vec<object_store::path::Path> =
+                    Vec::with_capacity(total_capacity);
+
+                // Add L0 SSTs
+                all_sst_paths.extend(
+                    current_state
+                        .manifest
+                        .core
+                        .l0
+                        .iter()
+                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
+                );
+
+                // Add compacted SSTs
+                all_sst_paths.extend(
+                    current_state
+                        .manifest
+                        .core
+                        .compacted
+                        .iter()
+                        .flat_map(|level| &level.ssts)
+                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
+                );
+
+                if !all_sst_paths.is_empty() {
+                    if let Err(e) = cached_obj_store
+                        .load_files_to_cache(all_sst_paths, max_cache_size)
+                        .await
+                    {
+                        warn!("Failed to preload full cache: {:?}", e);
+                    }
+                }
+            } else if self
+                .settings
+                .object_store_cache_options
+                .preload_l0_disk_cache_on_startup
+            {
+                // Only preload L0 files if full preload is not enabled
+                let l0_sst_paths: Vec<object_store::path::Path> = current_state
+                    .manifest
+                    .core
+                    .l0
+                    .iter()
+                    .map(|sst_handle| path_resolver.table_path(&sst_handle.id))
+                    .collect();
+
+                if !l0_sst_paths.is_empty() {
+                    if let Err(e) = cached_obj_store
+                        .load_files_to_cache(l0_sst_paths, max_cache_size)
+                        .await
+                    {
+                        warn!("Failed to preload L0 cache: {:?}", e);
+                    }
+                }
+            }
+        }
 
         // Create and return the Db instance
         Ok(Db {

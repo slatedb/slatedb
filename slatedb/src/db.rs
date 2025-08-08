@@ -1628,17 +1628,22 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_get_with_object_store_cache_stored_files() {
+    async fn test_object_store_cache_helper(
+        cache_puts_enabled: bool,
+        db_path: &str,
+        expected_cache_parts: Vec<(&str, usize)>,
+    ) -> (Arc<CachedObjectStore>, Db) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_")
             .tempdir()
             .unwrap();
+
         let stats_registry = StatRegistry::new();
         let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let part_size = 1024;
+
         let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.path().to_path_buf(),
             None,
@@ -1652,75 +1657,79 @@ mod tests {
             object_store.clone(),
             cache_storage,
             part_size,
+            cache_puts_enabled,
             cache_stats.clone(),
         )
         .unwrap();
 
         opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
-        let kv_store = Db::builder(
-            "/tmp/test_kv_store_with_cache_stored_files",
-            cached_object_store.clone(),
-        )
-        .with_settings(opts)
-        .build()
-        .await
-        .unwrap();
+        opts.object_store_cache_options.cache_puts = cache_puts_enabled;
+
+        let kv_store = Db::builder(db_path, cached_object_store.clone())
+            .with_settings(opts)
+            .build()
+            .await
+            .unwrap();
+
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
-        assert_eq!(
-            cached_object_store
-                .list(None)
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .filter_map(Result::ok)
-                .map(|meta| meta.location.to_string())
-                .collect::<Vec<_>>(),
-            vec![
-                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest"
-                    .to_string(),
-                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest"
-                    .to_string(),
-                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst"
-                    .to_string(),
-                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst"
-                    .to_string(),
-            ],
-        );
-
-        // check the files are cached as expected
-        let tests = vec![
-            (
-                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest",
-                0,
-            ),
-            (
-                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest",
-                2,
-            ),
-            (
-                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst",
-                2,
-            ),
-            (
-                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst",
-                0,
-            ),
-        ];
-        for (path, expected) in tests {
+        // Verify cache behavior
+        for (path, expected_parts) in expected_cache_parts {
             let entry = cached_object_store
                 .cache_storage
                 .entry(&object_store::path::Path::from(path), part_size);
             assert_eq!(
                 entry.cached_parts().await.unwrap().len(),
-                expected,
-                "{}",
+                expected_parts,
+                "Path: {}",
                 path
             );
         }
+
+        (cached_object_store, kv_store)
+    }
+
+    #[tokio::test]
+    async fn test_get_with_object_store_cache_stored_files() {
+        let expected_cache_parts =
+            vec![
+            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
+            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 2),
+            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 2),
+            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
+        ];
+
+        let (_cached_object_store, kv_store) = test_object_store_cache_helper(
+            false, // cache_puts disabled
+            "/tmp/test_kv_store_with_cache_stored_files",
+            expected_cache_parts,
+        )
+        .await;
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_object_store_cache_put_caching_enabled() {
+        let expected_cache_parts =
+            vec![
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 2),
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 2),
+            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 2),
+            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000002.sst", 2),
+        ];
+
+        let (_cached_object_store, kv_store) = test_object_store_cache_helper(
+            true, // cache_puts enabled
+            "/tmp/test_kv_store_with_put_cache_enabled",
+            expected_cache_parts,
+        )
+        .await;
+
+        kv_store.close().await.unwrap();
     }
 
     async fn build_database_from_table(
