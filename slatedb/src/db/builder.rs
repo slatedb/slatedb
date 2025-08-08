@@ -388,7 +388,6 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
-        let path_resolver_for_preload = path_resolver.clone(); // Clone for preloading
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
