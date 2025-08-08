@@ -552,9 +552,7 @@ pub(crate) enum InvalidGetRange {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Duration;
 
-    use object_store::memory::InMemory;
     use object_store::{path::Path, GetOptions, GetRange, ObjectStore, PutPayload};
     use rand::Rng;
 
