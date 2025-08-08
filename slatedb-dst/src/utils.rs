@@ -5,6 +5,7 @@ use slatedb::clock::LogicalClock;
 use slatedb::clock::SystemClock;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
+use slatedb::config::GarbageCollectorDirectoryOptions;
 use slatedb::config::GarbageCollectorOptions;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
@@ -114,9 +115,18 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         max_unflushed_bytes,
         compression_codec,
         garbage_collector_options: Some(GarbageCollectorOptions {
-            manifest_options: GarbageCollectorOptions::default().manifest_options,
-            wal_options: GarbageCollectorOptions::default().wal_options,
-            compacted_options: GarbageCollectorOptions::default().compacted_options,
+            manifest_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(300),
+                ..Default::default()
+            }),
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(300),
+                ..Default::default()
+            }),
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                ..Default::default()
+            }),
         }),
         compactor_options: Some(CompactorOptions::default()),
         wal_enabled: rng.random_bool(0.5),
