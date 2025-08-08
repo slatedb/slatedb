@@ -61,16 +61,14 @@ SlateDB provides several configuration options to tune performance. See [Setting
 
 SlateDB currently has two benchmarking tools: **bencher** and **microbenchmarks**.
 
-It comes with a [bencher](https://github.com/slatedb/slatedb/tree/main/slatedb-bencher) tool to benchmark put/get operations against an object store. You can configure the tool with a variety of options. See [bencher/README.md](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/README.md) for details. [benchmark-db.sh](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/benchmark-db.sh) also serves as an example.
+[bencher](https://github.com/slatedb/slatedb/tree/main/slatedb-bencher) is a tool to benchmark put/get operations against an object store. You can configure the tool with a variety of options. See [bencher/README.md](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/README.md) for details. [benchmark-db.sh](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/benchmark-db.sh) also serves as an example.
 
-### Nightly
+Microbenchmarks run with [Criterion](https://bheisler.github.io/criterion.rs/). They are located in [benches](https://github.com/slatedb/slatedb/tree/main/slatedb/benches) and run for specific internal SlateDB functions. A comment is left on all PRs when a > 200% slowdown is detected.
 
-We run bencher [nightly](https://github.com/slatedb/slatedb/blob/main/.github/workflows/nightly.yaml) and publish the results in the Github action summary. The benchmark runs on [WarpBuild](https://warpbuild.com)'s [warp-ubuntu-latest-x64-16x](https://docs.warpbuild.com/cloud-runners) runners, which use Hetzner machines in Frankfurt. We use [Tigris](https://www.tigrisdata.com/) for object storage with the `auto` region setting, which resolves to Frankfurt as well. Bandwidth between WarpBuild (Hetzner) and Tigris seems to be about 500MiB/s down and 130MiB/s up. We routinely max out the bandwidth in the nightly tests.
+### Nightly Benchmarks
 
-## Microbenchmarks
+We run both **bencher** and **microbenchmarks** [nightly](https://github.com/slatedb/slatedb/actions/workflows/nightly.yaml). The [results](https://github.com/slatedb/slatedb/actions/workflows/nightly.yaml) are published in the Github action summary.
 
-We use [Criterion](https://bheisler.github.io/criterion.rs/) to run microbenchmarks (located in [benches](https://github.com/slatedb/slatedb/tree/main/slatedb/benches)) for specific internal SlateDB functions. A comment is left on all PRs when a > 200% slowdown is detected.
+- **Bencher** benchmarks run on [WarpBuild](https://warpbuild.com)'s [warp-ubuntu-latest-x64-16x](https://docs.warpbuild.com/cloud-runners) runners, which use [Hetzner](https://hetzner.com/) machines in Frankfurt. We use [Tigris](https://www.tigrisdata.com/) for object storage with the `auto` region setting, which resolves to Frankfurt as well. Bandwidth between WarpBuild (Hetzner) and Tigris seems to be about 500MiB/s down and 130MiB/s up. We routinely max out the bandwidth in the nightly tests.
 
-### Nightly
-
-Microbenchmarks also run [nightly](https://github.com/slatedb/slatedb/blob/main/.github/workflows/nightly.yaml) with the [pprof-rs](https://github.com/tikv/pprof-rs) profiler. The resulting profiler protobuf files are published to [pprof.me](https://pprof.me) and links to each microbenchmark are provided in the Gihhub action summary. The microbenchmarks run on [standard Linux Github action runners](https://docs.github.com/en/actions/using-github-hosted-runners/using-github-hosted-runners/about-github-hosted-runners#standard-github-hosted-runners-for-public-repositories).
+- **Microbenchmarks** run on [standard Linux Github action runners](https://docs.github.com/en/actions/using-github-hosted-runners/using-github-hosted-runners/about-github-hosted-runners#standard-github-hosted-runners-for-public-repositories) with the [pprof-rs](https://github.com/tikv/pprof-rs) profiler. The resulting profiler protobuf files are published to [pprof.me](https://pprof.me) and links to each microbenchmark are provided in the Github action summary.
