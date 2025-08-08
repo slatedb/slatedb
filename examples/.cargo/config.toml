@@ -1,6 +1,0 @@
-[target.'cfg(all())']
-rustflags = [
-    "-A", "clippy::disallowed_macros",
-    "-A", "clippy::disallowed_types",
-    "-A", "clippy::disallowed_methods",
-]
