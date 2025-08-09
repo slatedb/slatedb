@@ -161,8 +161,11 @@ mod tests {
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
     use crate::{Db, Error};
+    use bytes::Bytes;
+    use fail_parallel::FailPointRegistry;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::time::Duration;
 
     type SnapshotTestCaseSetupFunc =
@@ -618,10 +621,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_snapshot_with_committed_failpoint() -> Result<(), Error> {
-        use bytes::Bytes;
-        use fail_parallel::FailPointRegistry;
-        use std::sync::Arc;
-
         // Create a test database with a failpoint registry
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let fp_registry = Arc::new(FailPointRegistry::new());
