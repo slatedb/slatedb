@@ -987,6 +987,20 @@ pub struct ObjectStoreCacheOptions {
     /// its default value is 4mb.
     pub part_size_bytes: usize,
 
+    /// Whether to cache PUT operations to disk. When enabled, data written via PUT operations
+    /// will be cached locally for faster subsequent reads. Default is false.
+    pub cache_puts: bool,
+
+    /// Whether to preload L0 SST files into cache during database startup. When enabled,
+    /// the database will load all L0 SST files into the cache up to the cache size limit
+    /// to warm up the cache for faster access. Default is false.
+    pub preload_l0_disk_cache_on_startup: bool,
+
+    /// Whether to preload compacted SST files into cache during database startup. When enabled,
+    /// the database will load all compacted SST files into the cache up to the cache size limit
+    /// to warm up the cache for faster access. Default is false.
+    pub preload_disk_cache_fully_on_startup: bool,
+
     /// Interval to scan the cache directory to rebuild the in-memory map for evictor.
     /// The default value is 1 hour. If set to None, the cache directory will be only
     /// scanned once on start up.
@@ -1007,6 +1021,9 @@ impl Default for ObjectStoreCacheOptions {
             #[cfg(not(target_pointer_width = "32"))]
             max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
             part_size_bytes: 4 * 1024 * 1024,
+            cache_puts: false,
+            preload_l0_disk_cache_on_startup: false,
+            preload_disk_cache_fully_on_startup: false,
             scan_interval: Some(Duration::from_secs(3600)),
         }
     }
@@ -1080,7 +1097,7 @@ mod tests {
     "flush_interval": "1s",
     "object_store_cache_options": {
         "root_folder": "/tmp/slatedb-root"
-    } 
+    }
 }
 "#,
             )
