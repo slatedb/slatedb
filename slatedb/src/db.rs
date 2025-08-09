@@ -24,6 +24,7 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
@@ -41,6 +42,7 @@ use crate::config::{
 };
 use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
+use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
@@ -53,6 +55,7 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::transaction_manager::TransactionManager;
 use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
@@ -69,6 +72,8 @@ pub(crate) struct DbInner {
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
+    #[allow(dead_code)]
+    pub(crate) fp_registry: Arc<FailPointRegistry>,
     /// A clock which is guaranteed to be monotonic. it's previous value is
     /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
@@ -80,6 +85,8 @@ pub(crate) struct DbInner {
     /// of the WAL buffer to the remote storage.
     pub(crate) wal_buffer: Arc<WalBufferManager>,
     pub(crate) wal_enabled: bool,
+    /// [`txn_manager`] tracks all the live transactions and related metadata.
+    pub(crate) txn_manager: Arc<TransactionManager>,
 }
 
 impl DbInner {
@@ -95,6 +102,7 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
@@ -139,6 +147,8 @@ impl DbInner {
             settings.flush_interval,
         ));
 
+        let txn_manager = Arc::new(TransactionManager::new(state.clone(), rand.clone()));
+
         let db_inner = Self {
             state,
             settings,
@@ -153,7 +163,9 @@ impl DbInner {
             system_clock,
             rand,
             stat_registry,
+            fp_registry,
             reader,
+            txn_manager,
         };
         Ok(db_inner)
     }
@@ -586,6 +598,50 @@ impl Db {
         }
 
         Ok(())
+    }
+
+    /// Create a snapshot of the database.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<DbSnapshot>, Error>`: the snapshot of the database, it represents
+    ///   a consistent view of the database at the time of the snapshot.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    /// use bytes::Bytes;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     
+    ///     // Write some data and create a snapshot
+    ///     db.put(b"key1", b"value1").await?;
+    ///     let snapshot = db.snapshot().await?;
+    ///     
+    ///     // Snapshot provides read-only access to database state
+    ///     let value = snapshot.get(b"key1").await?;
+    ///     assert_eq!(value, Some(Bytes::from(b"value1".as_ref())));
+    ///     
+    ///     // Write more data to original database
+    ///     db.put(b"key2", b"value2").await?;
+    ///     
+    ///     // Snapshot still sees old state, original db sees new data
+    ///     assert_eq!(snapshot.get(b"key2").await?, None);
+    ///     assert_eq!(db.get(b"key2").await?, Some(Bytes::from(b"value2".as_ref())));
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
+        self.inner.check_error()?;
+        let seq = self.inner.oracle.last_committed_seq.load();
+        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
+        Ok(snapshot)
     }
 
     /// Get a value from the database with default read options.
@@ -3925,5 +3981,40 @@ mod tests {
             garbage_collector_options: None,
             default_ttl: ttl,
         }
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_basic_functionality() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open("test_db", object_store).await.unwrap();
+
+        // Write some data
+        db.put(b"key1", b"value1").await.unwrap();
+        db.put(b"key2", b"value2").await.unwrap();
+
+        // Create a snapshot
+        let snapshot = db.snapshot().await.unwrap();
+
+        // Verify snapshot can read the data
+        assert_eq!(
+            snapshot.get(b"key1").await.unwrap(),
+            Some(Bytes::from(b"value1".as_ref()))
+        );
+        assert_eq!(
+            snapshot.get(b"key2").await.unwrap(),
+            Some(Bytes::from(b"value2".as_ref()))
+        );
+
+        // Write more data to the original database
+        db.put(b"key3", b"value3").await.unwrap();
+
+        // Snapshot should not see the new data
+        assert_eq!(snapshot.get(b"key3").await.unwrap(), None);
+
+        // Original database should see the new data
+        assert_eq!(
+            db.get(b"key3").await.unwrap(),
+            Some(Bytes::from(b"value3".as_ref()))
+        );
     }
 }

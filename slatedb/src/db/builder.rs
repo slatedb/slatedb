@@ -438,6 +438,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 memtable_flush_tx,
                 write_tx,
                 stat_registry,
+                self.fp_registry.clone(),
             )
             .await?,
         );
