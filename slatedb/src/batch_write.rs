@@ -97,7 +97,7 @@ impl DbInner {
         // this is useful for testing the case where the reader is not able to see the writes.
         fail_point!(
             Arc::clone(&self.fp_registry),
-            "write-memtable-before-committed",
+            "write-batch-pre-commit",
             |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
         );
 

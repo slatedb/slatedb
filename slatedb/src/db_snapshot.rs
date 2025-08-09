@@ -648,6 +648,7 @@ mod tests {
                 .expect("Failed to create test database"),
         );
         db.put(b"key1", b"value1").await?;
+        let recent_commited_seq = db.inner.oracle.last_committed_seq.load();
 
         // Configure the failpoint to "pause", blocking the put after memtable write but before commit
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "pause").unwrap();
@@ -673,6 +674,7 @@ mod tests {
 
         // At this point the data is in the memtable but not committed; create the snapshot
         let snapshot = db.snapshot().await?;
+        assert_eq!(snapshot.txn_state.seq, recent_commited_seq);
 
         // Turn off the failpoint to let the put complete
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();
