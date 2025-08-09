@@ -264,21 +264,18 @@ impl DefaultDstDistribution {
         Self { options, rand }
     }
 
-    /// Generate a write action with puts and deletes. The put probability is 80%
-    /// and the delete probability is 20%. The maximum number of bytes to write
-    /// is configured by [DstOptions::max_write_batch_bytes]
+    /// Generate a write action with puts and deletes.
+    /// The maximum number of bytes to write is configured by [DstOptions::max_write_batch_bytes].
     ///
     /// See [DefaultDstDistribution::gen_key] and [DefaultDstDistribution::gen_val]
     /// for more information.
     fn sample_write(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
         let mut write_ops = Vec::new();
-        let write_option = self.get_write_options();
-        let put_probability = 0.8;
+        let write_options = self.get_write_options();
         let mut remaining_bytes =
             self.sample_log10_uniform(1..self.options.max_write_batch_bytes) as i64;
         while remaining_bytes > 0 {
-            let is_put = self.rand.rng().random_bool(put_probability);
-            if is_put {
+            if self.is_put_operation() {
                 let key = self.gen_key(state);
                 let val = self.gen_val();
                 remaining_bytes -= (key.len() + val.len()) as i64;
@@ -289,7 +286,7 @@ impl DefaultDstDistribution {
                 write_ops.push((key, None, PutOptions::default()));
             }
         }
-        DstAction::Write(write_ops, write_option)
+        DstAction::Write(write_ops, write_options)
     }
 
     /// Generate a get action.
@@ -434,6 +431,16 @@ impl DefaultDstDistribution {
     #[inline]
     fn gen_read_options(&self) -> ReadOptions {
         ReadOptions::default()
+    }
+
+    /// Returns true if the operation is a put, false if it is a delete.
+    ///
+    /// The probability of a put is randomly sampled on each invocation.
+    #[inline]
+    fn is_put_operation(&self) -> bool {
+        let mut rng = self.rand.rng();
+        let insert_probability = rng.random_range(0.0..1.0);
+        rng.random_bool(insert_probability)
     }
 }
 
