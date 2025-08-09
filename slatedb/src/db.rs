@@ -634,7 +634,7 @@ impl Db {
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.check_error()?;
-        let seq = self.inner.oracle.last_seq.load();
+        let seq = self.inner.oracle.last_committed_seq.load();
         let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
         Ok(snapshot)
     }
