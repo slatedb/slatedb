@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 
-use crate::comparable_range::{ComparableRange, EndBound, StartBound};
+use crate::comparable_range::{ComparableBound, ComparableRange};
 
 /// Concrete struct representing a range of Bytes. Gets around much of
 /// the cumbersome work associated with the generic trait RangeBounds<Bytes>
@@ -123,11 +123,11 @@ impl BytesRange {
         !self.inner.non_empty()
     }
 
-    pub(crate) fn comparable_start_bound(&self) -> StartBound<&Bytes> {
+    pub(crate) fn comparable_start_bound(&self) -> ComparableBound<&Bytes> {
         self.inner.comparable_start_bound()
     }
 
-    pub(crate) fn comparable_end_bound(&self) -> EndBound<&Bytes> {
+    pub(crate) fn comparable_end_bound(&self) -> ComparableBound<&Bytes> {
         self.inner.comparable_end_bound()
     }
 }
