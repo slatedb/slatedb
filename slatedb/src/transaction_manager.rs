@@ -4,7 +4,6 @@ use crate::utils::IdGenerator;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Weak;
 use uuid::Uuid;
 
 pub(crate) struct TransactionState {
@@ -30,7 +29,7 @@ pub struct TransactionManager {
 
 struct TransactionManagerInner {
     /// Map of transaction state ID to weak reference.
-    active_txns: HashMap<Uuid, Weak<TransactionState>>,
+    active_txns: HashMap<Uuid, Arc<TransactionState>>,
 }
 
 impl TransactionManager {
@@ -50,7 +49,7 @@ impl TransactionManager {
         let txn_state = Arc::new(TransactionState { id, seq });
         {
             let mut inner = self.inner.write();
-            inner.active_txns.insert(id, Arc::downgrade(&txn_state));
+            inner.active_txns.insert(id, txn_state.clone());
         }
         txn_state
     }
@@ -67,11 +66,7 @@ impl TransactionManager {
 
     fn min_active_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
-        inner
-            .active_txns
-            .values()
-            .filter_map(|state| state.upgrade().map(|state| state.seq))
-            .min()
+        inner.active_txns.values().map(|state| state.seq).min()
     }
 
     fn save_recent_snapshot_min_seq(&self) {
