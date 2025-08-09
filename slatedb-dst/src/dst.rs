@@ -90,6 +90,7 @@ use rand::seq::IteratorRandom;
 use rand::Rng;
 use rand::RngCore;
 use slatedb::clock::SystemClock;
+use slatedb::config::DurabilityLevel;
 use slatedb::config::PutOptions;
 use slatedb::config::ReadOptions;
 use slatedb::config::ScanOptions;
@@ -312,7 +313,7 @@ impl DefaultDstDistribution {
         } else if start_key == end_key {
             end_key.push(b'\0');
         }
-        DstAction::Scan(start_key.clone(), end_key.clone(), ScanOptions::default())
+        DstAction::Scan(start_key.clone(), end_key.clone(), self.gen_scan_options())
     }
 
     fn sample_flush(&self) -> DstAction {
@@ -384,18 +385,18 @@ impl DefaultDstDistribution {
     /// improved in the future.
     #[inline]
     fn maybe_get_existing_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Option<Vec<u8>> {
-        let hit_probability = self.rand.rng().random_range(0.0..1.0);
-        let is_db_hit = !state.is_empty() && self.rand.rng().random_bool(hit_probability);
-        if is_db_hit {
-            let existing_key = state
-                .keys()
-                .choose(&mut self.rand.rng())
-                .expect("can't pick a key for an empty state")
-                .clone();
-            Some(existing_key)
-        } else {
-            None
+        let hit_probability = gen_uniform_random(&mut self.rand.rng());
+
+        if state.is_empty() || !hit_probability {
+            return None;
         }
+
+        let existing_key = state
+            .keys()
+            .choose(&mut self.rand.rng())
+            .expect("can't pick a key for an empty state")
+            .clone();
+        Some(existing_key)
     }
 
     /// Generates a value for actions that require a value. The value is filled with random bytes.
@@ -418,19 +419,33 @@ impl DefaultDstDistribution {
 
     /// Generates write options for actions that require write options.
     ///
-    /// Currently, we only have one option: `await_durable`. This option is set to true 50% of
-    /// the time.
+    /// Currently, we only have one option: `await_durable`.
     #[inline]
     fn get_write_options(&self) -> WriteOptions {
         let mut rng = self.rand.rng();
         WriteOptions {
-            await_durable: rng.random_bool(0.5),
+            await_durable: gen_uniform_random(&mut rng),
         }
     }
 
-    #[inline]
     fn gen_read_options(&self) -> ReadOptions {
-        ReadOptions::default()
+        let mut rng = self.rand.rng();
+        ReadOptions {
+            durability_filter: gen_durability_level(&mut rng),
+            dirty: gen_uniform_random(&mut rng),
+        }
+    }
+
+    fn gen_scan_options(&self) -> ScanOptions {
+        let read_ahead_bytes = self.sample_log10_uniform(1024..65536) as usize;
+        let mut rng = self.rand.rng();
+
+        ScanOptions {
+            durability_filter: gen_durability_level(&mut rng),
+            dirty: gen_uniform_random(&mut rng),
+            cache_blocks: gen_uniform_random(&mut rng),
+            read_ahead_bytes,
+        }
     }
 
     /// Returns true if the operation is a put, false if it is a delete.
@@ -439,9 +454,21 @@ impl DefaultDstDistribution {
     #[inline]
     fn is_put_operation(&self) -> bool {
         let mut rng = self.rand.rng();
-        let insert_probability = rng.random_range(0.0..1.0);
-        rng.random_bool(insert_probability)
+        gen_uniform_random(&mut rng)
     }
+}
+
+fn gen_durability_level(rng: &mut impl RngCore) -> DurabilityLevel {
+    if gen_uniform_random(rng) {
+        DurabilityLevel::Remote
+    } else {
+        DurabilityLevel::Memory
+    }
+}
+
+fn gen_uniform_random(rng: &mut impl RngCore) -> bool {
+    let dirty = rng.random_range(0.0..1.0);
+    rng.random_bool(dirty)
 }
 
 /// Samples an action from the distribution. Actions are sampled with equal probability.
@@ -536,6 +563,7 @@ impl Dst {
                 self.state.len(),
                 step_action,
             );
+            debug!("running step [step_action={:?}]", step_action);
             match step_action {
                 DstAction::Write(write_ops, write_options) => {
                     self.run_write(&write_ops, &write_options).await?
