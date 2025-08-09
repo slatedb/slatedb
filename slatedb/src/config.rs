@@ -65,15 +65,15 @@
 //! scan_interval = "3600s"
 //!
 //! [garbage_collector_options.manifest_options]
-//! poll_interval = "300s"
+//! interval = "300s"
 //! min_age = "86400s"
 //!
 //! [garbage_collector_options.wal_options]
-//! poll_interval = "60s"
+//! interval = "60s"
 //! min_age = "60s"
 //!
 //! [garbage_collector_options.compacted_options]
-//! poll_interval = "300s"
+//! interval = "300s"
 //! min_age = "86400s"
 //! ```
 //!
@@ -104,15 +104,15 @@
 //!  },
 //!  "garbage_collector_options": {
 //!    "manifest_options": {
-//!      "poll_interval": "300s",
+//!      "interval": "300s",
 //!      "min_age": "86400s"
 //!    },
 //!    "wal_options": {
-//!      "poll_interval": "60s",
+//!      "interval": "60s",
 //!      "min_age": "60s"
 //!    },
 //!    "compacted_options": {
-//!      "poll_interval": "300s",
+//!      "interval": "300s",
 //!      "min_age": "86400s"
 //!    }
 //!  }
@@ -143,13 +143,13 @@
 //!   scan_interval: '3600s'
 //! garbage_collector_options:
 //!   manifest_options:
-//!     poll_interval: '300s'
+//!     interval: '300s'
 //!     min_age: '86400s'
 //!   wal_options:
-//!     poll_interval: '60s'
+//!     interval: '60s'
 //!     min_age: '60s'
 //!   compacted_options:
-//!     poll_interval: '300s'
+//!     interval: '300s'
 //!     min_age: '86400s'
 //! ```
 //!

@@ -5,8 +5,9 @@ use slatedb::clock::LogicalClock;
 use slatedb::clock::SystemClock;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
+use slatedb::config::GarbageCollectorDirectoryOptions;
 use slatedb::config::GarbageCollectorOptions;
-use slatedb::object_store::memory::InMemory;
+use slatedb::object_store::ObjectStore;
 use slatedb::Db;
 use slatedb::DbBuilder;
 use slatedb::DbRand;
@@ -43,12 +44,19 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
 ///
 /// All arguments are expected to be deterministic.
 pub async fn build_dst(
+    object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
     rand: Rc<DbRand>,
     dst_opts: DstOptions,
 ) -> Dst {
-    let db = build_db(system_clock.clone(), logical_clock.clone(), &rand).await;
+    let db = build_db(
+        object_store,
+        system_clock.clone(),
+        logical_clock.clone(),
+        &rand,
+    )
+    .await;
     Dst::new(
         db,
         system_clock,
@@ -62,11 +70,12 @@ pub async fn build_dst(
 ///
 /// All arguments are expected to be deterministic.
 pub async fn build_db(
+    object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
     rand: &DbRand,
 ) -> Db {
-    let mut builder = DbBuilder::new("test_db", Arc::new(InMemory::new()));
+    let mut builder = DbBuilder::new("test_db", object_store);
     builder = builder.with_settings(build_settings(rand).await);
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
     builder = builder.with_system_clock(system_clock.clone());
@@ -106,9 +115,18 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         max_unflushed_bytes,
         compression_codec,
         garbage_collector_options: Some(GarbageCollectorOptions {
-            manifest_options: GarbageCollectorOptions::default().manifest_options,
-            wal_options: GarbageCollectorOptions::default().wal_options,
-            compacted_options: GarbageCollectorOptions::default().compacted_options,
+            manifest_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(300),
+                ..Default::default()
+            }),
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(300),
+                ..Default::default()
+            }),
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                ..Default::default()
+            }),
         }),
         compactor_options: Some(CompactorOptions::default()),
         wal_enabled: rng.random_bool(0.5),
@@ -141,6 +159,7 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
 ///
 /// All arguments are expected to be deterministic.
 pub async fn run_simulation(
+    object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
     logical_clock: Arc<dyn LogicalClock>,
     rand: Rc<DbRand>,
@@ -150,6 +169,7 @@ pub async fn run_simulation(
     let seed = rand.seed();
     info!("running simulation [seed={}]", seed);
     let mut dst = build_dst(
+        object_store,
         system_clock.clone(),
         logical_clock.clone(),
         rand.clone(),

@@ -12,6 +12,9 @@ homepage.workspace = true
 name = "slatedb"
 crate-type = ["cdylib"]
 doc = false
+# Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
+# See https://bheisler.github.io/criterion.rs/book/faq.html
+bench = false
 
 [dependencies]
 # See .cargo/config.toml for details on why pyo3/extension-module is only

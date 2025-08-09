@@ -6,18 +6,9 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WARMUP=0 # ignore the first N samples, equal to 30 seconds with default settings
 OUT="target/bencher/results"
 
-mkdir -p $OUT/plots
 mkdir -p $OUT/dats
 mkdir -p $OUT/logs
-
-# Check if gnuplot is available
-has_gnuplot() {
-    if command -v gnuplot >/dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
-}
+mkdir -p $OUT/mermaid
 
 run_bench() {
   local put_percentage="$1"
@@ -50,82 +41,159 @@ generate_dat() {
 
     echo "Parsing stats for $input_file -> $output_file"
 
-    # Extract elapsed time, puts/s, and gets/s using awk to handle additional fields like MiB/s and hit rate
-    awk '/stats dump/ {
-        if (match($0, /elapsed ([0-9.]+)/, a) &&
-            match($0, /put\/s: ([0-9.]+)/, b) &&
-            match($0, /get\/s: ([0-9.]+)/, c)) {
-            printf "%s %s %s\n", a[1], b[1], c[1];
-        }
-    }' "$input_file" > "$output_file"
+    # Extract elapsed time, puts/s, and gets/s using sed and awk for cross-platform compatibility
+    grep "stats dump" "$input_file" | sed -E 's/.*elapsed ([0-9.]+).*put\/s: ([0-9.]+).*get\/s: ([0-9.]+).*/\1 \2 \3/' > "$output_file"
 }
 
-generate_plot() {
-  local input_file="$1"
-  local output_file="$2"
-  local warmup="${WARMUP:-0}" # Default to 0 if WARMUP is not set
+generate_mermaid () {
+    local dat_file="$1"
+    local mermaid_file="$2"
 
-  echo "Generating plot for $input_file -> $output_file"
+    # Create mermaid directory if it doesn't exist
+    mkdir -p "$(dirname "$mermaid_file")"
 
-  gnuplot -e "
-    set terminal svg size 960,540 background rgb 'white';
-    set output '$output_file';
-    set title 'Puts/s and Gets/s Over Time';
-    set xlabel 'Elapsed Time (s)';
-    set ylabel 'Operations per Second';
-    set grid;
-    set key outside;
-    plot \
-    '$input_file' skip $warmup using 1:2 with linespoints linewidth 2 title 'Puts/s', \
-    '$input_file' skip $warmup using 1:3 with linespoints linewidth 2 title 'Gets/s';"
-}
+    # Get the last line from dat file (most recent benchmark result)
+    if [ ! -f "$dat_file" ] || [ ! -s "$dat_file" ]; then
+        echo "Warning: dat file $dat_file does not exist or is empty"
+        return 1
+    fi
 
-generate_json() {
-    local output_file="$OUT/benchmark-data.json"
-    echo "[" > "$output_file"
-    local first_entry=true
+    local last_line=$(tail -n 1 "$dat_file")
+    local put_value=$(echo "$last_line" | awk '{print $2}')
+    local get_value=$(echo "$last_line" | awk '{print $3}')
 
-    # Use find to get a sorted list of dat files
-    for dat_file in $(find "$OUT/dats" -name "*.dat" | sort -Vr); do
-        # Extract put_percentage and concurrency from filename
-        local filename=$(basename "$dat_file")
-        local put_percentage=$(echo "$filename" | cut -d'_' -f1)
-        local concurrency=$(echo "$filename" | cut -d'_' -f2 | cut -d'.' -f1)
+    # Get git commit hash (first 7 characters)
+    local git_hash=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
 
-        # Read the last line of the dat file for final stats
-        local stats=$(tail -n 1 "$dat_file")
-        local puts=$(echo "$stats" | awk '{print $2}')
-        local gets=$(echo "$stats" | awk '{print $3}')
+    # Get current date in YYYY-MM-DD format
+    local current_date=$(date +"%Y-%m-%d")
 
-        # Assert that all required values are non-empty
-        [ -n "$puts" ] || { echo "Error: puts/s is empty in $dat_file"; exit 1; }
-        [ -n "$gets" ] || { echo "Error: gets/s is empty in $dat_file"; exit 1; }
+    # Create x-axis entry
+    local x_entry="$current_date ($git_hash)"
 
-        # Add comma for all but first entry
-        if [ "$first_entry" = true ]; then
-            first_entry=false
-        else
-            echo "," >> "$output_file"
+    # Extract put_percentage and concurrency from mermaid filename
+    local filename=$(basename "$mermaid_file" .mermaid)
+    local put_percentage=$(echo "$filename" | cut -d'_' -f1)
+    local concurrency=$(echo "$filename" | cut -d'_' -f2)
+
+    # Calculate max value for y-axis scaling
+    local max_value=$(echo "$put_value $get_value" | tr ' ' '\n' | sort -nr | head -n1)
+    local y_max=$(echo "$max_value * 1.2" | bc -l | cut -d'.' -f1)
+
+    if [ ! -f "$mermaid_file" ]; then
+        # Create new mermaid file
+        cat > "$mermaid_file" << EOF
+---
+config:
+  themeVariables:
+    xyChart:
+      plotColorPalette: '#1e81b0, #e28743'
+---
+xychart-beta
+    title "SlateDB [puts=${put_percentage}%, threads=${concurrency}, 🔵=puts, 🟠=get]"
+    x-axis ["$x_entry"]
+    y-axis "requests/s" 0 --> $y_max
+    line [$put_value]
+    line [$get_value]
+EOF
+    else
+        # Update existing mermaid file
+        local temp_file=$(mktemp)
+
+        # Read current content
+        local title_line=$(grep "title" "$mermaid_file" | sed 's/^[[:space:]]*//')
+        local x_axis_line=$(grep "x-axis" "$mermaid_file")
+        local put_line=$(grep -m1 "line" "$mermaid_file")
+        local get_line=$(grep "line" "$mermaid_file" | tail -n1)
+
+        # Extract current values
+        local current_x_values=$(echo "$x_axis_line" | sed 's/.*\[//;s/\].*//' | tr ',' '\n' | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
+        local current_put_values=$(echo "$put_line" | sed 's/.*\[//;s/\].*//')
+        local current_get_values=$(echo "$get_line" | sed 's/.*\[//;s/\].*//')
+
+        # Convert to arrays
+        local x_array=()
+        local put_array=()
+        local get_array=()
+
+        # Parse existing x-axis values
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                x_array+=("$line")
+            fi
+        done <<< "$current_x_values"
+
+        # Parse existing put values
+        IFS=',' read -ra put_array <<< "$current_put_values"
+
+        # Parse existing get values
+        IFS=',' read -ra get_array <<< "$current_get_values"
+
+        # Add new values
+        x_array+=("$x_entry")
+        put_array+=("$put_value")
+        get_array+=("$get_value")
+
+        # Keep only last 30 values if we have more
+        if [ ${#x_array[@]} -gt 30 ]; then
+            x_array=("${x_array[@]: -30}")
+            put_array=("${put_array[@]: -30}")
+            get_array=("${get_array[@]: -30}")
         fi
 
-        # Append benchmark results
-        cat >> "$output_file" << EOF
-    {
-        "name": "SlateDB ${put_percentage}% Puts ${concurrency} Threads - Puts/s",
-        "unit": "ops/sec",
-        "value": $puts
-    },
-    {
-        "name": "SlateDB ${put_percentage}% Puts ${concurrency} Threads - Gets/s",
-        "unit": "ops/sec",
-        "value": $gets
-    }
-EOF
-    done
+        # Build new x-axis string
+        local new_x_axis="x-axis ["
+        for i in "${!x_array[@]}"; do
+            if [ $i -gt 0 ]; then
+                new_x_axis="$new_x_axis, "
+            fi
+            new_x_axis="$new_x_axis\"${x_array[i]}\""
+        done
+        new_x_axis="$new_x_axis]"
 
-    # Remove the last comma and close the array
-    echo "]" >> "$output_file"
-    echo "Generated benchmark data in $output_file"
+        # Build new put line string
+        local new_put_line="line ["
+        for i in "${!put_array[@]}"; do
+            if [ $i -gt 0 ]; then
+                new_put_line="$new_put_line, "
+            fi
+            new_put_line="$new_put_line${put_array[i]}"
+        done
+        new_put_line="$new_put_line]"
+
+        # Build new get line string
+        local new_get_line="line ["
+        for i in "${!get_array[@]}"; do
+            if [ $i -gt 0 ]; then
+                new_get_line="$new_get_line, "
+            fi
+            new_get_line="$new_get_line${get_array[i]}"
+        done
+        new_get_line="$new_get_line]"
+
+        # Calculate max value for y-axis scaling from all values
+        local all_values="${put_array[*]} ${get_array[*]}"
+        local max_value=$(echo "$all_values" | tr ' ' '\n' | sort -nr | head -n1)
+        local y_max=$(echo "$max_value * 1.2" | bc -l | cut -d'.' -f1)
+
+        # Write updated mermaid file
+        cat > "$mermaid_file" << EOF
+---
+config:
+  themeVariables:
+    xyChart:
+      plotColorPalette: '#1e81b0, #e28743'
+---
+xychart-beta
+    $title_line
+    $new_x_axis
+    y-axis "requests/s" 0 --> $y_max
+    $new_put_line
+    $new_get_line
+EOF
+    fi
+
+    echo "Generated/updated mermaid chart: $mermaid_file"
 }
 
 # Set CLOUD_PROVIDER to local if not already set
@@ -143,17 +211,11 @@ for put_percentage in 20 40 60 80 100; do
   for concurrency in 1 32; do
     log_file="$OUT/logs/${put_percentage}_${concurrency}.log"
     dat_file="$OUT/dats/${put_percentage}_${concurrency}.dat"
-    svg_file="$OUT/plots/${put_percentage}_${concurrency}.svg"
+    mermaid_file="$OUT/mermaid/${put_percentage}_${concurrency}.mermaid"
     num_keys=$((put_percentage * 1000))
 
     run_bench "$put_percentage" "$concurrency" "$num_keys" "$log_file"
     generate_dat "$log_file" "$dat_file"
-    if has_gnuplot; then
-        generate_plot "$dat_file" "$svg_file"
-    else
-        echo "gnuplot is missing, so skipping plot generation"
-    fi
+    generate_mermaid "$dat_file" "$mermaid_file"
   done
 done
-
-generate_json
