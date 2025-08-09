@@ -13,7 +13,7 @@ use crate::DbRead;
 pub struct DbSnapshot {
     /// txn_state holds the seq number of the transaction that created this snapshot
     txn_state: Arc<TransactionState>,
-    /// Unique ID assigned by the transaction manager
+    /// Reference to the transaction manager that created this snapshot
     txn_manager: Arc<TransactionManager>,
     /// Reference to the database
     db_inner: Arc<DbInner>,
