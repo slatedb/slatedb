@@ -184,7 +184,7 @@ mod tests {
     }
 
     async fn create_test_db() -> Db {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = Arc::new(InMemory::new());
         let config = Settings {
             flush_interval: Some(Duration::from_millis(100)),
             manifest_poll_interval: Duration::from_millis(100),
@@ -668,6 +668,8 @@ mod tests {
                 .await
                 .unwrap();
         });
+
+        // Sleep for 1 second to ensure the put is in the memtable but not committed
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // At this point the data is in the memtable but not committed; create the snapshot
@@ -679,8 +681,10 @@ mod tests {
         // Wait for the put to complete
         put_result.await.unwrap();
 
+        // Assert the snapshot should not contain the new value
         let snapshot_result = snapshot.get(b"key1").await?;
         assert_eq!(snapshot_result, Some(Bytes::from("value1")));
+
         let db_result = db.get(b"key1").await?;
         assert_eq!(db_result, Some(Bytes::from("value2")));
         Ok(())

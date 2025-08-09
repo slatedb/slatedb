@@ -602,7 +602,7 @@ impl Db {
     /// Create a snapshot of the database.
     ///
     /// ## Returns
-    /// - `Result<DbSnapshot, SlateDBError>`: the snapshot of the database, it represents
+    /// - `Result<Arc<DbSnapshot>, Error>`: the snapshot of the database, it represents
     ///   a consistent view of the database at the time of the snapshot.
     ///
     /// ## Examples
