@@ -157,7 +157,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::config::{CompactorOptions, Settings};
+    use crate::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
     use crate::{Db, Error};
@@ -613,6 +613,76 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_snapshot_with_committed_failpoint() -> Result<(), Error> {
+        use bytes::Bytes;
+        use fail_parallel::FailPointRegistry;
+        use std::sync::Arc;
+
+        // Create a test database with a failpoint registry
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let fp_registry = Arc::new(FailPointRegistry::new());
+
+        let config = Settings {
+            flush_interval: Some(Duration::from_millis(100)),
+            manifest_poll_interval: Duration::from_millis(100),
+            manifest_update_timeout: Duration::from_secs(300),
+            compactor_options: Some(CompactorOptions {
+                poll_interval: Duration::from_millis(100),
+                ..Default::default()
+            }),
+            max_unflushed_bytes: 16 * 1024,
+            min_filter_keys: 0,
+            l0_sst_size_bytes: 4 * 4096,
+            ..Default::default()
+        };
+
+        let db = Arc::new(
+            Db::builder("/tmp/failpoint_test", object_store)
+                .with_settings(config)
+                .with_fp_registry(fp_registry.clone())
+                .build()
+                .await
+                .expect("Failed to create test database"),
+        );
+        db.put(b"key1", b"value1").await?;
+
+        // Configure the failpoint to "pause", blocking the put after memtable write but before commit
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "pause").unwrap();
+
+        // Start the put operation; it will pause at the failpoint
+        let db_clone = Arc::clone(&db);
+        let put_result = tokio::spawn(async move {
+            db_clone
+                .put_with_options(
+                    b"key1",
+                    b"value2",
+                    &PutOptions::default(),
+                    &WriteOptions {
+                        await_durable: false,
+                    },
+                )
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // At this point the data is in the memtable but not committed; create the snapshot
+        let snapshot = db.snapshot().await?;
+
+        // Turn off the failpoint to let the put complete
+        fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();
+
+        // Wait for the put to complete
+        put_result.await.unwrap();
+
+        let snapshot_result = snapshot.get(b"key1").await?;
+        assert_eq!(snapshot_result, Some(Bytes::from("value1")));
+        let db_result = db.get(b"key1").await?;
+        assert_eq!(db_result, Some(Bytes::from("value2")));
         Ok(())
     }
 }
