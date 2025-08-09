@@ -24,6 +24,7 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
@@ -71,6 +72,7 @@ pub(crate) struct DbInner {
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
+    pub(crate) fp_registry: Arc<FailPointRegistry>,
     /// A clock which is guaranteed to be monotonic. it's previous value is
     /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
@@ -99,6 +101,7 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
@@ -159,6 +162,7 @@ impl DbInner {
             system_clock,
             rand,
             stat_registry,
+            fp_registry,
             reader,
             txn_manager,
         };
