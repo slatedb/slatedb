@@ -80,7 +80,9 @@
 //! # }
 //! ```
 
+use crate::state::DstState;
 use crate::utils;
+use crate::utils::truncate_bytes;
 use log::debug;
 use log::info;
 use rand::distr::weighted::WeightedIndex;
@@ -99,7 +101,6 @@ use slatedb::Db;
 use slatedb::DbRand;
 use slatedb::Error;
 use slatedb::WriteBatch;
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::Bound;
 use std::ops::RangeBounds;
@@ -191,12 +192,6 @@ impl std::fmt::Display for DstAction {
 /// for readability.
 impl std::fmt::Debug for DstAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fn truncate_bytes(bytes: &[u8]) -> &[u8] {
-            if bytes.len() < 8 {
-                return bytes;
-            }
-            &bytes[..8]
-        }
         match self {
             DstAction::Write(write_ops, write_options) => {
                 write!(f, "Write(")?;
@@ -242,7 +237,7 @@ impl std::fmt::Debug for DstAction {
 ///
 /// [Dst] samples actions from the distribution and performs them on the database.
 pub trait DstDistribution {
-    fn sample_action(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction;
+    fn sample_action(&self, state: &DstState) -> DstAction;
 }
 
 /// [DefaultDstDistribution] has the following characteristics:
@@ -270,7 +265,7 @@ impl DefaultDstDistribution {
     ///
     /// See [DefaultDstDistribution::gen_key] and [DefaultDstDistribution::gen_val]
     /// for more information.
-    fn sample_write(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+    fn sample_write(&self, state: &DstState) -> DstAction {
         let mut write_ops = Vec::new();
         let write_options = self.get_write_options();
         let mut remaining_bytes =
@@ -293,7 +288,7 @@ impl DefaultDstDistribution {
     /// Generate a get action.
     ///
     /// See [DefaultDstDistribution::gen_key] for more information.
-    fn sample_get(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+    fn sample_get(&self, state: &DstState) -> DstAction {
         DstAction::Get(self.gen_key(state), self.gen_read_options())
     }
 
@@ -305,7 +300,7 @@ impl DefaultDstDistribution {
     ///
     /// [DefaultDstDistribution::gen_key] is used to generate the start and end keys.
     /// This means scan inherits the db_hit probability from that method.
-    fn sample_scan(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+    fn sample_scan(&self, state: &DstState) -> DstAction {
         let mut start_key = self.gen_key(state);
         let mut end_key = self.gen_key(state);
         if start_key > end_key {
@@ -369,7 +364,7 @@ impl DefaultDstDistribution {
     /// ensures that we cover a wide range of keys without favoring any particular size.
     /// See [DefaultDstDistribution::sample_log10_uniform] for more details.
     #[inline]
-    fn gen_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
+    fn gen_key(&self, state: &DstState) -> Vec<u8> {
         if let Some(existing_key) = self.maybe_get_existing_key(state) {
             return existing_key;
         }
@@ -384,7 +379,7 @@ impl DefaultDstDistribution {
     /// a simple way to control the probability of sampling an existing key, but it may be
     /// improved in the future.
     #[inline]
-    fn maybe_get_existing_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Option<Vec<u8>> {
+    fn maybe_get_existing_key(&self, state: &DstState) -> Option<Vec<u8>> {
         let hit_probability = gen_uniform_random(&mut self.rand.rng());
 
         if state.is_empty() || !hit_probability {
@@ -473,7 +468,7 @@ fn gen_uniform_random(rng: &mut impl RngCore) -> bool {
 
 /// Samples an action from the distribution. Actions are sampled with equal probability.
 impl DstDistribution for DefaultDstDistribution {
-    fn sample_action(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+    fn sample_action(&self, state: &DstState) -> DstAction {
         let weights = [1; 5]; // all actions have equal probability for now
         let dist = WeightedIndex::new(weights).expect("non-empty weights and all ≥ 0");
         let action = dist.sample(&mut self.rand.rng());
@@ -523,7 +518,7 @@ pub struct Dst {
     /// The options to use for the simulation.
     options: DstOptions,
     /// An in-memory representation of what _should_ be in the DB.
-    state: SizedBTreeMap<Vec<u8>, Vec<u8>>,
+    state: DstState,
 }
 
 impl Dst {
@@ -536,7 +531,7 @@ impl Dst {
     ) -> Self {
         Self {
             db,
-            state: SizedBTreeMap::new(),
+            state: DstState::new(),
             rand,
             action_sampler,
             options,
@@ -613,9 +608,45 @@ impl Dst {
     async fn run_get(&mut self, key: &Vec<u8>, read_options: &ReadOptions) -> Result<(), Error> {
         let future = self.db.get_with_options(key, read_options);
         let result = self.poll_await(future, 0f64).await?;
-        let expected_val = self.state.get(key);
-        let actual_val = result.map(|b| b.to_vec());
-        assert_eq!(expected_val, actual_val.as_ref());
+
+        if read_options.durability_filter.is_memory() {
+            // If the read durability is memory, we expect the value to always be present.
+            let expected_val = self.state.get(key);
+            let actual_val = result.map(|b| b.to_vec());
+            assert_eq!(
+                expected_val,
+                actual_val.as_ref(),
+                "expected found [key={:?}, read_options={:?}]",
+                truncate_bytes(key),
+                read_options
+            );
+        } else {
+            // If the read durability is remote, we expect the value to be present if a flush operation has happened.
+            let committed = self.state.is_committed(key);
+
+            if committed {
+                let expected_val = self.state.get(key);
+                let actual_val = result.map(|b| b.to_vec());
+                assert_eq!(
+                    expected_val,
+                    actual_val.as_ref(),
+                    "expected found [key={:?}, read_options={:?}, committed={}]",
+                    truncate_bytes(key),
+                    read_options,
+                    committed
+                );
+            } else {
+                assert_eq!(
+                    None,
+                    result,
+                    "expected not found [key={:?}, read_options={:?}, committed={}]",
+                    truncate_bytes(key),
+                    read_options,
+                    committed
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -649,7 +680,9 @@ impl Dst {
 
     async fn run_flush(&self) -> Result<(), Error> {
         debug!("run_flush");
-        self.db.flush().await
+        self.db.flush().await?;
+        self.state.commit();
+        Ok(())
     }
 
     async fn advance_time(&self, duration: Duration) {
@@ -715,66 +748,10 @@ impl Dst {
                     self.advance_time(Duration::from_millis(sleep_ms)).await;
                     if self.rand.rng().random_bool(flush_probability) {
                         self.db.flush().await?;
+                        self.state.commit();
                     }
                 }
             }
         }
-    }
-}
-
-/// A [BTreeMap] that tracks the total size of the map in bytes. This helps
-/// us keep an upper-bound on the memory usage.
-pub struct SizedBTreeMap<K, V>
-where
-    K: Ord + AsRef<[u8]>,
-    V: Ord + AsRef<[u8]>,
-{
-    inner: BTreeMap<K, V>,
-    pub(crate) size_bytes: usize,
-}
-
-impl<K, V> SizedBTreeMap<K, V>
-where
-    K: Ord + AsRef<[u8]>,
-    V: Ord + AsRef<[u8]>,
-{
-    fn new() -> Self {
-        Self {
-            inner: BTreeMap::new(),
-            size_bytes: 0,
-        }
-    }
-
-    fn insert(&mut self, key: K, val: V) {
-        self.size_bytes += key.as_ref().len() + val.as_ref().len();
-        if let Some(old_value) = self.inner.insert(key, val) {
-            self.size_bytes -= old_value.as_ref().len();
-        }
-    }
-
-    fn remove(&mut self, key: &K) {
-        if let Some(val) = self.inner.remove(key) {
-            self.size_bytes -= key.as_ref().len() + val.as_ref().len();
-        }
-    }
-
-    fn get(&self, key: &K) -> Option<&V> {
-        self.inner.get(key)
-    }
-
-    fn range(&self, range: impl RangeBounds<K>) -> std::collections::btree_map::Range<'_, K, V> {
-        self.inner.range(range)
-    }
-
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    fn keys(&self) -> std::collections::btree_map::Keys<'_, K, V> {
-        self.inner.keys()
     }
 }

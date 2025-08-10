@@ -214,3 +214,10 @@ fn init_tracing() {
             .init();
     });
 }
+
+pub(crate) fn truncate_bytes(bytes: &[u8]) -> &[u8] {
+    if bytes.len() < 8 {
+        return bytes;
+    }
+    &bytes[..8]
+}
