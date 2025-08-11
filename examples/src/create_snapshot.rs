@@ -1,7 +1,6 @@
 use slatedb::config::Settings;
 use slatedb::{Db, Error};
 use std::sync::Arc;
-use tokio;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
