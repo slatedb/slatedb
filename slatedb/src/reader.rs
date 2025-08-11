@@ -165,7 +165,7 @@ impl Reader {
             sr_iters.push_back(iter);
         }
 
-        DbIterator::new(range.clone(), memtable_iters, l0_iters, sr_iters, max_seq).await
+        DbIterator::new(range, memtable_iters, l0_iters, sr_iters, max_seq).await
     }
 }
 
