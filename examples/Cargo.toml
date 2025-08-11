@@ -52,6 +52,18 @@ test = false
 bench = false
 
 [[bin]]
+name = "create-snapshot"
+path = "src/create_snapshot.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "scan-snapshot"
+path = "src/scan_snapshot.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "tracing-subscriber"
 path = "src/tracing_subscriber.rs"
 test = false

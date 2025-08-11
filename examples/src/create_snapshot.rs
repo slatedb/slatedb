@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use slatedb::config::Settings;
 use slatedb::{Db, Error};
 use std::sync::Arc;
@@ -28,14 +27,14 @@ async fn main() -> Result<(), Error> {
     let snapshot_value1 = snapshot.get(b"key1").await?;
     println!(
         "Snapshot key1: {:?}",
-        snapshot_value1.map(|v| String::from_utf8_lossy(&v))
+        snapshot_value1.map(|v| String::from_utf8_lossy(&v).to_string())
     );
 
     // Read from database - should see updated data
     let db_value1 = db.get(b"key1").await?;
     println!(
         "Database key1: {:?}",
-        db_value1.map(|v| String::from_utf8_lossy(&v))
+        db_value1.map(|v| String::from_utf8_lossy(&v).to_string())
     );
 
     Ok(())

@@ -22,13 +22,13 @@ async fn main() -> Result<(), Error> {
     println!("Snapshot created successfully");
 
     // After creating snapshot, make changes to the database
-    db.put(b"apple", b"green").await?;  // Modify existing
-    db.put(b"date", b"brown").await?;   // Add new key
-    db.delete(b"banana").await?;        // Delete existing
+    db.put(b"apple", b"green").await?; // Modify existing
+    db.put(b"date", b"brown").await?; // Add new key
+    db.delete(b"banana").await?; // Delete existing
 
     // Scan from snapshot - should see original data
     println!("\nScanning snapshot:");
-    let mut snapshot_iter = snapshot.scan(b"a"..=b"z").await?;
+    let mut snapshot_iter = snapshot.scan(b"a".to_vec()..=b"z".to_vec()).await?;
     while let Some(kv) = snapshot_iter.next().await? {
         println!(
             "  {}: {}",
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Error> {
 
     // Scan from database - should see updated data
     println!("\nScanning database:");
-    let mut db_iter = db.scan(b"a"..=b"z").await?;
+    let mut db_iter = db.scan(b"a".to_vec()..=b"z".to_vec()).await?;
     while let Some(kv) = db_iter.next().await? {
         println!(
             "  {}: {}",
