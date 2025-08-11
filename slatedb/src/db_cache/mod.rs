@@ -236,6 +236,118 @@ impl CachedEntry {
     }
 }
 
+pub struct SplitCache {
+    // Cache for block data
+    block_cache: Option<Arc<dyn DbCache>>,
+    // Cache for indices and filters
+    meta_cache: Option<Arc<dyn DbCache>>,
+}
+
+impl SplitCache {
+    #[inline(always)]
+    pub fn default_block_capacity() -> usize {
+        // 512 MB
+        512 * 1024 * 1024
+    }
+
+    #[inline(always)]
+    pub fn default_meta_capacity() -> usize {
+        // 128 MB
+        128 * 1024 * 1024
+    }
+
+    pub fn new() -> Self {
+        Self {
+            block_cache: None,
+            meta_cache: None,
+        }
+    }
+
+    pub fn with_block_cache(mut self, cache: Arc<dyn DbCache>) -> Self {
+        self.block_cache = Some(cache);
+        self
+    }
+
+    pub fn with_meta_cache(mut self, cache: Arc<dyn DbCache>) -> Self {
+        self.meta_cache = Some(cache);
+        self
+    }
+
+    pub fn build(self) -> Self {
+        self
+    }
+}
+
+#[async_trait]
+impl DbCache for SplitCache {
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        if let Some(cache) = &self.block_cache {
+            cache.get_block(key).await
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        if let Some(cache) = &self.meta_cache {
+            cache.get_index(key).await
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        if let Some(cache) = &self.meta_cache {
+            cache.get_filter(key).await
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn insert(&self, key: CachedKey, value: CachedEntry) {
+        match &value.item {
+            CachedItem::Block(_) => {
+                if let Some(ref cache) = self.block_cache {
+                    cache.insert(key, value.clamp_allocated_size()).await;
+                } else {
+                    debug!(
+                        "No block cache available, skipping insert for key: {:?}",
+                        key
+                    );
+                }
+            }
+            CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) => {
+                if let Some(ref cache) = self.meta_cache {
+                    cache.insert(key, value.clamp_allocated_size()).await;
+                } else {
+                    debug!(
+                        "No meta cache available, skipping insert for key: {:?}",
+                        key
+                    );
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn remove(&self, key: &CachedKey) {
+        // Because `CachedKey` is uniquely identified by (SST ID, offset), given a `CachedKey`, it
+        // will only appear in the block cache or meta cache, which is safe and will not cause duplicate
+        // deletion.
+        if let Some(ref cache) = self.block_cache {
+            cache.remove(key).await;
+        }
+        if let Some(ref cache) = self.meta_cache {
+            cache.remove(key).await;
+        }
+    }
+
+    fn entry_count(&self) -> u64 {
+        self.block_cache.as_ref().map_or(0, |c| c.entry_count())
+            + self.meta_cache.as_ref().map_or(0, |c| c.entry_count())
+    }
+}
+
 pub struct DbCacheWrapper {
     stats: DbCacheStats,
     system_clock: Arc<dyn SystemClock>,
@@ -346,7 +458,7 @@ impl DbCache for DbCacheWrapper {
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
-        self.cache.insert(key, value.clamp_allocated_size()).await
+        self.cache.insert(key, value).await
     }
 
     #[allow(dead_code)]
@@ -467,7 +579,7 @@ pub(crate) mod test_utils {
 mod tests {
 
     use crate::clock::DefaultSystemClock;
-    use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper};
+    use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
@@ -626,8 +738,13 @@ mod tests {
     #[fixture]
     fn cache() -> DbCacheWrapper {
         let registry = StatRegistry::new();
+        let cache = SplitCache::new()
+            .with_block_cache(Arc::new(TestCache::new()))
+            .with_meta_cache(Arc::new(TestCache::new()))
+            .build();
+
         DbCacheWrapper::new(
-            Arc::new(TestCache::new()),
+            Arc::new(cache),
             &registry,
             Arc::new(DefaultSystemClock::default()),
         )

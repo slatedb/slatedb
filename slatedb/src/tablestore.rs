@@ -30,8 +30,8 @@ pub struct TableStore {
     path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
-    /// In-memory cache for blocks
-    block_cache: Option<Arc<dyn DbCache>>,
+    /// In-memory cache for data blocks, indices, and filters
+    cache: Option<Arc<dyn DbCache>>,
 }
 
 struct ReadOnlyObject {
@@ -88,14 +88,14 @@ impl TableStore {
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
-        block_cache: Option<Arc<dyn DbCache>>,
+        cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self {
             object_stores,
             sst_format,
             path_resolver,
             fp_registry,
-            block_cache,
+            cache,
         }
     }
 
@@ -216,7 +216,7 @@ impl TableStore {
                 _ => SlateDBError::from(e),
             })?;
 
-        if let Some(cache) = self.block_cache.as_ref() {
+        if let Some(ref cache) = self.cache {
             if write_cache {
                 for block in encoded_sst.unconsumed_blocks {
                     let offset = block.offset;
@@ -239,7 +239,7 @@ impl TableStore {
     }
 
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
-        let Some(cache) = &self.block_cache else {
+        let Some(ref cache) = self.cache else {
             return;
         };
         if let Some(filter) = filter {
@@ -318,7 +318,7 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             if let Some(filter) = cache
                 .get_filter(&(handle.id, handle.info.filter_offset).into())
                 .await
@@ -332,7 +332,7 @@ impl TableStore {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             if let Some(filter) = filter.as_ref() {
                 cache
                     .insert(
@@ -349,7 +349,7 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             if let Some(index) = cache
                 .get_index(&(handle.id, handle.info.index_offset).into())
                 .await
@@ -363,7 +363,7 @@ impl TableStore {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             cache
                 .insert(
                     (handle.id, handle.info.index_offset).into(),
@@ -411,7 +411,7 @@ impl TableStore {
         let mut uncached_ranges = Vec::new();
 
         // If block cache is available, try to retrieve cached blocks
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             let index_borrow = index.borrow();
             // Attempt to get all requested blocks from cache concurrently
             let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
@@ -479,7 +479,7 @@ impl TableStore {
         }
 
         // Cache the newly read blocks if caching is enabled
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
                     cache.insert((id, offset).into(), CachedEntry::with_block(block))
@@ -589,6 +589,7 @@ mod tests {
 
     use crate::clock::DefaultSystemClock;
     use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::SplitCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
     use crate::object_stores::ObjectStores;
@@ -798,7 +799,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "moka")]
     async fn test_tablestore_sst_and_partial_cache_hits() {
-        use crate::db_cache::moka::MokaCache;
+        use crate::db_cache::{moka::MokaCache, SplitCache};
 
         // Setup
         let os = Arc::new(InMemory::new());
@@ -809,8 +810,17 @@ mod tests {
 
         let stat_registry = StatRegistry::new();
         let block_cache = Arc::new(MokaCache::new());
+        let meta_cache = Arc::new(MokaCache::new());
+
+        let split_cache = Arc::new(
+            SplitCache::new()
+                .with_block_cache(block_cache.clone())
+                .with_meta_cache(meta_cache)
+                .build(),
+        );
+
         let wrapper = Arc::new(DbCacheWrapper::new(
-            block_cache.clone(),
+            split_cache,
             &stat_registry,
             Arc::new(DefaultSystemClock::default()),
         ));
@@ -938,9 +948,18 @@ mod tests {
     async fn test_write_sst_should_write_cache() {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
-        let cache = Arc::new(TestCache::new());
+
+        let block_cache = Arc::new(TestCache::new());
+        let meta_cache = Arc::new(TestCache::new());
+        let split_cache = Arc::new(
+            SplitCache::new()
+                .with_block_cache(block_cache.clone())
+                .with_meta_cache(meta_cache)
+                .build(),
+        );
+
         let wrapper = Arc::new(DbCacheWrapper::new(
-            cache.clone(),
+            split_cache,
             &stat_registry,
             Arc::new(DefaultSystemClock::default()),
         ));
@@ -965,7 +984,7 @@ mod tests {
                 .sst_format
                 .read_block_raw(&sst_info, &index, i, &sst_bytes)
                 .unwrap();
-            let cached_block = cache
+            let cached_block = block_cache
                 .get_block(&(id, block_meta.offset()).into())
                 .await
                 .unwrap();
