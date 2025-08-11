@@ -77,19 +77,19 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 ///
 /// #[async_trait]
 /// impl DbCache for MyCache {
-///     async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, Error> {
+///     async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, Error> {
 ///         let guard = self.inner.lock().unwrap();
-///         Ok(guard.data.get(&key).cloned())
+///         Ok(guard.data.get(key).cloned())
 ///     }
 ///
-///     async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, Error> {
+///     async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, Error> {
 ///         let guard = self.inner.lock().unwrap();
-///         Ok(guard.data.get(&key).cloned())
+///         Ok(guard.data.get(key).cloned())
 ///     }
 ///
-///     async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, Error> {
+///     async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, Error> {
 ///         let guard = self.inner.lock().unwrap();
-///         Ok(guard.data.get(&key).cloned())
+///         Ok(guard.data.get(key).cloned())
 ///     }
 ///
 ///     async fn insert(&self, key: CachedKey, value: CachedEntry) {
@@ -100,9 +100,9 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 ///         }
 ///     }
 ///
-///     async fn remove(&self, key: CachedKey) {
+///     async fn remove(&self, key: &CachedKey) {
 ///         let mut guard = self.inner.lock().unwrap();
-///         if let Some(v) = guard.data.remove(&key) {
+///         if let Some(v) = guard.data.remove(key) {
 ///             guard.usage -= v.size() as u64;
 ///         }
 ///     }

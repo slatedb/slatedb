@@ -320,7 +320,7 @@ impl TableStore {
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(filter) = cache
-                .get_filter((handle.id, handle.info.filter_offset).into())
+                .get_filter(&(handle.id, handle.info.filter_offset).into())
                 .await
                 .unwrap_or(None)
                 .and_then(|e| e.bloom_filter())
@@ -351,7 +351,7 @@ impl TableStore {
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(cache) = &self.block_cache {
             if let Some(index) = cache
-                .get_index((handle.id, handle.info.index_offset).into())
+                .get_index(&(handle.id, handle.info.index_offset).into())
                 .await
                 .unwrap_or(None)
                 .and_then(|e| e.sst_index())
@@ -418,7 +418,7 @@ impl TableStore {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
                 cache
-                    .get_block((handle.id, offset).into())
+                    .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
                     .and_then(|entry| entry.block())
@@ -855,7 +855,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get_block((handle.id, offset).into())
+                    .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
                     .is_some(),
@@ -867,11 +867,11 @@ mod tests {
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove((handle.id, offset).into()).await;
+            block_cache.remove(&(handle.id, offset).into()).await;
         }
         for i in 15..20 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove((handle.id, offset).into()).await;
+            block_cache.remove(&(handle.id, offset).into()).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -886,7 +886,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get_block((handle.id, offset).into())
+                    .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
                     .is_some(),
@@ -911,7 +911,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get_block((handle.id, offset).into())
+                    .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
                     .is_some(),
@@ -966,7 +966,7 @@ mod tests {
                 .read_block_raw(&sst_info, &index, i, &sst_bytes)
                 .unwrap();
             let cached_block = cache
-                .get_block((id, block_meta.offset()).into())
+                .get_block(&(id, block_meta.offset()).into())
                 .await
                 .unwrap();
             assert!(cached_block.is_some());
@@ -1002,7 +1002,7 @@ mod tests {
         for i in 0..block_metas.len() {
             let block_meta = block_metas.get(i);
             let cached_block = cache
-                .get_block((id, block_meta.offset()).into())
+                .get_block(&(id, block_meta.offset()).into())
                 .await
                 .unwrap();
             assert!(cached_block.is_none());
