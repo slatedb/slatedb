@@ -125,12 +125,12 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 /// ```
 #[async_trait]
 pub trait DbCache: Send + Sync {
-    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
-    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
-    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
     async fn insert(&self, key: CachedKey, value: CachedEntry);
     #[allow(dead_code)]
-    async fn remove(&self, key: CachedKey);
+    async fn remove(&self, key: &CachedKey);
     #[allow(dead_code)]
     fn entry_count(&self) -> u64;
 }
@@ -297,7 +297,7 @@ impl DbCacheWrapper {
 
 #[async_trait]
 impl DbCache for DbCacheWrapper {
-    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         let entry = match self.cache.get_block(key).await {
             Ok(e) => e,
             Err(err) => {
@@ -313,7 +313,7 @@ impl DbCache for DbCacheWrapper {
         Ok(entry)
     }
 
-    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         let entry = match self.cache.get_index(key).await {
             Ok(e) => e,
             Err(err) => {
@@ -329,7 +329,7 @@ impl DbCache for DbCacheWrapper {
         Ok(entry)
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         let entry = match self.cache.get_filter(key).await {
             Ok(e) => e,
             Err(err) => {
@@ -350,7 +350,7 @@ impl DbCache for DbCacheWrapper {
     }
 
     #[allow(dead_code)]
-    async fn remove(&self, key: CachedKey) {
+    async fn remove(&self, key: &CachedKey) {
         self.cache.remove(key).await
     }
 
@@ -431,17 +431,17 @@ pub(crate) mod test_utils {
 
     #[async_trait]
     impl DbCache for TestCache {
-        async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
             let guard = self.items.lock().unwrap();
             Ok(guard.get(&key).cloned())
         }
 
-        async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
             let guard = self.items.lock().unwrap();
             Ok(guard.get(&key).cloned())
         }
 
-        async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
             let guard = self.items.lock().unwrap();
             Ok(guard.get(&key).cloned())
         }
@@ -451,7 +451,7 @@ pub(crate) mod test_utils {
             guard.insert(key, value);
         }
 
-        async fn remove(&self, key: CachedKey) {
+        async fn remove(&self, key: &CachedKey) {
             let mut guard = self.items.lock().unwrap();
             guard.remove(&key);
         }
@@ -496,7 +496,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_filter(key.clone()).await;
+            let _ = cache.get_filter(&key).await;
 
             // then:
             assert_eq!(0, cache.stats.filter_miss.get());
@@ -512,7 +512,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_filter(key.clone()).await;
+            let _ = cache.get_filter(&key).await;
 
             // then:
             assert_eq!(i, cache.stats.filter_miss.get());
@@ -534,7 +534,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_index(key.clone()).await;
+            let _ = cache.get_index(&key).await;
 
             // then:
             assert_eq!(0, cache.stats.index_miss.get());
@@ -558,7 +558,7 @@ mod tests {
             .await;
 
         // when:
-        let cached = cache.get_index(key).await.unwrap().unwrap();
+        let cached = cache.get_index(&key).await.unwrap().unwrap();
 
         // then:
         assert_index_clamped(index.as_ref(), cached.sst_index().unwrap().as_ref());
@@ -572,7 +572,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_index(key.clone()).await;
+            let _ = cache.get_index(&key).await;
 
             // then:
             assert_eq!(i, cache.stats.index_miss.get());
@@ -599,7 +599,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_block(key.clone()).await;
+            let _ = cache.get_block(&key).await;
 
             // then:
             assert_eq!(0, cache.stats.data_block_miss.get());
@@ -615,7 +615,7 @@ mod tests {
 
         for i in 1..4 {
             // when:
-            let _ = cache.get_block(key.clone()).await;
+            let _ = cache.get_block(&key).await;
 
             // then:
             assert_eq!(i, cache.stats.data_block_miss.get());

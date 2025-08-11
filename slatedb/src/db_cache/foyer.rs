@@ -90,24 +90,24 @@ impl Default for FoyerCache {
 
 #[async_trait]
 impl DbCache for FoyerCache {
-    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
-        Ok(self.inner.get(&key).map(|entry| entry.value().clone()))
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).map(|entry| entry.value().clone()))
     }
 
-    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
-        Ok(self.inner.get(&key).map(|entry| entry.value().clone()))
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).map(|entry| entry.value().clone()))
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
-        Ok(self.inner.get(&key).map(|entry| entry.value().clone()))
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).map(|entry| entry.value().clone()))
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         self.inner.insert(key, value);
     }
 
-    async fn remove(&self, key: CachedKey) {
-        self.inner.remove(&key);
+    async fn remove(&self, key: &CachedKey) {
+        self.inner.remove(key);
     }
 
     fn entry_count(&self) -> u64 {
