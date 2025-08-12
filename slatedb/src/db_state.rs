@@ -338,14 +338,7 @@ pub(crate) struct CoreDbState {
     /// Minimum sequence number across all recent in-memory snapshots. The compactor
     /// needs this to determine whether it's safe to drop duplicate key writes. If a
     /// recent snapshot still references an older version of a key, it should not be
-    /// recycled. There're two places that may update this field:
-    ///
-    /// 1. When a new snapshot is created, we update this field to the minimum seq
-    ///    of the living snapshots. if all living snapshots are dropped, we use the
-    ///    latest l0 seq.
-    /// 2. When a new L0 is flushed, we update this field to min(recent_snapshot_min_seq,
-    ///    l0_seq). this min comparasion ensures the min_retention_seq of living snapshots
-    ///    are preserved.
+    /// recycled. This field is updated after every commit.
     pub(crate) recent_snapshot_min_seq: u64,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) wal_object_store_uri: Option<String>,

@@ -122,6 +122,19 @@ impl DbInner {
             self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
 
+        {
+            // update recent_snapshot_min_seq in the db state to inform the compactor
+            // can safely reclaim the entries with smaller seq. the edited db state
+            // will be persisted to the manifest store when memtable is flushed. it's
+            // ok to be a stale value for recent_snapshot_min_seq.
+            let min_txn_active_seq = self.txn_manager.min_active_seq();
+            let mut guard = self.state.write();
+            guard.modify(|state| {
+                state.state.manifest.core.recent_snapshot_min_seq =
+                    min_txn_active_seq.unwrap_or(seq);
+            });
+        }
+
         Ok(durable_watcher)
     }
 

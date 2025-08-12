@@ -145,16 +145,6 @@ impl MemtableFlusher {
                     // update the persisted manifest last_l0_seq as the latest seq in the imm.
                     if let Some(seq) = imm_memtable.table().last_seq() {
                         modifier.state.manifest.core.last_l0_seq = seq;
-
-                        // inform the compactor can safely reclaim the entries with smaller seq.
-                        // when there're living snapshots, we should take the min seq of the living
-                        // snapshots, otherwise we should use the latest seq in the imm.
-                        modifier.state.manifest.core.recent_snapshot_min_seq = modifier
-                            .state
-                            .manifest
-                            .core
-                            .recent_snapshot_min_seq
-                            .min(seq);
                     };
 
                     Ok(())
