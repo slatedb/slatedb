@@ -85,9 +85,11 @@ impl DbInner {
             .collect::<Vec<_>>();
 
         if self.wal_enabled {
-            // we should ensure that the WAL entries are appended into wal buffer in atomic.
-            // otherwise, the WAL buffer may flush the entries in the middle of the batch,
-            // which would violate the atomicity guarantee.
+            // WAL entries must be appended to the wal buffer atomically. Otherwise,
+            // the WAL buffer might flush the entries in the middle of the batch, which
+            // would violate the guarantee that batches are written atomically. We do
+            // this by appending the entire entry batch in a single call to the WAL buffer,
+            // which holds a write lock during the append.
             self.wal_buffer.append(&entries).await?;
         }
         self.state.write().memtable().put_batch(&entries);
