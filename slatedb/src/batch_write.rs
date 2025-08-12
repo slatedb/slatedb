@@ -25,6 +25,7 @@
 //! _Note: The `write_batch` loop still holds a lock on the db_state. There can still
 //! be contention between `get`s, which holds a lock, and the write loop._
 
+use fail_parallel::fail_point;
 use log::{info, warn};
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,6 +95,14 @@ impl DbInner {
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
         self.wal_buffer.track_last_applied_seq(seq).await;
+
+        // insert a fail point for easier to test the case where the last_committed_seq is not updated.
+        // this is useful for testing the case where the reader is not able to see the writes.
+        fail_point!(
+            Arc::clone(&self.fp_registry),
+            "write-batch-pre-commit",
+            |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
+        );
 
         // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
         // otherwise, we'll use the memtable's durable watcher.
