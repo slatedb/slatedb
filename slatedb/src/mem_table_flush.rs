@@ -117,6 +117,8 @@ impl MemtableFlusher {
                 .flush_imm_table(&id, imm_memtable.table(), true)
                 .await?;
             {
+                let min_active_snapshot_seq = self.db_inner.txn_manager.min_active_seq();
+
                 let mut guard = self.db_inner.state.write();
                 guard.modify(|modifier| {
                     let popped = modifier
@@ -146,6 +148,10 @@ impl MemtableFlusher {
                     if let Some(seq) = imm_memtable.table().last_seq() {
                         modifier.state.manifest.core.last_l0_seq = seq;
                     };
+
+                    // update the persisted manifest recent_snapshot_min_seq to the latest seq in the imm.
+                    modifier.state.manifest.core.recent_snapshot_min_seq =
+                        min_active_snapshot_seq.unwrap_or(modifier.state.manifest.core.last_l0_seq);
 
                     Ok(())
                 })?;
