@@ -61,8 +61,11 @@ impl DbInner {
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         let now = self.mono_clock.now().await?;
         let seq = self.oracle.last_seq.next();
-        for op in batch.ops {
-            let row_entry = match op {
+
+        let entries = batch
+            .ops
+            .into_iter()
+            .map(|op| match op {
                 WriteOp::Put(key, value, opts) => RowEntry {
                     key,
                     value: ValueDeletable::Value(value),
@@ -77,16 +80,16 @@ impl DbInner {
                     expire_ts: None,
                     seq,
                 },
-            };
+            })
+            .collect::<Vec<_>>();
 
-            if self.wal_enabled {
-                self.wal_buffer.append(&[row_entry.clone()]).await?;
-            }
-            // we do not need to lock the memtable in the middle of the commit pipeline.
-            // the writes will not visible to the reader until the last_committed_seq
-            // is updated.
-            self.state.write().memtable().put(row_entry);
+        if self.wal_enabled {
+            // we should ensure that the WAL entries are appended into wal buffer in atomic.
+            // otherwise, the WAL buffer may flush the entries in the middle of the batch,
+            // which would violate the atomicity guarantee.
+            self.wal_buffer.append(&entries).await?;
         }
+        self.state.write().memtable().put_batch(&entries);
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
