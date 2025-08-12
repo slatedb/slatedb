@@ -66,6 +66,23 @@ db.delete(b"hello")
 db.close()
 ```
 
+### Connecting to an object store based on its URL
+
+```python
+
+# Open the database
+db = SlateDB("/tmp/slatedb", url="s3://my-bucket/my-prefix")
+
+# Put a key-value pair
+db.put(b"hello", b"world")
+
+# Retrieve a value
+value = db.get(b"hello")  # Returns b"world"
+
+# Always close when done
+db.close()
+```
+
 ### Asynchronous API
 
 SlateDB also provides async methods for use with asyncio:
@@ -102,7 +119,27 @@ except ValueError as e:
 
 ## Documentation
 
-There's no Python documentation for SlateDB. Checkout [slatedb.io](https://slatedb.io) for architecture and read the Python binding source code for API documentation.
+- [SlateDB core documentation](https://slatedb.io/docs/introduction) - Comprehensive guide to understand how SlateDB works.
+- [API Reference](https://github.com/slatedb/slatedb/tree/main/slatedb-py) - Detailed Python API documentation embedded in the source code.
+
+## Contributing
+
+SlateDB's Python bindings use [Uv](https://docs.astral.sh/uv/) to manage the development environment. You can install Uv following the steps on its website. Once you've installed Uv, run `uv venv` to create a virtual environment.
+
+### Installing dependencies
+
+Run `uv pip install` to install all dependencies. If you only want test dependencies, you can run `uv pip install -e .[test]`.
+
+### Running tests
+
+Run `uv run pytest` to run all tests.
+
+### Building the project
+
+SlateDB's Python bindings use [Maturin](https://www.maturin.rs/) to link the Rust codebase with the Python codebase.
+
+1. Install Maturin by running `uv tool install maturin`.
+2. Build the project with Maturin by running `ev run maturin develop`.
 
 ## License
 

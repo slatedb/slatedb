@@ -3,7 +3,7 @@ use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
 use object_store::{Attributes, GetRange, GetResultPayload, PutResult};
-use object_store::{ListResult, MultipartUpload, PutMultipartOpts, PutOptions, PutPayload};
+use object_store::{ListResult, MultipartUpload, PutMultipartOptions, PutOptions, PutPayload};
 use std::{ops::Range, sync::Arc};
 
 use crate::cached_object_store::admission::AdmissionPicker;
@@ -389,7 +389,7 @@ impl ObjectStore for CachedObjectStore {
     async fn put_multipart_opts(
         &self,
         location: &Path,
-        opts: PutMultipartOpts,
+        opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.object_store.put_multipart_opts(location, opts).await
     }

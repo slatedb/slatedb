@@ -187,6 +187,9 @@ pub(crate) enum SlateDBError {
 
     #[error("attempted a WAL operation when the WAL is disabled")]
     WalDisabled,
+
+    #[error("invalid object store URL. url=`{0}`")]
+    InvalidObjectStoreURL(String, #[source] url::ParseError),
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -404,6 +407,9 @@ impl From<SlateDBError> for Error {
                 Error::configuration(msg).with_source(Box::new(err))
             }
             SlateDBError::WalDisabled => Error::operation(msg),
+            SlateDBError::InvalidObjectStoreURL(_, err) => {
+                Error::configuration(msg).with_source(Box::new(err))
+            }
         }
     }
 }

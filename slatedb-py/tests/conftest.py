@@ -32,4 +32,14 @@ def db(db_path):
     try:
         db.close()
     except Exception:
-        pass  # Ignore errors during cleanup 
+        pass  # Ignore errors during cleanup
+
+@pytest.fixture
+def db_with_url(db_path):
+    """Create a SlateDB instance with a URL."""
+    db = SlateDB(db_path, url="memory:///")
+    yield db
+    try:
+        db.close()
+    except Exception:
+        pass  # Ignore errors during cleanup
