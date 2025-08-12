@@ -69,15 +69,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args: BenchmarkDbArgs) {
-    let (config, block_cache) = args.db_args.config().unwrap();
+    let (config, memory_cache) = args.db_args.config().unwrap();
     let write_options = WriteOptions {
         await_durable: args.await_durable,
     };
 
     let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
 
-    if let Some(block_cache) = block_cache {
-        builder = builder.with_block_cache(block_cache);
+    if let Some(block_cache) = memory_cache {
+        builder = builder.with_memory_cache(block_cache);
     }
 
     let db = Arc::new(builder.build().await.unwrap());

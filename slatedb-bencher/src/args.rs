@@ -8,8 +8,8 @@ use clap::{builder::PossibleValue, Args, Parser, Subcommand, ValueEnum};
 use slatedb::{
     config::{CompressionCodec, Settings},
     db_cache::{
-        moka::{MokaCache, MokaCacheOptions},
-        DbCache,
+        foyer::{FoyerCache, FoyerCacheOptions},
+        DbCache, SplitCache,
     },
     Error,
 };
@@ -64,6 +64,9 @@ pub(crate) struct DbArgs {
 
     #[arg(long, help = "The size in bytes of the block cache.")]
     pub(crate) block_cache_size: Option<u64>,
+
+    #[arg(long, help = "The size in bytes of the meta cache.")]
+    pub(crate) meta_cache_size: Option<u64>,
 }
 
 impl DbArgs {
@@ -75,14 +78,24 @@ impl DbArgs {
             Settings::load()?
         };
 
-        let block_cache = self.block_cache_size.map(|max_capacity| {
-            Arc::new(MokaCache::new_with_opts(MokaCacheOptions {
-                max_capacity,
-                ..Default::default()
+        let block_cache = self.block_cache_size.map(|capacity| {
+            Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+                max_capacity: capacity,
             })) as Arc<dyn DbCache>
         });
+        let meta_cache = self.meta_cache_size.map(|capacity| {
+            Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+                max_capacity: capacity,
+            })) as Arc<dyn DbCache>
+        });
+        let memory_cache = Some(Arc::new(
+            SplitCache::new()
+                .with_block_cache(block_cache)
+                .with_meta_cache(meta_cache)
+                .build(),
+        ) as Arc<dyn DbCache>);
 
-        Ok((settings, block_cache))
+        Ok((settings, memory_cache))
     }
 }
 

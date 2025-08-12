@@ -26,7 +26,8 @@ run_bench() {
     --db-options-path $DIR/Slatedb.toml \
     --duration 60 \
     --val-len 8192 \
-    --block-cache-size 134217728 \
+    --block-cache-size 536870912 \
+    --meta-cache-size 134217728 \
     --put-percentage $put_percentage \
     --concurrency $concurrency \
     --key-count $num_keys \
