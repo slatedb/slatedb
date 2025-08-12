@@ -489,7 +489,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 checkpoints: Some(checkpoints),
                 last_l0_seq: core.last_l0_seq,
                 wal_object_store_uri,
-                recent_snapshot_min_seq: core.last_l0_seq,
+                recent_snapshot_min_seq: core.recent_snapshot_min_seq,
             },
         );
         self.builder.finish(manifest, None);
@@ -770,16 +770,13 @@ mod tests {
     #[test]
     fn test_should_encode_decode_retention_min_seq() {
         let mut manifest = Manifest::initial(CoreDbState::new());
+        manifest.core.last_l0_seq = 11111;
         manifest.core.recent_snapshot_min_seq = 12345;
 
         let codec = FlatBufferManifestCodec {};
         let bytes = codec.encode(&manifest);
         let decoded = codec.decode(&bytes).unwrap();
 
-        assert_eq!(
-            manifest.core.recent_snapshot_min_seq,
-            decoded.core.recent_snapshot_min_seq
-        );
         assert_eq!(decoded.core.recent_snapshot_min_seq, 12345);
 
         // Test None case
