@@ -122,7 +122,6 @@ impl DbInner {
             self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
 
-
         Ok(durable_watcher)
     }
 
