@@ -198,7 +198,7 @@ impl WalBufferManager {
     pub async fn append(&self, entries: &[RowEntry]) -> Result<Option<u64>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
 
-        let inner = self.inner.read();
+        let inner = self.inner.write();
         for entry in entries {
             inner.current_wal.put(entry.clone());
         }

@@ -213,6 +213,10 @@ impl WritableKVTable {
         self.table.put(row);
     }
 
+    pub(crate) fn put_batch(&mut self, rows: &[RowEntry]) {
+        self.table.put_batch(rows);
+    }
+
     pub(crate) fn metadata(&self) -> KVTableMetadata {
         self.table.metadata()
     }
@@ -308,6 +312,12 @@ impl KVTable {
         .build();
         iterator.next_entry_sync();
         iterator
+    }
+
+    pub(crate) fn put_batch(&self, rows: &[RowEntry]) {
+        for row in rows {
+            self.put(row.clone());
+        }
     }
 
     pub(crate) fn put(&self, row: RowEntry) {
