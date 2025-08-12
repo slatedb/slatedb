@@ -245,13 +245,13 @@ pub struct SplitCache {
 
 impl SplitCache {
     #[inline(always)]
-    pub fn default_block_capacity() -> usize {
+    pub fn default_block_capacity() -> u64 {
         // 512 MB
         512 * 1024 * 1024
     }
 
     #[inline(always)]
-    pub fn default_meta_capacity() -> usize {
+    pub fn default_meta_capacity() -> u64 {
         // 128 MB
         128 * 1024 * 1024
     }
@@ -263,18 +263,24 @@ impl SplitCache {
         }
     }
 
-    pub fn with_block_cache(mut self, cache: Arc<dyn DbCache>) -> Self {
-        self.block_cache = Some(cache);
+    pub fn with_block_cache(mut self, cache: Option<Arc<dyn DbCache>>) -> Self {
+        self.block_cache = cache;
         self
     }
 
-    pub fn with_meta_cache(mut self, cache: Arc<dyn DbCache>) -> Self {
-        self.meta_cache = Some(cache);
+    pub fn with_meta_cache(mut self, cache: Option<Arc<dyn DbCache>>) -> Self {
+        self.meta_cache = cache;
         self
     }
 
     pub fn build(self) -> Self {
         self
+    }
+}
+
+impl Default for SplitCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -545,17 +551,17 @@ pub(crate) mod test_utils {
     impl DbCache for TestCache {
         async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
             let guard = self.items.lock().unwrap();
-            Ok(guard.get(&key).cloned())
+            Ok(guard.get(key).cloned())
         }
 
         async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
             let guard = self.items.lock().unwrap();
-            Ok(guard.get(&key).cloned())
+            Ok(guard.get(key).cloned())
         }
 
         async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
             let guard = self.items.lock().unwrap();
-            Ok(guard.get(&key).cloned())
+            Ok(guard.get(key).cloned())
         }
 
         async fn insert(&self, key: CachedKey, value: CachedEntry) {
@@ -565,7 +571,7 @@ pub(crate) mod test_utils {
 
         async fn remove(&self, key: &CachedKey) {
             let mut guard = self.items.lock().unwrap();
-            guard.remove(&key);
+            guard.remove(key);
         }
 
         fn entry_count(&self) -> u64 {
@@ -739,8 +745,8 @@ mod tests {
     fn cache() -> DbCacheWrapper {
         let registry = StatRegistry::new();
         let cache = SplitCache::new()
-            .with_block_cache(Arc::new(TestCache::new()))
-            .with_meta_cache(Arc::new(TestCache::new()))
+            .with_block_cache(Some(Arc::new(TestCache::new())))
+            .with_meta_cache(Some(Arc::new(TestCache::new())))
             .build();
 
         DbCacheWrapper::new(
