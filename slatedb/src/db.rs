@@ -4017,4 +4017,89 @@ mod tests {
             Some(Bytes::from(b"value3".as_ref()))
         );
     }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_monotonic() {
+        let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
+        let object_store = Arc::new(InMemory::new());
+        let settings = Settings {
+            l0_sst_size_bytes: 64 * 1024,
+            max_unflushed_bytes: 16 * 1024,
+            min_filter_keys: 0,
+            flush_interval: Some(Duration::from_millis(100)),
+            ..Default::default()
+        };
+
+        let db = Db::builder(path, object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+
+        // Initial state: recent_snapshot_min_seq should be 0
+        {
+            let state = db.inner.state.read();
+            assert_eq!(state.state().core().recent_snapshot_min_seq, 0);
+        }
+
+        // Test 1: Without active snapshots, recent_snapshot_min_seq should equal last_committed_seq
+        db.put(b"key1", b"value1").await.unwrap();
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            let last_committed_seq = db.inner.oracle.last_committed_seq.load();
+            assert_eq!(recent_min_seq, last_committed_seq);
+            assert!(recent_min_seq > 0);
+        }
+
+        // Test 2: Monotonic increase without snapshots - simpler test
+        let mut prev_min_seq = {
+            let state = db.inner.state.read();
+            state.state().core().recent_snapshot_min_seq
+        };
+
+        for i in 2..=5 {
+            db.put(
+                format!("key{}", i).as_bytes(),
+                format!("value{}", i).as_bytes(),
+            )
+            .await
+            .unwrap();
+
+            let state = db.inner.state.read();
+            let current_min_seq = state.state().core().recent_snapshot_min_seq;
+            let last_committed_seq = db.inner.oracle.last_committed_seq.load();
+
+            // Without active snapshots, recent_snapshot_min_seq should equal last_committed_seq
+            assert_eq!(current_min_seq, last_committed_seq);
+
+            // Should be monotonically increasing
+            assert!(
+                current_min_seq > prev_min_seq,
+                "recent_snapshot_min_seq should be monotonically increasing: {} -> {}",
+                prev_min_seq,
+                current_min_seq
+            );
+            prev_min_seq = current_min_seq;
+        }
+
+        // Test 3: With snapshots, min_active_seq should influence the result
+        let _snapshot = db.snapshot().await.unwrap();
+        let snapshot_created_at_seq = db.inner.oracle.last_committed_seq.load();
+
+        // Write more data
+        db.put(b"after_snapshot", b"value").await.unwrap();
+
+        // Verify that txn_manager.min_active_seq() returns a value
+        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        assert!(min_active_seq.is_some());
+        assert_eq!(min_active_seq.unwrap(), snapshot_created_at_seq);
+
+        // Verify recent_snapshot_min_seq should be the minimum active seq
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(recent_min_seq, min_active_seq.unwrap());
+        }
+    }
 }
