@@ -52,7 +52,7 @@
 //!             .unwrap();
 //!     let cache = Arc::new(FoyerHybridCache::new_with_cache(cache));
 //!     let db = Db::builder("path/to/db", object_store)
-//!         .with_block_cache(cache)
+//!         .with_memory_cache(cache)
 //!         .build()
 //!         .await;
 //! }

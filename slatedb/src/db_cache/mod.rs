@@ -118,7 +118,7 @@ pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 ///     let object_store = Arc::new(LocalFileSystem::new());
 ///     let cache = Arc::new(MyCache::new(128u64 * 1024 * 1024));
 ///     let db = Db::builder("/path/to/db", object_store)
-///         .with_block_cache(cache)
+///         .with_memory_cache(cache)
 ///         .build()
 ///         .await;
 /// }

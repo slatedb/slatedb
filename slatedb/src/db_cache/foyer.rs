@@ -23,7 +23,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_block_cache(Arc::new(FoyerCache::new()))
+//!         .with_memory_cache(Arc::new(FoyerCache::new()))
 //!         .build()
 //!         .await?;
 //!     Ok(())
