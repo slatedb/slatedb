@@ -90,7 +90,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 .unwrap_or(false);
             let in_retention_window_by_seq = retention_min_seq
                 .map(|min_seq| entry.seq >= min_seq)
-                .unwrap_or(true);
+                .unwrap_or(false);
 
             let should_keep = idx == 0 || in_retention_window_by_time || in_retention_window_by_seq;
             if !should_keep {

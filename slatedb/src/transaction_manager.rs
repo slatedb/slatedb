@@ -51,6 +51,9 @@ impl TransactionManager {
             let mut inner = self.inner.write();
             inner.active_txns.insert(id, txn_state.clone());
         }
+
+        self.save_recent_snapshot_min_seq();
+
         txn_state
     }
 
@@ -60,7 +63,6 @@ impl TransactionManager {
             let mut inner = self.inner.write();
             inner.active_txns.remove(&txn_state.id);
         }
-
         self.save_recent_snapshot_min_seq();
     }
 
@@ -76,7 +78,8 @@ impl TransactionManager {
         // to the manifest store when memtable is flushed.
         let mut guard = self.db_state.write();
         guard.modify(|state| {
-            state.state.manifest.core.recent_snapshot_min_seq = min_seq;
+            state.state.manifest.core.recent_snapshot_min_seq =
+                min_seq.unwrap_or(state.state.manifest.core.last_l0_seq);
         });
     }
 }
