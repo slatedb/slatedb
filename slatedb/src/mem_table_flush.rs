@@ -149,7 +149,9 @@ impl MemtableFlusher {
                         modifier.state.manifest.core.last_l0_seq = seq;
                     };
 
-                    // update the persisted manifest recent_snapshot_min_seq to the latest seq in the imm.
+                    // update the persisted manifest recent_snapshot_min_seq to inform the compactor
+                    // can safely reclaim the entries with smaller seq. if there's no active snapshot,
+                    // we simply use the latest l0 seq.
                     modifier.state.manifest.core.recent_snapshot_min_seq =
                         min_active_snapshot_seq.unwrap_or(modifier.state.manifest.core.last_l0_seq);
 
