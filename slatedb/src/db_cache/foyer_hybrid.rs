@@ -44,7 +44,7 @@
 //!             .with_name("hybrid_cache")
 //!             .memory(1024)
 //!             .with_weighter(|_, v: &CachedEntry| v.size())
-//!             .storage(Engine::Large)
+//!             .storage(Engine::large())
 //!             .with_device_options(
 //!                 DirectFsDeviceOptions::new("/tmp/slatedb-cache").with_capacity(1024 * 1024))
 //!             .build()
