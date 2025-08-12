@@ -784,11 +784,45 @@ impl Default for DbReaderOptions {
 pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
     #[cfg(feature = "moka")]
     {
-        return Some(Arc::new(crate::db_cache::moka::MokaCache::new()));
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::SplitCache::default_block_capacity(),
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
+    }
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::SplitCache::default_block_capacity(),
+            },
+        )));
+    }
+    None
+}
+
+#[allow(unreachable_code)]
+pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::SplitCache::default_meta_capacity(),
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
     }
     #[cfg(feature = "foyer")]
     {
         return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()));
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::SplitCache::default_meta_capacity(),
+            },
+        )));
     }
     None
 }

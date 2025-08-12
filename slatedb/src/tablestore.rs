@@ -814,8 +814,8 @@ mod tests {
 
         let split_cache = Arc::new(
             SplitCache::new()
-                .with_block_cache(block_cache.clone())
-                .with_meta_cache(meta_cache)
+                .with_block_cache(Some(block_cache.clone()))
+                .with_meta_cache(Some(meta_cache))
                 .build(),
         );
 
@@ -953,8 +953,8 @@ mod tests {
         let meta_cache = Arc::new(TestCache::new());
         let split_cache = Arc::new(
             SplitCache::new()
-                .with_block_cache(block_cache.clone())
-                .with_meta_cache(meta_cache)
+                .with_block_cache(Some(block_cache.clone()))
+                .with_meta_cache(Some(meta_cache))
                 .build(),
         );
 
