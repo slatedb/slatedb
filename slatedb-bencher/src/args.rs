@@ -93,7 +93,7 @@ impl DbArgs {
                 .with_block_cache(block_cache)
                 .with_meta_cache(meta_cache)
                 .build(),
-        ) as Arc<dyn DbCache>);
+        );
 
         Ok((settings, memory_cache))
     }
