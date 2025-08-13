@@ -86,7 +86,7 @@ impl DbArgs {
         let meta_cache = self.meta_cache_size.map(|capacity| {
             Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
                 max_capacity: capacity,
-            })) as Arc<dyn DbCache>
+            }))
         });
         let memory_cache = Some(Arc::new(
             SplitCache::new()
