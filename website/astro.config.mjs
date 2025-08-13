@@ -92,8 +92,9 @@ export default defineConfig({
 							link: '/docs/tutorials/checkpoint/',
 						},
 						{
-							label: 'API Docs',
+							label: 'API Documentation',
 							link: 'https://docs.rs/slatedb',
+							attrs: { target: '_blank' }
 						}
 					]
 				},
