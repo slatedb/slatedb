@@ -204,6 +204,9 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 
     /// Sets the memory cache to use for the database.
+    ///
+    /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
+    /// [`slatedb::db_cache::SplitCache`] is used by default.
     pub fn with_memory_cache(mut self, memory_cache: Arc<dyn DbCache>) -> Self {
         self.memory_cache = Some(memory_cache);
         self
