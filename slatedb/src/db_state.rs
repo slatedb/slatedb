@@ -5,6 +5,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
+use crate::seq_tracker::TieredSequenceTracker;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
@@ -342,6 +343,7 @@ pub(crate) struct CoreDbState {
     pub(crate) recent_snapshot_min_seq: u64,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) wal_object_store_uri: Option<String>,
+    pub(crate) seq_tracker: Option<TieredSequenceTracker>,
 }
 
 impl CoreDbState {
@@ -358,6 +360,7 @@ impl CoreDbState {
             checkpoints: vec![],
             wal_object_store_uri: None,
             recent_snapshot_min_seq: 0,
+            seq_tracker: Some(TieredSequenceTracker::new(1, 4096)),
         }
     }
 
@@ -535,6 +538,7 @@ impl<'a> StateModifier<'a> {
             checkpoints: remote_manifest.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
             recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
+            seq_tracker: my_db_state.seq_tracker.clone(),
         };
         self.state.manifest = remote_manifest;
     }

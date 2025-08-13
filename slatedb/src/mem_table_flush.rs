@@ -155,6 +155,10 @@ impl MemtableFlusher {
                     modifier.state.manifest.core.recent_snapshot_min_seq =
                         min_active_snapshot_seq.unwrap_or(modifier.state.manifest.core.last_l0_seq);
 
+                    // update all the sequence numbers in the manifest
+                    let seq_tracker = self.db_inner.wal_buffer.seq_tracker();
+                    modifier.state.manifest.core.seq_tracker = Some(seq_tracker);
+
                     Ok(())
                 })?;
             }

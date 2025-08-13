@@ -95,6 +95,9 @@ table ManifestV1 {
     // needs this to determine whether it's safe to drop duplicate key writes. If a recent snapshot
     // still references an older version of a key, it should not be dropped.
     recent_snapshot_min_seq: ulong;
+
+    // a mapping from sequence number to the corresponding system clock timestamp
+    seq_tracker: SequenceTracker;
 }
 
 table CompactedSstId {
@@ -138,4 +141,21 @@ table Checkpoint {
     // Optional metadata associated with the checkpoint. For example, the writer can use this to
     // clean up checkpoints from older writers.
     metadata: CheckpointMetadata;
+}
+
+// A map (lossy) tracking sequence numbers to corresponding system clock ticks
+table SequenceTracker {
+    tiers: [SequenceTrackerTier] (required);
+}
+
+// A single tier of the SequenceTracker table, consists of timestamps for a range
+// of sequence numbers. The timestamp at timestamps[i] represents the timestamp for
+// sequence number first_seq + step * i. The actual timestamps are manually encoded
+// using the Gorilla encoding scheme
+table SequenceTrackerTier {
+    step: uint64;
+    first_seq: uint64;
+    last_seq: uint64;
+    timestamps: [ubyte] (required);
+    capacity: uint32;
 }

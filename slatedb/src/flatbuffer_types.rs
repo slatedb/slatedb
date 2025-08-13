@@ -7,9 +7,10 @@ use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector,
 use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
-use crate::checkpoint;
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
+use crate::seq_tracker::TieredSequenceTracker;
+use crate::{checkpoint, seq_tracker};
 
 #[path = "./generated/manifest_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
@@ -26,8 +27,9 @@ use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::manifest_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
-    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun,
-    SortedRunArgs, Uuid, UuidArgs,
+    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SequenceTracker,
+    SequenceTrackerArgs, SequenceTrackerTier, SequenceTrackerTierArgs, SortedRun, SortedRunArgs,
+    Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
@@ -223,6 +225,22 @@ impl FlatBufferManifestCodec {
                 .expect("invalid timestamp"),
             })
             .collect();
+
+        let tiers: Vec<seq_tracker::Tier> = manifest
+            .seq_tracker()
+            .unwrap()
+            .tiers()
+            .iter()
+            .map(|tier| seq_tracker::Tier {
+                step: tier.step(),
+                first_seq: tier.first_seq(),
+                last_seq: tier.last_seq(),
+                capacity: tier.capacity(),
+                timestamps: seq_tracker::decode_timestamps_from_bytes(tier.timestamps().bytes())
+                    .expect("Invalid sequence tracker timestamps"),
+            })
+            .collect();
+
         let core = CoreDbState {
             initialized: manifest.initialized(),
             l0_last_compacted,
@@ -235,6 +253,7 @@ impl FlatBufferManifestCodec {
             checkpoints,
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
+            seq_tracker: Some(TieredSequenceTracker { tiers }),
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -380,6 +399,37 @@ impl<'b> DbFlatBufferBuilder<'b> {
         Uuid::create(&mut self.builder, &UuidArgs { high, low })
     }
 
+    fn add_tier(&mut self, tier: &seq_tracker::Tier) -> WIPOffset<SequenceTrackerTier<'b>> {
+        let timestamps = Some(
+            self.builder
+                .create_vector(seq_tracker::encode_timestamps_to_bytes(&tier.timestamps).as_ref()),
+        );
+        SequenceTrackerTier::create(
+            &mut self.builder,
+            &SequenceTrackerTierArgs {
+                step: tier.step,
+                first_seq: tier.first_seq,
+                last_seq: tier.last_seq,
+                capacity: tier.capacity,
+                timestamps,
+            },
+        )
+    }
+
+    fn add_seq_tracker(
+        &mut self,
+        seq_tracker: &seq_tracker::TieredSequenceTracker,
+    ) -> WIPOffset<SequenceTracker<'b>> {
+        let tiers: Vec<WIPOffset<SequenceTrackerTier>> =
+            seq_tracker.tiers.iter().map(|t| self.add_tier(t)).collect();
+        let tiers = self.builder.create_vector(tiers.as_ref());
+
+        SequenceTracker::create(
+            &mut self.builder,
+            &SequenceTrackerArgs { tiers: Some(tiers) },
+        )
+    }
+
     fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
         let id = self.add_uuid(checkpoint.id);
         let checkpoint_expire_time_s =
@@ -467,6 +517,11 @@ impl<'b> DbFlatBufferBuilder<'b> {
             Some(self.builder.create_vector(external_dbs.as_ref()))
         };
 
+        let seq_tracker = &core
+            .seq_tracker
+            .as_ref()
+            .map(|st| self.add_seq_tracker(&st));
+
         let wal_object_store_uri = core
             .wal_object_store_uri
             .as_ref()
@@ -490,6 +545,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 last_l0_seq: core.last_l0_seq,
                 wal_object_store_uri,
                 recent_snapshot_min_seq: core.recent_snapshot_min_seq,
+                seq_tracker: *seq_tracker,
             },
         );
         self.builder.finish(manifest, None);
@@ -721,6 +777,7 @@ mod tests {
                 last_l0_seq: 0,
                 wal_object_store_uri: None,
                 recent_snapshot_min_seq: 0,
+                seq_tracker: None,
             },
         );
         fbb.finish(manifest, None);
