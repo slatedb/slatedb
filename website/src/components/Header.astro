@@ -13,14 +13,6 @@ import Search from '@astrojs/starlight/components/Search.astro';
 		<Search />
 	</div>
 	<div class="sl-hidden md:sl-flex print:hidden">
-		<a 
-			href="https://docs.rs/slatedb" 
-			target="_blank" 
-			rel="noopener noreferrer"
-			class="api-docs-link"
-		>
-			API Docs
-		</a>
 		<div class="sl-flex social-icons">
 			<SocialIcons />
 		</div>
@@ -98,17 +90,4 @@ import Search from '@astrojs/starlight/components/Search.astro';
             content: none;
             border-inline-end: none;
         }
-
-		.api-docs-link {
-    		margin-right: 1rem;
-    		color: white;
-    		font-weight: 500;
-    		text-decoration: none;
-    		transition: color 0.2s;
-		}
-
-		.api-docs-link:hover {
-    		text-decoration: underline;
-    		color: #ffd700;
-		}
 </style>

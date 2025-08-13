@@ -4,8 +4,13 @@ import { Icon } from '@astrojs/starlight/components';
 const links: Array<{
     label: string;
     href: string;
-    icon: 'github' | 'discord';
+    icon: 'open-book' | 'github' | 'discord';
 }> = [
+	{
+		label: 'Introduction',
+		href: 'https://slatedb.io/docs/introduction/',
+		icon: 'open-book',
+	},
     {
         label: 'GitHub',
         href: 'https://github.com/slatedb/slatedb',
