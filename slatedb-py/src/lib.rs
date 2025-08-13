@@ -37,6 +37,30 @@ fn load_object_store(env_file: Option<String>) -> PyResult<Arc<dyn ObjectStore>>
     }
 }
 
+async fn load_db_from_url(path: &str, url: &str, settings: Settings) -> PyResult<Db> {
+    let object_store = Db::resolve_object_store(url).map_err(create_value_error)?;
+
+    Db::builder(path, object_store)
+        .with_settings(settings)
+        .build()
+        .await
+        .map_err(create_value_error)
+}
+
+async fn load_db_from_env(
+    path: &str,
+    env_file: Option<String>,
+    settings: Settings,
+) -> PyResult<Db> {
+    let object_store = load_object_store(env_file)?;
+
+    Db::builder(path, object_store)
+        .with_settings(settings)
+        .build()
+        .await
+        .map_err(create_value_error)
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn slatedb(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -72,30 +96,30 @@ impl PySlateDB {
 #[pymethods]
 impl PySlateDB {
     #[new]
-    #[pyo3(signature = (path, env_file = None, *, **kwargs))]
+    #[pyo3(signature = (path, url = None, env_file = None, *, **kwargs))]
     fn new(
         path: String,
+        url: Option<String>,
         env_file: Option<String>,
         kwargs: Option<&Bound<PyDict>>,
     ) -> PyResult<Self> {
         let rt = get_runtime();
-        let object_store = load_object_store(env_file)?;
-        let db = rt.block_on(async {
-            let settings = match kwargs.and_then(|k| k.get_item("settings").ok().flatten()) {
-                Some(settings_item) => {
-                    let settings_path = settings_item
-                        .extract::<String>()
-                        .map_err(create_value_error)?;
-                    Settings::from_file(settings_path).map_err(create_value_error)?
-                }
-                None => Settings::load().map_err(create_value_error)?,
-            };
+        let settings = match kwargs.and_then(|k| k.get_item("settings").ok().flatten()) {
+            Some(settings_item) => {
+                let settings_path = settings_item
+                    .extract::<String>()
+                    .map_err(create_value_error)?;
+                Settings::from_file(settings_path).map_err(create_value_error)?
+            }
+            None => Settings::load().map_err(create_value_error)?,
+        };
 
-            Db::builder(path, object_store)
-                .with_settings(settings)
-                .build()
-                .await
-                .map_err(create_value_error)
+        let db = rt.block_on(async move {
+            if let Some(url) = url {
+                load_db_from_url(&path, &url, settings).await
+            } else {
+                load_db_from_env(&path, env_file, settings).await
+            }
         })?;
         Ok(Self {
             inner: Arc::new(db),

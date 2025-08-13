@@ -26,6 +26,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
+use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use std::time::Duration;
@@ -1130,6 +1131,22 @@ impl Db {
     /// Get the metrics registry for the database.
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
+    }
+
+    /// Resolve an object store from a URL.
+    ///
+    /// ## Arguments
+    /// - `url`: the URL to resolve, for example `s3://my-bucket/my-prefix`.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
+    pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
+        let registry = DefaultObjectStoreRegistry::new();
+        let url = url
+            .try_into()
+            .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
+        let (object_store, _) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        Ok(object_store)
     }
 }
 

@@ -118,3 +118,8 @@ def test_invalid_inputs(db):
     
     with pytest.raises(TypeError):
         db.delete("not bytes")  # key must be bytes
+
+def test_put_and_get_with_url(db_with_url):
+    """Test basic put and get operations with a URL."""
+    db_with_url.put(b"key1", b"value1")
+    assert db_with_url.get(b"key1") == b"value1"
