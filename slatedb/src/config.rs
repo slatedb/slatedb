@@ -207,7 +207,7 @@ impl SstBlockSize {
     }
 }
 
-/// Describes the durability of data based on the medium (e.g. in-memory, object storags)
+/// Describes the durability of data based on the medium (e.g. in-memory, object storage)
 /// that the data is currently stored in. Currently this is used to define a
 /// durability filter for data served by a read.
 #[non_exhaustive]
@@ -220,6 +220,18 @@ pub enum DurabilityLevel {
     /// Includes data with level Remote and data currently only stored in-memory awaiting flush
     /// to object storage.
     Memory,
+}
+
+impl DurabilityLevel {
+    /// Returns true if the durability level is Remote.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, DurabilityLevel::Remote)
+    }
+
+    /// Returns true if the durability level is Memory.
+    pub fn is_memory(&self) -> bool {
+        matches!(self, DurabilityLevel::Memory)
+    }
 }
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
