@@ -90,6 +90,11 @@ export default defineConfig({
 						{
 							label: 'Checkpoint & Restore',
 							link: '/docs/tutorials/checkpoint/',
+						},
+						{
+							label: 'API Documentation',
+							link: 'https://docs.rs/slatedb',
+							attrs: { target: '_blank' }
 						}
 					]
 				},
