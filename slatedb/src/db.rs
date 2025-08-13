@@ -1661,7 +1661,7 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
         opts.object_store_cache_options.part_size_bytes = 1024;
         let kv_store = Db::builder(
             "/tmp/test_kv_store_with_cache_metrics",
@@ -1729,7 +1729,7 @@ mod tests {
         )
         .unwrap();
 
-        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
         let kv_store = Db::builder(
             "/tmp/test_kv_store_with_cache_stored_files",
             cached_object_store.clone(),

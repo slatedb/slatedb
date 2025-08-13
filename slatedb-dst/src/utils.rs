@@ -150,7 +150,7 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
     // https://pierrezemb.fr/posts/tokio-hidden-gems/
     tokio::runtime::Builder::new_current_thread()
         .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
-        .build_local(&mut Default::default())
+        .build_local(Default::default())
         .unwrap()
 }
 
