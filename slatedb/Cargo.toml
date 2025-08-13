@@ -53,6 +53,7 @@ walkdir = { workspace = true }
 zstd = { workspace = true, optional = true }
 tokio-util = { workspace = true, default-features = false, features = ["rt"] }
 thread_local = { workspace = true }
+url = "2.5.4"
 
 [dev-dependencies]
 bincode = { workspace = true }

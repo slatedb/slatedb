@@ -44,7 +44,7 @@
 //!             .with_name("hybrid_cache")
 //!             .memory(1024)
 //!             .with_weighter(|_, v: &CachedEntry| v.size())
-//!             .storage(Engine::Large)
+//!             .storage(Engine::large())
 //!             .with_device_options(
 //!                 DirectFsDeviceOptions::new("/tmp/slatedb-cache").with_capacity(1024 * 1024))
 //!             .build()
@@ -80,7 +80,7 @@ impl FoyerHybridCache {
         self.inner
             .get(key)
             .await
-            .map_err(|e| FoyerCacheReadingError(Arc::new(e)).into())
+            .map_err(|e| FoyerCacheReadingError(Arc::new(e.into())).into())
             .map(|maybe_v| maybe_v.map(|v| v.value().clone()))
     }
 }
@@ -182,7 +182,7 @@ mod tests {
             .with_name("hybrid_cache_test")
             .memory(1024)
             .with_weighter(|_, v: &CachedEntry| v.size())
-            .storage(Engine::Large)
+            .storage(Engine::large())
             .with_device_options(
                 DirectFsDeviceOptions::new(tempdir.path()).with_capacity(1024 * 1024),
             )
