@@ -913,7 +913,7 @@ mod tests {
     /// A tuple containing the manifest store, table store, local object store,
     /// and database stats
     fn build_objects() -> (Arc<ManifestStore>, Arc<TableStore>, Arc<LocalFileSystem>) {
-        let tempdir = tempfile::tempdir().unwrap().into_path();
+        let tempdir = tempfile::tempdir().unwrap().keep();
         let local_object_store = Arc::new(
             LocalFileSystem::new_with_prefix(tempdir)
                 .unwrap()
