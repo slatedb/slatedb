@@ -139,7 +139,7 @@ Run `uv run pytest` to run all tests.
 SlateDB's Python bindings use [Maturin](https://www.maturin.rs/) to link the Rust codebase with the Python codebase.
 
 1. Install Maturin by running `uv tool install maturin`.
-2. Build the project with Maturin by running `ev run maturin develop`.
+2. Build the project with Maturin by running `uv run maturin develop`.
 
 ## License
 
