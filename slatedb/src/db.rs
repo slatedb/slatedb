@@ -26,6 +26,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
+use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use std::time::Duration;
@@ -1131,6 +1132,22 @@ impl Db {
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
     }
+
+    /// Resolve an object store from a URL.
+    ///
+    /// ## Arguments
+    /// - `url`: the URL to resolve, for example `s3://my-bucket/my-prefix`.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
+    pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
+        let registry = DefaultObjectStoreRegistry::new();
+        let url = url
+            .try_into()
+            .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
+        let (object_store, _) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        Ok(object_store)
+    }
 }
 
 #[async_trait::async_trait]
@@ -1644,7 +1661,7 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
         opts.object_store_cache_options.part_size_bytes = 1024;
         let kv_store = Db::builder(
             "/tmp/test_kv_store_with_cache_metrics",
@@ -1712,7 +1729,7 @@ mod tests {
         )
         .unwrap();
 
-        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
         let kv_store = Db::builder(
             "/tmp/test_kv_store_with_cache_stored_files",
             cached_object_store.clone(),
