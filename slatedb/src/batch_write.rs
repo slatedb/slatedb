@@ -92,7 +92,12 @@ impl DbInner {
             // which holds a write lock during the append.
             self.wal_buffer.append(&entries).await?;
         }
-        self.state.write().memtable().put_batch(&entries);
+
+        {
+            let mut guard = self.state.write();
+            let memtable = guard.memtable();
+            entries.into_iter().for_each(|entry| memtable.put(entry));
+        }
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
