@@ -3981,7 +3981,13 @@ mod tests {
         compactor_options: Option<CompactorOptions>,
         ttl: Option<u64>,
     ) -> Settings {
-        test_db_options_with_wal_and_ttl(min_filter_keys, l0_sst_size_bytes, compactor_options, ttl, true)
+        test_db_options_with_wal_and_ttl(
+            min_filter_keys,
+            l0_sst_size_bytes,
+            compactor_options,
+            ttl,
+            true,
+        )
     }
 
     fn test_db_options_with_wal_and_ttl(
