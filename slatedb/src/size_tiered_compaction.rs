@@ -360,6 +360,7 @@ mod tests {
 
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::seq_tracker::TieredSequenceTracker;
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
 
     #[test]
@@ -679,7 +680,7 @@ mod tests {
             checkpoints: vec![],
             wal_object_store_uri: None,
             recent_snapshot_min_seq: 0,
-            seq_tracker: None,
+            seq_tracker: TieredSequenceTracker::new(1, 4096),
         }
     }
 

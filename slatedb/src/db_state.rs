@@ -343,7 +343,7 @@ pub(crate) struct CoreDbState {
     pub(crate) recent_snapshot_min_seq: u64,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) wal_object_store_uri: Option<String>,
-    pub(crate) seq_tracker: Option<TieredSequenceTracker>,
+    pub(crate) seq_tracker: TieredSequenceTracker,
 }
 
 impl CoreDbState {
@@ -360,7 +360,7 @@ impl CoreDbState {
             checkpoints: vec![],
             wal_object_store_uri: None,
             recent_snapshot_min_seq: 0,
-            seq_tracker: Some(TieredSequenceTracker::new(1, 4096)),
+            seq_tracker: TieredSequenceTracker::new(1, 4096),
         }
     }
 

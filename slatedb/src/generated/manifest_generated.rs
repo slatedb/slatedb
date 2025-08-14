@@ -1345,11 +1345,11 @@ impl<'a> ManifestV1<'a> {
     unsafe { self._tab.get::<u64>(ManifestV1::VT_RECENT_SNAPSHOT_MIN_SEQ, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn seq_tracker(&self) -> Option<SequenceTracker<'a>> {
+  pub fn seq_tracker(&self) -> SequenceTracker<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SequenceTracker>>(ManifestV1::VT_SEQ_TRACKER, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SequenceTracker>>(ManifestV1::VT_SEQ_TRACKER, None).unwrap()}
   }
 }
 
@@ -1375,7 +1375,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<u64>("last_l0_seq", Self::VT_LAST_L0_SEQ, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("wal_object_store_uri", Self::VT_WAL_OBJECT_STORE_URI, false)?
      .visit_field::<u64>("recent_snapshot_min_seq", Self::VT_RECENT_SNAPSHOT_MIN_SEQ, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<SequenceTracker>>("seq_tracker", Self::VT_SEQ_TRACKER, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<SequenceTracker>>("seq_tracker", Self::VT_SEQ_TRACKER, true)?
      .finish();
     Ok(())
   }
@@ -1417,7 +1417,7 @@ impl<'a> Default for ManifestV1Args<'a> {
       last_l0_seq: 0,
       wal_object_store_uri: None,
       recent_snapshot_min_seq: 0,
-      seq_tracker: None,
+      seq_tracker: None, // required field
     }
   }
 }
@@ -1505,6 +1505,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.required(o, ManifestV1::VT_L0,"l0");
     self.fbb_.required(o, ManifestV1::VT_COMPACTED,"compacted");
     self.fbb_.required(o, ManifestV1::VT_CHECKPOINTS,"checkpoints");
+    self.fbb_.required(o, ManifestV1::VT_SEQ_TRACKER,"seq_tracker");
     flatbuffers::WIPOffset::new(o.value())
   }
 }

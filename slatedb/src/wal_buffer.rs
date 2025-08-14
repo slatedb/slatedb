@@ -99,11 +99,10 @@ impl WalBufferManager {
         max_wal_bytes_size: usize,
         max_flush_interval: Option<Duration>,
     ) -> Self {
-        println!("Creating new WAL buffer manager");
         let current_wal = Arc::new(KVTable::new());
         let immutable_wals = VecDeque::new();
         // TODO: we should see if we can create a seq tracker without
-        // cloning the db stat (which happens on read().state())
+        // cloning the db state (which happens on read().state())
         let seq_tracker = db_state.read().state().manifest.core.seq_tracker.clone();
         let inner = WalBufferManagerInner {
             current_wal,
@@ -113,7 +112,7 @@ impl WalBufferManager {
             flush_tx: None,
             background_task: None,
             oracle,
-            seq_tracker: seq_tracker.unwrap_or_else(|| TieredSequenceTracker::new(1, 4096)),
+            seq_tracker,
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
@@ -487,11 +486,7 @@ impl WalBufferManager {
 
     /// Return all sequence numbers that have been tracked
     pub fn seq_tracker(&self) -> TieredSequenceTracker {
-        {
-            let inner = self.inner.read();
-            let seq_tracker = inner.seq_tracker.clone();
-            return seq_tracker;
-        }
+        self.inner.read().seq_tracker.clone()
     }
 
     /// Recycle the immutable WALs that are applied to the memtable and flushed to the remote storage.

@@ -228,7 +228,6 @@ impl FlatBufferManifestCodec {
 
         let tiers: Vec<seq_tracker::Tier> = manifest
             .seq_tracker()
-            .unwrap()
             .tiers()
             .iter()
             .map(|tier| seq_tracker::Tier {
@@ -252,8 +251,13 @@ impl FlatBufferManifestCodec {
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
+<<<<<<< HEAD
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
             seq_tracker: Some(TieredSequenceTracker { tiers }),
+=======
+            recent_snapshot_min_seq,
+            seq_tracker: TieredSequenceTracker { tiers },
+>>>>>>> c670f95 (clippy)
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -517,10 +521,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
             Some(self.builder.create_vector(external_dbs.as_ref()))
         };
 
-        let seq_tracker = &core
-            .seq_tracker
-            .as_ref()
-            .map(|st| self.add_seq_tracker(&st));
+        let seq_tracker = &self.add_seq_tracker(&core.seq_tracker);
 
         let wal_object_store_uri = core
             .wal_object_store_uri
@@ -545,7 +546,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 last_l0_seq: core.last_l0_seq,
                 wal_object_store_uri,
                 recent_snapshot_min_seq: core.recent_snapshot_min_seq,
-                seq_tracker: *seq_tracker,
+                seq_tracker: Some(*seq_tracker),
             },
         );
         self.builder.finish(manifest, None);

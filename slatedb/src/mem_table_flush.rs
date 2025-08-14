@@ -157,7 +157,7 @@ impl MemtableFlusher {
 
                     // update all the sequence numbers in the manifest
                     let seq_tracker = self.db_inner.wal_buffer.seq_tracker();
-                    modifier.state.manifest.core.seq_tracker = Some(seq_tracker);
+                    modifier.state.manifest.core.seq_tracker = seq_tracker;
 
                     Ok(())
                 })?;
