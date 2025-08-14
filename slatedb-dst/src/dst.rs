@@ -74,13 +74,15 @@
 //!         rand.clone(),
 //!         distr,
 //!         dst_opts,
-//!     );
+//!     ).unwrap();
 //!     dst.run_simulation(DstDuration::Iterations(10)).await.unwrap();
 //! });
 //! # }
 //! ```
 
-use crate::utils;
+use crate::state::SQLiteState;
+use crate::state::State;
+use crate::utils::truncate_bytes;
 use log::debug;
 use log::info;
 use rand::distr::weighted::WeightedIndex;
@@ -98,7 +100,6 @@ use slatedb::Db;
 use slatedb::DbRand;
 use slatedb::Error;
 use slatedb::WriteBatch;
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::Bound;
 use std::ops::RangeBounds;
@@ -115,8 +116,11 @@ pub struct DstOptions {
     max_val_bytes: u32,
     /// Maximum write batch size in bytes.
     max_write_batch_bytes: u32,
-    /// Maximum size of in-memory BTree database in bytes.
-    max_btree_size_bytes: u32,
+    /// Optional path to store the DST state database in.
+    /// If not provided, the DST state database will be stored in memory.
+    /// When the DST state database is stored in memory, the simulation will fail
+    /// if the machine runs out of memory.
+    state_path: Option<&'static str>,
 }
 
 impl Default for DstOptions {
@@ -125,7 +129,7 @@ impl Default for DstOptions {
             max_key_bytes: u16::MAX,                 // keys are limited to 65_535 bytes
             max_val_bytes: 1024 * 1024,              // 1 MiB
             max_write_batch_bytes: 50 * 1024 * 1024, // 50 MiB
-            max_btree_size_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB
+            state_path: None,
         }
     }
 }
@@ -190,12 +194,6 @@ impl std::fmt::Display for DstAction {
 /// for readability.
 impl std::fmt::Debug for DstAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fn truncate_bytes(bytes: &[u8]) -> &[u8] {
-            if bytes.len() < 8 {
-                return bytes;
-            }
-            &bytes[..8]
-        }
         match self {
             DstAction::Write(write_ops, write_options) => {
                 write!(f, "Write(")?;
@@ -241,7 +239,7 @@ impl std::fmt::Debug for DstAction {
 ///
 /// [Dst] samples actions from the distribution and performs them on the database.
 pub trait DstDistribution {
-    fn sample_action(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction;
+    fn sample_action(&self, state: &SQLiteState) -> DstAction;
 }
 
 /// [DefaultDstDistribution] has the following characteristics:
@@ -269,7 +267,7 @@ impl DefaultDstDistribution {
     ///
     /// See [DefaultDstDistribution::gen_key] and [DefaultDstDistribution::gen_val]
     /// for more information.
-    fn sample_write(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+    fn sample_write(&self, state: &SQLiteState) -> DstAction {
         let mut write_ops = Vec::new();
         let write_options = self.get_write_options();
         let mut remaining_bytes =
@@ -292,7 +290,7 @@ impl DefaultDstDistribution {
     /// Generate a get action.
     ///
     /// See [DefaultDstDistribution::gen_key] for more information.
-    fn sample_get(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+    fn sample_get(&self, state: &SQLiteState) -> DstAction {
         DstAction::Get(self.gen_key(state), self.gen_read_options())
     }
 
@@ -304,7 +302,7 @@ impl DefaultDstDistribution {
     ///
     /// [DefaultDstDistribution::gen_key] is used to generate the start and end keys.
     /// This means scan inherits the db_hit probability from that method.
-    fn sample_scan(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+    fn sample_scan(&self, state: &SQLiteState) -> DstAction {
         let mut start_key = self.gen_key(state);
         let mut end_key = self.gen_key(state);
         if start_key > end_key {
@@ -368,7 +366,7 @@ impl DefaultDstDistribution {
     /// ensures that we cover a wide range of keys without favoring any particular size.
     /// See [DefaultDstDistribution::sample_log10_uniform] for more details.
     #[inline]
-    fn gen_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
+    fn gen_key(&self, state: &SQLiteState) -> Vec<u8> {
         if let Some(existing_key) = self.maybe_get_existing_key(state) {
             return existing_key;
         }
@@ -383,12 +381,14 @@ impl DefaultDstDistribution {
     /// a simple way to control the probability of sampling an existing key, but it may be
     /// improved in the future.
     #[inline]
-    fn maybe_get_existing_key(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> Option<Vec<u8>> {
+    fn maybe_get_existing_key(&self, state: &SQLiteState) -> Option<Vec<u8>> {
         let hit_probability = self.rand.rng().random_range(0.0..1.0);
         let is_db_hit = !state.is_empty() && self.rand.rng().random_bool(hit_probability);
+
         if is_db_hit {
-            let existing_key = state
-                .keys()
+            let keys = state.keys().unwrap_or_default();
+            let existing_key = keys
+                .into_iter()
                 .choose(&mut self.rand.rng())
                 .expect("can't pick a key for an empty state")
                 .clone();
@@ -446,7 +446,7 @@ impl DefaultDstDistribution {
 
 /// Samples an action from the distribution. Actions are sampled with equal probability.
 impl DstDistribution for DefaultDstDistribution {
-    fn sample_action(&self, state: &SizedBTreeMap<Vec<u8>, Vec<u8>>) -> DstAction {
+    fn sample_action(&self, state: &SQLiteState) -> DstAction {
         let weights = [1; 5]; // all actions have equal probability for now
         let dist = WeightedIndex::new(weights).expect("non-empty weights and all ≥ 0");
         let action = dist.sample(&mut self.rand.rng());
@@ -493,10 +493,8 @@ pub struct Dst {
     rand: Rc<DbRand>,
     /// The action sampler to use for the simulation.
     action_sampler: Box<dyn DstDistribution>,
-    /// The options to use for the simulation.
-    options: DstOptions,
-    /// An in-memory representation of what _should_ be in the DB.
-    state: SizedBTreeMap<Vec<u8>, Vec<u8>>,
+    /// A representation of what _should_ be in the DB.
+    state: SQLiteState,
 }
 
 impl Dst {
@@ -506,15 +504,15 @@ impl Dst {
         rand: Rc<DbRand>,
         action_sampler: Box<dyn DstDistribution>,
         options: DstOptions,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Error> {
+        let state = SQLiteState::new(options.state_path)?;
+        Ok(Self {
             db,
-            state: SizedBTreeMap::new(),
+            state,
             rand,
             action_sampler,
-            options,
             system_clock,
-        }
+        })
     }
 
     /// Runs the simulation for the given duration.
@@ -529,11 +527,12 @@ impl Dst {
         while dst_duration.should_run(step_count, actual_start_time) {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
-                "run_simulation [step_count={}, simulated_time={}, btree_size={}, btree_entries={}, step_action={}]",
+                "run_simulation [simulated_time={}, state={:?}, step_count={}, step_action={}]",
+                self.system_clock
+                    .now()
+                    .signed_duration_since(simulated_time),
+                &self.state,
                 step_count,
-                self.system_clock.now().signed_duration_since(simulated_time),
-                utils::pretty_bytes(self.state.size_bytes),
-                self.state.len(),
                 step_action,
             );
             match step_action {
@@ -547,7 +546,6 @@ impl Dst {
                 DstAction::Flush => self.run_flush().await?,
                 DstAction::AdvanceTime(duration) => self.advance_time(duration).await,
             }
-            self.maybe_shrink_db().await?;
             step_count += 1;
         }
         Ok(())
@@ -559,6 +557,7 @@ impl Dst {
         write_options: &WriteOptions,
     ) -> Result<(), Error> {
         let mut write_batch = WriteBatch::new();
+
         for (key, val, options) in write_ops {
             if let Some(val) = val {
                 write_batch.put_with_options(key, val, options);
@@ -577,29 +576,23 @@ impl Dst {
             0f64
         };
         self.poll_await(future, flush_probability).await?;
-        for (key, val, _) in write_ops {
-            if let Some(val) = val {
-                self.state.insert(key.clone(), val.clone());
-            } else {
-                self.state.remove(key);
-            }
-        }
+        self.state.write_batch(write_ops)?;
         Ok(())
     }
 
     async fn run_get(&mut self, key: &Vec<u8>, read_options: &ReadOptions) -> Result<(), Error> {
         let future = self.db.get_with_options(key, read_options);
         let result = self.poll_await(future, 0f64).await?;
-        let expected_val = self.state.get(key);
+        let expected_val = self.state.get(key)?;
         let actual_val = result.map(|b| b.to_vec());
-        assert_eq!(expected_val, actual_val.as_ref());
+        assert_eq!(expected_val, actual_val);
         Ok(())
     }
 
     async fn run_scan(
         &self,
-        start_key: &Vec<u8>,
-        end_key: &Vec<u8>,
+        start_key: &[u8],
+        end_key: &[u8],
         scan_options: &ScanOptions,
     ) -> Result<(), Error> {
         if start_key == end_key {
@@ -607,11 +600,10 @@ impl Dst {
             // Skip because SlateDB does not allow empty ranges (see #681)
             return Ok(());
         }
-        let future = self
-            .db
-            .scan_with_options(start_key.clone()..end_key.clone(), scan_options);
+        let future = self.db.scan_with_options(start_key..end_key, scan_options);
         let mut actual_itr = self.poll_await(future, 0f64).await?;
-        let expected_itr = self.state.range(start_key..end_key);
+        let expected_itr = self.state.scan(start_key, end_key)?;
+
         for (expected_key, expected_val) in expected_itr {
             let actual_key_val = actual_itr
                 .next()
@@ -632,34 +624,6 @@ impl Dst {
     async fn advance_time(&self, duration: Duration) {
         debug!("advance_time [duration={:?}]", duration);
         self.system_clock.clone().advance(duration).await;
-    }
-
-    /// Shrinks the database and in-memory state if the in-memory state exceeds
-    /// `max_btree_size_bytes`.
-    ///
-    /// The shrink operation deletes random keys from the database and in-memory
-    /// state until the in-memory state is below a threshold. The threshold is a
-    /// random size between 80% and 100% of `max_btree_size_bytes`. If the in-memory
-    /// state is empty or below `max_btree_size_bytes`, the shrink operation is
-    /// always skipped.
-    async fn maybe_shrink_db(&mut self) -> Result<(), Error> {
-        let shrink_to_bytes = self.rand.rng().random_range(
-            (self.options.max_btree_size_bytes as f64 * 0.8) as usize
-                ..self.options.max_btree_size_bytes as usize,
-        );
-        while self.state.size_bytes > shrink_to_bytes && !self.state.is_empty() {
-            let key = self
-                .state
-                .keys()
-                .choose(&mut self.rand.rng())
-                .unwrap()
-                // Clone so we can mutably borrow below state without
-                // holding a reference to the rand.rng here.
-                .clone();
-            self.poll_await(self.db.delete(&key), 0.01).await?;
-            self.state.remove(&key);
-        }
-        Ok(())
     }
 
     /// Polls a future until it is ready, advancing time if it is not ready.
@@ -696,62 +660,5 @@ impl Dst {
                 }
             }
         }
-    }
-}
-
-/// A [BTreeMap] that tracks the total size of the map in bytes. This helps
-/// us keep an upper-bound on the memory usage.
-pub struct SizedBTreeMap<K, V>
-where
-    K: Ord + AsRef<[u8]>,
-    V: Ord + AsRef<[u8]>,
-{
-    inner: BTreeMap<K, V>,
-    pub(crate) size_bytes: usize,
-}
-
-impl<K, V> SizedBTreeMap<K, V>
-where
-    K: Ord + AsRef<[u8]>,
-    V: Ord + AsRef<[u8]>,
-{
-    fn new() -> Self {
-        Self {
-            inner: BTreeMap::new(),
-            size_bytes: 0,
-        }
-    }
-
-    fn insert(&mut self, key: K, val: V) {
-        self.size_bytes += key.as_ref().len() + val.as_ref().len();
-        if let Some(old_value) = self.inner.insert(key, val) {
-            self.size_bytes -= old_value.as_ref().len();
-        }
-    }
-
-    fn remove(&mut self, key: &K) {
-        if let Some(val) = self.inner.remove(key) {
-            self.size_bytes -= key.as_ref().len() + val.as_ref().len();
-        }
-    }
-
-    fn get(&self, key: &K) -> Option<&V> {
-        self.inner.get(key)
-    }
-
-    fn range(&self, range: impl RangeBounds<K>) -> std::collections::btree_map::Range<'_, K, V> {
-        self.inner.range(range)
-    }
-
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    fn keys(&self) -> std::collections::btree_map::Keys<'_, K, V> {
-        self.inner.keys()
     }
 }
