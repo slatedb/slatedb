@@ -33,13 +33,16 @@ pub mod foyer_hybrid;
 pub mod moka;
 mod serde;
 
-/// The default max capacity for the cache. (64MB)
+/// The default max capacity for the user default cache. (64MB)
 pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
+pub const DEFAULT_BLOCK_CACHE_CAPACITY: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_META_CACHE_CAPACITY: u64 = 128 * 1024 * 1024;
 
-/// A trait for slatedb's block cache.
+/// A trait for slatedb's in-memory cache.
 ///
-/// This trait defines the interface for a block cache,
-/// which is used to store and retrieve cached blocks associated with SSTable IDs.
+/// This trait defines the interface for an in-memory cache,
+/// which is used to store and retrieve cached blocks, indices and filters
+/// associated with SSTable IDs.
 ///
 /// Example:
 ///
@@ -244,18 +247,6 @@ pub struct SplitCache {
 }
 
 impl SplitCache {
-    #[inline(always)]
-    pub fn default_block_capacity() -> u64 {
-        // 512 MB
-        512 * 1024 * 1024
-    }
-
-    #[inline(always)]
-    pub fn default_meta_capacity() -> u64 {
-        // 128 MB
-        128 * 1024 * 1024
-    }
-
     pub fn new() -> Self {
         Self {
             block_cache: None,
