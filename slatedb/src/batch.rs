@@ -48,6 +48,7 @@ impl Default for WriteBatch {
     }
 }
 
+/// A write operation in a batch.
 #[derive(PartialEq, Clone)]
 pub(crate) enum WriteOp {
     Put(Bytes, Bytes, PutOptions),
