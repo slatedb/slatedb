@@ -3981,10 +3981,20 @@ mod tests {
         compactor_options: Option<CompactorOptions>,
         ttl: Option<u64>,
     ) -> Settings {
+        test_db_options_with_wal_and_ttl(min_filter_keys, l0_sst_size_bytes, compactor_options, ttl, true)
+    }
+
+    fn test_db_options_with_wal_and_ttl(
+        min_filter_keys: u32,
+        l0_sst_size_bytes: usize,
+        compactor_options: Option<CompactorOptions>,
+        ttl: Option<u64>,
+        wal_enabled: bool,
+    ) -> Settings {
         Settings {
             flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
-            wal_enabled: true,
+            wal_enabled,
             manifest_poll_interval: Duration::from_millis(100),
             manifest_update_timeout: Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
@@ -4117,5 +4127,17 @@ mod tests {
             );
             assert!(recent_min_seq > snapshot_seq);
         }
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    async fn test_manifest_sequence_tracker_after_flush_wal_enabled() {
+        do_test_manifest_sequence_tracker_after_flush(true).await;
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    async fn test_manifest_sequence_tracker_after_flush_wal_disabled() {
+        do_test_manifest_sequence_tracker_after_flush(false).await;
     }
 }
