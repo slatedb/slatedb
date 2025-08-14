@@ -444,8 +444,8 @@ impl DbState {
         self.error.write(error);
     }
 
-    pub fn memtable(&mut self) -> &mut WritableKVTable {
-        &mut self.memtable
+    pub fn memtable(&self) -> &WritableKVTable {
+        &self.memtable
     }
 
     pub fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) -> Result<(), SlateDBError> {

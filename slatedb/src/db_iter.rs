@@ -183,12 +183,12 @@ mod tests {
     #[tokio::test]
     async fn test_sequence_number_filtering() {
         // Create two memtables with overlapping keys but different sequence numbers
-        let mut mem1 = WritableKVTable::new();
+        let mem1 = WritableKVTable::new();
         mem1.put(RowEntry::new_value(b"key1", b"value1", 96));
         mem1.put(RowEntry::new_value(b"key1", b"value2", 110));
         let mem_iter1 = mem1.table().range_ascending(BytesRange::from(..));
 
-        let mut mem2 = WritableKVTable::new();
+        let mem2 = WritableKVTable::new();
         mem2.put(RowEntry::new_value(b"key1", b"value3", 95));
         let mem_iter2 = mem2.table().range_ascending(BytesRange::from(..));
 
@@ -216,7 +216,7 @@ mod tests {
     #[tokio::test]
     async fn test_seek_cannot_rewind() {
         // Build a simple memtable with two keys
-        let mut mem = WritableKVTable::new();
+        let mem = WritableKVTable::new();
         mem.put(RowEntry::new_value(b"key1", b"value1", 1));
         mem.put(RowEntry::new_value(b"key2", b"value2", 2));
 
