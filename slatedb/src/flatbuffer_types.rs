@@ -611,8 +611,12 @@ pub(crate) mod test_utils {
 mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::flatbuffer_types::manifest_generated::{
+        SequenceTracker, SequenceTrackerArgs, SequenceTrackerTier, SequenceTrackerTierArgs,
+    };
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+    use crate::seq_tracker;
     use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
 
@@ -759,6 +763,23 @@ mod tests {
         let l0 = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
         let compacted = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
         let checkpoints = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
+        let timestamps =
+            Some(fbb.create_vector::<u8>(&seq_tracker::encode_timestamps_to_bytes(&[0])));
+
+        let tiers = vec![SequenceTrackerTier::create(
+            &mut fbb,
+            &SequenceTrackerTierArgs {
+                step: 1,
+                first_seq: 1,
+                timestamps,
+                last_seq: 1,
+                capacity: 1,
+            },
+        )];
+
+        let tiers = fbb.create_vector(tiers.as_ref());
+        let seq_tracker =
+            SequenceTracker::create(&mut fbb, &SequenceTrackerArgs { tiers: Some(tiers) });
 
         let manifest = manifest_generated::ManifestV1::create(
             &mut fbb,
@@ -778,7 +799,7 @@ mod tests {
                 last_l0_seq: 0,
                 wal_object_store_uri: None,
                 recent_snapshot_min_seq: 0,
-                seq_tracker: None,
+                seq_tracker: Some(seq_tracker),
             },
         );
         fbb.finish(manifest, None);

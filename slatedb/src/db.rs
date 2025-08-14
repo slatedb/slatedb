@@ -3986,6 +3986,7 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             ttl,
+            #[cfg(feature = "wal_disable")]
             true,
         )
     }
@@ -3995,7 +3996,7 @@ mod tests {
         l0_sst_size_bytes: usize,
         compactor_options: Option<CompactorOptions>,
         ttl: Option<u64>,
-        wal_enabled: bool,
+        #[cfg(feature = "wal_disable")] wal_enabled: bool,
     ) -> Settings {
         Settings {
             flush_interval: Some(Duration::from_millis(100)),
