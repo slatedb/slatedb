@@ -562,10 +562,8 @@ impl Dst {
         for (key, val, options) in write_ops {
             if let Some(val) = val {
                 write_batch.put_with_options(key, val, options);
-                self.state.insert(key.clone(), val.clone());
             } else {
                 write_batch.delete(key);
-                self.state.remove(key);
             }
         }
         let future = self.db.write_with_options(write_batch, write_options);
@@ -579,6 +577,13 @@ impl Dst {
             0f64
         };
         self.poll_await(future, flush_probability).await?;
+        for (key, val, _) in write_ops {
+            if let Some(val) = val {
+                self.state.insert(key.clone(), val.clone());
+            } else {
+                self.state.remove(key);
+            }
+        }
         Ok(())
     }
 
