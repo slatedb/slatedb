@@ -1,4 +1,3 @@
-use crate::db_state::DbState;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use parking_lot::RwLock;
@@ -21,8 +20,6 @@ pub(crate) struct TransactionState {
 /// Manages the lifecycle of DbSnapshot objects, tracking all living transaction states
 pub struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
-    // reference to the db state for updating recent_snapshot_min_seq
-    db_state: Arc<RwLock<DbState>>,
     // random number generator for generating transaction IDs
     db_rand: Arc<DbRand>,
 }
@@ -33,9 +30,8 @@ struct TransactionManagerInner {
 }
 
 impl TransactionManager {
-    pub fn new(db_state: Arc<RwLock<DbState>>, db_rand: Arc<DbRand>) -> Self {
+    pub fn new(db_rand: Arc<DbRand>) -> Self {
         Self {
-            db_state,
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
             })),
@@ -51,6 +47,7 @@ impl TransactionManager {
             let mut inner = self.inner.write();
             inner.active_txns.insert(id, txn_state.clone());
         }
+
         txn_state
     }
 
@@ -60,23 +57,10 @@ impl TransactionManager {
             let mut inner = self.inner.write();
             inner.active_txns.remove(&txn_state.id);
         }
-
-        self.save_recent_snapshot_min_seq();
     }
 
-    fn min_active_seq(&self) -> Option<u64> {
+    pub fn min_active_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
         inner.active_txns.values().map(|state| state.seq).min()
-    }
-
-    fn save_recent_snapshot_min_seq(&self) {
-        let min_seq = self.min_active_seq();
-
-        // update recent_snapshot_min_seq in the db state. the edited db state will be persisted
-        // to the manifest store when memtable is flushed.
-        let mut guard = self.db_state.write();
-        guard.modify(|state| {
-            state.state.manifest.core.recent_snapshot_min_seq = min_seq;
-        });
     }
 }
