@@ -14,19 +14,20 @@
 use crate::checkpoint::Checkpoint;
 use crate::clock::SystemClock;
 use crate::config::GarbageCollectorOptions;
+use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
-use log::{debug, error, info};
+use log::{debug, error};
 use manifest_gc::ManifestGcTask;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use wal_gc::WalGcTask;
 
@@ -40,7 +41,6 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
 
 trait GcTask {
     fn resource(&self) -> &str;
-    fn interval(&self) -> Duration;
     async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
 }
 
@@ -60,14 +60,14 @@ trait GcTask {
 /// The garbage collector uses configurable intervals and minimum age thresholds for each
 /// type of data to ensure that recently created data isn't immediately deleted, which
 /// helps prevent removing files that might still be referenced by in-flight operations.
-#[derive(Clone)]
 pub struct GarbageCollector {
+    wal_gc_task: WalGcTask,
+    compacted_gc_task: CompactedGcTask,
+    manifest_gc_task: ManifestGcTask,
     manifest_store: Arc<ManifestStore>,
-    table_store: Arc<TableStore>,
     options: GarbageCollectorOptions,
     stats: Arc<GcStats>,
     system_clock: Arc<dyn SystemClock>,
-    cancellation_token: CancellationToken,
 }
 
 impl GarbageCollector {
@@ -91,65 +91,34 @@ impl GarbageCollector {
         options: GarbageCollectorOptions,
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
-        cancellation_token: CancellationToken,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
+        let wal_gc_task = WalGcTask::new(
+            manifest_store.clone(),
+            table_store.clone(),
+            stats.clone(),
+            options.wal_options,
+        );
+        let compacted_gc_task = CompactedGcTask::new(
+            manifest_store.clone(),
+            table_store.clone(),
+            stats.clone(),
+            options.compacted_options,
+        );
+        let manifest_gc_task = ManifestGcTask::new(
+            manifest_store.clone(),
+            stats.clone(),
+            options.manifest_options,
+        );
         Self {
+            wal_gc_task,
+            compacted_gc_task,
+            manifest_gc_task,
             manifest_store,
-            table_store,
             options,
             stats,
             system_clock,
-            cancellation_token,
         }
-    }
-
-    /// Starts the garbage collector. This method performs the actual garbage collection.
-    /// The garbage collector runs until the cancellation token is cancelled.
-    pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
-        let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
-        let mut compacted_ticker = self.system_clock.ticker(compacted_gc_task.interval());
-        let mut wal_ticker = self.system_clock.ticker(wal_gc_task.interval());
-        let mut manifest_ticker = self.system_clock.ticker(manifest_gc_task.interval());
-        let mut log_ticker = self.system_clock.ticker(Duration::from_secs(60));
-
-        info!(
-            "Starting Garbage Collector with [manifest: {:#?}], [wal: {:#?}], [compacted: {:#?}]",
-            manifest_gc_task.interval(),
-            wal_gc_task.interval(),
-            compacted_gc_task.interval()
-        );
-
-        loop {
-            tokio::select! {
-                biased;
-                // check the cancellation token first to avoid starting new GC tasks when the runtime is shutting down
-                _ = self.cancellation_token.cancelled() => {
-                    info!("Garbage collector received shutdown signal... shutting down");
-                    break;
-                },
-                _ = manifest_ticker.tick() => { self.run_gc_task(&mut manifest_gc_task).await; },
-                _ = wal_ticker.tick() => { self.run_gc_task(&mut wal_gc_task).await; },
-                _ = compacted_ticker.tick() => { self.run_gc_task(&mut compacted_gc_task).await; },
-                _ = log_ticker.tick() => {
-                    debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
-                         self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
-                         self.stats.gc_wal_count.value.load(Ordering::SeqCst),
-                         self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
-                     );
-                 }
-            }
-            self.stats.gc_count.inc();
-        }
-
-        info!(
-            "GC shutdown after collecting {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
-            self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
-            self.stats.gc_wal_count.value.load(Ordering::SeqCst),
-            self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
-        );
-
-        Ok(())
     }
 
     /// Run the garbage collector once.
@@ -160,38 +129,15 @@ impl GarbageCollector {
     /// - Compacted SST garbage collection
     /// - Manifest garbage collection
     pub async fn run_gc_once(&self) {
-        let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
-
-        self.run_gc_task(&mut manifest_gc_task).await;
-        self.run_gc_task(&mut wal_gc_task).await;
-        self.run_gc_task(&mut compacted_gc_task).await;
+        self.run_gc_task(&self.manifest_gc_task).await;
+        self.run_gc_task(&self.wal_gc_task).await;
+        self.run_gc_task(&self.compacted_gc_task).await;
 
         self.stats.gc_count.inc();
     }
 
-    fn gc_tasks(&self) -> (WalGcTask, CompactedGcTask, ManifestGcTask) {
-        let wal_gc_task = WalGcTask::new(
-            self.manifest_store.clone(),
-            self.table_store.clone(),
-            self.stats.clone(),
-            self.options.wal_options,
-        );
-        let compacted_gc_task = CompactedGcTask::new(
-            self.manifest_store.clone(),
-            self.table_store.clone(),
-            self.stats.clone(),
-            self.options.compacted_options,
-        );
-        let manifest_gc_task = ManifestGcTask::new(
-            self.manifest_store.clone(),
-            self.stats.clone(),
-            self.options.manifest_options,
-        );
-        (wal_gc_task, compacted_gc_task, manifest_gc_task)
-    }
-
     #[instrument(level = "debug", skip_all, fields(resource = task.resource()))]
-    async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &mut T) {
+    async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &T) {
         if let Err(e) = self.remove_expired_checkpoints().await {
             error!("error removing expired checkpoints [error={}]", e);
         } else if let Err(e) = task.collect(self.system_clock.now()).await {
@@ -234,6 +180,99 @@ impl GarbageCollector {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum Message {
+    CollectManifests,
+    CollectCompacted,
+    CollectWal,
+    LogStats,
+}
+
+pub(crate) struct GarbageCollectorMessageHandler {
+    garbage_collector: GarbageCollector,
+}
+
+impl GarbageCollectorMessageHandler {
+    pub(crate) fn new(garbage_collector: GarbageCollector) -> Self {
+        Self { garbage_collector }
+    }
+}
+
+#[async_trait]
+impl MessageHandler<Message> for GarbageCollectorMessageHandler {
+    async fn handle(
+        &mut self,
+        message: Message,
+        error: Option<SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        if error.is_some() {
+            return Ok(());
+        }
+        if !matches!(message, Message::LogStats) {
+            self.garbage_collector.stats.gc_count.inc();
+        }
+        match message {
+            Message::CollectManifests => {
+                self.garbage_collector
+                    .run_gc_task(&self.garbage_collector.manifest_gc_task)
+                    .await
+            }
+            Message::CollectCompacted => {
+                self.garbage_collector
+                    .run_gc_task(&self.garbage_collector.compacted_gc_task)
+                    .await
+            }
+            Message::CollectWal => {
+                self.garbage_collector
+                    .run_gc_task(&self.garbage_collector.wal_gc_task)
+                    .await
+            }
+            Message::LogStats => {
+                debug!(
+                    "total garbage collected [manifests={}, wal_ssts={}, compacted_ssts={}]",
+                    self.garbage_collector
+                        .stats
+                        .gc_manifest_count
+                        .value
+                        .load(Ordering::SeqCst),
+                    self.garbage_collector
+                        .stats
+                        .gc_wal_count
+                        .value
+                        .load(Ordering::SeqCst),
+                    self.garbage_collector
+                        .stats
+                        .gc_compacted_count
+                        .value
+                        .load(Ordering::SeqCst)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<Message>>)> {
+        let mut tickers: Vec<(Duration, Box<MessageFactory<Message>>)> =
+            vec![(Duration::from_secs(60), Box::new(|| Message::LogStats))];
+        if let Some(interval) = self.garbage_collector.options.manifest_options {
+            if let Some(interval) = interval.interval {
+                tickers.push((interval, Box::new(|| Message::CollectManifests)));
+            }
+        }
+        if let Some(interval) = self.garbage_collector.options.compacted_options {
+            if let Some(interval) = interval.interval {
+                tickers.push((interval, Box::new(|| Message::CollectCompacted)));
+            }
+        }
+        if let Some(interval) = self.garbage_collector.options.wal_options {
+            if let Some(interval) = interval.interval {
+                tickers.push((interval, Box::new(|| Message::CollectWal)));
+            }
+        }
+        tickers
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,7 +282,7 @@ mod tests {
 
     use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
-    use tokio::runtime::Handle;
+
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
@@ -253,7 +292,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
-    use crate::utils::spawn_bg_task;
+
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         manifest::store::{ManifestStore, StoredManifest},
@@ -1035,53 +1074,11 @@ mod tests {
             gc_opts,
             stats.clone(),
             Arc::new(DefaultSystemClock::default()),
-            CancellationToken::new(),
         );
 
         gc.run_gc_once().await;
 
         // Verify reference integrity
         assert_no_dangling_references(manifest_store, table_store).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_gc_shutdown() {
-        let (manifest_store, table_store, _) = build_objects();
-        let stats = Arc::new(StatRegistry::new());
-
-        let gc_opts = GarbageCollectorOptions {
-            manifest_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(3600),
-                interval: Some(Duration::from_secs(1)),
-            }),
-            wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(3600),
-                interval: Some(Duration::from_secs(1)),
-            }),
-            compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(3600),
-                interval: Some(Duration::from_secs(1)),
-            }),
-        };
-
-        let cancellation_token = CancellationToken::new();
-
-        let gc = GarbageCollector::new(
-            manifest_store.clone(),
-            table_store.clone(),
-            gc_opts,
-            stats.clone(),
-            Arc::new(DefaultSystemClock::default()),
-            cancellation_token.clone(),
-        );
-
-        let fut = async move { gc.run_async_task().await };
-        let jh = spawn_bg_task(&Handle::current(), |result| assert!(result.is_ok()), fut);
-        cancellation_token.cancel();
-        let result = jh.await.unwrap();
-        assert!(result.is_ok(), "result: {:#?}", result);
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        assert!(cancellation_token.is_cancelled());
     }
 }
