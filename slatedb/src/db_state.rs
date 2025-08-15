@@ -335,10 +335,11 @@ pub(crate) struct CoreDbState {
     /// it's persisted in the manifest, and only updated when a new L0
     /// SST is created in the manifest.
     pub(crate) last_l0_seq: u64,
-    /// Minimum sequence number across all recent in-memory (write) snapshots. The compactor
-    /// needs this to determine whether it's safe to drop duplicate key writes. If a recent snapshot
-    /// still references an older version of a key, it should not be dropped.
-    pub(crate) recent_snapshot_min_seq: Option<u64>,
+    /// Minimum sequence number across all recent in-memory snapshots. The compactor
+    /// needs this to determine whether it's safe to drop duplicate key writes. If a
+    /// recent snapshot still references an older version of a key, it should not be
+    /// recycled. This field is updated when a new L0 is flushed.
+    pub(crate) recent_snapshot_min_seq: u64,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) wal_object_store_uri: Option<String>,
 }
@@ -356,7 +357,7 @@ impl CoreDbState {
             last_l0_seq: 0,
             checkpoints: vec![],
             wal_object_store_uri: None,
-            recent_snapshot_min_seq: None,
+            recent_snapshot_min_seq: 0,
         }
     }
 
