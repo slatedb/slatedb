@@ -23,7 +23,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_block_cache(Arc::new(FoyerCache::new()))
+//!         .with_memory_cache(Arc::new(FoyerCache::new()))
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -90,24 +90,24 @@ impl Default for FoyerCache {
 
 #[async_trait]
 impl DbCache for FoyerCache {
-    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
-        Ok(self.inner.get(&key).map(|entry| entry.value().clone()))
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).map(|entry| entry.value().clone()))
     }
 
-    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
-        Ok(self.inner.get(&key).map(|entry| entry.value().clone()))
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).map(|entry| entry.value().clone()))
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
-        Ok(self.inner.get(&key).map(|entry| entry.value().clone()))
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).map(|entry| entry.value().clone()))
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         self.inner.insert(key, value);
     }
 
-    async fn remove(&self, key: CachedKey) {
-        self.inner.remove(&key);
+    async fn remove(&self, key: &CachedKey) {
+        self.inner.remove(key);
     }
 
     fn entry_count(&self) -> u64 {

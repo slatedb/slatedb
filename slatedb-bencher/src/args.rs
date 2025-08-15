@@ -8,8 +8,8 @@ use clap::{builder::PossibleValue, Args, Parser, Subcommand, ValueEnum};
 use slatedb::{
     config::{CompressionCodec, Settings},
     db_cache::{
-        moka::{MokaCache, MokaCacheOptions},
-        DbCache,
+        foyer::{FoyerCache, FoyerCacheOptions},
+        DbCache, SplitCache,
     },
     Error,
 };
@@ -64,6 +64,15 @@ pub(crate) struct DbArgs {
 
     #[arg(long, help = "The size in bytes of the block cache.")]
     pub(crate) block_cache_size: Option<u64>,
+
+    #[arg(long, help = "The size in bytes of the meta cache.")]
+    pub(crate) meta_cache_size: Option<u64>,
+
+    #[arg(
+        long,
+        help = "Use unified cache, we will use `block_cache_size` as unified cache size"
+    )]
+    pub(crate) unified_cache: bool,
 }
 
 impl DbArgs {
@@ -75,14 +84,30 @@ impl DbArgs {
             Settings::load()?
         };
 
-        let block_cache = self.block_cache_size.map(|max_capacity| {
-            Arc::new(MokaCache::new_with_opts(MokaCacheOptions {
-                max_capacity,
-                ..Default::default()
+        let block_cache = self.block_cache_size.map(|capacity| {
+            Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+                max_capacity: capacity,
             })) as Arc<dyn DbCache>
         });
 
-        Ok((settings, block_cache))
+        // If we use unified cache, we will increase `block_cache` reference count
+        let meta_cache = if self.unified_cache {
+            block_cache.as_ref().map(|cache| cache.clone())
+        } else {
+            self.meta_cache_size.map(|capacity| {
+                Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+                    max_capacity: capacity,
+                })) as Arc<dyn DbCache>
+            })
+        };
+        let memory_cache = Some(Arc::new(
+            SplitCache::new()
+                .with_block_cache(block_cache)
+                .with_meta_cache(meta_cache)
+                .build(),
+        ) as Arc<dyn DbCache>);
+
+        Ok((settings, memory_cache))
     }
 }
 

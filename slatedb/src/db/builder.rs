@@ -55,7 +55,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_block_cache(Arc::new(MokaCache::new()))
+//!         .with_memory_cache(Arc::new(MokaCache::new()))
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -123,12 +123,14 @@ use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
+use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::SizeTieredCompactionSchedulerOptions;
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
+use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -152,7 +154,7 @@ pub struct DbBuilder<P: Into<Path>> {
     settings: Settings,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
-    block_cache: Option<Arc<dyn DbCache>>,
+    memory_cache: Option<Arc<dyn DbCache>>,
     logical_clock: Option<Arc<dyn LogicalClock>>,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
@@ -172,7 +174,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             main_object_store,
             settings: Settings::default(),
             wal_object_store: None,
-            block_cache: None,
+            memory_cache: None,
             logical_clock: None,
             system_clock: None,
             gc_runtime: None,
@@ -201,9 +203,12 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the block cache to use for the database.
-    pub fn with_block_cache(mut self, block_cache: Arc<dyn DbCache>) -> Self {
-        self.block_cache = Some(block_cache);
+    /// Sets the memory cache to use for the database.
+    ///
+    /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
+    /// [`slatedb::db_cache::SplitCache`] is used by default.
+    pub fn with_memory_cache(mut self, memory_cache: Arc<dyn DbCache>) -> Self {
+        self.memory_cache = Some(memory_cache);
         self
     }
 
@@ -306,7 +311,16 @@ impl<P: Into<Path>> DbBuilder<P> {
         let logical_clock = self
             .logical_clock
             .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
-        let block_cache = self.block_cache.or_else(default_block_cache);
+        let memory_cache = self.memory_cache.or_else(|| {
+            let block_cache = default_block_cache();
+            let meta_cache = default_meta_cache();
+            Some(Arc::new(
+                SplitCache::new()
+                    .with_block_cache(block_cache)
+                    .with_meta_cache(meta_cache)
+                    .build(),
+            ))
+        });
 
         let system_clock = self
             .system_clock
@@ -391,7 +405,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
-            block_cache.as_ref().map(|c| {
+            memory_cache.as_ref().map(|c| {
                 Arc::new(DbCacheWrapper::new(
                     c.clone(),
                     stat_registry.as_ref(),
