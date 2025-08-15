@@ -55,6 +55,8 @@ pub mod clock;
 pub mod compaction_execute_bench;
 pub mod config;
 pub mod db_cache;
+pub mod db_snapshot;
+
 pub mod db_stats;
 pub mod size_tiered_compaction;
 pub mod stats;
@@ -80,7 +82,6 @@ mod db_common;
 mod db_iter;
 mod db_read;
 mod db_reader;
-mod db_snapshot;
 mod db_state;
 mod error;
 mod filter;
