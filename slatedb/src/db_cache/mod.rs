@@ -307,7 +307,7 @@ impl DbCache for SplitCache {
                 if let Some(ref cache) = self.block_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
-                    warn!("no block cache available for insertion");
+                    trace!("no block cache available for insertion");
                 }
             }
             CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) => {
