@@ -1345,11 +1345,11 @@ impl<'a> ManifestV1<'a> {
     unsafe { self._tab.get::<u64>(ManifestV1::VT_RECENT_SNAPSHOT_MIN_SEQ, Some(0)).unwrap()}
   }
   #[inline]
-  pub fn seq_tracker(&self) -> Option<SequenceTracker<'a>> {
+  pub fn seq_tracker(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SequenceTrackerTier<'a>>>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SequenceTracker>>(ManifestV1::VT_SEQ_TRACKER, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SequenceTrackerTier>>>>(ManifestV1::VT_SEQ_TRACKER, None)}
   }
 }
 
@@ -1375,7 +1375,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<u64>("last_l0_seq", Self::VT_LAST_L0_SEQ, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("wal_object_store_uri", Self::VT_WAL_OBJECT_STORE_URI, false)?
      .visit_field::<u64>("recent_snapshot_min_seq", Self::VT_RECENT_SNAPSHOT_MIN_SEQ, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<SequenceTracker>>("seq_tracker", Self::VT_SEQ_TRACKER, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SequenceTrackerTier>>>>("seq_tracker", Self::VT_SEQ_TRACKER, false)?
      .finish();
     Ok(())
   }
@@ -1396,7 +1396,7 @@ pub struct ManifestV1Args<'a> {
     pub last_l0_seq: u64,
     pub wal_object_store_uri: Option<flatbuffers::WIPOffset<&'a str>>,
     pub recent_snapshot_min_seq: u64,
-    pub seq_tracker: Option<flatbuffers::WIPOffset<SequenceTracker<'a>>>,
+    pub seq_tracker: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SequenceTrackerTier<'a>>>>>,
 }
 impl<'a> Default for ManifestV1Args<'a> {
   #[inline]
@@ -1488,8 +1488,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(ManifestV1::VT_RECENT_SNAPSHOT_MIN_SEQ, recent_snapshot_min_seq, 0);
   }
   #[inline]
-  pub fn add_seq_tracker(&mut self, seq_tracker: flatbuffers::WIPOffset<SequenceTracker<'b >>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<SequenceTracker>>(ManifestV1::VT_SEQ_TRACKER, seq_tracker);
+  pub fn add_seq_tracker(&mut self, seq_tracker: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<SequenceTrackerTier<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_SEQ_TRACKER, seq_tracker);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestV1Builder<'a, 'b, A> {
@@ -2201,104 +2201,6 @@ impl core::fmt::Debug for Checkpoint<'_> {
           ds.field("metadata", &x)
         },
       };
-      ds.finish()
-  }
-}
-pub enum SequenceTrackerOffset {}
-#[derive(Copy, Clone, PartialEq)]
-
-pub struct SequenceTracker<'a> {
-  pub _tab: flatbuffers::Table<'a>,
-}
-
-impl<'a> flatbuffers::Follow<'a> for SequenceTracker<'a> {
-  type Inner = SequenceTracker<'a>;
-  #[inline]
-  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: flatbuffers::Table::new(buf, loc) }
-  }
-}
-
-impl<'a> SequenceTracker<'a> {
-  pub const VT_TIERS: flatbuffers::VOffsetT = 4;
-
-  #[inline]
-  pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
-    SequenceTracker { _tab: table }
-  }
-  #[allow(unused_mut)]
-  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: flatbuffers::Allocator + 'bldr>(
-    _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr, A>,
-    args: &'args SequenceTrackerArgs<'args>
-  ) -> flatbuffers::WIPOffset<SequenceTracker<'bldr>> {
-    let mut builder = SequenceTrackerBuilder::new(_fbb);
-    if let Some(x) = args.tiers { builder.add_tiers(x); }
-    builder.finish()
-  }
-
-
-  #[inline]
-  pub fn tiers(&self) -> flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SequenceTrackerTier<'a>>> {
-    // Safety:
-    // Created from valid Table for this object
-    // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SequenceTrackerTier>>>>(SequenceTracker::VT_TIERS, None).unwrap()}
-  }
-}
-
-impl flatbuffers::Verifiable for SequenceTracker<'_> {
-  #[inline]
-  fn run_verifier(
-    v: &mut flatbuffers::Verifier, pos: usize
-  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
-    use self::flatbuffers::Verifiable;
-    v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SequenceTrackerTier>>>>("tiers", Self::VT_TIERS, true)?
-     .finish();
-    Ok(())
-  }
-}
-pub struct SequenceTrackerArgs<'a> {
-    pub tiers: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<SequenceTrackerTier<'a>>>>>,
-}
-impl<'a> Default for SequenceTrackerArgs<'a> {
-  #[inline]
-  fn default() -> Self {
-    SequenceTrackerArgs {
-      tiers: None, // required field
-    }
-  }
-}
-
-pub struct SequenceTrackerBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
-  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a, A>,
-  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
-}
-impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SequenceTrackerBuilder<'a, 'b, A> {
-  #[inline]
-  pub fn add_tiers(&mut self, tiers: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<SequenceTrackerTier<'b >>>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SequenceTracker::VT_TIERS, tiers);
-  }
-  #[inline]
-  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SequenceTrackerBuilder<'a, 'b, A> {
-    let start = _fbb.start_table();
-    SequenceTrackerBuilder {
-      fbb_: _fbb,
-      start_: start,
-    }
-  }
-  #[inline]
-  pub fn finish(self) -> flatbuffers::WIPOffset<SequenceTracker<'a>> {
-    let o = self.fbb_.end_table(self.start_);
-    self.fbb_.required(o, SequenceTracker::VT_TIERS,"tiers");
-    flatbuffers::WIPOffset::new(o.value())
-  }
-}
-
-impl core::fmt::Debug for SequenceTracker<'_> {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut ds = f.debug_struct("SequenceTracker");
-      ds.field("tiers", &self.tiers());
       ds.finish()
   }
 }

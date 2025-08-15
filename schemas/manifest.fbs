@@ -97,7 +97,7 @@ table ManifestV1 {
     recent_snapshot_min_seq: ulong;
 
     // a mapping from sequence number to the corresponding system clock timestamp
-    seq_tracker: SequenceTracker;
+    seq_tracker: [SequenceTrackerTier];
 }
 
 table CompactedSstId {
@@ -141,11 +141,6 @@ table Checkpoint {
     // Optional metadata associated with the checkpoint. For example, the writer can use this to
     // clean up checkpoints from older writers.
     metadata: CheckpointMetadata;
-}
-
-// A map (lossy) tracking sequence numbers to corresponding system clock ticks
-table SequenceTracker {
-    tiers: [SequenceTrackerTier] (required);
 }
 
 // A single tier of the SequenceTracker table, consists of timestamps for a range
