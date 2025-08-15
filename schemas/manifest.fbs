@@ -97,7 +97,7 @@ table ManifestV1 {
     recent_snapshot_min_seq: ulong;
 
     // a mapping from sequence number to the corresponding system clock timestamp
-    seq_tracker: SequenceTracker (required);
+    seq_tracker: SequenceTracker;
 }
 
 table CompactedSstId {

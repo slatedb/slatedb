@@ -226,19 +226,25 @@ impl FlatBufferManifestCodec {
             })
             .collect();
 
-        let tiers: Vec<seq_tracker::Tier> = manifest
-            .seq_tracker()
-            .tiers()
-            .iter()
-            .map(|tier| seq_tracker::Tier {
-                step: tier.step(),
-                first_seq: tier.first_seq(),
-                last_seq: tier.last_seq(),
-                capacity: tier.capacity(),
-                timestamps: seq_tracker::decode_timestamps_from_bytes(tier.timestamps().bytes())
+        let seq_tracker = if let Some(seq_tracker) = manifest.seq_tracker() {
+            let tiers: Vec<seq_tracker::Tier> = seq_tracker
+                .tiers()
+                .iter()
+                .map(|tier| seq_tracker::Tier {
+                    step: tier.step(),
+                    first_seq: tier.first_seq(),
+                    last_seq: tier.last_seq(),
+                    capacity: tier.capacity(),
+                    timestamps: seq_tracker::decode_timestamps_from_bytes(
+                        tier.timestamps().bytes(),
+                    )
                     .expect("Invalid sequence tracker timestamps"),
-            })
-            .collect();
+                })
+                .collect();
+            TieredSequenceTracker { tiers }
+        } else {
+            TieredSequenceTracker::new(1, 4096)
+        };
 
         let core = CoreDbState {
             initialized: manifest.initialized(),
@@ -251,13 +257,8 @@ impl FlatBufferManifestCodec {
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
-<<<<<<< HEAD
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
-            seq_tracker: Some(TieredSequenceTracker { tiers }),
-=======
-            recent_snapshot_min_seq,
-            seq_tracker: TieredSequenceTracker { tiers },
->>>>>>> c670f95 (clippy)
+            seq_tracker,
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
