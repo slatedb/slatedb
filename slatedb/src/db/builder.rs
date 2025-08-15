@@ -113,6 +113,7 @@ use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::admin::Admin;
+use crate::batch_write::BatchWriteMessageHandler;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
@@ -131,9 +132,12 @@ use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::CoreDbState;
+use crate::dispatcher::MessageDispatcher;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
+use crate::garbage_collector::GarbageCollectorMessageHandler;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::mem_table_flush::MemtableFlusher;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -454,9 +458,26 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner.wal_buffer.start_background().await?;
         };
 
-        let memtable_flush_task =
-            inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
-        let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
+        let memtable_flush_task = {
+            let mut dispatcher = MessageDispatcher::new_with_channel(
+                Box::new(MemtableFlusher::new(inner.clone(), manifest)),
+                memtable_flush_rx,
+                system_clock.clone(),
+                self.cancellation_token.clone(),
+                Some(inner.state.clone()),
+            );
+            Some(tokio_handle.spawn(async move { dispatcher.run().await }))
+        };
+        let write_task = {
+            let mut dispatcher = MessageDispatcher::new_with_channel(
+                Box::new(BatchWriteMessageHandler::new(inner.clone())),
+                write_rx,
+                system_clock.clone(),
+                self.cancellation_token.clone(),
+                Some(inner.state.clone()),
+            );
+            Some(tokio_handle.spawn(async move { dispatcher.run().await }))
+        };
 
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -516,25 +537,20 @@ impl<P: Into<Path>> DbBuilder<P> {
             if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
                 let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
                 let gc_handle = self.gc_runtime.unwrap_or_else(|| tokio_handle.clone());
-                let cleanup_inner = inner.clone();
                 let gc = GarbageCollector::new(
                     manifest_store.clone(),
                     uncached_table_store.clone(),
                     gc_options,
                     inner.stat_registry.clone(),
                     system_clock.clone(),
+                );
+                let mut dispatcher = MessageDispatcher::new(
+                    Box::new(GarbageCollectorMessageHandler::new(gc)),
+                    system_clock.clone(),
                     self.cancellation_token.clone(),
+                    Some(inner.state.clone()),
                 );
-                let garbage_collector_task = spawn_bg_task(
-                    &gc_handle,
-                    move |result| {
-                        let err = bg_task_result_into_err(result);
-                        warn!("GC thread exited [error={}]", err);
-                        let mut state = cleanup_inner.state.write();
-                        state.record_fatal_error(err.clone())
-                    },
-                    async move { gc.run_async_task().await },
-                );
+                let garbage_collector_task = gc_handle.spawn(async move { dispatcher.run().await });
                 Some(garbage_collector_task)
             } else {
                 None
@@ -610,7 +626,6 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     options: GarbageCollectorOptions,
     stat_registry: Arc<StatRegistry>,
-    cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
 }
 
@@ -622,7 +637,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             wal_object_store: None,
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
-            cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
         }
     }
@@ -643,12 +657,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Sets the system clock to use for the garbage collector.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
-        self
-    }
-
-    /// Sets the cancellation token to use for the garbage collector.
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = cancellation_token;
         self
     }
 
@@ -678,7 +686,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.options,
             self.stat_registry,
             self.system_clock,
-            self.cancellation_token,
         )
     }
 }

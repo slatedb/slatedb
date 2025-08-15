@@ -34,7 +34,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::batch::WriteBatch;
-use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
+use crate::batch_write::BatchWriteMessage;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
@@ -49,7 +49,7 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
-use crate::mem_table_flush::MemtableFlushMsg;
+use crate::mem_table_flush::MemtableMessage;
 use crate::oracle::Oracle;
 use crate::rand::DbRand;
 use crate::reader::Reader;
@@ -69,8 +69,8 @@ pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
-    pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-    pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
+    pub(crate) memtable_flush_notifier: UnboundedSender<MemtableMessage>,
+    pub(crate) write_notifier: UnboundedSender<BatchWriteMessage>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
     #[allow(dead_code)]
@@ -100,8 +100,8 @@ impl DbInner {
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
-        memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-        write_notifier: UnboundedSender<WriteBatchMsg>,
+        memtable_flush_notifier: UnboundedSender<MemtableMessage>,
+        write_notifier: UnboundedSender<BatchWriteMessage>,
         stat_registry: Arc<StatRegistry>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
@@ -255,18 +255,16 @@ impl DbInner {
         self.db_stats.write_batch_count.inc();
         self.db_stats.write_ops.add(batch.ops.len() as u64);
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let batch_msg =
-            WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx }, options.clone());
-
         self.maybe_apply_backpressure().await?;
-        self.write_notifier
-            .send_safely(self.state.read().error_reader(), batch_msg)?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let batch_msg = BatchWriteMessage::Write(batch, options.clone(), tx);
+        let error_reader = self.state.read().error_reader();
+        self.write_notifier.send_safely(error_reader, batch_msg)?;
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
         let mut durable_watcher = rx.await??;
-
         if options.await_durable {
             durable_watcher.await_value().await?;
         }
@@ -376,7 +374,7 @@ impl DbInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier.send_safely(
             self.state.read().error_reader(),
-            MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) },
+            MemtableMessage::FlushImmutableMemtables { sender: Some(tx) },
         )?;
         rx.await?
     }
@@ -555,15 +553,6 @@ impl Db {
             info!("garbage collector task exited [result={:?}]", result);
         }
 
-        // Shutdown the write batch thread.
-        self.inner
-            .write_notifier
-            .send_safely(
-                self.inner.state.read().error_reader(),
-                WriteBatchMsg::Shutdown,
-            )
-            .ok();
-
         if let Some(write_task) = {
             let mut write_task = self.write_task.lock();
             write_task.take()
@@ -578,15 +567,6 @@ impl Db {
             .close()
             .await
             .expect("failed to close WAL buffer");
-
-        // Shutdown the memtable flush thread.
-        self.inner
-            .memtable_flush_notifier
-            .send_safely(
-                self.inner.state.read().error_reader(),
-                MemtableFlushMsg::Shutdown,
-            )
-            .ok();
 
         if let Some(memtable_flush_task) = {
             let mut memtable_flush_task = self.memtable_flush_task.lock();

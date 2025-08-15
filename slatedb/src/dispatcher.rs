@@ -269,11 +269,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                 state.write().record_fatal_error(e.clone());
             }
             // if there is an error state, use it
-            state
-                .read()
-                .error_reader()
-                .read()
-                .map_or(result, Err)
+            state.read().error_reader().read().map_or(result, Err)
         } else {
             // no state, so simply use our error when draining
             result
