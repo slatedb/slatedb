@@ -337,32 +337,37 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         // Setup object store with optional caching
-        let maybe_cached_main_object_store =
-            match &self.settings.object_store_cache_options.root_folder {
-                None => self.main_object_store.clone(),
-                Some(cache_root_folder) => {
-                    let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
-                    let cache_storage = Arc::new(FsCacheStorage::new(
-                        cache_root_folder.clone(),
-                        self.settings
-                            .object_store_cache_options
-                            .max_cache_size_bytes,
-                        self.settings.object_store_cache_options.scan_interval,
-                        stats.clone(),
-                        system_clock.clone(),
-                        rand.clone(),
-                    ));
+        let cached_object_store = match &self.settings.object_store_cache_options.root_folder {
+            None => None,
+            Some(cache_root_folder) => {
+                let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
+                let cache_storage = Arc::new(FsCacheStorage::new(
+                    cache_root_folder.clone(),
+                    self.settings
+                        .object_store_cache_options
+                        .max_cache_size_bytes,
+                    self.settings.object_store_cache_options.scan_interval,
+                    stats.clone(),
+                    system_clock.clone(),
+                    rand.clone(),
+                ));
 
-                    let cached_main_object_store = CachedObjectStore::new(
-                        self.main_object_store.clone(),
-                        cache_storage,
-                        self.settings.object_store_cache_options.part_size_bytes,
-                        stats.clone(),
-                    )?;
-                    cached_main_object_store.start_evictor().await;
-                    cached_main_object_store
-                }
-            };
+                let cached_object_store = CachedObjectStore::new(
+                    self.main_object_store.clone(),
+                    cache_storage,
+                    self.settings.object_store_cache_options.part_size_bytes,
+                    self.settings.object_store_cache_options.cache_puts,
+                    stats.clone(),
+                )?;
+                cached_object_store.start_evictor().await;
+                Some(cached_object_store)
+            }
+        };
+
+        let maybe_cached_main_object_store = match &cached_object_store {
+            Some(cached_store) => cached_store.clone(),
+            None => self.main_object_store.clone(),
+        };
 
         // Setup the manifest store and load latest manifest
         let manifest_store = Arc::new(ManifestStore::new(
@@ -479,7 +484,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.wal_object_store.clone(),
             ),
             sst_format,
-            path_resolver,
+            path_resolver.clone(),
             self.fp_registry.clone(),
             None,
         ));
@@ -556,6 +561,13 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Replay WAL
         inner.replay_wal().await?;
+
+        // Preload cache if enabled
+        if let Some(cached_obj_store) = cached_object_store {
+            inner
+                .preload_cache(&cached_obj_store, &path_resolver)
+                .await?;
+        }
 
         // Create and return the Db instance
         Ok(Db {
