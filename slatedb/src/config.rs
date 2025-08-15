@@ -167,6 +167,15 @@ use crate::error::SlateDBError;
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
+/// Enum representing different levels of cache preloading on startup
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum PreloadLevel {
+    /// Preload only L0 SSTs (most recently written files)
+    L0Sst,
+    /// Preload all SSTs (both L0 and compacted levels)
+    AllSst,
+}
+
 /// Enum representing valid SST block sizes
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub enum SstBlockSize {
@@ -991,15 +1000,10 @@ pub struct ObjectStoreCacheOptions {
     /// will be cached locally for faster subsequent reads. Default is false.
     pub cache_puts: bool,
 
-    /// Whether to preload L0 SST files into cache during database startup. When enabled,
-    /// the database will load all L0 SST files into the cache up to the cache size limit
-    /// to warm up the cache for faster access. Default is false.
-    pub preload_l0_disk_cache_on_startup: bool,
-
-    /// Whether to preload compacted SST files into cache during database startup. When enabled,
-    /// the database will load all compacted SST files into the cache up to the cache size limit
-    /// to warm up the cache for faster access. Default is false.
-    pub preload_disk_cache_fully_on_startup: bool,
+    /// Whether to preload SST files into cache during database startup. When enabled,
+    /// the database will load SST files into the cache up to the cache size limit
+    /// to warm up the cache for faster access. Default is None (no preloading).
+    pub preload_disk_cache_on_startup: Option<PreloadLevel>,
 
     /// Interval to scan the cache directory to rebuild the in-memory map for evictor.
     /// The default value is 1 hour. If set to None, the cache directory will be only
@@ -1022,8 +1026,7 @@ impl Default for ObjectStoreCacheOptions {
             max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
             part_size_bytes: 4 * 1024 * 1024,
             cache_puts: false,
-            preload_l0_disk_cache_on_startup: false,
-            preload_disk_cache_fully_on_startup: false,
+            preload_disk_cache_on_startup: None,
             scan_interval: Some(Duration::from_secs(3600)),
         }
     }

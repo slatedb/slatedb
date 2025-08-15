@@ -1,4 +1,5 @@
 use crate::cached_object_store::stats::CachedObjectStoreStats;
+use crate::cached_object_store::LocalCacheEntry;
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
@@ -9,6 +10,7 @@ use std::{ops::Range, sync::Arc};
 use crate::cached_object_store::admission::AdmissionPicker;
 use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
 use crate::error::SlateDBError;
+use log::warn;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
@@ -54,46 +56,52 @@ impl CachedObjectStore {
         file_paths: Vec<Path>,
         max_bytes: usize,
     ) -> Result<(), SlateDBError> {
-        let mut bytes_loaded = 0;
+        if file_paths.is_empty() || max_bytes == 0 {
+            return Ok(());
+        }
 
-        for file_path in file_paths {
-            // Check if we have reached the maximum bytes limit before fetching the file
-            // To avoid unnecessarily caching the file metadata
-            if bytes_loaded >= max_bytes {
-                break;
-            }
+        let mut remaining_bytes = max_bytes;
+        let mut files_to_load = Vec::with_capacity(file_paths.len());
 
-            // Use cached_get_opts to fetch the entire file, which will automatically
-            // handle caching through the existing cache logic
-            match self
-                .cached_get_opts(&file_path, GetOptions::default())
-                .await
-            {
-                Ok(get_result) => {
-                    let file_size = get_result.meta.size as usize;
-                    if bytes_loaded + file_size > max_bytes {
+        // First pass: sequentially get metadata and select files that fit
+        // This is done sequentially because the head calls should be very quick compared to files loading
+        for path in file_paths {
+            match self.object_store.head(&path).await {
+                Ok(meta) => {
+                    let file_size = meta.size as usize;
+                    if remaining_bytes >= file_size {
+                        remaining_bytes -= file_size;
+                        files_to_load.push(path);
+                    } else {
+                        // We can't fit this file, so we stop here
                         break;
                     }
-
-                    // Consume the result to trigger the caching - we don't need the actual bytes
-                    // but getting them ensures the file is fully loaded and cached
-                    match get_result.bytes().await {
-                        Ok(_) => {
-                            bytes_loaded += file_size;
-                        }
-                        Err(_) => {
-                            // TODO - handle error appropriately, maybe a warning log
-                        }
-                    }
                 }
-                Err(_) => {
-                    // TODO - handle error appropriately, maybe a warning log
+                Err(e) => {
+                    // If file doesn't exist or can't be accessed, we stop here
+                    warn!("Failed to preload all SSTs to cache: {:?}", e);
+                    break;
                 }
             }
         }
 
+        // Second pass: load the selected files in bouded parallelism and cache them.
+        let degree_of_parallelism = 5;
+        let _result = stream::iter(files_to_load.into_iter())
+            .map(|path| async move {
+                // Load the file into cache
+                if let Ok(get_result) = self.cached_get_opts(&path, GetOptions::default()).await {
+                    // Consume the result to trigger caching
+                    let _ = get_result.bytes().await;
+                }
+            })
+            .buffer_unordered(degree_of_parallelism)
+            .collect::<Vec<_>>()
+            .await;
+
         Ok(())
     }
+
     pub async fn cached_head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
         let entry = self.cache_storage.entry(location, self.part_size_bytes);
         match entry.read_head().await {
@@ -111,7 +119,7 @@ impl CachedObjectStore {
                     )
                     .await?;
                 let meta = result.meta.clone();
-                self.save_result(result).await.ok();
+                self.save_get_result(result).await.ok();
                 Ok(meta)
             }
         }
@@ -162,45 +170,28 @@ impl CachedObjectStore {
             .await?;
 
         // Then, save to local cache if admission policy allows it
-        let entry = self.cache_storage.entry(location, self.part_size_bytes);
+        // Get metadata and attributes using our cached head method (this also saves the head to cache)
+        match self.cached_head(location).await {
+            Ok(meta) => {
+                let entry = self
+                    .cache_storage
+                    .entry(&meta.location, self.part_size_bytes);
+                if self.admission_picker.pick(entry.as_ref()).admitted() {
+                    // Convert PutPayload to stream and save parts to cache.
+                    // Note: cached_head() already saved the head, so we only need to save parts
+                    let stream =
+                        stream::iter(payload.into_iter()).map(Ok::<Bytes, object_store::Error>);
 
-        if self.admission_picker.pick(entry.as_ref()).admitted() {
-            // Get metadata and attributes using our cached head method (this also saves the head to cache)
-            match self.cached_head(location).await {
-                Ok(_meta) => {
-                    // Split the bytes into parts and save them
-                    let mut offset = 0;
-                    let mut part_number = 0;
-
-                    // Copy the payload chunks to contiguous bytes. Another option is to use a payload.as_ref(),
-                    // but then we need to copy during the creation of each part.
-                    // TODO: optimize this by changing save_part to accept chunks directly.
-                    let bytes: Bytes = payload.into();
-
-                    while offset < bytes.len() {
-                        let end = std::cmp::min(offset + self.part_size_bytes, bytes.len());
-                        let part_bytes = bytes.slice(offset..end);
-
-                        match entry.save_part(part_number, part_bytes).await {
-                            Ok(_evicted_bytes) => {
-                                // We ignore evicted bytes in PUT operations since we're
-                                // not trying to limit cache size during normal operations
-                            }
-                            Err(_e) => {
-                                // Log warning but don't fail the operation
-                                // TODO: add proper logging
-                                break;
-                            }
-                        }
-
-                        offset = end;
-                        part_number += 1;
-                    }
+                    // Save parts only, ignoring errors (cache failures shouldn't fail the PUT operation)
+                    self.save_parts_stream(entry, stream, 0).await.ok();
                 }
-                Err(_e) => {
-                    // Log warning but don't fail the PUT operation
-                    // TODO: add proper logging
-                }
+            }
+            Err(e) => {
+                // Log warning but don't fail the PUT operation
+                warn!(
+                    "Failed to save head to disk cache for {} with. Error {}",
+                    location, e
+                );
             }
         }
 
@@ -238,14 +229,14 @@ impl CachedObjectStore {
         // swallow the error on saving to disk here (the disk might be already full), just fallback
         // to the object store.
         // TODO: add a warning log here.
-        self.save_result(get_result).await.ok();
+        self.save_get_result(get_result).await.ok();
         Ok((result_meta, result_attrs))
     }
 
     /// save the GetResult to the disk cache, a GetResult may be transformed into multiple part
     /// files and a meta file. please note that the `range` in the GetResult is expected to be
     /// aligned with the part size.
-    async fn save_result(&self, result: GetResult) -> object_store::Result<u64> {
+    async fn save_get_result(&self, result: GetResult) -> object_store::Result<u64> {
         let part_size_bytes_u64 = self.part_size_bytes as u64;
         assert!(result.range.start % part_size_bytes_u64 == 0);
         assert!(
@@ -260,30 +251,52 @@ impl CachedObjectStore {
         if self.admission_picker.pick(entry.as_ref()).admitted() {
             entry.save_head((&result.meta, &result.attributes)).await?;
 
-            let mut buffer = BytesMut::new();
-            let mut part_number = usize::try_from(result.range.start / part_size_bytes_u64)
+            let start_part_number = usize::try_from(result.range.start / part_size_bytes_u64)
                 .expect("Part number exceeds u32 on a 32-bit system. Try increasing part size.");
 
-            let mut stream = result.into_stream();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk?;
-                buffer.extend_from_slice(&chunk);
+            let stream = result.into_stream();
 
-                while buffer.len() >= self.part_size_bytes {
-                    let to_write = buffer.split_to(self.part_size_bytes);
-                    entry.save_part(part_number, to_write.into()).await?;
-                    part_number += 1;
-                }
-            }
-
-            // if the last part is not fully filled, save it as the last part.
-            if !buffer.is_empty() {
-                entry.save_part(part_number, buffer.into()).await?;
-                return Ok(object_size);
-            }
+            self.save_parts_stream(entry, stream, start_part_number)
+                .await?;
         }
 
         Ok(object_size)
+    }
+
+    /// Save a stream of bytes to cache as parts, starting from the specified part number.
+    /// Returns the number of bytes saved.
+    /// This method only saves the data parts - the head should be saved separately.
+    async fn save_parts_stream<S>(
+        &self,
+        entry: Box<dyn LocalCacheEntry>,
+        mut stream: S,
+        start_part_number: usize,
+    ) -> object_store::Result<usize>
+    where
+        S: stream::Stream<Item = Result<Bytes, object_store::Error>> + Unpin,
+    {
+        let mut buffer = BytesMut::new();
+        let mut part_number = start_part_number;
+        let mut total_bytes: usize = 0;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            total_bytes += chunk.len();
+            buffer.extend_from_slice(&chunk);
+
+            while buffer.len() >= self.part_size_bytes {
+                let to_write = buffer.split_to(self.part_size_bytes);
+                entry.save_part(part_number, to_write.into()).await?;
+                part_number += 1;
+            }
+        }
+
+        // Save any remaining bytes as the last part
+        if !buffer.is_empty() {
+            entry.save_part(part_number, buffer.into()).await?;
+        }
+
+        Ok(total_bytes)
     }
 
     // split the range into parts, and return the part id and the range inside the part.
@@ -601,7 +614,7 @@ mod tests {
                 .unwrap();
         let entry = cached_store.cache_storage.entry(&location, 1024);
 
-        let object_size_hint = cached_store.save_result(get_result).await?;
+        let object_size_hint = cached_store.save_get_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3 + 32);
 
         // assert the cached meta
@@ -671,7 +684,7 @@ mod tests {
         let cached_store =
             CachedObjectStore::new(object_store, cache_storage, part_size, false, stats).unwrap();
         let entry = cached_store.cache_storage.entry(&location, part_size);
-        let object_size_hint = cached_store.save_result(get_result).await?;
+        let object_size_hint = cached_store.save_get_result(get_result).await?;
         assert_eq!(object_size_hint, 1024 * 3);
         let cached_parts = entry.cached_parts().await?;
         assert_eq!(cached_parts.len(), 3);

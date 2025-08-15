@@ -549,85 +549,9 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Preload cache if enabled
         if let Some(cached_obj_store) = cached_object_store {
-            let current_state = inner.state.read().state();
-            let max_cache_size = self
-                .settings
-                .object_store_cache_options
-                .max_cache_size_bytes
-                .unwrap_or(usize::MAX);
-
-            // Preload compacted files if enabled (this includes L0 and all compacted levels)
-            if self
-                .settings
-                .object_store_cache_options
-                .preload_disk_cache_fully_on_startup
-            {
-                // Calculate total capacity needed to avoid reallocations
-                let l0_count = current_state.manifest.core.l0.len();
-                let compacted_count: usize = current_state
-                    .manifest
-                    .core
-                    .compacted
-                    .iter()
-                    .map(|level| level.ssts.len())
-                    .sum();
-                let total_capacity = l0_count + compacted_count;
-
-                let mut all_sst_paths: Vec<object_store::path::Path> =
-                    Vec::with_capacity(total_capacity);
-
-                // Add L0 SSTs
-                all_sst_paths.extend(
-                    current_state
-                        .manifest
-                        .core
-                        .l0
-                        .iter()
-                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
-                );
-
-                // Add compacted SSTs
-                all_sst_paths.extend(
-                    current_state
-                        .manifest
-                        .core
-                        .compacted
-                        .iter()
-                        .flat_map(|level| &level.ssts)
-                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
-                );
-
-                if !all_sst_paths.is_empty() {
-                    if let Err(e) = cached_obj_store
-                        .load_files_to_cache(all_sst_paths, max_cache_size)
-                        .await
-                    {
-                        warn!("Failed to preload full cache: {:?}", e);
-                    }
-                }
-            } else if self
-                .settings
-                .object_store_cache_options
-                .preload_l0_disk_cache_on_startup
-            {
-                // Only preload L0 files if full preload is not enabled
-                let l0_sst_paths: Vec<object_store::path::Path> = current_state
-                    .manifest
-                    .core
-                    .l0
-                    .iter()
-                    .map(|sst_handle| path_resolver.table_path(&sst_handle.id))
-                    .collect();
-
-                if !l0_sst_paths.is_empty() {
-                    if let Err(e) = cached_obj_store
-                        .load_files_to_cache(l0_sst_paths, max_cache_size)
-                        .await
-                    {
-                        warn!("Failed to preload L0 cache: {:?}", e);
-                    }
-                }
-            }
+            inner
+                .preload_cache(&cached_obj_store, &path_resolver)
+                .await?;
         }
 
         // Create and return the Db instance

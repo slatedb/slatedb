@@ -34,10 +34,12 @@ use tokio_util::sync::CancellationToken;
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
+use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
 use crate::config::{
-    FlushOptions, FlushType, PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions,
+    FlushOptions, FlushType, PreloadLevel, PutOptions, ReadOptions, ScanOptions, Settings,
+    WriteOptions,
 };
 use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
@@ -48,6 +50,7 @@ use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::oracle::Oracle;
+use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
@@ -410,6 +413,94 @@ impl DbInner {
         self.oracle
             .last_remote_persisted_seq
             .store(self.oracle.last_committed_seq.load());
+        Ok(())
+    }
+
+    async fn preload_cache(
+        &self,
+        cached_obj_store: &CachedObjectStore,
+        path_resolver: &PathResolver,
+    ) -> Result<(), SlateDBError> {
+        let current_state = self.state.read().state();
+        let max_cache_size = self
+            .settings
+            .object_store_cache_options
+            .max_cache_size_bytes
+            .unwrap_or(usize::MAX);
+
+        match self
+            .settings
+            .object_store_cache_options
+            .preload_disk_cache_on_startup
+        {
+            Some(PreloadLevel::AllSst) => {
+                // Preload both L0 and compacted SSTs
+                let l0_count = current_state.manifest.core.l0.len();
+                let compacted_count: usize = current_state
+                    .manifest
+                    .core
+                    .compacted
+                    .iter()
+                    .map(|level| level.ssts.len())
+                    .sum();
+                let total_capacity = l0_count + compacted_count;
+
+                let mut all_sst_paths: Vec<object_store::path::Path> =
+                    Vec::with_capacity(total_capacity);
+
+                // Add L0 SSTs
+                all_sst_paths.extend(
+                    current_state
+                        .manifest
+                        .core
+                        .l0
+                        .iter()
+                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
+                );
+
+                // Add compacted SSTs
+                all_sst_paths.extend(
+                    current_state
+                        .manifest
+                        .core
+                        .compacted
+                        .iter()
+                        .flat_map(|level| &level.ssts)
+                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
+                );
+
+                if !all_sst_paths.is_empty() {
+                    if let Err(e) = cached_obj_store
+                        .load_files_to_cache(all_sst_paths, max_cache_size)
+                        .await
+                    {
+                        warn!("Failed to preload all SSTs to cache: {:?}", e);
+                    }
+                }
+            }
+            Some(PreloadLevel::L0Sst) => {
+                // Preload only L0 SSTs
+                let l0_sst_paths: Vec<object_store::path::Path> = current_state
+                    .manifest
+                    .core
+                    .l0
+                    .iter()
+                    .map(|sst_handle| path_resolver.table_path(&sst_handle.id))
+                    .collect();
+
+                if !l0_sst_paths.is_empty() {
+                    if let Err(e) = cached_obj_store
+                        .load_files_to_cache(l0_sst_paths, max_cache_size)
+                        .await
+                    {
+                        warn!("Failed to preload L0 SSTs to cache: {:?}", e);
+                    }
+                }
+            }
+            None => {
+                // No preloading
+            }
+        }
         Ok(())
     }
 
