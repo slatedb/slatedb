@@ -25,7 +25,7 @@ pub(crate) struct WatchableOnceCell<T: Clone> {
     tx: tokio::sync::watch::Sender<Option<T>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct WatchableOnceCellReader<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
 }

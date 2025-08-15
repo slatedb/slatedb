@@ -25,33 +25,25 @@
 //! _Note: The `write_batch` loop still holds a lock on the db_state. There can still
 //! be contention between `get`s, which holds a lock, and the write loop._
 
+use async_trait::async_trait;
 use fail_parallel::fail_point;
-use log::{info, warn};
+use log::warn;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 use tracing::instrument;
 
+use crate::clock::SystemClock;
 use crate::config::WriteOptions;
+use crate::dispatcher::MessageHandler;
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
+use crate::utils::WatchableOnceCellReader;
 use crate::{
     batch::{WriteBatch, WriteOp},
     db::DbInner,
     error::SlateDBError,
 };
-
-pub(crate) enum WriteBatchMsg {
-    Shutdown,
-    WriteBatch(WriteBatchRequest, WriteOptions),
-}
-
-pub(crate) struct WriteBatchRequest {
-    pub(crate) batch: WriteBatch,
-    pub(crate) done: tokio::sync::oneshot::Sender<
-        Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError>,
-    >,
-}
 
 impl DbInner {
     #[allow(clippy::panic)]
@@ -134,72 +126,76 @@ impl DbInner {
 
         Ok(durable_watcher)
     }
+}
 
-    pub(crate) fn spawn_write_task(
-        self: &Arc<Self>,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<WriteBatchMsg>,
-        tokio_handle: &Handle,
-    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
-        let this = Arc::clone(self);
-        let mut is_stopped = false;
-        let mut is_first_write = true;
-        let monitor_first_write =
-            async move |mut watcher: WatchableOnceCellReader<Result<(), SlateDBError>>| {
+pub(crate) type WriteResponse =
+    oneshot::Sender<Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError>>;
+
+#[derive(Debug)]
+pub(crate) enum BatchWriteMessage {
+    Write(WriteBatch, WriteOptions, WriteResponse),
+}
+
+pub(crate) struct BatchWriteMessageHandler {
+    inner: Arc<DbInner>,
+    monitor_trigggered: AtomicBool,
+}
+
+impl BatchWriteMessageHandler {
+    pub fn new(inner: Arc<DbInner>) -> Self {
+        Self {
+            inner,
+            monitor_trigggered: AtomicBool::new(false),
+        }
+    }
+    async fn monitor_first_write(
+        &self,
+        mut watcher: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        options: WriteOptions,
+        system_clock: Arc<dyn SystemClock>,
+    ) {
+        let monitor_trigggered = self.monitor_trigggered.swap(true, Ordering::SeqCst);
+        if !monitor_trigggered && !self.inner.wal_enabled && options.await_durable {
+            tokio::spawn(async move {
                 tokio::select! {
                     _ = watcher.await_value() => {}
-                    _ = this.system_clock.sleep(Duration::from_secs(5)) => {
+                    _ = system_clock.sleep(Duration::from_secs(5)) => {
                         warn!("First write not durable after 5 seconds and WAL is disabled. \
                         SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
                         is reached. If writer is single threaded or has low throughput, the \
                         applications must call `flush` to ensure durability in a timely manner.");
                     }
                 }
-            };
+            });
+        }
+    }
+}
 
-        let this = Arc::clone(self);
-        let fut = async move {
-            while !(is_stopped && rx.is_empty()) {
-                match rx.recv().await.expect("unexpected channel close") {
-                    WriteBatchMsg::WriteBatch(write_batch_request, options) => {
-                        let WriteBatchRequest { batch, done } = write_batch_request;
-                        let result = this.write_batch(batch).await;
-                        if is_first_write && !this.wal_enabled && options.await_durable {
-                            is_first_write = false;
-                            let monitor_first_write = monitor_first_write.clone();
-                            let durable_watcher = result.clone()?;
-                            tokio::spawn(async move {
-                                monitor_first_write(durable_watcher).await;
-                            });
-                        }
-                        _ = done.send(result);
-                    }
-                    WriteBatchMsg::Shutdown => {
-                        is_stopped = true;
-                    }
+#[async_trait]
+impl MessageHandler<BatchWriteMessage> for BatchWriteMessageHandler {
+    async fn handle(
+        &mut self,
+        message: BatchWriteMessage,
+        error: Option<SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        match (message, error) {
+            (BatchWriteMessage::Write(batch, options, response), None) => {
+                let result = self.inner.write_batch(batch).await;
+                if let Ok(ref watcher) = result {
+                    self.monitor_first_write(
+                        watcher.clone(),
+                        options,
+                        self.inner.system_clock.clone(),
+                    )
+                    .await;
                 }
+                let _ = response.send(result.clone());
+                result.map(|_| ())
             }
-            Ok(())
-        };
-
-        let this = Arc::clone(self);
-        Some(spawn_bg_task(
-            tokio_handle,
-            move |result| {
-                let err = match result {
-                    Ok(()) => {
-                        info!("write task shutdown complete");
-                        SlateDBError::BackgroundTaskShutdown
-                    }
-                    Err(err) => {
-                        warn!("write task exited [error={}]", err);
-                        err.clone()
-                    }
-                };
-                // notify any waiters about the failure
-                let mut state = this.state.write();
-                state.record_fatal_error(err.clone());
-            },
-            fut,
-        ))
+            (BatchWriteMessage::Write(_, _, response), Some(e)) => {
+                let _ = response.send(Err(e));
+                Ok(())
+            }
+        }
     }
 }
