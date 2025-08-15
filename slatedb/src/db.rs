@@ -4136,6 +4136,75 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    async fn do_test_manifest_sequence_tracker_after_flush(wal_enabled: bool) {
+        use crate::{clock::MockSystemClock, seq_tracker::FindOption};
+
+        let clock = Arc::new(MockSystemClock::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+        let options = test_db_options_with_wal_and_ttl(0, 1 << 18, None, None, wal_enabled);
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+        let put_options = PutOptions::default();
+
+        // first seq number in slateDB is 1  -- test 8k insertions
+        // so that we can test the downsampling logic (default is 4096 seqs per tier)
+        for i in 1..8000 {
+            clock.set(i * 1000 as i64);
+            db.put_with_options(
+                &[b'a'; 4],
+                &[b'j'; 28],
+                &put_options.clone(),
+                &write_options.clone(),
+            )
+            .await
+            .expect("write batch failed");
+        }
+
+        // close the db to flush the manifest
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        let options = test_db_options_with_wal_and_ttl(0, 32, None, None, wal_enabled);
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        let state = db.inner.state.read().state();
+        let tracker = state.core().seq_tracker.clone();
+
+        // the first seq number in slateDB is 1
+        for i in 1..4000 {
+            let seq = i * 2;
+            let expected_ts = seq;
+            assert_eq!(
+                tracker
+                    .find_ts(seq, FindOption::RoundDown)
+                    .map(|ts| ts.timestamp() as u64),
+                Some(expected_ts),
+                "seq {} should have timestamp {}",
+                seq,
+                expected_ts
+            );
+        }
+    }
+
     #[tokio::test]
     #[cfg(all(feature = "test-util", feature = "wal_disable"))]
     async fn test_manifest_sequence_tracker_after_flush_wal_enabled() {
