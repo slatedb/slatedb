@@ -198,7 +198,7 @@ impl WalReplayIterator<'_> {
             return Ok(None);
         }
 
-        let mut table = WritableKVTable::new();
+        let table = WritableKVTable::new();
         let mut last_wal_id = 0;
 
         if let Some(overflow_row) = self.overflow_row.take() {
@@ -373,7 +373,7 @@ mod tests {
         .await
         .unwrap();
 
-        let mut full_replayed_table = WritableKVTable::new();
+        let full_replayed_table = WritableKVTable::new();
         let mut last_wal_id = 0;
         let mut replayed_entries = 0;
 
@@ -426,7 +426,7 @@ mod tests {
         .await
         .unwrap();
 
-        let mut full_replayed_table = WritableKVTable::new();
+        let full_replayed_table = WritableKVTable::new();
         let mut last_wal_id = 0;
 
         while let Some(replayed_table) = replay_iter.next().await.unwrap() {

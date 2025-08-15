@@ -2808,7 +2808,7 @@ mod tests {
             .unwrap();
 
         let memtable = {
-            let mut lock = kv_store.inner.state.write();
+            let lock = kv_store.inner.state.read();
             lock.memtable()
                 .put(RowEntry::new_value(b"abc1111", b"value1111", 1));
             lock.memtable()
@@ -2926,7 +2926,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut state = db_restored.inner.state.write();
+        let state = db_restored.inner.state.read();
         let memtable = state.memtable();
         let mut iter = memtable.table().iter();
         assert_iterator(
@@ -2956,7 +2956,7 @@ mod tests {
         let val = db.get(b"key1").await.unwrap();
         assert_eq!(val, Some(Bytes::from_static(b"value1")));
 
-        let mut state = db.inner.state.write();
+        let state = db.inner.state.read();
         let memtable = state.memtable();
         assert_eq!(memtable.table().last_seq(), Some(1));
     }

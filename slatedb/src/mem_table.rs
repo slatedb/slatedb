@@ -112,6 +112,30 @@ pub(crate) struct WritableKVTable {
     table: Arc<KVTable>,
 }
 
+impl WritableKVTable {
+    pub(crate) fn new() -> Self {
+        Self {
+            table: Arc::new(KVTable::new()),
+        }
+    }
+
+    pub(crate) fn table(&self) -> &Arc<KVTable> {
+        &self.table
+    }
+
+    pub(crate) fn put(&self, row: RowEntry) {
+        self.table.put(row);
+    }
+
+    pub(crate) fn metadata(&self) -> KVTableMetadata {
+        self.table.metadata()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+}
+
 pub(crate) struct ImmutableMemtable {
     /// The recent flushed WAL ID when this IMM is freezed. This is used to determine the starting
     /// position of WAL replay during recovery. After an IMM is flushed to L0, we do not need to
@@ -195,30 +219,6 @@ impl ImmutableMemtable {
 
     pub(crate) fn notify_flush_to_l0(&self, result: Result<(), SlateDBError>) {
         self.flushed.write(result);
-    }
-}
-
-impl WritableKVTable {
-    pub(crate) fn new() -> Self {
-        Self {
-            table: Arc::new(KVTable::new()),
-        }
-    }
-
-    pub(crate) fn table(&self) -> &Arc<KVTable> {
-        &self.table
-    }
-
-    pub(crate) fn put(&mut self, row: RowEntry) {
-        self.table.put(row);
-    }
-
-    pub(crate) fn metadata(&self) -> KVTableMetadata {
-        self.table.metadata()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.table.is_empty()
     }
 }
 
@@ -371,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_iter() {
-        let mut table = WritableKVTable::new();
+        let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"abc333", b"value3", 1));
         table.put(RowEntry::new_value(b"abc111", b"value1", 2));
         table.put(RowEntry::new_value(b"abc555", b"value5", 3));
@@ -395,7 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_iter_entry_attrs() {
-        let mut table = WritableKVTable::new();
+        let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"abc333", b"value3", 1));
         table.put(RowEntry::new_value(b"abc111", b"value1", 2));
 
@@ -412,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_range_from_existing_key() {
-        let mut table = WritableKVTable::new();
+        let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"abc333", b"value3", 1));
         table.put(RowEntry::new_value(b"abc111", b"value1", 2));
         table.put(RowEntry::new_value(b"abc555", b"value5", 3));
@@ -435,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_range_from_nonexisting_key() {
-        let mut table = WritableKVTable::new();
+        let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"abc333", b"value3", 1));
         table.put(RowEntry::new_value(b"abc111", b"value1", 2));
         table.put(RowEntry::new_value(b"abc555", b"value5", 3));
@@ -457,7 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_iter_delete() {
-        let mut table = WritableKVTable::new();
+        let table = WritableKVTable::new();
         table.put(RowEntry::new_tombstone(b"abc333", 2));
         table.put(RowEntry::new_value(b"abc333", b"value3", 1));
         table.put(RowEntry::new_value(b"abc444", b"value4", 4));
@@ -479,7 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_track_sz_and_num() {
-        let mut table = WritableKVTable::new();
+        let table = WritableKVTable::new();
         let mut metadata = table.table().metadata();
 
         assert_eq!(metadata.entry_num, 0);
@@ -517,7 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memtable_track_last_seq() {
-        let mut table = WritableKVTable::new();
+        let table = WritableKVTable::new();
         let mut metadata = table.table().metadata();
 
         assert_eq!(metadata.last_seq, 0);
@@ -623,7 +623,7 @@ mod tests {
         let runtime = Runtime::new().unwrap();
         let sample_table = sample::table(runner.rng(), 500, 10);
 
-        let mut kv_table = WritableKVTable::new();
+        let kv_table = WritableKVTable::new();
         let mut seq = 1;
         for (key, value) in &sample_table {
             let row_entry = RowEntry::new_value(key, value, seq);
