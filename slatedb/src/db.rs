@@ -24,7 +24,9 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
+use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use std::time::Duration;
@@ -43,6 +45,7 @@ use crate::config::{
 };
 use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
+use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
@@ -56,6 +59,7 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::transaction_manager::TransactionManager;
 use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
@@ -72,6 +76,8 @@ pub(crate) struct DbInner {
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
+    #[allow(dead_code)]
+    pub(crate) fp_registry: Arc<FailPointRegistry>,
     /// A clock which is guaranteed to be monotonic. it's previous value is
     /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
@@ -83,6 +89,8 @@ pub(crate) struct DbInner {
     /// of the WAL buffer to the remote storage.
     pub(crate) wal_buffer: Arc<WalBufferManager>,
     pub(crate) wal_enabled: bool,
+    /// [`txn_manager`] tracks all the live transactions and related metadata.
+    pub(crate) txn_manager: Arc<TransactionManager>,
 }
 
 impl DbInner {
@@ -98,6 +106,7 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
@@ -142,6 +151,8 @@ impl DbInner {
             settings.flush_interval,
         ));
 
+        let txn_manager = Arc::new(TransactionManager::new(rand.clone()));
+
         let db_inner = Self {
             state,
             settings,
@@ -156,7 +167,9 @@ impl DbInner {
             system_clock,
             rand,
             stat_registry,
+            fp_registry,
             reader,
+            txn_manager,
         };
         Ok(db_inner)
     }
@@ -679,6 +692,50 @@ impl Db {
         Ok(())
     }
 
+    /// Create a snapshot of the database.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<DbSnapshot>, Error>`: the snapshot of the database, it represents
+    ///   a consistent view of the database at the time of the snapshot.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    /// use bytes::Bytes;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///
+    ///     // Write some data and create a snapshot
+    ///     db.put(b"key1", b"value1").await?;
+    ///     let snapshot = db.snapshot().await?;
+    ///
+    ///     // Snapshot provides read-only access to database state
+    ///     let value = snapshot.get(b"key1").await?;
+    ///     assert_eq!(value, Some(Bytes::from(b"value1".as_ref())));
+    ///
+    ///     // Write more data to original database
+    ///     db.put(b"key2", b"value2").await?;
+    ///
+    ///     // Snapshot still sees old state, original db sees new data
+    ///     assert_eq!(snapshot.get(b"key2").await?, None);
+    ///     assert_eq!(db.get(b"key2").await?, Some(Bytes::from(b"value2".as_ref())));
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
+        self.inner.check_error()?;
+        let seq = self.inner.oracle.last_committed_seq.load();
+        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
+        Ok(snapshot)
+    }
+
     /// Get a value from the database with default read options.
     ///
     /// The `Bytes` object returned contains a slice of an entire
@@ -1165,6 +1222,22 @@ impl Db {
     /// Get the metrics registry for the database.
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
+    }
+
+    /// Resolve an object store from a URL.
+    ///
+    /// ## Arguments
+    /// - `url`: the URL to resolve, for example `s3://my-bucket/my-prefix`.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
+    pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
+        let registry = DefaultObjectStoreRegistry::new();
+        let url = url
+            .try_into()
+            .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
+        let (object_store, _) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        Ok(object_store)
     }
 }
 
@@ -1679,7 +1752,7 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
         opts.object_store_cache_options.part_size_bytes = 1024;
         let kv_store = Db::builder(
             "/tmp/test_kv_store_with_cache_metrics",
@@ -1753,15 +1826,16 @@ mod tests {
         )
         .unwrap();
 
-        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
         opts.object_store_cache_options.cache_puts = cache_puts_enabled;
-
-        let kv_store = Db::builder(db_path, cached_object_store.clone())
-            .with_settings(opts)
-            .build()
-            .await
-            .unwrap();
-
+        let kv_store = Db::builder(
+            "/tmp/test_kv_store_with_cache_stored_files",
+            cached_object_store.clone(),
+        )
+        .with_settings(opts)
+        .build()
+        .await
+        .unwrap();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
@@ -4024,6 +4098,125 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             default_ttl: ttl,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_basic_functionality() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open("test_db", object_store).await.unwrap();
+
+        // Write some data
+        db.put(b"key1", b"value1").await.unwrap();
+        db.put(b"key2", b"value2").await.unwrap();
+
+        // Create a snapshot
+        let snapshot = db.snapshot().await.unwrap();
+
+        // Verify snapshot can read the data
+        assert_eq!(
+            snapshot.get(b"key1").await.unwrap(),
+            Some(Bytes::from(b"value1".as_ref()))
+        );
+        assert_eq!(
+            snapshot.get(b"key2").await.unwrap(),
+            Some(Bytes::from(b"value2".as_ref()))
+        );
+
+        // Write more data to the original database
+        db.put(b"key3", b"value3").await.unwrap();
+
+        // Snapshot should not see the new data
+        assert_eq!(snapshot.get(b"key3").await.unwrap(), None);
+
+        // Original database should see the new data
+        assert_eq!(
+            db.get(b"key3").await.unwrap(),
+            Some(Bytes::from(b"value3".as_ref()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_monotonic() {
+        let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
+        let object_store = Arc::new(InMemory::new());
+        let settings = Settings {
+            l0_sst_size_bytes: 4 * 1024,   // Smaller to trigger flush more easily
+            max_unflushed_bytes: 2 * 1024, // Smaller to trigger flush more easily
+            min_filter_keys: 0,
+            flush_interval: Some(Duration::from_millis(100)),
+            ..Default::default()
+        };
+
+        let db = Db::builder(path, object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+
+        // Initial state: recent_snapshot_min_seq should be 0
+        {
+            let state = db.inner.state.read();
+            assert_eq!(state.state().core().recent_snapshot_min_seq, 0);
+        }
+
+        // Test 1: Force memtable flush to update recent_snapshot_min_seq
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            // After flush, recent_snapshot_min_seq should be updated (no active snapshots)
+            assert!(
+                recent_min_seq > 0,
+                "recent_snapshot_min_seq should be > 0 after flush"
+            );
+        }
+
+        // Test 2: With active snapshots
+        let _snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = db.inner.oracle.last_committed_seq.load();
+
+        // Write more data and force flush
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        // Verify that txn_manager.min_active_seq() returns the snapshot seq
+        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        assert!(min_active_seq.is_some());
+        assert_eq!(min_active_seq.unwrap(), snapshot_seq);
+
+        // Verify recent_snapshot_min_seq should be the minimum active seq after flush
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                min_active_seq.unwrap(),
+                "recent_snapshot_min_seq should equal min_active_seq after flush"
+            );
+        }
+
+        // Test 3: Drop snapshot and check update
+        drop(_snapshot);
+
+        // Write more data and flush to trigger update
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        // Now recent_snapshot_min_seq should be updated to higher value (no active snapshots)
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            let last_l0_seq = state.state().core().last_l0_seq;
+
+            // Should be updated to last_l0_seq since no active snapshots
+            assert_eq!(
+                recent_min_seq, last_l0_seq,
+                "recent_snapshot_min_seq should equal last_l0_seq when no active snapshots"
+            );
+            assert!(recent_min_seq > snapshot_seq);
         }
     }
 }

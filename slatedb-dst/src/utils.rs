@@ -5,6 +5,7 @@ use slatedb::clock::LogicalClock;
 use slatedb::clock::SystemClock;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
+use slatedb::config::GarbageCollectorDirectoryOptions;
 use slatedb::config::GarbageCollectorOptions;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
@@ -48,7 +49,7 @@ pub async fn build_dst(
     logical_clock: Arc<dyn LogicalClock>,
     rand: Rc<DbRand>,
     dst_opts: DstOptions,
-) -> Dst {
+) -> Result<Dst, Error> {
     let db = build_db(
         object_store,
         system_clock.clone(),
@@ -56,6 +57,7 @@ pub async fn build_dst(
         &rand,
     )
     .await;
+
     Dst::new(
         db,
         system_clock,
@@ -114,9 +116,18 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         max_unflushed_bytes,
         compression_codec,
         garbage_collector_options: Some(GarbageCollectorOptions {
-            manifest_options: GarbageCollectorOptions::default().manifest_options,
-            wal_options: GarbageCollectorOptions::default().wal_options,
-            compacted_options: GarbageCollectorOptions::default().compacted_options,
+            manifest_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(300),
+                ..Default::default()
+            }),
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(300),
+                ..Default::default()
+            }),
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                ..Default::default()
+            }),
         }),
         compactor_options: Some(CompactorOptions::default()),
         wal_enabled: rng.random_bool(0.5),
@@ -140,7 +151,7 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
     // https://pierrezemb.fr/posts/tokio-hidden-gems/
     tokio::runtime::Builder::new_current_thread()
         .rng_seed(RngSeed::from_bytes(&seed.to_le_bytes()))
-        .build_local(&mut Default::default())
+        .build_local(Default::default())
         .unwrap()
 }
 
@@ -165,26 +176,13 @@ pub async fn run_simulation(
         rand.clone(),
         dst_opts,
     )
-    .await;
+    .await?;
     match dst.run_simulation(dst_duration).await {
         Ok(_) => Ok(()),
         Err(e) => {
             error!("simulation failed [seed={}, error={}]", seed, e);
             Err(e)
         }
-    }
-}
-
-/// Formats a number of bytes in a human-readable way.
-pub(crate) fn pretty_bytes(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{}b", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{}kb", bytes / 1024)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{}mb", bytes / (1024 * 1024))
-    } else {
-        format!("{0:.2}gb", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
 
@@ -203,4 +201,11 @@ fn init_tracing() {
             .with_test_writer()
             .init();
     });
+}
+
+pub(crate) fn truncate_bytes(bytes: &[u8]) -> &[u8] {
+    if bytes.len() < 8 {
+        return bytes;
+    }
+    &bytes[..8]
 }

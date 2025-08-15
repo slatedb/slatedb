@@ -26,7 +26,8 @@ run_bench() {
     --db-options-path $DIR/Slatedb.toml \
     --duration 60 \
     --val-len 8192 \
-    --block-cache-size 134217728 \
+    --block-cache-size 100663296 \
+    --meta-cache-size 33554432 \
     --put-percentage $put_percentage \
     --concurrency $concurrency \
     --key-count $num_keys \
@@ -76,6 +77,10 @@ generate_mermaid () {
     local put_percentage=$(echo "$filename" | cut -d'_' -f1)
     local concurrency=$(echo "$filename" | cut -d'_' -f2)
 
+    # Calculate max value for y-axis scaling
+    local max_value=$(echo "$put_value $get_value" | tr ' ' '\n' | sort -nr | head -n1)
+    local y_max=$(echo "$max_value * 1.2" | bc -l | cut -d'.' -f1)
+
     if [ ! -f "$mermaid_file" ]; then
         # Create new mermaid file
         cat > "$mermaid_file" << EOF
@@ -88,6 +93,7 @@ config:
 xychart-beta
     title "SlateDB [puts=${put_percentage}%, threads=${concurrency}, 🔵=puts, 🟠=get]"
     x-axis ["$x_entry"]
+    y-axis "requests/s" 0 --> $y_max
     line [$put_value]
     line [$get_value]
 EOF
@@ -166,6 +172,11 @@ EOF
         done
         new_get_line="$new_get_line]"
 
+        # Calculate max value for y-axis scaling from all values
+        local all_values="${put_array[*]} ${get_array[*]}"
+        local max_value=$(echo "$all_values" | tr ' ' '\n' | sort -nr | head -n1)
+        local y_max=$(echo "$max_value * 1.2" | bc -l | cut -d'.' -f1)
+
         # Write updated mermaid file
         cat > "$mermaid_file" << EOF
 ---
@@ -177,6 +188,7 @@ config:
 xychart-beta
     $title_line
     $new_x_axis
+    y-axis "requests/s" 0 --> $y_max
     $new_put_line
     $new_get_line
 EOF
