@@ -2,20 +2,21 @@ use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::db_state::SsTableId;
+use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
-use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
+use crate::utils::IdGenerator;
+use async_trait::async_trait;
 use log::{error, info, warn};
 use std::cmp;
 use std::sync::Arc;
-use tokio::runtime::Handle;
-use tokio::sync::mpsc::UnboundedReceiver;
+use std::time::Duration;
 use tokio::sync::oneshot::Sender;
 use tracing::instrument;
 
 #[derive(Debug)]
-pub(crate) enum MemtableFlushMsg {
+pub(crate) enum MemtableMessage {
+    PollManifest,
     FlushImmutableMemtables {
         sender: Option<Sender<Result<(), SlateDBError>>>,
     },
@@ -23,7 +24,6 @@ pub(crate) enum MemtableFlushMsg {
         options: CheckpointOptions,
         sender: Sender<Result<CheckpointCreateResult, SlateDBError>>,
     },
-    Shutdown,
 }
 
 pub(crate) struct MemtableFlusher {
@@ -32,6 +32,10 @@ pub(crate) struct MemtableFlusher {
 }
 
 impl MemtableFlusher {
+    pub(crate) fn new(db_inner: Arc<DbInner>, manifest: FenceableManifest) -> Self {
+        Self { db_inner, manifest }
+    }
+
     pub(crate) async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
         self.manifest.refresh().await?;
         let mut wguard_state = self.db_inner.state.write();
@@ -173,151 +177,88 @@ impl MemtableFlusher {
         }
         Ok(())
     }
-}
 
-impl DbInner {
-    async fn flush_and_record(
-        self: &Arc<Self>,
-        flusher: &mut MemtableFlusher,
-    ) -> Result<(), SlateDBError> {
-        let result = flusher.flush_imm_memtables_to_l0().await;
+    async fn flush_and_record(self: &mut MemtableFlusher) -> Result<(), SlateDBError> {
+        let result = self.flush_imm_memtables_to_l0().await;
         if let Err(err) = &result {
             error!("error from memtable flush [error={}]", err);
         } else {
-            self.db_stats.immutable_memtable_flushes.inc();
+            self.db_inner.db_stats.immutable_memtable_flushes.inc();
         }
         result
     }
+}
 
-    pub(crate) fn spawn_memtable_flush_task(
-        self: &Arc<Self>,
-        manifest: FenceableManifest,
-        mut flush_rx: UnboundedReceiver<MemtableFlushMsg>,
-        tokio_handle: &Handle,
-    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
-        let this = Arc::clone(self);
-
-        async fn core_flush_loop(
-            this: &Arc<DbInner>,
-            flusher: &mut MemtableFlusher,
-            flush_rx: &mut UnboundedReceiver<MemtableFlushMsg>,
-        ) -> Result<(), SlateDBError> {
-            let mut manifest_poll_interval = this
-                .system_clock
-                .ticker(this.settings.manifest_poll_interval);
-            let mut err_reader = this.state.read().error_reader();
-
-            // Stop the loop when the shut down has been received *and* all
-            // remaining `rx` flushes have been drained.
-            loop {
-                tokio::select! {
-                    err = err_reader.await_value() => {
-                        return Err(err);
+#[async_trait]
+impl MessageHandler<MemtableMessage> for MemtableFlusher {
+    async fn handle(
+        &mut self,
+        message: MemtableMessage,
+        error: Option<SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        match (message, error) {
+            (MemtableMessage::PollManifest, _) => {
+                if let Err(err) = self.load_manifest().await {
+                    error!("error loading manifest [error={}]", err);
+                    return Err(err);
+                }
+                self.flush_and_record().await?
+            }
+            (MemtableMessage::FlushImmutableMemtables { sender }, None) => {
+                self.flush_and_record().await?;
+                if let Some(rsp_sender) = sender {
+                    let res = rsp_sender.send(Ok(()));
+                    if let Err(Err(err)) = res {
+                        error!("error sending flush response [error={}]", err);
                     }
-                    _ = manifest_poll_interval.tick() => {
-                        if let Err(err) = flusher.load_manifest().await {
-                            error!("error loading manifest [error={}]", err);
-                            return Err(err);
-                        }
-                        this.flush_and_record(flusher).await?
-                    }
-                    flush_msg = flush_rx.recv() => {
-                        let msg = flush_msg.expect("channel unexpectedly closed");
-                        match msg {
-                            MemtableFlushMsg::Shutdown => {
-                                return Ok(());
-                            },
-                            MemtableFlushMsg::FlushImmutableMemtables { sender} => {
-                                this.flush_and_record(flusher).await?;
-                                if let Some(rsp_sender) = sender {
-                                    let res = rsp_sender.send(Ok(()));
-                                    if let Err(Err(err)) = res {
-                                        error!("error sending flush response [error={}]", err);
-                                    }
-                                }
-                            },
-                            MemtableFlushMsg::CreateCheckpoint { options, sender } => {
-                                let write_result = flusher.write_checkpoint_safely(&options).await;
-                                if let Err(Err(e)) = sender.send(write_result) {
-                                    error!("Failed to send checkpoint error [error={}]", e);
-                                }
-                            }
-                        }
-                    },
                 }
             }
+            (
+                MemtableMessage::FlushImmutableMemtables {
+                    sender: Some(sender),
+                },
+                Some(e),
+            ) => {
+                let _ = sender.send(Err(e));
+            }
+            (MemtableMessage::CreateCheckpoint { options, sender }, None) => {
+                let write_result = self.write_checkpoint_safely(&options).await;
+                if let Err(Err(e)) = sender.send(write_result) {
+                    error!("Failed to send checkpoint error [error={}]", e);
+                }
+            }
+            (MemtableMessage::CreateCheckpoint { options: _, sender }, Some(e)) => {
+                let _ = sender.send(Err(e));
+            }
+            // skip flush immutable memtables on error if sender is None
+            _ => {}
         }
-
-        let fut = async move {
-            let mut flusher = MemtableFlusher {
-                db_inner: this.clone(),
-                manifest,
-            };
-
-            // Stop the loop when the shut down has been received *and* all
-            // remaining `rx` flushes and checkpoints have been drained.
-            let result = core_flush_loop(&this, &mut flusher, &mut flush_rx).await;
-
-            // Record error state before closing flush_rx in drain_messages. Thus, any
-            // send() that returns a SendError (channel closed) can check the error
-            // state and propagate it. We leave the cleanup_fn to record the error state
-            // again in case core_flush_loop panics.
-            if let Err(err) = &result {
-                let mut state = this.state.write();
-                state.record_fatal_error(err.clone());
-            }
-
-            // respond to any pending msgs
-            let pending_error = result.clone().err().unwrap_or(BackgroundTaskShutdown);
-            Self::drain_messages(&mut flush_rx, &pending_error).await;
-
-            if let Err(err) = flusher.write_manifest_safely().await {
-                error!("error writing manifest on shutdown [err={}]", err);
-            }
-
-            info!("memtable flush thread exiting [result={:?}]", result);
-            result
-        };
-
-        let this = Arc::clone(self);
-        Some(spawn_bg_task(
-            tokio_handle,
-            move |result| {
-                let err = bg_task_result_into_err(result);
-                warn!("memtable flush task exited with error [error={}]", err);
-                let mut state = this.state.write();
-                state.record_fatal_error(err.clone());
-                info!("notifying in-memory memtable of error");
-                state.memtable().table().notify_durable(Err(err.clone()));
-                for imm_table in state.state().imm_memtable.iter() {
-                    info!(
-                        "notifying imm memtable of error [last_wal_id={}, error={}]",
-                        imm_table.recent_flushed_wal_id(),
-                        err,
-                    );
-                    imm_table.notify_flush_to_l0(Err(err.clone()));
-                    imm_table.table().notify_durable(Err(err.clone()));
-                }
-            },
-            fut,
-        ))
+        Ok(())
     }
 
-    async fn drain_messages(rx: &mut UnboundedReceiver<MemtableFlushMsg>, error: &SlateDBError) {
-        rx.close();
-        while !rx.is_empty() {
-            let msg = rx.recv().await.expect("channel unexpectedly closed");
-            match msg {
-                MemtableFlushMsg::CreateCheckpoint { options: _, sender } => {
-                    let _ = sender.send(Err(error.clone()));
-                }
-                MemtableFlushMsg::FlushImmutableMemtables {
-                    sender: Some(sender),
-                } => {
-                    let _ = sender.send(Err(error.clone()));
-                }
-                _ => (),
-            }
+    async fn cleanup(&mut self, error: Option<SlateDBError>) -> Result<(), SlateDBError> {
+        if let Err(err) = self.write_manifest_safely().await {
+            error!("error writing manifest on shutdown [err={}]", err);
         }
+        let err = Err(error.unwrap_or(SlateDBError::BackgroundTaskShutdown));
+        let mut state = self.db_inner.state.write();
+        state.memtable().table().notify_durable(err.clone());
+        for imm_table in state.state().imm_memtable.iter() {
+            info!(
+                "notifying imm memtable of error [last_wal_id={}, error={:?}]",
+                imm_table.recent_flushed_wal_id(),
+                err,
+            );
+            imm_table.notify_flush_to_l0(err.clone());
+            imm_table.table().notify_durable(err.clone());
+        }
+        Ok(())
+    }
+
+    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<MemtableMessage>>)> {
+        vec![(
+            self.db_inner.settings.manifest_poll_interval,
+            Box::new(|| MemtableMessage::PollManifest),
+        )]
     }
 }
