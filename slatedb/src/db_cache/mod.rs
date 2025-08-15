@@ -314,7 +314,7 @@ impl DbCache for SplitCache {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
-                    warn!("no meta cache available for insertion");
+                    trace!("no meta cache available for insertion");
                 }
             }
         }
