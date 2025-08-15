@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
-use log::{debug, error};
+use log::{debug, error, warn};
 use parking_lot::Mutex;
 
 use crate::clock::SystemClock;
@@ -307,20 +307,14 @@ impl DbCache for SplitCache {
                 if let Some(ref cache) = self.block_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
-                    debug!(
-                        "No block cache available, skipping insert for key: {:?}",
-                        key
-                    );
+                    warn!("no block cache available for insertion");
                 }
             }
             CachedItem::SsTableIndex(_) | CachedItem::BloomFilter(_) => {
                 if let Some(ref cache) = self.meta_cache {
                     cache.insert(key, value.clamp_allocated_size()).await;
                 } else {
-                    debug!(
-                        "No meta cache available, skipping insert for key: {:?}",
-                        key
-                    );
+                    warn!("no meta cache available for insertion");
                 }
             }
         }
