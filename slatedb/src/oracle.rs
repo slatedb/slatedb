@@ -1,6 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use crate::utils::MonotonicSeq;
+use crate::{
+    clock::SystemClock,
+    seq_tracker::{TieredSequenceTracker, TrackedSeq},
+    utils::MonotonicSeq,
+};
 
 /// Oracle is a struct that centralizes the generation & maintainance of various
 /// sequence numbers. These sequence numbers are mostly related to the lifecycle
@@ -16,6 +20,10 @@ pub(crate) struct Oracle {
     /// The sequence number of the most recent write that has been fully durable
     /// flushed to the remote storage.
     pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
+    /// Tracks the mapping from sequence number to timestamp.
+    pub(crate) seq_tracker: RwLock<TieredSequenceTracker>,
+    /// The system clock (used to track the timestamp of the sequence numbers).
+    system_clock: Arc<dyn SystemClock>,
 }
 
 impl Oracle {
@@ -23,12 +31,18 @@ impl Oracle {
     /// db instance (DbReader), only the last committed sequence number is needed to be
     /// tracked, and last_seq and last_remote_persisted_seq are considered to be
     /// the same as last_committed_seq.
-    pub(crate) fn new(last_committed_seq: MonotonicSeq) -> Self {
+    pub(crate) fn new(
+        seq_tracker: TieredSequenceTracker,
+        last_committed_seq: MonotonicSeq,
+        system_clock: Arc<dyn SystemClock>,
+    ) -> Self {
         let last_committed_seq = Arc::new(last_committed_seq);
         Self {
             last_seq: last_committed_seq.clone(),
             last_committed_seq: last_committed_seq.clone(),
             last_remote_persisted_seq: last_committed_seq,
+            seq_tracker: RwLock::new(seq_tracker),
+            system_clock,
         }
     }
 
@@ -46,6 +60,16 @@ impl Oracle {
         Self {
             last_remote_persisted_seq: Arc::new(last_remote_persisted_seq),
             ..self
+        }
+    }
+
+    pub(crate) fn track_last_committed_seq(&self, seq: u64) {
+        self.last_committed_seq.store(seq);
+        if let Ok(mut tracker) = self.seq_tracker.write() {
+            tracker.insert(TrackedSeq {
+                seq,
+                ts: self.system_clock.now(),
+            });
         }
     }
 }

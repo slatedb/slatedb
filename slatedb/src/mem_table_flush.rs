@@ -156,8 +156,10 @@ impl MemtableFlusher {
                         min_active_snapshot_seq.unwrap_or(modifier.state.manifest.core.last_l0_seq);
 
                     // update all the sequence numbers in the manifest
-                    let seq_tracker = self.db_inner.wal_buffer.seq_tracker();
-                    modifier.state.manifest.core.seq_tracker = seq_tracker;
+                    let seq_tracker = self.db_inner.oracle.seq_tracker.read().map_err(|e| {
+                        SlateDBError::Internal(format!("Failed to read seq_tracker: {}", e))
+                    })?;
+                    modifier.state.manifest.core.seq_tracker = seq_tracker.clone();
 
                     Ok(())
                 })?;

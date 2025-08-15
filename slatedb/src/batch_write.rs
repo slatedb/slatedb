@@ -123,7 +123,7 @@ impl DbInner {
         };
 
         // update the last_committed_seq, so the writes will be visible to the readers.
-        self.oracle.last_committed_seq.store(seq);
+        self.oracle.track_last_committed_seq(seq);
 
         // maybe freeze the memtable.
         {

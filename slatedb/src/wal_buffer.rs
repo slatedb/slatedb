@@ -20,7 +20,6 @@ use crate::{
     iter::KeyValueIterator,
     mem_table::KVTable,
     oracle::Oracle,
-    seq_tracker::{TieredSequenceTracker, TrackedSeq},
     tablestore::TableStore,
     types::RowEntry,
     utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader},
@@ -76,9 +75,6 @@ struct WalBufferManagerInner {
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
     /// the immutable wal can be recycled in memory.
     last_applied_seq: Option<u64>,
-    /// Sequence numbers that should be tracked and inserted into the
-    /// manifest when the WAL/Memtable is flushed.
-    seq_tracker: TieredSequenceTracker,
     /// The flusher will update the recent_flushed_wal_id and last_flushed_seq when the flush is done.
     recent_flushed_wal_id: u64,
     /// The oracle to track the last flushed sequence number.
@@ -101,9 +97,6 @@ impl WalBufferManager {
     ) -> Self {
         let current_wal = Arc::new(KVTable::new());
         let immutable_wals = VecDeque::new();
-        // TODO: we should see if we can create a seq tracker without
-        // cloning the db state (which happens on read().state())
-        let seq_tracker = db_state.read().state().manifest.core.seq_tracker.clone();
         let inner = WalBufferManagerInner {
             current_wal,
             immutable_wals,
@@ -112,7 +105,6 @@ impl WalBufferManager {
             flush_tx: None,
             background_task: None,
             oracle,
-            seq_tracker,
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
@@ -476,17 +468,8 @@ impl WalBufferManager {
         {
             let mut inner = self.inner.write();
             inner.last_applied_seq = Some(seq);
-            inner.seq_tracker.insert(TrackedSeq {
-                seq,
-                ts: self.system_clock.now(),
-            });
         }
         self.maybe_release_immutable_wals().await;
-    }
-
-    /// Return all sequence numbers that have been tracked
-    pub fn seq_tracker(&self) -> TieredSequenceTracker {
-        self.inner.read().seq_tracker.clone()
     }
 
     /// Recycle the immutable WALs that are applied to the memtable and flushed to the remote storage.
@@ -541,6 +524,7 @@ mod tests {
     use crate::manifest::store::DirtyManifest;
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
+    use crate::seq_tracker::TieredSequenceTracker;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
@@ -577,7 +561,11 @@ mod tests {
         ));
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
-        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
+        let oracle = Arc::new(Oracle::new(
+            TieredSequenceTracker::new(1, 4096),
+            MonotonicSeq::new(0),
+            Arc::new(DefaultSystemClock::default()),
+        ));
         let db_state = Arc::new(RwLock::new(DbState::new(DirtyManifest::new(
             0,
             Manifest::initial(CoreDbState::new()),

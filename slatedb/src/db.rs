@@ -111,9 +111,13 @@ impl DbInner {
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
         let oracle = Arc::new(
-            Oracle::new(last_committed_seq)
-                .with_last_seq(last_seq)
-                .with_last_remote_persisted_seq(last_remote_persisted_seq),
+            Oracle::new(
+                manifest.core.seq_tracker.clone(),
+                last_committed_seq,
+                system_clock.clone(),
+            )
+            .with_last_seq(last_seq)
+            .with_last_remote_persisted_seq(last_remote_persisted_seq),
         );
 
         let mono_clock = Arc::new(MonotonicClock::new(
