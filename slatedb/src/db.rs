@@ -148,7 +148,7 @@ impl DbInner {
             settings.flush_interval,
         ));
 
-        let txn_manager = Arc::new(TransactionManager::new(state.clone(), rand.clone()));
+        let txn_manager = Arc::new(TransactionManager::new(rand.clone()));
 
         let db_inner = Self {
             state,
@@ -4013,5 +4013,89 @@ mod tests {
             db.get(b"key3").await.unwrap(),
             Some(Bytes::from(b"value3".as_ref()))
         );
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_monotonic() {
+        let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
+        let object_store = Arc::new(InMemory::new());
+        let settings = Settings {
+            l0_sst_size_bytes: 4 * 1024,   // Smaller to trigger flush more easily
+            max_unflushed_bytes: 2 * 1024, // Smaller to trigger flush more easily
+            min_filter_keys: 0,
+            flush_interval: Some(Duration::from_millis(100)),
+            ..Default::default()
+        };
+
+        let db = Db::builder(path, object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+
+        // Initial state: recent_snapshot_min_seq should be 0
+        {
+            let state = db.inner.state.read();
+            assert_eq!(state.state().core().recent_snapshot_min_seq, 0);
+        }
+
+        // Test 1: Force memtable flush to update recent_snapshot_min_seq
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            // After flush, recent_snapshot_min_seq should be updated (no active snapshots)
+            assert!(
+                recent_min_seq > 0,
+                "recent_snapshot_min_seq should be > 0 after flush"
+            );
+        }
+
+        // Test 2: With active snapshots
+        let _snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = db.inner.oracle.last_committed_seq.load();
+
+        // Write more data and force flush
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        // Verify that txn_manager.min_active_seq() returns the snapshot seq
+        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        assert!(min_active_seq.is_some());
+        assert_eq!(min_active_seq.unwrap(), snapshot_seq);
+
+        // Verify recent_snapshot_min_seq should be the minimum active seq after flush
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                min_active_seq.unwrap(),
+                "recent_snapshot_min_seq should equal min_active_seq after flush"
+            );
+        }
+
+        // Test 3: Drop snapshot and check update
+        drop(_snapshot);
+
+        // Write more data and flush to trigger update
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        // Now recent_snapshot_min_seq should be updated to higher value (no active snapshots)
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            let last_l0_seq = state.state().core().last_l0_seq;
+
+            // Should be updated to last_l0_seq since no active snapshots
+            assert_eq!(
+                recent_min_seq, last_l0_seq,
+                "recent_snapshot_min_seq should equal last_l0_seq when no active snapshots"
+            );
+            assert!(recent_min_seq > snapshot_seq);
+        }
     }
 }
