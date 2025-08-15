@@ -1828,14 +1828,11 @@ mod tests {
 
         opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
         opts.object_store_cache_options.cache_puts = cache_puts_enabled;
-        let kv_store = Db::builder(
-            "/tmp/test_kv_store_with_cache_stored_files",
-            cached_object_store.clone(),
-        )
-        .with_settings(opts)
-        .build()
-        .await
-        .unwrap();
+        let kv_store = Db::builder(db_path, cached_object_store.clone())
+            .with_settings(opts)
+            .build()
+            .await
+            .unwrap();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
