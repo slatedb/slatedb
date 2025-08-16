@@ -330,7 +330,7 @@ mod tests {
         test_utils::seed_database(&parent_db, &table, false)
             .await
             .unwrap();
-        parent_db.flush().await.unwrap();
+        parent_db.inner.flush_memtables().await.unwrap();
         parent_db.close().await.unwrap();
 
         create_clone(
