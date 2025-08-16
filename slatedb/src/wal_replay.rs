@@ -481,7 +481,6 @@ mod tests {
 
         let mut db_state = CoreDbState::new();
         db_state.replay_after_wal_id = replay_after_wal_id;
-        db_state.next_wal_sst_id = replay_after_wal_id + 1;
 
         let mut replay_iter = WalReplayIterator::new(
             &db_state,
