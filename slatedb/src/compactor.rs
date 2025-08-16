@@ -382,7 +382,7 @@ impl CompactorEventHandler {
             match self.write_manifest().await {
                 Ok(_) => return Ok(()),
                 Err(SlateDBError::ManifestVersionExists) => {
-                    warn!("conflicting manifest version. updating and retrying write again.");
+                    debug!("conflicting manifest version. updating and retrying write again.");
                 }
                 Err(err) => return Err(err),
             }
