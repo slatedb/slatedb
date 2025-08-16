@@ -3149,6 +3149,9 @@ mod tests {
         next_wal_id += 1;
 
         // verify that we reload imm
+        let db_next_wal_id = reader.inner.oracle.next_wal_id.load();
+        assert_eq!(db_next_wal_id, next_wal_id);
+
         let db_state = reader.inner.state.read().view();
         assert_eq!(db_state.state.imm_memtable.len(), 2);
 
@@ -3171,8 +3174,6 @@ mod tests {
                 .recent_flushed_wal_id(),
             2
         );
-        // Use oracle value instead of last_seen_wal_id
-        assert_eq!(db.inner.oracle.next_wal_id.load(), next_wal_id);
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -3323,7 +3324,12 @@ mod tests {
         // It's possible that there exists buffered multiple wals in memory, so the next_wal_sst_id
         // in manifest is greater than the next_wal_sst_id based on what's currently in the object
         // store unless ALL the wals are flushed.
-        assert!(manifest.core.last_seen_wal_id > next_wal_sst_id);
+        assert!(
+            manifest.core.last_seen_wal_id > next_wal_sst_id,
+            "last_seen_wal_id: {}, next_wal_sst_id: {}",
+            manifest.core.last_seen_wal_id,
+            next_wal_sst_id
+        );
     }
 
     async fn do_test_should_read_compacted_db(options: Settings) {
