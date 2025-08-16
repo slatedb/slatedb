@@ -218,6 +218,7 @@ impl DbInner {
                 .await
             {
                 Ok(_) => {
+                    self.oracle.next_wal_id.store(empty_wal_id + 1);
                     return Ok(());
                 }
                 Err(SlateDBError::Fenced) => {
