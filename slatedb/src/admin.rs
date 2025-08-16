@@ -2,7 +2,9 @@ use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
+use crate::dispatcher::MessageDispatcher;
 use crate::error::SlateDBError;
+use crate::garbage_collector::GarbageCollectorMessageHandler;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 
 use crate::clone;
@@ -18,7 +20,6 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
@@ -124,7 +125,6 @@ impl Admin {
         gc_opts: GarbageCollectorOptions,
         cancellation_token: CancellationToken,
     ) -> Result<(), Box<dyn Error>> {
-        let tracker = TaskTracker::new();
         let ct = cancellation_token.clone();
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
@@ -133,13 +133,13 @@ impl Admin {
         .with_system_clock(self.system_clock.clone())
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
-        .with_cancellation_token(ct)
         .build();
 
-        let jh = tracker.spawn(async move { gc.run_async_task().await });
-        tracker.close();
-        tracker.wait().await;
-        jh.await
+        let handler = Box::new(GarbageCollectorMessageHandler::new(gc));
+        let mut dispatcher = MessageDispatcher::new(handler, self.system_clock.clone(), ct, None);
+        let join_handle = tokio::spawn(async move { dispatcher.run().await });
+        join_handle
+            .await
             .expect("Failed to finish garbage collector task")
             .map_err(Into::into)
     }

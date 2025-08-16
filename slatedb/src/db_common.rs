@@ -3,7 +3,7 @@ use parking_lot::RwLockWriteGuard;
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
-use crate::mem_table_flush::MemtableFlushMsg;
+use crate::mem_table_flush::MemtableMessage;
 use crate::utils::SendSafely;
 use crate::wal_replay::ReplayedMemtable;
 
@@ -37,7 +37,7 @@ impl DbInner {
         guard.freeze_memtable(wal_id)?;
         self.memtable_flush_notifier.send_safely(
             guard.error_reader(),
-            MemtableFlushMsg::FlushImmutableMemtables { sender: None },
+            MemtableMessage::FlushImmutableMemtables { sender: None },
         )?;
         Ok(())
     }

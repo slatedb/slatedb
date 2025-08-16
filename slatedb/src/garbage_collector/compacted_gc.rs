@@ -5,9 +5,9 @@ use crate::{
 use chrono::{DateTime, Utc};
 use log::error;
 use std::collections::HashSet;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
+use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
 
 pub(crate) struct CompactedGcTask {
     manifest_store: Arc<ManifestStore>,
@@ -91,12 +91,6 @@ impl GcTask for CompactedGcTask {
         }
 
         Ok(())
-    }
-
-    fn interval(&self) -> Duration {
-        self.compacted_options
-            .and_then(|opts| opts.interval)
-            .unwrap_or(DEFAULT_INTERVAL)
     }
 
     fn resource(&self) -> &str {

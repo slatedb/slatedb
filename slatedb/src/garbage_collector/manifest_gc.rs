@@ -5,9 +5,8 @@ use chrono::{DateTime, Utc};
 use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 
-use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
+use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
 
 pub(crate) struct ManifestGcTask {
     manifest_store: Arc<ManifestStore>,
@@ -90,12 +89,6 @@ impl GcTask for ManifestGcTask {
         }
 
         Ok(())
-    }
-
-    fn interval(&self) -> Duration {
-        self.manifest_options
-            .and_then(|opts| opts.interval)
-            .unwrap_or(DEFAULT_INTERVAL)
     }
 
     fn resource(&self) -> &str {
