@@ -227,6 +227,7 @@ impl TokioCompactionExecutorInner {
                 self.stats.bytes_compacted.add(sst.info.filter_offset);
                 output_ssts.push(sst);
                 bytes_written = 0;
+                // Persist the output_ssts to the .compactor file
             }
         }
 

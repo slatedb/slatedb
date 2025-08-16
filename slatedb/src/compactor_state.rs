@@ -54,6 +54,7 @@ impl SourceId {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CompactionStatus {
+    // Add status completed failed
     Submitted,
     #[allow(dead_code)]
     InProgress,
@@ -86,7 +87,7 @@ impl Compaction {
         }
     }
 }
-
+// Add compactor_epoch and dirtyCompactionState
 pub struct CompactorState {
     manifest: DirtyManifest,
     compactions: HashMap<Uuid, Compaction>,

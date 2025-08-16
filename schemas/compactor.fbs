@@ -3,18 +3,11 @@ include "sst.fbs";
 enum CompactionType : byte { Internal = 0, External; }
 
 enum CompactionStatus : byte {
-    Submitted = 0,      // Waiting to be scheduled
+    Submitted = 0,  // Waiting to be scheduled
     InProgress,     // Currently executing
     Completed,      // Successfully finished
     Failed,         // Failed with error
     Cancelled;      // Cancelled by request
-}
-
-enum CompactionPriority : byte {
-    Critical = 0,  // Preempts all other compactions
-    High,      // Preempts normal/low compactions  
-    Normal,    // Standard automatic compaction priority
-    Low;       // Background maintenance priority
 }
 
 table CompactionJob {
@@ -34,10 +27,7 @@ table CompactionJob {
     completed_input_sr_ids:[uint32];
 
     // Output SSTs to be persisted in destination SR  
-    output_ssts_written:[CompactedSsTable];
-
-    // Current CompactionJob Status
-    current_status: CompactionStatus;
+    output_sr:[SortedRun];
 }
 
 table Compaction {
@@ -61,9 +51,6 @@ table Compaction {
 
     // Compaction Type to distinguish between internal or external
     compaction_type: CompactionType (required);
-
-    // Priority to handle external compaction requests
-    compaction_priority: CompactionPriority;
 
     // List of CompactionJob Retries
     job_attempts:[CompactionJob];

@@ -144,20 +144,193 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 13. GC clears the orphaned states and SSTs during it's run.
 
+#### **CompactionState Structure**
+The persistent state contains the complete view of all compaction activity:
+
+```rust
+
+pub(crate) struct CompactionJob {
+    pub(crate) id: Uuid,
+    pub(crate) destination: u32,
+    pub(crate) ssts: Vec<SsTableHandle>,
+    pub(crate) sorted_runs: Vec<SortedRun>,
+    pub(crate) compaction_ts: i64,
+    pub(crate) is_dest_last_run: bool,
+    pub(crate) completed_input_sst_ids: Vec<Ulid>;
+    pub(crate) completed_input_sr_ids: Vec<u32>;
+    pub(crate) output_sr: SortedRun;
+}
+
+pub(crate) enum CompactionType {
+    Internal,
+    External,
+}
+
+pub struct Compaction {
+    pub(crate) status: CompactionStatus,
+    pub(crate) sources: Vec<SourceId>,
+    pub(crate) destination: u32,
+    pub(crate) compaction_id: Uuid,
+    pub(crate) compaction_type: CompactionType,
+    pub(crate) job_attempts: Vec<CompactionJob>;
+}
+
+pub(crate) CompactorState {
+    manifest: DirtyManifest
+    compaction_state: CompactionState
+}
+
+pub(crate) struct CompactionState {
+    compactor_epoch: u64,
+    // active_compactions queued, in-progress and completed
+    compactions: HashMap<Uuid, Compaction>,
+}
+
+pub(crate) struct DirtyCompactionState {
+    id: u64,
+    compactor_epoch: u64,
+    compaction_state: CompactionState,
+}
+
+pub(crate) struct StoredCompactionState {
+    id: u64,
+    compaction_state: CompactionState,
+    compaction_state_store: Arc<CompactionStateStore>,
+}
+
+pub(crate) struct FenceableCompactionState {
+    compaction_state: StoredCompactionState,
+    local_epoch: u64,
+    stored_epoch: fn(&CompactionState) -> u64,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionState {
+    /// Fencing token to ensure single active compactor
+    /// Incremented each time a new compactor takes control
+    pub compactor_epoch: u64,
+    
+    /// Compactor state identifier. This would be used for creating
+    /// compactor files and CAS updates
+    pub compactor_state_id: u64,
+    /// All currently active compactions indexed by ID
+    /// Includes queued, running, and recently completed compactions
+    pub active_compactions: BTreeMap<CompactionId, Compaction>,
+        
+    /// Timestamp when this state was created/last updated
+    pub state_timestamp: DateTime<Utc>,
+}
+```
+
+### Persisting Internal Compactions
+
+1. Size_tiered_compaction compaction scheduler executes `maybe_schedule_compaction` and returns a list of compactions to be executed.
+
+2. Compactor executes the `submit_compaction` method on the list of compactions from Step(1). the method delegates the validation of the compactions to the compactor_state.rs.
+
+3. For each compaction in the input list of compactions, The compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
+
+    - Check If the count of runnning compactions is less than the threshold. If yes, continue
+
+    - Check if the source L0 SSTs and SRs are not part of any other compaction. If yes, continue.
+
+    - Check if the destination SR is not part of any other compaction. If yes, continue.
+
+    - Check if creating new SR(as part of L0 compaction) would it form a tiered SR group and get compacted. If yes, do not create the SR.
+
+    - Add compaction validations to verify correct group of sources and destinations are selected. Reference: https://github.com/slatedb/slatedb/blob/main/rfcs/0002-compaction.md#compactions.
+
+    - The existing validations in `submit_compaction` method.
+
+4. When a compaction successfully validates, it is appended to the local copy of compactor_state `active_compaction` param and `new_compactions` list.
+
+5. Try writing the compactor_state to the next sequential .compactor file.
+
+    If file exists,
+
+      - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
+
+      - If latest .compactor compactor_epoch == current compactor epoch, reconcile the compactor_state and pass `new_compactions` object to Step(3). This process would continue until successful .compactor file write or the `new_compaction` object is empty.
+
+      - If latest .compactor compactor_epoch < current compactor epoch, panic
+      ( Compactor_epoch going backwards)
+
+    [When this step is successful, compaction is persisted in the .compactor file]
+
+6. Now, `start_compaction()` for each compaction in the `active_compaction` param if the count of running compactions is below threshold.
+
+7. A new `CompactionJob` is created using the last job_attempt or afresh if it the first CompactionJob. The `CompactionJob` is then handed to the CompactionExecutor for execution.
+
+8. We need to update CompactionExecutor code to support the following:
+
+    - Resuming Partially executed compactions (covered separately in the section below)
+
+    - Writing compaction_state updates to the .compactor file
+
+The CompactionExecutor would persist the compaction_state in .compactor file by updating the `active_compaction` param (refer state management protocol). Two possible options:
+
+    - Each compactionExecutor Job tries writing to the .compactor file.
+
+    - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the CompactionJob on the write
+
+
+9. Once the compactionJob is completed, follow the steps mentioned in the State Managment protocol.    
+
+
+### Persisting External Compactions
+
+The idea is to leverage the existing compaction workflow. Need a mechanism to plugin the external requests so that it can be picked and executed by the compaction worflow. The steps are outlined here:
+
+1. Client provides the list of source_ssts and source_srs to be compacted by calling the method `submit_manual_compaction`.
+
+2. Use the `pick_next_compaction` to transform the request into a list of compactions.
+
+3. For each compaction in the input list of compactions, The compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
+
+    - Check If the count of runnning compactions is less than the threshold. If yes, continue
+
+    - Check if the source L0 SSTs and SRs are not part of any other compaction. If yes, continue.
+
+    - Check if the destination SR is not part of any other compaction. If yes, continue.
+
+    - Check if creating new SR(as part of L0 compaction) would it form a tiered SR group and get compacted. If yes, do not create the SR.
+
+    - Add compaction validations to verify correct group of sources and destinations are selected. Reference: https://github.com/slatedb/slatedb/blob/main/rfcs/0002-compaction.md#compactions.
+
+    - The existing validations in `submit_compaction` method.
+
+4. When a compaction successfully validates, it is appended to the local copy of compactor_state `active_compaction` param and `new_compactions` list.
+
+5. Try writing the compactor_state to the next sequential .compactor file.
+
+    If file exists,
+
+      - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
+
+      - If latest .compactor compactor_epoch == current compactor epoch, reconcile the compactor_state and pass `new_compactions` object to Step(3). This process would continue until successful .compactor file write or the `new_compaction` object is empty.
+
+      - If latest .compactor compactor_epoch < current compactor epoch, panic
+      ( Compactor_epoch going backwards)
+
+    [When this step is successful, compaction is persisted in the .compactor file]
+
 
 ### Resuming Partial Compactions
 
 1. When the output SSTs(part of the partially completed destination SR) are fetched, pick the lastEntry(the lastEntry in lexicographic order) from the last SST of the SR. Possible Approaches:
-    - Have a index on footer as suggested here:https://github.com/slatedb/slatedb/pull/695/files#r2243447106 similar to first key and iterate to the lastKey of each block using the footer 
+    - Add a lastKey in the metadata block of SST as suggested here:https://github.com/slatedb/slatedb/pull/695/files#r2243447106 similar to first key and fetch it from the metadata block 
 
     - Once on the relevant SST, go to the last block by iterating the indexes. Iterate to the lastKey of the last block of the SST.
-2. Ignore completely iterated L0 SSTs and move the iterator on each SR to a key >= lastKey on SST partition
+
+2. Ignore completed L0 SSTs and move the iterator on each SR to a key >= lastKey on SST partition
 
 3. This is done by doing a binary search on a SR to find the right SST partition and then iterating the blocks of the SST till we find the Entry. 
+    [Note: A corner case: With monotonically overlapping SST ranges(specifically the last key), a key might be present across a contiguous range of SST in a SR]
 
 4. These {key, seq_number, sst_iterator} tuple is then added to a min_heap to decide the right order across a group of SRs( can be thought of as a way to get a sorted list from all the sorted SR SSTs).
 
-5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each. 
+5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each and persist it to the .compactor file by updating the compaction in `active_compaction`. ( This is the CompactionJob progress section in State Management Protocol) 
 
 Note:
  - Step (3) and (4) are already implemented in the `seek()` in merge_iterator. It should handle Tombstones, TTL/Expiration
@@ -207,31 +380,6 @@ The compaction state is persisted to the object store following the same CAS pat
 /000000003.compactor  # Current state
 ```
 
-#### **CompactionState Structure**
-The persistent state contains the complete view of all compaction activity:
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionState {
-    /// Fencing token to ensure single active compactor
-    /// Incremented each time a new compactor takes control
-    pub compactor_epoch: u64,
-    
-    /// Compactor state identifier. This would be used for creating
-    /// compactor files and CAS updates
-    pub compactor_state_id: u64,
-
-    // current Sorted Runs
-    pub current_sorted_runs: [SortedRun];
-    
-    /// All currently active compactions indexed by ID
-    /// Includes queued, running, and recently completed compactions
-    pub active_compactions: BTreeMap<CompactionId, Compaction>,
-        
-    /// Timestamp when this state was created/last updated
-    pub state_timestamp: DateTime<Utc>,
-}
-```
 The section below is under discussion here: https://github.com/slatedb/slatedb/pull/695/files#r2239561471
 
 ### Protocol for State Management of Manifest and CompactionState
@@ -465,57 +613,35 @@ External processes can safely read compaction state without interfering with the
 #### **Write Access Through Coordination**
 External processes that need to trigger compactions coordinate through the persistent state:
 
-**Manual Compaction Submission**:
-1. External process submits a `ManualCompactionRequest`.
-2. The `ManualCompactionRequest` undergoes validations and is passed to the CLI channel created in the Compactor EventLoop.
-3. The request handler of the channel is responsible to convert the request to a `Compaction` object
-3. The `Compaction` object is then persisted in the .compactor file using CAS update .
-4. A signal is sent to the client via a channel with the compactionId and the status.
-(Post this step the regular Compaction workflow begins.)
-5. If the count of ongoing Compactions is less than the threshold, the `Compaction` is submitted for compaction to the `submitCompaction()` 
-6. Once it passes the validations in the `submitCompaction()`, the event handler proceeds with the `startCompaction()` converting the compaction into a compactionJob.
-7. The compactionJob is then executed in a blocking task and the terminal state of the execution is then handled by the event handler.
-
 **Administrative Commands**:
 - `slatedb compaction submit --sources SR1,SR2 --priority high` - Submit manual compaction
 - `slatedb compaction cancel --id <compaction-id>` - Cancel running compaction  
 - `slatedb compaction retry --id <compaction-id>` - Retry failed compaction
 
-## Manual Compaction Support
-
-Extend compaction system to support operator-initiated compactions:
-
-### **Priority-Based Scheduling**
-- **Critical**: Manual compactions with deadlines
-- **High**: L0 threshold breaches, urgent manual compactions
-- **Normal**: Regular size-tiered compactions  
-- **Low**: Background maintenance
-
-## Public API
 
 ### **Manual Compaction Management**
 
 We extend the `Db` API to support manual compaction operations, and introduce a new `CompactionManager` API for administrative operations:
 
 ```rust
-/// Options for manual compaction submission
-pub struct ManualCompactionOptions {
-    /// Priority level for the compaction
-    pub priority: CompactionRequestPriority,
-    /// Optional deadline for completion
-    pub deadline: Option<DateTime<Utc>>,
-    /// Optional description/reason for the compaction  
-    pub reason: Option<String>,
-}
 
-/// Priority levels for compaction scheduling
-#[derive(Debug, Clone, PartialEq)]
-pub enum CompactionPriorityRequest {
-    Critical,  // Preempts all other compactions
-    High,      // Preempts normal/low compactions  
-    Normal,    // Standard automatic compaction priority
-    Low,       // Background maintenance priority
-}
+// API method signature uses the public struct directly
+pub async fn submit_manual_compaction(
+    &self, 
+    source_ssts: Vec<String>,
+    source_srs: Vec<String>                         
+) -> Result<CompactionInfo, Error>   
+
+pub async fn get_compaction_info(
+    &self,
+    id: CompactionId
+) -> Result<CompactionInfo, Error>           // ← Returns public struct directly
+
+// API method returns vector of public struct
+pub async fn list_compactions(
+    &self,
+    status_filter: Option<CompactionRequestStatus>  // ← Public enum
+) -> Result<Vec<CompactionInfo>, Error> 
 
 /// Status of a compaction job to be shown to the customer
 #[derive(Debug, Clone, PartialEq)]
@@ -551,10 +677,10 @@ pub struct CompactionInfo {
     pub id: CompactionId,
     /// Current status
     pub status: CompactionRequestStatus,
-    /// Priority level
-    pub priority: CompactionRequestPriority,
-    /// Source SSTs/SRs being compacted
-    pub sources: Vec<String>,
+    /// Source SSTs being compacted
+    pub source_ssts: Vec<String>,
+    /// Source SRs being compacted
+    pub source_srs: Vec<String>,
     /// Target Destination of compaction
     pub target: String,
     /// Current progress (if running)
@@ -569,35 +695,6 @@ pub struct CompactionInfo {
     pub error_message: Option<String>,
 }
 ```
-
-#### Example
-```rust
-// CLI parses arguments into this public struct
-let options = ManualCompactionOptions {
-    priority: CompactionRequestPriority::High,           // --priority high
-    deadline: Some(parse_datetime("2025-01-30T10:00:00Z")), // --deadline
-    reason: Some("urgent cleanup".to_string()),   // --reason
-};
-
-// API method signature uses the public struct directly
-pub async fn submit_manual_compaction(
-    &self, 
-    sources: Vec<String>,                    
-    options: ManualCompactionOptions        
-) -> Result<CompactionInfo, Error>   
-
-pub async fn get_compaction_info(
-    &self,
-    id: CompactionId
-) -> Result<CompactionInfo, Error>           // ← Returns public struct directly
-
-// API method returns vector of public struct
-pub async fn list_compactions(
-    &self,
-    status_filter: Option<CompactionRequestStatus>  // ← Public enum
-) -> Result<Vec<CompactionInfo>, Error> 
-
-```        
 
 <!-- This would depend on how we plan partial Compactions>
 <!-- ### **Garbage Collection Integration**

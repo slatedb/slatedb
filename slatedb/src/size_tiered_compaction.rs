@@ -20,6 +20,7 @@ struct CompactionSource {
 /// with any other ongoing compactions. A compaction conflict if it uses a
 /// source (SST or SR) that is already in use by a running compaction.
 pub(crate) struct ConflictChecker {
+    // This should be fetched from the .compactor file
     sources_used: HashSet<SourceId>,
 }
 
