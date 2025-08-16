@@ -4,7 +4,7 @@ use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 
 use chrono::TimeDelta;
-use futures::future::join_all;
+use futures::future::{join_all, try_join_all};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
@@ -138,30 +138,26 @@ impl TokioCompactionExecutorInner {
         compaction: &'a CompactionJob,
     ) -> Result<RetentionIterator<MergeIterator<'a>>, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 4,
-            blocks_to_fetch: 256,
+            max_fetch_tasks: 16,
+            blocks_to_fetch: 1024,
             cache_blocks: false, // don't clobber the cache
             eager_spawn: true,
         };
 
-        let mut l0_iters = VecDeque::new();
-        for l0 in compaction.ssts.iter() {
-            let maybe_iter =
-                SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options)
-                    .await?;
-            if let Some(iter) = maybe_iter {
-                l0_iters.push_back(iter);
-            }
-        }
+        let l0_futures = compaction.ssts.iter().map(|l0| {
+            SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options)
+        });
+
+        let l0_results = try_join_all(l0_futures).await?;
+        let l0_iters: VecDeque<_> = l0_results.into_iter().flatten().collect();
         let l0_merge_iter = MergeIterator::new(l0_iters).await?.with_dedup(false);
 
-        let mut sr_iters = VecDeque::new();
-        for sr in compaction.sorted_runs.iter() {
-            let iter =
-                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
-                    .await?;
-            sr_iters.push_back(iter);
-        }
+        let sr_futures = compaction.sorted_runs.iter().map(|sr| {
+            SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
+        });
+
+        let sr_results = try_join_all(sr_futures).await?;
+        let sr_iters: VecDeque<_> = sr_results.into_iter().collect();
         let sr_merge_iter = MergeIterator::new(sr_iters).await?.with_dedup(false);
 
         let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])
