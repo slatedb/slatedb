@@ -1,0 +1,80 @@
+include "sst.fbs";
+
+enum CompactionType : byte { Internal = 0, External; }
+
+enum CompactionStatus : byte {
+    Submitted = 0,  // Waiting to be scheduled
+    InProgress,     // Currently executing
+    Completed,      // Successfully finished
+    Failed,         // Failed with error
+    Cancelled;      // Cancelled by request
+}
+
+table CompactionJob {
+    // CompactorJob ID
+    job_id: ulong;
+
+    // Reference to the compaction to which this job belongs
+    compaction_id: uint64
+
+    // Timestamp when CompactionJob was created
+    created_ts: uint64
+    
+    // InputSSTables completed before the job started
+    completed_input_sst_ids:[CompactedSstId];
+
+    // InputSortedRuns completed before the job started
+    completed_input_sr_ids:[uint32];
+
+    // Output SSTs to be persisted in destination SR  
+    output_sr:[SortedRun];
+}
+
+table Compaction {
+    // Compaction Status visible to public API
+    status: CompactionStatus;
+
+    // Destination Sorted Run ID
+    destination: u32 (required);
+
+    // Destination Sorted Run
+    output_sorted_run: SortedRun
+
+    // input L0 SSTables
+    ssts: [CompactedSsTable]; 
+
+    // input Sorted Runs
+    sorted_runs: [SortedRun];
+
+    // Identifier to reference a Compaction
+    compaction_id: uint64;
+
+    // Compaction Type to distinguish between internal or external
+    compaction_type: CompactionType (required);
+
+    // List of CompactionJob Retries
+    job_attempts:[CompactionJob];
+
+    // Creation Timestamp of Compaction
+    created_ts: uint64
+
+    // Creation Timestamp of Compaction
+    updated_ts: uint64
+}
+
+
+table CompactionState {
+    // Identifier of the compaction state. Compactor file name would be derived from this field
+    compaction_state_id: uint64;
+
+    // Fencing token to ensure single active compactor
+    compactor_epoch: uint64;
+
+    // Compactions in scheduled, in_progress and recently completed compactions
+    active_compactions: [Compaction];
+
+    // Creation Timestamp of CompactionState
+    created_at: uint64
+}
+
+root_type CompactionState;
