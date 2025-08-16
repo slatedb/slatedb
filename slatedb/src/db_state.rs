@@ -352,7 +352,7 @@ impl CoreDbState {
             l0_last_compacted: None,
             l0: VecDeque::new(),
             compacted: vec![],
-            last_seen_wal_id: 1,
+            last_seen_wal_id: 0,
             replay_after_wal_id: 0,
             last_l0_clock_tick: i64::MIN,
             last_l0_seq: 0,
