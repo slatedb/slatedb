@@ -455,7 +455,9 @@ impl WalBufferManager {
         }
 
         // increment WAL id within the lock held
-        let next_wal_id = inner.oracle.next_wal_id.next();
+        let next_wal_id = inner.oracle.next_wal_id.load();
+        inner.oracle.next_wal_id.store(next_wal_id + 1);
+
         let current_wal = std::mem::replace(&mut inner.current_wal, Arc::new(KVTable::new()));
         inner.immutable_wals.push_back((next_wal_id, current_wal));
         Ok(())
