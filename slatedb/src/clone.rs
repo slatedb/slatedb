@@ -619,21 +619,17 @@ mod tests {
         test_utils::seed_database(&parent_db, &sample::table(&mut rng, 100, 10), false)
             .await
             .unwrap();
-        parent_db.flush().await.unwrap();
+        parent_db.inner.flush_memtables().await.unwrap();
 
         test_utils::seed_database(&parent_db, &sample::table(&mut rng, 100, 10), false)
             .await
             .unwrap();
-        parent_db.flush().await.unwrap();
+        parent_db.inner.flush_memtables().await.unwrap();
         parent_db.close().await.unwrap();
 
-        fail_parallel::cfg(
-            Arc::clone(&fp_registry),
-            "copy-wal-ssts-io-error",
-            "1*off->return",
-        )
-        .unwrap();
+        fail_parallel::cfg(Arc::clone(&fp_registry), "copy-wal-ssts-io-error", "return").unwrap();
 
+        // TODO(flaneur2020): if it's better to find last_seen_wal_id by listing, this test case can be updated as well
         let err = create_clone(
             clone_path.clone(),
             parent_path.clone(),
