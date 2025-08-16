@@ -816,10 +816,10 @@ mod tests {
             .await
             .unwrap();
         let mut dirty = sm.prepare_dirty();
-        dirty.core.next_wal_sst_id = 123;
+        dirty.core.last_seen_wal_id = 123;
         sm.update_manifest(dirty).await.unwrap();
 
-        assert_eq!(sm.db_state().next_wal_sst_id, 123);
+        assert_eq!(sm.db_state().last_seen_wal_id, 123);
     }
 
     #[tokio::test]
@@ -830,13 +830,13 @@ mod tests {
             .unwrap();
         let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
         let mut dirty = sm.prepare_dirty();
-        dirty.core.next_wal_sst_id = 123;
+        dirty.core.last_seen_wal_id = 123;
         sm.update_manifest(dirty).await.unwrap();
 
         let refreshed = sm2.refresh().await.unwrap();
 
-        assert_eq!(refreshed.core.next_wal_sst_id, 123);
-        assert_eq!(sm2.db_state().next_wal_sst_id, 123);
+        assert_eq!(refreshed.core.last_seen_wal_id, 123);
+        assert_eq!(sm2.db_state().last_seen_wal_id, 123);
     }
 
     #[tokio::test]

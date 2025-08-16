@@ -2898,7 +2898,7 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
-        assert_eq!(db_state.next_wal_sst_id, next_wal_id);
+        assert_eq!(db_state.last_seen_wal_id, next_wal_id);
     }
 
     #[tokio::test]
@@ -3167,7 +3167,7 @@ mod tests {
                 .recent_flushed_wal_id(),
             2
         );
-        assert_eq!(db_state.state.core().next_wal_sst_id, next_wal_id);
+        assert_eq!(db_state.state.core().last_seen_wal_id, next_wal_id);
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -3246,7 +3246,7 @@ mod tests {
         );
         assert!(db_state.state.imm_memtable.get(1).is_none());
 
-        assert_eq!(db_state.state.core().next_wal_sst_id, 4);
+        assert_eq!(db_state.state.core().last_seen_wal_id, 4);
         assert_eq!(
             db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -3317,7 +3317,7 @@ mod tests {
         // It's possible that there exists buffered multiple wals in memory, so the next_wal_sst_id
         // in manifest is greater than the next_wal_sst_id based on what's currently in the object
         // store unless ALL the wals are flushed.
-        assert!(manifest.core.next_wal_sst_id > next_wal_sst_id);
+        assert!(manifest.core.last_seen_wal_id > next_wal_sst_id);
     }
 
     async fn do_test_should_read_compacted_db(options: Settings) {
@@ -3458,7 +3458,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
+        assert_eq!(db.inner.state.read().state().core().last_seen_wal_id, 2);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::builder(path, object_store.clone())
@@ -3466,7 +3466,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 4);
+        assert_eq!(db.inner.state.read().state().core().last_seen_wal_id, 4);
     }
 
     #[tokio::test]
@@ -3509,7 +3509,7 @@ mod tests {
         );
 
         do_put(&db2, b"2", b"2").await.unwrap();
-        assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
+        assert_eq!(db2.inner.state.read().state().core().last_seen_wal_id, 5);
     }
 
     #[tokio::test]

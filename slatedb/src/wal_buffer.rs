@@ -157,6 +157,11 @@ impl WalBufferManager {
         current_wal_entries_count + flushing_wal_entries_count
     }
 
+    pub fn last_wal_id(&self) -> u64 {
+        let inner = self.inner.read();
+        inner.oracle.next_wal_id.load()
+    }
+
     pub fn recent_flushed_wal_id(&self) -> u64 {
         let inner = self.inner.read();
         inner.recent_flushed_wal_id

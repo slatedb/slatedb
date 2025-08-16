@@ -279,7 +279,7 @@ async fn copy_wal_ssts(
     let clone_path_resolver = PathResolver::new(clone_path.clone());
 
     let mut wal_id = parent_checkpoint_state.replay_after_wal_id + 1;
-    while wal_id < parent_checkpoint_state.next_wal_sst_id {
+    while wal_id < parent_checkpoint_state.last_seen_wal_id {
         fail_point!(fp_registry.clone(), "copy-wal-ssts-io-error", |_| Err(
             SlateDBError::from(std::io::Error::other("oops"))
         ));

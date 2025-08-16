@@ -465,7 +465,7 @@ impl DbReaderInner {
         let wal_id_end = if replay_new_wals {
             table_store.last_seen_wal_id().await? + 1
         } else {
-            core.next_wal_sst_id
+            core.last_seen_wal_id
         };
 
         let mut replay_iter = WalReplayIterator::range(
