@@ -2897,9 +2897,12 @@ mod tests {
 
         // validate that the manifest file exists.
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
-        let db_state = stored_manifest.db_state();
-        assert_eq!(db_state.last_seen_wal_id, next_wal_id);
+        let _stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        // Use oracle value instead of last_seen_wal_id
+        assert_eq!(
+            kv_store_restored.inner.oracle.next_wal_id.load(),
+            next_wal_id
+        );
     }
 
     #[tokio::test]
@@ -3168,7 +3171,8 @@ mod tests {
                 .recent_flushed_wal_id(),
             2
         );
-        assert_eq!(db_state.state.core().last_seen_wal_id, next_wal_id);
+        // Use oracle value instead of last_seen_wal_id
+        assert_eq!(db.inner.oracle.next_wal_id.load(), next_wal_id);
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -3247,7 +3251,8 @@ mod tests {
         );
         assert!(db_state.state.imm_memtable.get(1).is_none());
 
-        assert_eq!(db_state.state.core().last_seen_wal_id, 4);
+        // Use oracle value instead of last_seen_wal_id
+        assert_eq!(db.inner.oracle.next_wal_id.load(), 4);
         assert_eq!(
             db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -3510,7 +3515,8 @@ mod tests {
         );
 
         do_put(&db2, b"2", b"2").await.unwrap();
-        assert_eq!(db2.inner.state.read().state().core().last_seen_wal_id, 5);
+        // Use oracle value instead of last_seen_wal_id
+        assert_eq!(db2.inner.oracle.next_wal_id.load(), 5);
     }
 
     #[tokio::test]
