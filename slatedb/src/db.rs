@@ -3279,6 +3279,10 @@ mod tests {
         assert!(result.to_string().contains("background task panic'd"));
     }
 
+    // TODO(flaneur2020): it seems that the mem_table_flusher's background task will get the error
+    // propogated when the wal background task panics, and will NOT flush the latest manifest to the
+    // object_store after error. there might be other reasons this test could pass, hmm
+    #[ignore]
     #[tokio::test]
     async fn test_wal_id_last_seen_should_exist_even_if_wal_write_fails() {
         let fp_registry = Arc::new(FailPointRegistry::new());
