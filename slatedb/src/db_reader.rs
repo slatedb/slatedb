@@ -129,7 +129,8 @@ impl DbReaderInner {
         // to last_l0_seq.
         let last_committed_seq = MonotonicSeq::new(initial_state.core().last_l0_seq);
         last_committed_seq.store_if_greater(initial_state.last_committed_seq);
-        let oracle = Arc::new(Oracle::new(last_committed_seq));
+        let next_wal_id = MonotonicSeq::new(initial_state.last_wal_id + 1);
+        let oracle = Arc::new(Oracle::new(last_committed_seq, next_wal_id));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());

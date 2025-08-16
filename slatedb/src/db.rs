@@ -105,13 +105,14 @@ impl DbInner {
         stat_registry: Arc<StatRegistry>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
-        // both last_seq and last_committed_seq will be updated after WAL replay.
+        // last_seq, last_committed_seq, next_wal_id will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
+        let next_wal_id = MonotonicSeq::new(manifest.core.replay_after_wal_id + 1);
         let oracle = Arc::new(
-            Oracle::new(last_committed_seq)
+            Oracle::new(last_committed_seq, next_wal_id)
                 .with_last_seq(last_seq)
                 .with_last_remote_persisted_seq(last_remote_persisted_seq),
         );
