@@ -3459,7 +3459,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().last_seen_wal_id, 2);
+        assert_eq!(db.inner.oracle.next_wal_id.load(), 2);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::builder(path, object_store.clone())
@@ -3467,7 +3467,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().last_seen_wal_id, 4);
+        assert_eq!(db.inner.oracle.next_wal_id.load(), 4);
     }
 
     #[tokio::test]
