@@ -267,10 +267,10 @@ impl CompactorEventHandler {
         /* State Management Protocol Compactor Startup:*/
         // let stored_compactor_state = CompactionState::load(compactor_state_store.clone()).await?;
         let stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
-       // let compactor_state = FenceableCompactionState::init_compactor(stored_compactor_state, 
-       // options.compactor_update_timeout, 
-       // system_clock.clone()).await?;
-       let manifest = FenceableManifest::init_compactor(
+        // let compactor_state = FenceableCompactionState::init_compactor(stored_compactor_state,
+        // options.compactor_update_timeout,
+        // system_clock.clone()).await?;
+        let manifest = FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
             system_clock.clone(),
