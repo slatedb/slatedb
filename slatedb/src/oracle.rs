@@ -16,8 +16,13 @@ pub(crate) struct Oracle {
     /// The sequence number of the most recent write that has been fully durable
     /// flushed to the remote storage.
     pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
-    /// The next wal id to be assigned. This field is incremented when a new WAL
-    /// is created in WAL buffer, or during WAL replay after replayed a WAL file.
+    /// The next WAL ID to be assigned. This value is used to uniquely identify
+    /// each WAL SST file, and incremented in the following scenarios:
+    /// 1. when a new WAL SST is prepared in the WAL buffer as part of normal write
+    ///    operations.
+    /// 2. during start up, after a WAL SST has been successfully replayed.
+    /// 3. during start up, after an empty WAL file is created for fencing writes on
+    ///    WAL.
     pub(crate) next_wal_id: Arc<MonotonicSeq>,
 }
 

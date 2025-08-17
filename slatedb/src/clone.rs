@@ -629,7 +629,8 @@ mod tests {
 
         fail_parallel::cfg(Arc::clone(&fp_registry), "copy-wal-ssts-io-error", "return").unwrap();
 
-        // TODO(flaneur2020): if it's better to find last_seen_wal_id by listing, this test case can be updated as well
+        // TODO(flaneur2020): If it's better to find last_seen_wal_id by listing in clone, this test case may need
+        // some consideration.
         let err = create_clone(
             clone_path.clone(),
             parent_path.clone(),
