@@ -14,19 +14,33 @@
     - [Impact](#impact)
   - [Proposal](#proposal)
     - [Core Strategy: Iterator-Based Persistence](#core-strategy-iterator-based-persistence)
-  - [Worflow](#worflow)
+  - [Workflow](#workflow)
     - [Compaction Workflow](#compaction-workflow)
+    - [CompactionState Structure](#compactionstate-structure)
+    - [Persisting Internal Compactions](#persisting-internal-compactions)
+    - [Persisting External Compactions](#persisting-external-compactions)
     - [Resuming Partial Compactions](#resuming-partial-compactions)
-    - [Key Design Decisions](#key-design-decisions)
-    - [Persistent State Storage](#persistent-state-storage)
-    - [Protocol for State Management of Manifest and CompactionState](#protocol-for-state-management-of-manifest-and-compactionstate)
-    - [Summarised Protocol](#summarised-protocol)
-    - [Race conditions handled in the protocol](#race-conditions-handled-in-the-protocol)
-    - [External Process Integration](#external-process-integration)
-  - [Manual Compaction Support](#manual-compaction-support)
-    - [Priority-Based Scheduling](#priority-based-scheduling)
-  - [Public API](#public-api)
-    - [Manual Compaction Management](#manual-compaction-management)
+  - [Key Design Decisions](#key-design-decisions)
+    - [1. Persistence Boundaries](#1-persistence-boundaries)
+    - [2. Enhanced Job Model](#2-enhanced-job-model)
+    - [3. State Management Pattern](#3-state-management-pattern)
+    - [4. Recovery Strategy](#4-recovery-strategy)
+    - [5. Migrate `compaction_epoch` from Manifest to CompactionState](#5-migrate-compaction_epoch-from-manifest-to-compactionstate)
+  - [Persistent State Storage](#persistent-state-storage)
+    - [Object Store Layout](#object-store-layout)
+  - [Protocol for State Management of Manifest and CompactionState](#protocol-for-state-management-of-manifest-and-compactionstate)
+    - [On startup...](#on-startup)
+    - [On compaction initiation...](#on-compaction-initiation)
+    - [On compaction job progress...](#on-compaction-job-progress)
+    - [On compaction job complete...](#on-compaction-job-complete)
+  - [Summarised Protocol](#summarised-protocol)
+  - [Race conditions handled in the protocol](#race-conditions-handled-in-the-protocol)
+    - [Incorrect Read order of manifest and compactionState](#incorrect-read-order-of-manifest-and-compactionstate)
+    - [Fenced Compactor Process trying to update manifest](#fenced-compactor-process-trying-to-update-manifest)
+    - [Fenced Compactor Process trying to update manifest](#fenced-compactor-process-trying-to-update-manifest-1)
+  - [Gaps in compactor_epoch in .manifest file](#gaps-in-compactor_epoch-in-manifest-file)
+  - [External Process Integration](#external-process-integration)
+  - [Garbage Collection Integration](#garbage-collection-integration)
   - [Observability Enhancements](#observability-enhancements)
     - [Progress Tracking](#progress-tracking)
     - [Statistics](#statistics)
@@ -36,7 +50,6 @@
     - [Recovery Efficiency Analysis](#recovery-efficiency-analysis)
     - [Scaling Analysis](#scaling-analysis)
   - [Future Extensions](#future-extensions)
-    - [Distributed Compaction](#distributed-compaction)
 
 <!-- TOC end -->
 
@@ -170,20 +183,20 @@ pub struct Compaction {
     pub(crate) status: CompactionStatus,
     pub(crate) sources: Vec<SourceId>,
     pub(crate) destination: u32,
-    pub(crate) compaction_id: Uuid,
+    pub(crate) compaction_id: Ulid,
     pub(crate) compaction_type: CompactionType,
     pub(crate) job_attempts: Vec<CompactionJob>;
 }
 
 pub(crate) CompactorState {
     manifest: DirtyManifest
-    compaction_state: CompactionState
+    compaction_state: DirtyCompactionState
 }
 
 pub(crate) struct CompactionState {
     compactor_epoch: u64,
     // active_compactions queued, in-progress and completed
-    compactions: HashMap<Uuid, Compaction>,
+    compactions: HashMap<Ulid, Compaction>,
 }
 
 pub(crate) struct DirtyCompactionState {
@@ -202,24 +215,6 @@ pub(crate) struct FenceableCompactionState {
     compaction_state: StoredCompactionState,
     local_epoch: u64,
     stored_epoch: fn(&CompactionState) -> u64,
-}
-
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionState {
-    /// Fencing token to ensure single active compactor
-    /// Incremented each time a new compactor takes control
-    pub compactor_epoch: u64,
-    
-    /// Compactor state identifier. This would be used for creating
-    /// compactor files and CAS updates
-    pub compactor_state_id: u64,
-    /// All currently active compactions indexed by ID
-    /// Includes queued, running, and recently completed compactions
-    pub active_compactions: BTreeMap<CompactionId, Compaction>,
-        
-    /// Timestamp when this state was created/last updated
-    pub state_timestamp: DateTime<Utc>,
 }
 ```
 
@@ -583,7 +578,7 @@ At T = 5, Compactor A updates .manifest file [Compactor is fenced but can still 
 At T = 6, Compactor B updates .manifest file
 ```
 
-### Gaps in compactor_epoch in .manifest file
+#### Gaps in compactor_epoch in .manifest file
 
 ```text
 Compactor 1 reads latest .compactor file (00005.compactor, compactor_epoch = 1)
@@ -600,28 +595,11 @@ Note: The above protocol enables us to use the existing compaction logic for mer
 
 ### **External Process Integration**
 
-#### **Read-Only Access Pattern**
-External processes can safely read compaction state without interfering with the active compactor:
-
-**CLI Status Commands**:
-- `slatedb compaction status` - Show all active compactions with progress
-- `slatedb compaction list --failed` - List failed compactions needing attention
-- `slatedb compaction history --last 24h` - Show recent compaction activity
-- `slatedb compaction stats` - Display performance and efficiency metrics
-
-
-#### **Write Access Through Coordination**
-External processes that need to trigger compactions coordinate through the persistent state:
-
 **Administrative Commands**:
 - `slatedb compaction submit --sources SR1,SR2 --priority high` - Submit manual compaction
-- `slatedb compaction cancel --id <compaction-id>` - Cancel running compaction  
-- `slatedb compaction retry --id <compaction-id>` - Retry failed compaction
+- `slatedb compaction status --id <compaction-id>` - Status of a compaction
 
-
-### **Manual Compaction Management**
-
-We extend the `Db` API to support manual compaction operations, and introduce a new `CompactionManager` API for administrative operations:
+We leverage `admin.rs` to expose methods that would be triggered during manual compactions requests from external process / CLI
 
 ```rust
 
@@ -696,12 +674,8 @@ pub struct CompactionInfo {
 }
 ```
 
-<!-- This would depend on how we plan partial Compactions>
-<!-- ### **Garbage Collection Integration**
-- The garbage collector would be responsible to delete the entries in the compaction state files based on the two conditions:
-  - min_age
-  - CompactionJob associated with the compaction state is `Complete` or `Attempts_Exhausted`
-- As mentioned in the earlier section, the manifest update with the compacted SRs would only happen when the `CompactionJob` completes successfully. -->
+### **Garbage Collection Integration**
+<Todo>
 
 ## Observability Enhancements
 
