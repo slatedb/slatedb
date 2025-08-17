@@ -267,7 +267,7 @@ The CompactionExecutor would persist the compaction_state in .compactor file by 
 
     - Each compactionExecutor Job tries writing to the .compactor file.
 
-    - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the CompactionJob on the write
+    - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the CompactionJob on the write. [Agreed]
 
 
 9. Once the compactionJob is completed, follow the steps mentioned in the State Managment protocol.    
@@ -316,7 +316,7 @@ The idea is to leverage the existing compaction workflow. Need a mechanism to pl
 1. When the output SSTs(part of the partially completed destination SR) are fetched, pick the lastEntry(the lastEntry in lexicographic order) from the last SST of the SR. Possible Approaches:
     - Add a lastKey in the metadata block of SST as suggested here:https://github.com/slatedb/slatedb/pull/695/files#r2243447106 similar to first key and fetch it from the metadata block 
 
-    - Once on the relevant SST, go to the last block by iterating the indexes. Iterate to the lastKey of the last block of the SST.
+    - Once on the relevant SST, go to the last block by iterating the indexes. Iterate to the lastKey of the last block of the SST.[Agreed]
 
 2. Ignore completed L0 SSTs and move the iterator on each SR to a key >= lastKey on SST partition
 
