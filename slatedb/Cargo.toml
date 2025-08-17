@@ -42,16 +42,17 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 siphasher = { workspace = true }
 snap = { workspace = true, optional = true }
+thread_local = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
+tokio-util = { workspace = true, default-features = false, features = ["rt"] }
+tokio-retry2 = { version = "0.5.7", features = ["jitter"] }
 tracing = { workspace = true, features = ["log"] }
 ulid = { workspace = true, features = ["serde"] }
+url = "2.5.4"
 uuid = { workspace = true, features = ["v4", "serde"] }
 walkdir = { workspace = true }
 zstd = { workspace = true, optional = true }
-tokio-util = { workspace = true, default-features = false, features = ["rt"] }
-thread_local = { workspace = true }
-url = "2.5.4"
 
 [dev-dependencies]
 bincode = { workspace = true }
