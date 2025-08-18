@@ -119,7 +119,7 @@ fn test_dst_is_deterministic(
         let logical_clock = Arc::new(MockLogicalClock::new());
         let runtime = build_runtime(rand.rng().random::<u64>());
         runtime.block_on(async {
-            let mut dst = build_dst(object_store.clone(), system_clock.clone(), logical_clock.clone(), rand.clone(), DstOptions::default()).await;
+            let mut dst = build_dst(object_store.clone(), system_clock.clone(), logical_clock.clone(), rand.clone(), DstOptions::default()).await?;
             info!(seed, simulation_count, "running simulation");
             match dst.run_simulation(dst_duration).await {
                 Ok(()) => {
