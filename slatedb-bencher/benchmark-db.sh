@@ -66,10 +66,10 @@ generate_mermaid () {
     # Get git commit hash (first 7 characters)
     local git_hash=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
 
-    # Get current date in YYYY-MM-DD format
-    local current_date=$(date +"%Y-%m-%d")
+    # Get current local timestamp including time to ensure uniqueness per run
+    local current_date=$(date +"%Y-%m-%d %H:%M:%S")
 
-    # Create x-axis entry
+    # Create x-axis entry (date-time and commit)
     local x_entry="$current_date ($git_hash)"
 
     # Extract put_percentage and concurrency from mermaid filename
@@ -101,11 +101,11 @@ EOF
         # Update existing mermaid file
         local temp_file=$(mktemp)
 
-        # Read current content
-        local title_line=$(grep "title" "$mermaid_file" | sed 's/^[[:space:]]*//')
-        local x_axis_line=$(grep "x-axis" "$mermaid_file")
-        local put_line=$(grep -m1 "line" "$mermaid_file")
-        local get_line=$(grep "line" "$mermaid_file" | tail -n1)
+        # Read current content (match only Mermaid series lines, not YAML like plotColorPalette)
+        local title_line=$(grep -E "^[[:space:]]*title[[:space:]]" "$mermaid_file" | sed 's/^[[:space:]]*//')
+        local x_axis_line=$(grep -E "^[[:space:]]*x-axis[[:space:]]*\\[" "$mermaid_file")
+        local put_line=$(grep -E "^[[:space:]]*line[[:space:]]*\\[" "$mermaid_file" | head -n1)
+        local get_line=$(grep -E "^[[:space:]]*line[[:space:]]*\\[" "$mermaid_file" | tail -n1)
 
         # Extract current values
         local current_x_values=$(echo "$x_axis_line" | sed 's/.*\[//;s/\].*//' | tr ',' '\n' | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
