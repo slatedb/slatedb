@@ -675,7 +675,27 @@ pub struct CompactionInfo {
 ```
 
 ### **Garbage Collection Integration**
-<Todo>
+The garbage collection of .compactor file can leverage the existing logic of garbage collecting .sst files and .manifest files. 
+
+The .sst file is deemed to be garbage collected if it satisfies  the following conditions:
+
+  - SST is older than the min age configured.
+
+  - SST is not referenced by any active manifest checkpoint. 
+
+The .manifest file is deemed to be garbage collected if it satisfies the following conditions:  
+
+  - Avoid deletion of the latest manifest
+  
+  - Delete manifest not referenced by active checkpoints
+
+  - Delete manifests that have passed the min_age
+
+The .compactor file can be cleaned by the garbage collector similar to .manifest file garbage collection conditions:
+
+  - Avoid deletion of the latest .compactor file
+
+  - Delete compactor files that have passed the min_age
 
 ## Observability Enhancements
 
