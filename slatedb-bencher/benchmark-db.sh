@@ -66,10 +66,10 @@ generate_mermaid () {
     # Get git commit hash (first 7 characters)
     local git_hash=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
 
-    # Get current local timestamp including time to ensure uniqueness per run
-    local current_date=$(date +"%Y-%m-%d %H:%M:%S")
+    # Get current date in YYYY-MM-DD format
+    local current_date=$(date +"%Y-%m-%d")
 
-    # Create x-axis entry (date-time and commit)
+    # Create x-axis entry
     local x_entry="$current_date ($git_hash)"
 
     # Extract put_percentage and concurrency from mermaid filename
