@@ -300,9 +300,9 @@ jobs:
           cd zerofs
           git checkout ${{ steps.find.outputs.sha }}
           # Update ZeroFS Cargo.toml to use local SlateDB with current changes
-          if grep -q "slatedb" Cargo.toml; then
+          if grep -q "slatedb" zerofs/Cargo.toml; then
             # Always enable wal_disable feature so we can control it at runtime
-            sed -i 's|slatedb = .*|slatedb = { path = "'$GITHUB_WORKSPACE'/slatedb", features = ["wal_disable"] }|' Cargo.toml
+            sed -i 's|slatedb = .*|slatedb = { path = "'$GITHUB_WORKSPACE'/slatedb", features = ["wal_disable"] }|' zerofs/Cargo.toml
           fi
           # Add wal_enabled field to slatedb::config::Settings
           echo "Finding all files with slatedb::config::Settings..."
