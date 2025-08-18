@@ -413,7 +413,6 @@ jobs:
           docker rm minio || true
 
   notify:
-    # List every top-level job you want to watch
     needs: [microbenchmarks, benchmarks, microbenchmark-pprofs, deterministic-simulation-test, zerofs-kernel-compile-9p]
     if: ${{ always() }}
     permissions:
@@ -428,16 +427,41 @@ jobs:
           script: |
             const {owner, repo} = context.repo;
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const q = `repo:${owner}/${repo} is:issue is:open in:title "Nightly failed"`;
-            const found = await github.rest.search.issuesAndPullRequests({ q, per_page: 1 });
             const body = `Another failure.\n\nRun: ${runUrl}`;
-            if (found.data.total_count > 0) {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: found.data.items[0].number, body
-              });
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            );
+            const hit = issues.find(i => i.title === 'Nightly failed');
+
+            if (hit) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: hit.number, body });
             } else {
               await github.rest.issues.create({
-                owner, repo, title: 'Nightly failed', body: `Run: ${runUrl}`,
+                owner, repo,
+                title: 'Nightly failed',
+                body: `Run: ${runUrl}`,
                 labels: ['ci-failure']
               });
+            }
+
+      - name: 'Close any open "Nightly failed" issues on success'
+        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = `Nightly succeeded.\n\nRun: ${runUrl}\n\nClosing this issue.`;
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            );
+            const toClose = issues.filter(i => i.title === 'Nightly failed');
+
+            for (const issue of toClose) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body });
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed' });
             }
