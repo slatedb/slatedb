@@ -122,8 +122,8 @@ EOF
 
         # Parse existing x-axis values
         while IFS= read -r bar; do
-            if [ -n "$line" ]; then
-                x_array+=("$line")
+            if [ -n "$bar" ]; then
+                x_array+=("$bar")
             fi
         done <<< "$current_x_values"
 
