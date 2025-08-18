@@ -9,6 +9,8 @@ on:
 permissions:
   # Required for storing benchmark results
   contents: write
+  # Required for reading ZeroFS's main action status
+  actions: read
 
 jobs:
   # Run and save nightly microbenchmark data so PRs have a fresh baseline to compare against
@@ -87,7 +89,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ./target/bencher/results/mermaid
-          key: ${{ runner.os }}-mermaid-plots
+          key: ${{ runner.os }}-mermaid-plots-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-mermaid-plots-
 
       - name: Run benchmark
         env:
@@ -106,7 +110,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ./target/bencher/results/mermaid
-          key: ${{ runner.os }}-mermaid-plots
+          key: ${{ runner.os }}-mermaid-plots-${{ github.run_id }}
 
       - name: Add mermaid diagrams to summary
         run: |
@@ -261,41 +265,32 @@ jobs:
           ./mc alias set myminio http://localhost:9000 minioadmin minioadmin
           ./mc mb myminio/slatedb-test || true
 
-      - name: Find last green SHA on Barre/zerofs main
-        id: find
+      - name: Resolve latest commit on Barre/zerofs:main with all-success workflow runs
+        id: resolve
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          owner="Barre"
-          name="zerofs"
-          cursor=null
-          while :; do
-            resp="$(gh api graphql -f owner="$owner" -f name="$name" -f cursor="$cursor" -f query='
-              query($owner:String!, $name:String!, $cursor:String) {
-                repository(owner:$owner, name:$name) {
-                  ref(qualifiedName: "refs/heads/main") {
-                    target { ... on Commit {
-                      history(first: 100, after: $cursor) {
-                        pageInfo { hasNextPage endCursor }
-                        nodes { oid statusCheckRollup { state } }
-                      }
-                    } }
-                  }
-                }
-              }')"
-            sha="$(jq -r '.data.repository.ref.target.history.nodes
-                            | map(select(.statusCheckRollup.state=="SUCCESS"))[0].oid // empty' <<<"$resp")"
-            if [ -n "${sha:-}" ]; then
-              echo "sha=$sha" >> "$GITHUB_OUTPUT"
-              break
-            fi
-            if [ "$(jq -r '.data.repository.ref.target.history.pageInfo.hasNextPage' <<<"$resp")" != "true" ]; then
-              echo "No successful commit found on main" >&2
-              exit 1
-            fi
-            cursor="$(jq -r '.data.repository.ref.target.history.pageInfo.endCursor' <<<"$resp")"
-          done
+          sha="$(
+            gh run list -R Barre/zerofs -b main --limit 300 \
+              --json headSha,status,conclusion,createdAt \
+            | jq -r '
+                sort_by(.headSha, .createdAt)
+                | group_by(.headSha)
+                | map(select(all(.[]; .status=="completed" and .conclusion=="success")))
+                | if length==0 then empty else
+                    map({headSha: .[0].headSha, lastAt: (max_by(.createdAt).createdAt)})
+                    | sort_by(.lastAt)
+                    | last
+                    | .headSha
+                  end
+              '
+          )"
+          if [ -z "${sha:-}" ]; then
+            echo "No commit on main has all-success workflow runs." >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Clone and configure ZeroFS
         run: |
@@ -420,7 +415,6 @@ jobs:
           docker rm minio || true
 
   notify:
-    # List every top-level job you want to watch
     needs: [microbenchmarks, benchmarks, microbenchmark-pprofs, deterministic-simulation-test, zerofs-kernel-compile-9p]
     if: ${{ always() }}
     permissions:
@@ -435,16 +429,41 @@ jobs:
           script: |
             const {owner, repo} = context.repo;
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const q = `repo:${owner}/${repo} is:issue is:open in:title "Nightly failed"`;
-            const found = await github.rest.search.issuesAndPullRequests({ q, per_page: 1 });
             const body = `Another failure.\n\nRun: ${runUrl}`;
-            if (found.data.total_count > 0) {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: found.data.items[0].number, body
-              });
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            );
+            const hit = issues.find(i => i.title === 'Nightly failed');
+
+            if (hit) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: hit.number, body });
             } else {
               await github.rest.issues.create({
-                owner, repo, title: 'Nightly failed', body: `Run: ${runUrl}`,
+                owner, repo,
+                title: 'Nightly failed',
+                body: `Run: ${runUrl}`,
                 labels: ['ci-failure']
               });
+            }
+
+      - name: 'Close any open "Nightly failed" issues on success'
+        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = `Nightly succeeded.\n\nRun: ${runUrl}\n\nClosing this issue.`;
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            );
+            const toClose = issues.filter(i => i.title === 'Nightly failed');
+
+            for (const issue of toClose) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body });
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed' });
             }
