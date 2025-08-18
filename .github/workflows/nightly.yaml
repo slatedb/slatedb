@@ -267,7 +267,6 @@ jobs:
           cd /tmp
           git clone https://github.com/Barre/ZeroFS.git zerofs
           cd zerofs
-          git checkout bea734e71b788b4ba7ac7ed4cef324aac3fd4470
           # Update ZeroFS Cargo.toml to use local SlateDB with current changes
           if grep -q "slatedb" Cargo.toml; then
             # Always enable wal_disable feature so we can control it at runtime
