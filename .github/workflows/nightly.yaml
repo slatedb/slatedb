@@ -89,7 +89,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ./target/bencher/results/mermaid
-          key: ${{ runner.os }}-mermaid-plots
+          key: ${{ runner.os }}-mermaid-plots-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-mermaid-plots-
 
       - name: Run benchmark
         env:
@@ -108,7 +110,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ./target/bencher/results/mermaid
-          key: ${{ runner.os }}-mermaid-plots
+          key: ${{ runner.os }}-mermaid-plots-${{ github.run_id }}
 
       - name: Add mermaid diagrams to summary
         run: |
