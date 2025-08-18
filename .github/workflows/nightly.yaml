@@ -26,7 +26,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ./microbenchmarks-cache
-          key: ${{ runner.os }}-microbenchmarks
+          key: ${{ runner.os }}-microbenchmarks-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-microbenchmarks-
 
       - name: Update microbenchmark result
         uses: benchmark-action/github-action-benchmark@v1
@@ -44,7 +46,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ./microbenchmarks-cache
-          key: ${{ runner.os }}-microbenchmarks
+          key: ${{ runner.os }}-microbenchmarks-${{ github.run_id }}
 
   benchmarks:
     runs-on: warp-ubuntu-latest-x64-16x
