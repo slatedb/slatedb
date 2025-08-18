@@ -261,11 +261,48 @@ jobs:
           ./mc alias set myminio http://localhost:9000 minioadmin minioadmin
           ./mc mb myminio/slatedb-test || true
 
+      - name: Find last green SHA on Barre/zerofs main
+        id: find
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner="Barre"
+          name="zerofs"
+          cursor=null
+          while :; do
+            resp="$(gh api graphql -f owner="$owner" -f name="$name" -f cursor="$cursor" -f query='
+              query($owner:String!, $name:String!, $cursor:String) {
+                repository(owner:$owner, name:$name) {
+                  ref(qualifiedName: "refs/heads/main") {
+                    target { ... on Commit {
+                      history(first: 100, after: $cursor) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes { oid statusCheckRollup { state } }
+                      }
+                    } }
+                  }
+                }
+              }')"
+            sha="$(jq -r '.data.repository.ref.target.history.nodes
+                            | map(select(.statusCheckRollup.state=="SUCCESS"))[0].oid // empty' <<<"$resp")"
+            if [ -n "${sha:-}" ]; then
+              echo "sha=$sha" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            if [ "$(jq -r '.data.repository.ref.target.history.pageInfo.hasNextPage' <<<"$resp")" != "true" ]; then
+              echo "No successful commit found on main" >&2
+              exit 1
+            fi
+            cursor="$(jq -r '.data.repository.ref.target.history.pageInfo.endCursor' <<<"$resp")"
+          done
+
       - name: Clone and configure ZeroFS
         run: |
           # Clone ZeroFS outside of the workspace
           cd /tmp
           git clone https://github.com/Barre/ZeroFS.git zerofs
+          git checkout ${{ steps.find.outputs.sha }}
           cd zerofs
           # Update ZeroFS Cargo.toml to use local SlateDB with current changes
           if grep -q "slatedb" Cargo.toml; then
