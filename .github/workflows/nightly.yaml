@@ -208,7 +208,7 @@ jobs:
           SLATEDB_DST_ROOT: "./"
 
   notify:
-    needs: [microbenchmarks, benchmarks, microbenchmark-pprofs, deterministic-simulation-test, zerofs-kernel-compile-9p]
+    needs: [microbenchmarks, benchmarks, microbenchmark-pprofs, deterministic-simulation-test]
     if: ${{ always() }}
     permissions:
       issues: write
