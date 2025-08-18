@@ -297,8 +297,8 @@ jobs:
           # Clone ZeroFS outside of the workspace
           cd /tmp
           git clone https://github.com/Barre/ZeroFS.git zerofs
-          git checkout ${{ steps.find.outputs.sha }}
           cd zerofs
+          git checkout ${{ steps.find.outputs.sha }}
           # Update ZeroFS Cargo.toml to use local SlateDB with current changes
           if grep -q "slatedb" Cargo.toml; then
             # Always enable wal_disable feature so we can control it at runtime
