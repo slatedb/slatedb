@@ -35,7 +35,6 @@
 //!     async fn handle(
 //!         &mut self,
 //!         message: Message,
-//!         error: Option<SlateDBError>,
 //!     ) -> Result<(), SlateDBError> {
 //!         match message {
 //!             Message::Say(msg) => println!("{}", msg),
@@ -47,6 +46,21 @@
 //!         let mut tickers = Vec::new();
 //!         tickers.push((Duration::from_secs(1), Box::new(|| Message::Say("tick".to_string()))));
 //!         tickers
+//!     }
+//!
+//!     async fn cleanup(
+//!         &mut self,
+//!         messages: BoxStream<'async_trait, T>,
+//!         result: Result<(), SlateDBError>,
+//!     ) -> Result<(), SlateDBError> {
+//!         match result {
+//!             Ok(_) | Err(SlateDBError::BackgroundTaskShutdown) => {
+//!                 messages.for_each(|m| self.handle(m)).await;
+//!             },
+//!             // skipping drain messages on unclean shutdown
+//!             _ => {},
+//!         }
+//!         Ok(())
 //!     }
 //! }
 //!
@@ -177,8 +191,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         // TODO: handle panic here (similar to spawn_bg_task)
         let result = self.run_loop().await;
         let result = self.handle_result(result);
-        let maybe_error = Self::to_option(result.clone());
-        if let Err(e) = self.cleanup(maybe_error).await {
+        if let Err(e) = self.cleanup(result.clone()).await {
             warn!("failed to cleanup dispatcher on shutdown [error={:?}]", e);
         }
         result
@@ -229,11 +242,11 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                 }
                 // if no errors, prioritize messages
                 Some(message) = self.rx.recv() => {
-                    self.handler.handle(message, None).await?;
+                    self.handler.handle(message).await?;
                 },
                 // if no messages, check tickers (select_all barfs if ticker_futures is empty, so check)
                 (message, _, _) = async { select_all(ticker_futures).await }, if tickers_not_empty => {
-                    self.handler.handle(message?, None).await?;
+                    self.handler.handle(message?).await?;
                 },
             }
         }
@@ -278,22 +291,11 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// ## Returns
     ///
     /// The [Result] after cleaning up resources.
-    async fn cleanup(&mut self, maybe_error: Option<SlateDBError>) -> Result<(), SlateDBError> {
+    async fn cleanup(&mut self, result: Result<(), SlateDBError>) -> Result<(), SlateDBError> {
         let messages = futures::stream::unfold(&mut self.rx, |rx| async move {
             rx.recv().await.map(|message| (message, rx))
         });
-        self.handler.cleanup(Box::pin(messages), maybe_error).await
-    }
-
-    /// Converts a [Result] to an [Option].
-    ///
-    /// If the result is [Ok] or [SlateDBError::BackgroundTaskShutdown], returns [None].
-    /// Otherwise, returns [Some(e)] where `e` is the error.
-    fn to_option(result: Result<(), SlateDBError>) -> Option<SlateDBError> {
-        match result {
-            Ok(_) | Err(SlateDBError::BackgroundTaskShutdown) => None,
-            Err(e) => Some(e),
-        }
+        self.handler.cleanup(Box::pin(messages), result).await
     }
 }
 
@@ -381,8 +383,7 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     /// ## Returns
     ///
     /// The [Result] after handling the message.
-    async fn handle(&mut self, message: T, error: Option<SlateDBError>)
-        -> Result<(), SlateDBError>;
+    async fn handle(&mut self, message: T) -> Result<(), SlateDBError>;
 
     /// Cleans up resources.
     ///
@@ -400,6 +401,6 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     async fn cleanup(
         &mut self,
         messages: BoxStream<'async_trait, T>,
-        error: Option<SlateDBError>,
+        result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError>;
 }
