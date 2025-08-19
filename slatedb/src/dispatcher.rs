@@ -68,7 +68,8 @@
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use futures::future::select_all;
+use async_trait::async_trait;
+use futures::{future::select_all, stream::BoxStream, Stream};
 use log::warn;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -164,9 +165,9 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// 1. Running the main event loop ([MessageDispatcher::run_loop]).
     /// 2. Processing the final result when the event loop exits
-    ///    ([MessageDispatcher::handle_result]).
-    /// 3. Draining any remaining messages ([MessageDispatcher::drain]).
-    /// 4. Cleaning up resources ([MessageDispatcher::cleanup]).
+    ///   ([MessageDispatcher::handle_result]).
+    /// 4. Cleaning up resources and processing any remaining messages
+    ///   ([MessageDispatcher::cleanup]).
     ///
     /// ## Returns
     ///
@@ -177,9 +178,6 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         let result = self.run_loop().await;
         let result = self.handle_result(result);
         let maybe_error = Self::to_option(result.clone());
-        if let Err(e) = self.drain(maybe_error.clone()).await {
-            warn!("failed to drain dispatcher on shutdown [error={:?}]", e);
-        }
         if let Err(e) = self.cleanup(maybe_error).await {
             warn!("failed to cleanup dispatcher on shutdown [error={:?}]", e);
         }
@@ -265,29 +263,6 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         self.error_state.reader().read().map_or(result, Err)
     }
 
-    /// Closes the dispatcher's channel and processes any remaining messages.
-    ///
-    /// If drain fails, the error is returned.
-    ///
-    /// ## Arguments
-    ///
-    /// * `maybe_error`: An optional error to pass to the handler. Setting this argument
-    ///   signals to the [MessageHandler] that the database is in an error state during
-    ///   shutdown. An option is used instead of `Result`` because we convert
-    ///   [SlateDBError::BackgroundTaskShutdown] to None, so handlers handle messages
-    ///   cleanly during shutdown when the database is not in an error state.
-    ///
-    /// ## Returns
-    ///
-    /// The [Result] after draining messages.
-    async fn drain(&mut self, maybe_error: Option<SlateDBError>) -> Result<(), SlateDBError> {
-        self.rx.close();
-        while let Some(message) = self.rx.recv().await {
-            self.handler.handle(message, maybe_error.clone()).await?;
-        }
-        Ok(())
-    }
-
     /// Tells the handler to clean up any resources.
     ///
     /// If cleanup fails, the error is returned.
@@ -304,7 +279,13 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// The [Result] after cleaning up resources.
     async fn cleanup(&mut self, maybe_error: Option<SlateDBError>) -> Result<(), SlateDBError> {
-        self.handler.cleanup(maybe_error).await
+        let messages = futures::stream::unfold(&mut self.rx, |rx| async move {
+            match rx.recv().await {
+                Some(message) => Some((message, rx)),
+                None => None,
+            }
+        });
+        self.handler.cleanup(Box::pin(messages), maybe_error).await
     }
 
     /// Converts a [Result] to an [Option].
@@ -375,7 +356,7 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
 ///
 /// It is safe to return errors on failure; the [MessageDispatcher] will handle failures
 /// appropriately.
-#[async_trait::async_trait]
+#[async_trait]
 pub(crate) trait MessageHandler<T: Send>: Send {
     /// Defines message ticker schedules. [MessageDispatcher::run_loop] instantiates a
     /// [MessageDispatcherTicker] for each ticker defined here. Whenever each ticker
@@ -410,6 +391,8 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     ///
     /// ## Arguments
     ///
+    /// * `messages`: An iterator of messages still in the channel after
+    ///   [MessageDispatcher::run_loop] returns.
     /// * `error`: An optional error to pass to the handler. If set, this argument
     ///   signals to the [MessageHandler] that the database is in an error state during
     ///   shutdown.
@@ -417,8 +400,9 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     /// ## Returns
     ///
     /// The [Result] after cleaning up resources.
-    #[allow(unused)]
-    async fn cleanup(&mut self, error: Option<SlateDBError>) -> Result<(), SlateDBError> {
-        Ok(())
-    }
+    async fn cleanup(
+        &mut self,
+        messages: BoxStream<'async_trait, T>,
+        error: Option<SlateDBError>,
+    ) -> Result<(), SlateDBError>;
 }
