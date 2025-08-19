@@ -7,18 +7,14 @@ enum CompactionStatus : byte {
     InProgress,     // Currently executing
     Completed,      // Successfully finished
     Failed,         // Failed with error
-    Cancelled;      // Cancelled by request
 }
 
 table CompactionJob {
-    // CompactorJob ID
+    // CompactorJob ID(Ulid)
     job_id: ulong;
 
     // Reference to the compaction to which this job belongs
     compaction_id: uint64
-
-    // Timestamp when CompactionJob was created
-    created_ts: uint64
     
     // InputSSTables completed before the job started
     completed_input_sst_ids:[CompactedSstId];
@@ -46,7 +42,10 @@ table Compaction {
     // input Sorted Runs
     sorted_runs: [SortedRun];
 
-    // Identifier to reference a Compaction
+    // Identifier to reference a Compaction(Ulid)
+    // Ulid can be used get the human readable timestamp:
+    // https://docs.rs/ulid/latest/ulid/struct.Ulid.html#method.timestamp_ms
+    // Can also be a replacement from created_ts
     compaction_id: uint64;
 
     // Compaction Type to distinguish between internal or external
@@ -54,9 +53,6 @@ table Compaction {
 
     // List of CompactionJob Retries
     job_attempts:[CompactionJob];
-
-    // Creation Timestamp of Compaction
-    created_ts: uint64
 
     // Creation Timestamp of Compaction
     updated_ts: uint64
@@ -71,7 +67,7 @@ table CompactionState {
     compactor_epoch: uint64;
 
     // Compactions in scheduled, in_progress and recently completed compactions
-    active_compactions: [Compaction];
+    recent_compactions: [Compaction];
 
     // Creation Timestamp of CompactionState
     created_at: uint64
