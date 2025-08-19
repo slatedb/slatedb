@@ -75,6 +75,7 @@ This RFC proposes the goals & design for compaction state persistence along with
 - Separate out compaction related details from `Manifest` into a separate `CompactionManifest`
 - Coordination between `Manifest` and `CompactionManifest`
 - Coordination mechanism between externally triggered compactions and the main compaction process.
+- Refactor Manifest store so that it can be used to store both ,manifest and .compactor files.
 
 ## Non-Goals
 
@@ -92,7 +93,7 @@ This RFC proposes the goals & design for compaction state persistence along with
 - [Compaction RFC](https://github.com/slatedb/slatedb/blob/main/rfcs/0002-compaction.md)
 - [Universal Compaction](https://github.com/facebook/rocksdb/wiki/universal-compaction)
 
-## ProblemStatement
+## Problem Statement
 
 This RFC extends discussions in the below github issue. It also addresses several other sub-issues.
 
@@ -129,7 +130,7 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 ## Workflow
 
-### Compaction Workflow
+### Current Compaction Workflow
 
 1. `Compactor` initialises the `CompactionScheduler` and `CompactionEventHandler` during startup. It also initialises event loop that periodically polls manifest, periodically logs and provides progress and handles completed compactions [No change required]
 
@@ -149,7 +150,7 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 9. The task loads all the iterators in a `MergeIterator` struct and runs compactions on it. It discards older expired versions and continues to write to a SST. Once the SST reaches it's threshold size, the SST is written to the active destination SR. Periodically the task also provides stats on task progress. 
 
-10. When a task completes compaction execution, the task returns the {destinationId, outputSSTs} to the to a worker channel to act upon the compaction terminal state
+10. When a task completes compaction execution, the task returns the {destinationId, outputSSTs} to the worker channel to act upon the compaction terminal state
 
 11. The worker task executes the `finishCompaction()` upon successful `CompactionCompletion` and updates the manifests and trigger scheduling of next compactions by calling `maybeScheduleCompaction()`
 
@@ -161,9 +162,8 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 The persistent state contains the complete view of all compaction activity:
 
 ```rust
-
 pub(crate) struct CompactionJob {
-    pub(crate) id: Uuid,
+    pub(crate) id: Ulid,
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
@@ -238,7 +238,7 @@ pub(crate) struct FenceableCompactionState {
 
     - The existing validations in `submit_compaction` method.
 
-4. When a compaction successfully validates, it is appended to the local copy of compactor_state `active_compaction` param and `new_compactions` list.
+4. When a compaction successfully validates, it is appended to the local copy of compactor_state `compactions` param and `new_compactions` list.
 
 5. Try writing the compactor_state to the next sequential .compactor file.
 
@@ -253,7 +253,7 @@ pub(crate) struct FenceableCompactionState {
 
     [When this step is successful, compaction is persisted in the .compactor file]
 
-6. Now, `start_compaction()` for each compaction in the `active_compaction` param if the count of running compactions is below threshold.
+6. Now, `start_compaction()` for each compaction in the `compactions` param if the count of running compactions is below threshold.
 
 7. A new `CompactionJob` is created using the last job_attempt or afresh if it the first CompactionJob. The `CompactionJob` is then handed to the CompactionExecutor for execution.
 
@@ -263,7 +263,7 @@ pub(crate) struct FenceableCompactionState {
 
     - Writing compaction_state updates to the .compactor file
 
-The CompactionExecutor would persist the compaction_state in .compactor file by updating the `active_compaction` param (refer state management protocol). Two possible options:
+The CompactionExecutor would persist the compaction_state in .compactor file by updating the `compactions` param (refer state management protocol). Two possible options:
 
     - Each compactionExecutor Job tries writing to the .compactor file.
 
@@ -295,7 +295,9 @@ The idea is to leverage the existing compaction workflow. Need a mechanism to pl
 
     - The existing validations in `submit_compaction` method.
 
-4. When a compaction successfully validates, it is appended to the local copy of compactor_state `active_compaction` param and `new_compactions` list.
+  Note: Invalid compactions would be dropped from the list of compactions during validation.
+
+4. When a compaction successfully validates, it is appended to the local copy of compactor_state `compactions` param and `new_compactions` list.
 
 5. Try writing the compactor_state to the next sequential .compactor file.
 
@@ -325,7 +327,7 @@ The idea is to leverage the existing compaction workflow. Need a mechanism to pl
 
 4. These {key, seq_number, sst_iterator} tuple is then added to a min_heap to decide the right order across a group of SRs( can be thought of as a way to get a sorted list from all the sorted SR SSTs).
 
-5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each and persist it to the .compactor file by updating the compaction in `active_compaction`. ( This is the CompactionJob progress section in State Management Protocol) 
+5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each and persist it to the .compactor file by updating the compaction in `compactions`. ( This is the CompactionJob progress section in State Management Protocol) 
 
 Note:
  - Step (3) and (4) are already implemented in the `seek()` in merge_iterator. It should handle Tombstones, TTL/Expiration
@@ -379,7 +381,7 @@ The section below is under discussion here: https://github.com/slatedb/slatedb/p
 
 ### Protocol for State Management of Manifest and CompactionState
 
-This a proposol for Statement Management of Manifest and CompactionState. The protocol is based on the following principals:
+This a proposal for Statement Management of Manifest and CompactionState. The protocol is based on the following principals:
 
 - manifest should be source of truth for reader and writer clients (and should thus contain SRs)
 
@@ -461,6 +463,8 @@ At this point, the compactor has been successfully initialised. Any updates to w
 3. Write the in-memory .manifest state to the next sequential .manifest file. If the file(00007.manifest) exists, it could be due to two possibilities:
 
     - Writer has written a new manifest.
+
+    - Reader has written a new manifest with new checkpoints.
 
     - Compactor has written a new manifest.
 
@@ -628,7 +632,6 @@ pub enum CompactionStatusResponse {
     InProgress,     // Currently executing
     Completed,      // Successfully finished
     Failed,         // Failed with error
-    Cancelled,      // Cancelled by request
 }
 
 /// Progress information for an active compaction
@@ -677,7 +680,7 @@ pub struct CompactionInfo {
 ### **Garbage Collection Integration**
 The garbage collection of .compactor file can leverage the existing logic of garbage collecting .sst files and .manifest files. 
 
-The .sst file is deemed to be garbage collected if it satisfies  the following conditions:
+The .sst file is deemed to be garbage collected if it satisfies the following conditions:
 
   - SST is older than the min age configured.
 
