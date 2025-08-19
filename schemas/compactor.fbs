@@ -1,5 +1,10 @@
 include "sst.fbs";
 
+table Ulid {
+    high: uint64;
+    low: uint64;
+}
+
 enum CompactionType : byte { Internal = 0, External; }
 
 enum CompactionStatus : byte {
@@ -11,10 +16,10 @@ enum CompactionStatus : byte {
 
 table CompactionJob {
     // CompactorJob ID(Ulid)
-    job_id: ulong;
+    job_id: Ulid;
 
     // Reference to the compaction to which this job belongs
-    compaction_id: uint64
+    compaction_id: Ulid
     
     // InputSSTables completed before the job started
     completed_input_sst_ids:[CompactedSstId];
@@ -46,7 +51,7 @@ table Compaction {
     // Ulid can be used get the human readable timestamp:
     // https://docs.rs/ulid/latest/ulid/struct.Ulid.html#method.timestamp_ms
     // Can also be a replacement from created_ts
-    compaction_id: uint64;
+    compaction_id: Ulid;
 
     // Compaction Type to distinguish between internal or external
     compaction_type: CompactionType (required);
