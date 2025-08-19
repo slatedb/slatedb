@@ -2,7 +2,7 @@ use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -32,15 +32,18 @@ pub struct TransactionManager {
 struct TransactionManagerInner {
     /// Map of transaction state ID to weak reference.
     active_txns: HashMap<Uuid, Arc<TransactionState>>,
-    // Tracks recently committed transaction states used for conflict checks at commit time.
-    // We can safely garbage collect an entry when ALL active transactions and snapshots
-    // have started_seq strictly greater than this entry's committed_seq.
-    // Notes:
-    // - Snapshots are treated as read-only transactions and included in the active set.
-    // - Non-transactional writes are modeled as single-op transactions with
-    //   started_seq == committed_seq and follow the same GC rule.
-    // - If there are no active transactions/snapshots, this deque can be drained.
-    recent_committed_txns: VecDeque<Arc<TransactionState>>,
+    /// Tracks recently committed transaction states for conflict checks at commit.
+    ///
+    /// An entry can be garbage collected when *all* active transactions (excluding snapshots,
+    /// since snapshots are read-only so it's impossible to have any conflict) have `started_seq`
+    /// strictly greater than the entry's `committed_seq`.
+    ///
+    /// Notes:
+    /// - Snapshots are treated as read-only transactions.
+    /// - Non-transactional writes are modeled as single-op transactions with `started_seq ==
+    ///   committed_seq` and follow the same GC rule.
+    /// - If there are no active non-readonly transactions, this deque can be fully drained.
+    recent_committed_txns: BTreeMap<u64, Arc<TransactionState>>,
 }
 
 impl TransactionManager {
@@ -48,7 +51,7 @@ impl TransactionManager {
         Self {
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
-                recent_committed_txns: VecDeque::new(),
+                recent_committed_txns: BTreeMap::new(),
             })),
             db_rand,
         }
