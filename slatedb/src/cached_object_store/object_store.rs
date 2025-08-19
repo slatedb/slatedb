@@ -189,7 +189,7 @@ impl CachedObjectStore {
             Err(e) => {
                 // Log warning but don't fail the PUT operation
                 warn!(
-                    "Failed to save head to disk cache for {} with. Error {}",
+                    "failed to save head to disk cache [location={}, error={:?}]",
                     location, e
                 );
             }

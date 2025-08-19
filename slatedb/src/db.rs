@@ -506,7 +506,7 @@ impl DbInner {
                         .load_files_to_cache(l0_sst_paths, max_cache_size)
                         .await
                     {
-                        warn!("Failed to preload L0 SSTs to cache: {:?}", e);
+                        warn!("failed to preload L0 SSTs to cache [error={:?}]", e);
                     }
                 }
             }
