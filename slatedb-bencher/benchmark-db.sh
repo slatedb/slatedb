@@ -89,6 +89,7 @@ config:
   xyChart:
     chartOrientation: horizontal
     height: 768
+    width: 1024
   themeVariables:
     xyChart:
       plotColorPalette: '#1e81b0, #e28743'
@@ -97,8 +98,8 @@ xychart-beta
     title "SlateDB [puts=${put_percentage}%, threads=${concurrency}, 🔵=puts, 🟠=get]"
     x-axis ["$x_entry"]
     y-axis "requests/s" 0 --> $y_max
-    bar [$put_value]
-    bar [$get_value]
+    line [$put_value]
+    line [$get_value]
 EOF
     else
         # Update existing mermaid file
@@ -107,8 +108,8 @@ EOF
         # Read current content (match only Mermaid series lines, not YAML like plotColorPalette)
         local title_line=$(grep -E "^[[:space:]]*title[[:space:]]" "$mermaid_file" | sed 's/^[[:space:]]*//')
         local x_axis_line=$(grep -E "^[[:space:]]*x-axis[[:space:]]*\\[" "$mermaid_file")
-        local put_line=$(grep -E "^[[:space:]]*bar[[:space:]]*\\[" "$mermaid_file" | head -n1)
-        local get_line=$(grep -E "^[[:space:]]*bar[[:space:]]*\\[" "$mermaid_file" | tail -n1)
+        local put_line=$(grep -E "^[[:space:]]*line[[:space:]]*\\[" "$mermaid_file" | head -n1)
+        local get_line=$(grep -E "^[[:space:]]*line[[:space:]]*\\[" "$mermaid_file" | tail -n1)
 
         # Extract current values
         local current_x_values=$(echo "$x_axis_line" | sed 's/.*\[//;s/\].*//' | tr ',' '\n' | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
@@ -121,9 +122,9 @@ EOF
         local get_array=()
 
         # Parse existing x-axis values
-        while IFS= read -r bar; do
-            if [ -n "$bar" ]; then
-                x_array+=("$bar")
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                x_array+=("$line")
             fi
         done <<< "$current_x_values"
 
@@ -133,16 +134,16 @@ EOF
         # Parse existing get values
         IFS=',' read -ra get_array <<< "$current_get_values"
 
-        # Add new values
-        x_array+=("$x_entry")
-        put_array+=("$put_value")
-        get_array+=("$get_value")
+        # Prepend new values (newest first)
+        x_array=("$x_entry" "${x_array[@]}")
+        put_array=("$put_value" "${put_array[@]}")
+        get_array=("$get_value" "${get_array[@]}")
 
-        # Keep only last 30 values if we have more
+        # Keep only first 30 values (newest-first) if we have more
         if [ ${#x_array[@]} -gt 30 ]; then
-            x_array=("${x_array[@]: -30}")
-            put_array=("${put_array[@]: -30}")
-            get_array=("${get_array[@]: -30}")
+            x_array=("${x_array[@]:0:30}")
+            put_array=("${put_array[@]:0:30}")
+            get_array=("${get_array[@]:0:30}")
         fi
 
         # Build new x-axis string
@@ -156,7 +157,7 @@ EOF
         new_x_axis="$new_x_axis]"
 
         # Build new put line string
-        local new_put_line="bar ["
+        local new_put_line="line ["
         for i in "${!put_array[@]}"; do
             if [ $i -gt 0 ]; then
                 new_put_line="$new_put_line, "
@@ -166,7 +167,7 @@ EOF
         new_put_line="$new_put_line]"
 
         # Build new get line string
-        local new_get_line="bar ["
+        local new_get_line="line ["
         for i in "${!get_array[@]}"; do
             if [ $i -gt 0 ]; then
                 new_get_line="$new_get_line, "
@@ -184,6 +185,10 @@ EOF
         cat > "$mermaid_file" << EOF
 ---
 config:
+  xyChart:
+    chartOrientation: horizontal
+    height: 768
+    width: 1024
   themeVariables:
     xyChart:
       plotColorPalette: '#1e81b0, #e28743'
