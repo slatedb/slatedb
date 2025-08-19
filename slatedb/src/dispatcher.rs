@@ -70,13 +70,11 @@ use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use futures::future::select_all;
 use log::warn;
-use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     clock::{SystemClock, SystemClockTicker},
-    db_state::DbState,
     error::SlateDBError,
     utils::WatchableOnceCell,
 };
@@ -107,7 +105,7 @@ pub(crate) struct MessageDispatcher<T: Send + std::fmt::Debug> {
     rx: mpsc::UnboundedReceiver<T>,
     clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
-    state: Option<Arc<RwLock<DbState>>>,
+    error_state: WatchableOnceCell<SlateDBError>,
 }
 
 impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
@@ -125,10 +123,10 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         handler: Box<dyn MessageHandler<T>>,
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
-        state: Option<Arc<RwLock<DbState>>>,
+        error_state: WatchableOnceCell<SlateDBError>,
     ) -> Self {
         let (_tx, rx) = mpsc::unbounded_channel();
-        Self::new_with_channel(handler, rx, clock, cancellation_token, state)
+        Self::new_with_channel(handler, rx, clock, cancellation_token, error_state)
     }
 
     /// Creates a new [MessageDispatcher] with a channel. This is the primary way to
@@ -148,14 +146,14 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
-        state: Option<Arc<RwLock<DbState>>>,
+        error_state: WatchableOnceCell<SlateDBError>,
     ) -> Self {
         Self {
             handler,
             rx,
             clock,
             cancellation_token,
-            state,
+            error_state,
         }
     }
 
@@ -208,11 +206,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// or an uncaught error.
     async fn run_loop(&mut self) -> Result<(), SlateDBError> {
         let cancellation_token = self.cancellation_token.clone();
-        let mut error_watcher = self
-            .state
-            .as_ref()
-            .map(|s| s.read().error_reader())
-            .unwrap_or(WatchableOnceCell::new().reader());
+        let mut error_watcher = self.error_state.reader();
         let mut tickers = self
             .handler
             .tickers()
@@ -263,21 +257,12 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// A [Result] containing the [DbState::error] if it was already set, or the result
     /// of [MessageDispatcher::handle_result] otherwise.
     fn handle_result(&self, result: Result<(), SlateDBError>) -> Result<(), SlateDBError> {
-        if let Some(ref state) = self.state {
-            // if we failed, notify state (won't overwrite if state is already failed)
-            if let Err(ref e) = result {
-                state.write().record_fatal_error(e.clone());
-            }
-            // if there is an error state, use it
-            state
-                .read()
-                .error_reader()
-                .read()
-                .map_or(result, Err)
-        } else {
-            // no state, so simply use our error when draining
-            result
+        // if we failed, notify state (won't overwrite if state is already failed)
+        if let Err(ref e) = result {
+            self.error_state.write(e.clone());
         }
+        // use the first error that occurred (could be ours, or a previous failure)
+        self.error_state.reader().read().map_or(result, Err)
     }
 
     /// Closes the dispatcher's channel and processes any remaining messages.
