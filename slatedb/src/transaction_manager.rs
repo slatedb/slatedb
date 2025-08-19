@@ -2,7 +2,7 @@ use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -12,11 +12,14 @@ pub(crate) struct TransactionState {
     /// id. we can not use seq as the txn id, because it's possible to start multiple
     /// transactions with the same seq number.
     id: Uuid,
+    pub(crate) read_only: bool,
     /// seq is the sequence number when the transaction started. this is used to establish
     /// a snapshot of this transaction. we should ensure the compactor cannot recycle
     /// the row versions that are below any seq number of active transactions.
     pub(crate) started_seq: u64,
-    /// the sequence number when the transaction committed.
+    /// the sequence number when the transaction committed. this field is only set AFTER
+    /// a transaction is committed. this is used to check conflicts with recent committed
+    /// transactions.
     pub(crate) committed_seq: Option<u64>,
     /// the write keys of the transaction.
     pub(crate) write_keys: HashSet<Bytes>,
@@ -43,7 +46,7 @@ struct TransactionManagerInner {
     /// - Non-transactional writes are modeled as single-op transactions with `started_seq ==
     ///   committed_seq` and follow the same GC rule.
     /// - If there are no active non-readonly transactions, this deque can be fully drained.
-    recent_committed_txns: BTreeMap<u64, Arc<TransactionState>>,
+    recent_committed_txns: VecDeque<Arc<TransactionState>>,
 }
 
 impl TransactionManager {
@@ -51,19 +54,20 @@ impl TransactionManager {
         Self {
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
-                recent_committed_txns: BTreeMap::new(),
+                recent_committed_txns: VecDeque::new(),
             })),
             db_rand,
         }
     }
 
     /// Register a transaction state with a specific ID
-    pub fn new_txn(&self, seq: u64) -> Arc<TransactionState> {
+    pub fn new_txn(&self, seq: u64, read_only: bool) -> Arc<TransactionState> {
         let id = self.db_rand.rng().gen_uuid();
         let txn_state = Arc::new(TransactionState {
             id,
             started_seq: seq,
             committed_seq: None,
+            read_only,
             write_keys: HashSet::new(),
         });
         {
