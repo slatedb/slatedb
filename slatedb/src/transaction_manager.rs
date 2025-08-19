@@ -2,7 +2,7 @@ use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use crate::WriteBatch;
 use bytes::Bytes;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -18,21 +18,34 @@ pub(crate) struct TransactionState {
     /// a snapshot of this transaction. we should ensure the compactor cannot recycle
     /// the row versions that are below any seq number of active transactions.
     pub(crate) started_seq: u64,
+    /// Mutable state protected by a Mutex
+    inner: Mutex<TransactionStateInner>,
+}
+
+struct TransactionStateInner {
     /// the sequence number when the transaction committed. this field is only set AFTER
     /// a transaction is committed. this is used to check conflicts with recent committed
     /// transactions.
-    pub(crate) committed_seq: Option<u64>,
+    committed_seq: Option<u64>,
     /// the write keys of the transaction.
-    pub(crate) write_keys: HashSet<Bytes>,
+    write_keys: HashSet<Bytes>,
 }
 
 impl TransactionState {
-    fn track_write_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
-        todo!()
+    fn track_write_keys(&self, keys: impl IntoIterator<Item = Bytes>) {
+        self.inner.lock().write_keys.extend(keys);
     }
 
-    fn mark_as_committed(&mut self, seq: u64) {
-        self.committed_seq = Some(seq);
+    fn mark_as_committed(&self, seq: u64) {
+        self.inner.lock().committed_seq = Some(seq);
+    }
+
+    pub(crate) fn committed_seq(&self) -> Option<u64> {
+        self.inner.lock().committed_seq
+    }
+
+    pub(crate) fn write_keys(&self) -> HashSet<Bytes> {
+        self.inner.lock().write_keys.clone()
     }
 }
 
@@ -77,9 +90,11 @@ impl TransactionManager {
         let txn_state = Arc::new(TransactionState {
             id,
             started_seq: seq,
-            committed_seq: None,
             read_only,
-            write_keys: HashSet::new(),
+            inner: Mutex::new(TransactionStateInner {
+                committed_seq: None,
+                write_keys: HashSet::new(),
+            }),
         });
         {
             let mut inner = self.inner.write();
@@ -99,8 +114,14 @@ impl TransactionManager {
     }
 
     /// Mark the txn as committed, and record it in recent_committed_txns.
-    pub fn mark_txn_as_committed(&self, txn_state: &TransactionState, seq: u64) {
-        todo!();
+    pub fn mark_txn_as_committed(&self, txn_id: &Uuid, seq: u64) {
+        let mut inner = self.inner.write();
+
+        // Find and remove the transaction from active_txns
+        if let Some(txn_state) = inner.active_txns.remove(txn_id) {
+            txn_state.mark_as_committed(seq);
+            inner.recent_committed_txns.push_back(txn_state);
+        }
     }
 
     /// The min started_seq of all active transactions, including snapshots. This value
@@ -122,10 +143,34 @@ impl TransactionManager {
     /// The min started_seq of all non-readonly transactions, this seq is useful to garbage
     /// collect the entries in the `recent_committed_txns` deque.
     pub fn min_conflict_check_seq(&self) -> Option<u64> {
-        todo!();
+        let inner = self.inner.read();
+        inner
+            .active_txns
+            .values()
+            .filter(|state| !state.read_only)
+            .map(|state| state.started_seq)
+            .min()
     }
 
     pub fn check_conflict(&self, txn_state: &TransactionState) -> bool {
-        todo!();
+        let inner = self.inner.read();
+
+        // Check for conflicts with recently committed transactions
+        for committed_txn in &inner.recent_committed_txns {
+            // Skip if the committed transaction started after our transaction
+            if committed_txn.started_seq >= txn_state.started_seq {
+                continue;
+            }
+
+            // Check for write-write conflicts
+            if !txn_state
+                .write_keys()
+                .is_disjoint(&committed_txn.write_keys())
+            {
+                return true; // Conflict detected
+            }
+        }
+
+        false // No conflicts found
     }
 }
