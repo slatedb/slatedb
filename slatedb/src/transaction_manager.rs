@@ -27,27 +27,12 @@ pub(crate) struct TransactionState {
 }
 
 impl TransactionState {
-    fn with_write_keys(self: Arc<Self>, keys: impl IntoIterator<Item = Bytes>) -> Arc<Self> {
-        let mut new_txn_state = Self {
-            id: self.id,
-            started_seq: self.started_seq,
-            read_only: self.read_only,
-            committed_seq: self.committed_seq,
-            write_keys: self.write_keys.clone(),
-        };
-        new_txn_state.write_keys.extend(keys);
-        Arc::new(new_txn_state)
+    fn track_write_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
+        self.write_keys.extend(keys);
     }
 
-    fn with_committed(self: Arc<Self>, seq: u64) -> Arc<Self> {
-        let new_txn_state = Self {
-            id: self.id,
-            started_seq: self.started_seq,
-            read_only: self.read_only,
-            committed_seq: Some(seq),
-            write_keys: self.write_keys.clone(),
-        };
-        Arc::new(new_txn_state)
+    fn mark_as_committed(&mut self, seq: u64) {
+        self.committed_seq = Some(seq);
     }
 }
 
@@ -60,7 +45,7 @@ pub struct TransactionManager {
 
 struct TransactionManagerInner {
     /// Map of transaction state ID to weak reference.
-    active_txns: HashMap<Uuid, Arc<TransactionState>>,
+    active_txns: HashMap<Uuid, TransactionState>,
     /// Tracks recently committed transaction states for conflict checks at commit.
     ///
     /// An entry can be garbage collected when *all* active transactions (excluding snapshots,
@@ -72,7 +57,7 @@ struct TransactionManagerInner {
     /// - Non-transactional writes are modeled as single-op transactions with `started_seq ==
     ///   committed_seq` and follow the same GC rule.
     /// - If there are no active non-readonly transactions, this deque can be fully drained.
-    recent_committed_txns: VecDeque<Arc<TransactionState>>,
+    recent_committed_txns: VecDeque<TransactionState>,
 }
 
 impl TransactionManager {
@@ -89,17 +74,17 @@ impl TransactionManager {
     /// Register a transaction state with a specific ID
     pub fn new_txn(&self, seq: u64, read_only: bool) -> (Uuid, u64) {
         let id = self.db_rand.rng().gen_uuid();
-        let txn_state = Arc::new(TransactionState {
+        let txn_state = TransactionState {
             id,
             started_seq: seq,
             read_only,
             committed_seq: None,
             write_keys: HashSet::new(),
-        });
+        };
 
         {
             let mut inner = self.inner.write();
-            inner.active_txns.insert(id, txn_state.clone());
+            inner.active_txns.insert(id, txn_state);
         }
 
         (id, seq)
@@ -117,7 +102,7 @@ impl TransactionManager {
     pub fn track_txn_write_keys(&self, txn_id: &Uuid, keys: impl IntoIterator<Item = Bytes>) {
         let mut inner = self.inner.write();
         if let Some(entry) = inner.active_txns.get_mut(txn_id) {
-            *entry = entry.clone().with_write_keys(keys);
+            entry.track_write_keys(keys);
         }
     }
 
@@ -126,9 +111,9 @@ impl TransactionManager {
         let mut inner = self.inner.write();
 
         // Find and remove the transaction from active_txns
-        if let Some(txn_state) = inner.active_txns.remove(txn_id) {
-            let committed_txn_state = txn_state.with_committed(seq);
-            inner.recent_committed_txns.push_back(committed_txn_state);
+        if let Some(mut txn_state) = inner.active_txns.remove(txn_id) {
+            txn_state.mark_as_committed(seq);
+            inner.recent_committed_txns.push_back(txn_state);
         }
     }
 
