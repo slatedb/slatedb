@@ -18,8 +18,8 @@ pub(crate) struct TransactionState {
     /// a snapshot of this transaction. we should ensure the compactor cannot recycle
     /// the row versions that are below any seq number of active transactions.
     pub(crate) started_seq: u64,
-    /// Mutable state protected by a Mutex
-    inner: Mutex<TransactionStateInner>,
+    /// Mutable state protected by a RwLock
+    inner: RwLock<TransactionStateInner>,
 }
 
 struct TransactionStateInner {
@@ -33,19 +33,19 @@ struct TransactionStateInner {
 
 impl TransactionState {
     fn track_write_keys(&self, keys: impl IntoIterator<Item = Bytes>) {
-        self.inner.lock().write_keys.extend(keys);
+        self.inner.write().write_keys.extend(keys);
     }
 
     fn mark_as_committed(&self, seq: u64) {
-        self.inner.lock().committed_seq = Some(seq);
+        self.inner.write().committed_seq = Some(seq);
     }
 
     pub(crate) fn committed_seq(&self) -> Option<u64> {
-        self.inner.lock().committed_seq
+        self.inner.read().committed_seq
     }
 
     pub(crate) fn write_keys(&self) -> HashSet<Bytes> {
-        self.inner.lock().write_keys.clone()
+        self.inner.read().write_keys.clone()
     }
 }
 
@@ -91,7 +91,7 @@ impl TransactionManager {
             id,
             started_seq: seq,
             read_only,
-            inner: Mutex::new(TransactionStateInner {
+            inner: RwLock::new(TransactionStateInner {
                 committed_seq: None,
                 write_keys: HashSet::new(),
             }),
