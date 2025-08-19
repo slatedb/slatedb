@@ -1,4 +1,5 @@
 use crate::rand::DbRand;
+use crate::types::RowEntry;
 use crate::utils::IdGenerator;
 use crate::WriteBatch;
 use bytes::Bytes;
@@ -98,22 +99,33 @@ impl TransactionManager {
         inner.recycle_recent_committed_txns();
     }
 
-    pub fn track_txn_write_keys(&self, txn_id: &Uuid, keys: impl IntoIterator<Item = Bytes>) {
-        let mut inner = self.inner.write();
-        if let Some(entry) = inner.active_txns.get_mut(txn_id) {
-            entry.track_write_keys(keys);
-        }
-    }
-
     /// Mark the txn as committed, and record it in recent_committed_txns.
-    pub fn mark_txn_as_committed(&self, txn_id: &Uuid, seq: u64) {
+    pub fn try_mark_txn_as_committed(
+        &self,
+        txn_id: &Uuid,
+        keys: &HashSet<Bytes>,
+        committed_seq: u64,
+    ) -> bool {
         let mut inner = self.inner.write();
 
-        // Find and remove the transaction from active_txns
+        {
+            let txn_state = match inner.active_txns.get(txn_id) {
+                Some(txn_state) => txn_state,
+                None => return false,
+            };
+
+            if inner.check_conflict(keys, txn_state.started_seq, committed_seq) {
+                return false;
+            }
+        }
+
+        // remove the transaction from active_txns, and add it to recent_committed_txns
         if let Some(mut txn_state) = inner.active_txns.remove(txn_id) {
-            txn_state.mark_as_committed(seq);
+            txn_state.mark_as_committed(committed_seq);
             inner.recent_committed_txns.push_back(txn_state);
         }
+
+        true
     }
 
     /// The min started_seq of all active transactions, including snapshots. This value
@@ -130,30 +142,6 @@ impl TransactionManager {
             .values()
             .map(|state| state.started_seq)
             .min()
-    }
-
-    pub fn check_conflict(&self, txn_id: &Uuid) -> bool {
-        let inner = self.inner.read();
-
-        let txn_state = match inner.active_txns.get(txn_id) {
-            Some(txn_state) => txn_state,
-            None => return false,
-        };
-
-        // Check for conflicts with recently committed transactions
-        for committed_txn in &inner.recent_committed_txns {
-            // Skip if the committed transaction started after our transaction
-            if committed_txn.started_seq >= txn_state.started_seq {
-                continue;
-            }
-
-            // Check for write-write conflicts
-            if !txn_state.write_keys.is_disjoint(&committed_txn.write_keys) {
-                return true; // Conflict detected
-            }
-        }
-
-        false
     }
 }
 
@@ -188,5 +176,14 @@ impl TransactionManagerInner {
             // No active non-readonly transactions, can drain the entire deque
             self.recent_committed_txns.clear();
         }
+    }
+
+    fn check_conflict(
+        &self,
+        write_keys: &HashSet<Bytes>,
+        started_seq: u64,
+        committed_seq: u64,
+    ) -> bool {
+        todo!()
     }
 }
