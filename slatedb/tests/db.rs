@@ -6,13 +6,24 @@ use slatedb::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::EnvFilter;
 use std::collections::HashMap;
+use std::error::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_writers_and_readers() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+        .with_test_writer()
+        .init();
+
     const NUM_WRITERS: usize = 10;
     const NUM_READERS: usize = 2;
     const WRITES_PER_TASK: usize = 100;
@@ -51,6 +62,7 @@ async fn test_concurrent_writers_and_readers() {
             .await
             .unwrap(),
     );
+    let reader_cancellation_token = CancellationToken::new();
 
     // Writer tasks: each writer writes to its own key with incrementing values
     let writer_handles = (0..NUM_WRITERS)
@@ -83,23 +95,23 @@ async fn test_concurrent_writers_and_readers() {
     let reader_handles = (0..NUM_READERS)
         .map(|reader_id| {
             let db = db.clone();
+            let reader_cancellation_token = reader_cancellation_token.clone();
 
             tokio::spawn(async move {
                 let mut latest_values = HashMap::<usize, AtomicU64>::new();
                 let mut iterations = 0;
                 let mut rng = StdRng::from_os_rng();
 
-                loop {
+                while !reader_cancellation_token.is_cancelled() {
                     // Pick a random key and validate that it's higher than the last value for that key
                     let key = rng.random_range(0..NUM_WRITERS);
                     if let Some(bytes) = db
                         .get(zero_pad_key(key.try_into().unwrap(), KEY_LENGTH))
-                        .await
-                        .expect("Failed to read value")
+                        .await?
                     {
                         // Convert bytes to u64 value
                         let value_bytes: [u8; 8] =
-                            bytes.as_ref().try_into().expect("Invalid value size");
+                            bytes.as_ref().try_into().map_err(|_| slatedb::Error::operation("invalid byte conversion".to_string()))?;
                         let current_value = u64::from_be_bytes(value_bytes);
 
                         // Check if this value is greater than the last seen value for this key
@@ -139,6 +151,7 @@ async fn test_concurrent_writers_and_readers() {
                         }
                     }
                 }
+                Ok::<(), slatedb::Error>(())
             })
         })
         .collect::<Vec<_>>();
