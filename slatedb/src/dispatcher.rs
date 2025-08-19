@@ -69,7 +69,7 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use futures::{future::select_all, stream::BoxStream, Stream};
+use futures::{future::select_all, stream::BoxStream};
 use log::warn;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -280,10 +280,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// The [Result] after cleaning up resources.
     async fn cleanup(&mut self, maybe_error: Option<SlateDBError>) -> Result<(), SlateDBError> {
         let messages = futures::stream::unfold(&mut self.rx, |rx| async move {
-            match rx.recv().await {
-                Some(message) => Some((message, rx)),
-                None => None,
-            }
+            rx.recv().await.map(|message| (message, rx))
         });
         self.handler.cleanup(Box::pin(messages), maybe_error).await
     }
