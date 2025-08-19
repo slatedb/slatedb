@@ -92,14 +92,14 @@ impl TransactionManager {
     /// Remove a transaction state when it's dropped. The dropped txn is considered
     /// as rolled back, no side effect is ever produced.
     pub fn drop_txn(&self, txn_state: &TransactionState) {
-        {
-            let mut inner = self.inner.write();
-            inner.active_txns.remove(&txn_state.id);
-        }
+        let mut inner = self.inner.write();
+        inner.active_txns.remove(&txn_state.id);
+
+        // TODO: clean up the recent_committed_txns deque
     }
 
     /// Mark the txn as committed, and record it in recent_committed_txns.
-    pub fn mark_committed(&self, txn_state: &TransactionState, seq: u64) {
+    pub fn mark_txn_as_committed(&self, txn_state: &TransactionState, seq: u64) {
         todo!();
     }
 
