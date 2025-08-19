@@ -12,7 +12,7 @@ pub(crate) struct TransactionState {
     /// ends, we can remove the transaction state from the transaction manager by this
     /// id. we can not use seq as the txn id, because it's possible to start multiple
     /// transactions with the same seq number.
-    id: Uuid,
+    pub(crate) id: Uuid,
     pub(crate) read_only: bool,
     /// seq is the sequence number when the transaction started. this is used to establish
     /// a snapshot of this transaction. we should ensure the compactor cannot recycle
@@ -91,9 +91,9 @@ impl TransactionManager {
 
     /// Remove a transaction state when it's dropped. The dropped txn is considered
     /// as rolled back, no side effect is ever produced.
-    pub fn drop_txn(&self, txn_state: &TransactionState) {
+    pub fn drop_txn(&self, txn_id: &Uuid) {
         let mut inner = self.inner.write();
-        inner.active_txns.remove(&txn_state.id);
+        inner.active_txns.remove(txn_id);
 
         // TODO: clean up the recent_committed_txns deque
     }

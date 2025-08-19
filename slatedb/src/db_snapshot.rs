@@ -148,7 +148,7 @@ impl DbRead for DbSnapshot {
 /// Unregister from transaction manager when dropped.
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
-        self.txn_manager.drop_txn(self.txn_state.as_ref());
+        self.txn_manager.drop_txn(&self.txn_state.id);
     }
 }
 
