@@ -18,11 +18,6 @@ pub(crate) struct TransactionState {
     /// a snapshot of this transaction. we should ensure the compactor cannot recycle
     /// the row versions that are below any seq number of active transactions.
     pub(crate) started_seq: u64,
-    /// Mutable state protected by a RwLock
-    inner: RwLock<TransactionStateInner>,
-}
-
-struct TransactionStateInner {
     /// the sequence number when the transaction committed. this field is only set AFTER
     /// a transaction is committed. this is used to check conflicts with recent committed
     /// transactions.
@@ -32,20 +27,27 @@ struct TransactionStateInner {
 }
 
 impl TransactionState {
-    fn track_write_keys(&self, keys: impl IntoIterator<Item = Bytes>) {
-        self.inner.write().write_keys.extend(keys);
+    fn with_write_keys(self: Arc<Self>, keys: impl IntoIterator<Item = Bytes>) -> Arc<Self> {
+        let mut new_txn_state = Self {
+            id: self.id,
+            started_seq: self.started_seq,
+            read_only: self.read_only,
+            committed_seq: self.committed_seq,
+            write_keys: self.write_keys.clone(),
+        };
+        new_txn_state.write_keys.extend(keys);
+        Arc::new(new_txn_state)
     }
 
-    fn mark_as_committed(&self, seq: u64) {
-        self.inner.write().committed_seq = Some(seq);
-    }
-
-    pub(crate) fn committed_seq(&self) -> Option<u64> {
-        self.inner.read().committed_seq
-    }
-
-    pub(crate) fn write_keys(&self) -> HashSet<Bytes> {
-        self.inner.read().write_keys.clone()
+    fn with_committed(self: Arc<Self>, seq: u64) -> Arc<Self> {
+        let new_txn_state = Self {
+            id: self.id,
+            started_seq: self.started_seq,
+            read_only: self.read_only,
+            committed_seq: Some(seq),
+            write_keys: self.write_keys.clone(),
+        };
+        Arc::new(new_txn_state)
     }
 }
 
@@ -85,23 +87,22 @@ impl TransactionManager {
     }
 
     /// Register a transaction state with a specific ID
-    pub fn new_txn(&self, seq: u64, read_only: bool) -> Arc<TransactionState> {
+    pub fn new_txn(&self, seq: u64, read_only: bool) -> (Uuid, u64) {
         let id = self.db_rand.rng().gen_uuid();
         let txn_state = Arc::new(TransactionState {
             id,
             started_seq: seq,
             read_only,
-            inner: RwLock::new(TransactionStateInner {
-                committed_seq: None,
-                write_keys: HashSet::new(),
-            }),
+            committed_seq: None,
+            write_keys: HashSet::new(),
         });
+
         {
             let mut inner = self.inner.write();
             inner.active_txns.insert(id, txn_state.clone());
         }
 
-        txn_state
+        (id, seq)
     }
 
     /// Remove a transaction state when it's dropped. The dropped txn is considered
@@ -113,14 +114,21 @@ impl TransactionManager {
         // TODO: clean up the recent_committed_txns deque
     }
 
+    pub fn track_txn_write_keys(&self, txn_id: &Uuid, keys: impl IntoIterator<Item = Bytes>) {
+        let mut inner = self.inner.write();
+        if let Some(entry) = inner.active_txns.get_mut(txn_id) {
+            *entry = entry.clone().with_write_keys(keys);
+        }
+    }
+
     /// Mark the txn as committed, and record it in recent_committed_txns.
     pub fn mark_txn_as_committed(&self, txn_id: &Uuid, seq: u64) {
         let mut inner = self.inner.write();
 
         // Find and remove the transaction from active_txns
         if let Some(txn_state) = inner.active_txns.remove(txn_id) {
-            txn_state.mark_as_committed(seq);
-            inner.recent_committed_txns.push_back(txn_state);
+            let committed_txn_state = txn_state.with_committed(seq);
+            inner.recent_committed_txns.push_back(committed_txn_state);
         }
     }
 
@@ -163,10 +171,7 @@ impl TransactionManager {
             }
 
             // Check for write-write conflicts
-            if !txn_state
-                .write_keys()
-                .is_disjoint(&committed_txn.write_keys())
-            {
+            if !txn_state.write_keys.is_disjoint(&committed_txn.write_keys) {
                 return true; // Conflict detected
             }
         }

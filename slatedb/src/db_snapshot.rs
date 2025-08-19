@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
 use crate::config::{ReadOptions, ScanOptions};
@@ -11,8 +12,10 @@ use crate::transaction_manager::{TransactionManager, TransactionState};
 use crate::DbRead;
 
 pub struct DbSnapshot {
-    /// txn_state holds the seq number of the transaction that created this snapshot
-    txn_state: Arc<TransactionState>,
+    /// txn_id is the id of the transaction that created this snapshot
+    txn_id: Uuid,
+    /// txn_seq is the sequence number of the transaction that created this snapshot
+    txn_seq: u64,
     /// Reference to the transaction manager that created this snapshot
     txn_manager: Arc<TransactionManager>,
     /// Reference to the database
@@ -25,10 +28,11 @@ impl DbSnapshot {
         txn_manager: Arc<TransactionManager>,
         seq: u64,
     ) -> Arc<Self> {
-        let txn_state = txn_manager.new_txn(seq, true);
+        let (txn_id, txn_seq) = txn_manager.new_txn(seq, true);
 
         Arc::new(Self {
-            txn_state,
+            txn_id,
+            txn_seq,
             txn_manager,
             db_inner,
         })
@@ -62,7 +66,7 @@ impl DbSnapshot {
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader
-            .get_with_options(key, options, &db_state, Some(self.txn_state.started_seq))
+            .get_with_options(key, options, &db_state, Some(self.txn_seq))
             .await
             .map_err(Into::into)
     }
@@ -115,7 +119,7 @@ impl DbSnapshot {
                 BytesRange::from(range),
                 options,
                 &db_state,
-                Some(self.txn_state.started_seq),
+                Some(self.txn_seq),
             )
             .await
             .map_err(Into::into)
@@ -148,7 +152,7 @@ impl DbRead for DbSnapshot {
 /// Unregister from transaction manager when dropped.
 impl Drop for DbSnapshot {
     fn drop(&mut self) {
-        self.txn_manager.drop_txn(&self.txn_state.id);
+        self.txn_manager.drop_txn(&self.txn_id);
     }
 }
 
@@ -674,7 +678,7 @@ mod tests {
 
         // At this point the data is in the memtable but not committed; create the snapshot
         let snapshot = db.snapshot().await?;
-        assert_eq!(snapshot.txn_state.started_seq, recent_commited_seq);
+        assert_eq!(snapshot.txn_seq, recent_commited_seq);
 
         // Turn off the failpoint to let the put complete
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();
