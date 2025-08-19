@@ -95,8 +95,7 @@ impl TransactionManager {
     pub fn drop_txn(&self, txn_id: &Uuid) {
         let mut inner = self.inner.write();
         inner.active_txns.remove(txn_id);
-
-        // TODO: clean up the recent_committed_txns deque
+        inner.recycle_recent_committed_txns();
     }
 
     pub fn track_txn_write_keys(&self, txn_id: &Uuid, keys: impl IntoIterator<Item = Bytes>) {
@@ -133,20 +132,13 @@ impl TransactionManager {
             .min()
     }
 
-    /// The min started_seq of all non-readonly transactions, this seq is useful to garbage
-    /// collect the entries in the `recent_committed_txns` deque.
-    pub fn min_conflict_check_seq(&self) -> Option<u64> {
+    pub fn check_conflict(&self, txn_id: &Uuid) -> bool {
         let inner = self.inner.read();
-        inner
-            .active_txns
-            .values()
-            .filter(|state| !state.read_only)
-            .map(|state| state.started_seq)
-            .min()
-    }
 
-    pub fn check_conflict(&self, txn_state: &TransactionState) -> bool {
-        let inner = self.inner.read();
+        let txn_state = match inner.active_txns.get(txn_id) {
+            Some(txn_state) => txn_state,
+            None => return false,
+        };
 
         // Check for conflicts with recently committed transactions
         for committed_txn in &inner.recent_committed_txns {
@@ -161,6 +153,40 @@ impl TransactionManager {
             }
         }
 
-        false // No conflicts found
+        false
+    }
+}
+
+impl TransactionManagerInner {
+    /// The min started_seq of all non-readonly transactions, this seq is useful to garbage
+    /// collect the entries in the `recent_committed_txns` deque.
+    fn min_conflict_check_seq(&self) -> Option<u64> {
+        self.active_txns
+            .values()
+            .filter(|state| !state.read_only)
+            .map(|state| state.started_seq)
+            .min()
+    }
+
+    fn recycle_recent_committed_txns(&mut self) {
+        let min_conflict_seq = self.min_conflict_check_seq();
+        if let Some(min_seq) = min_conflict_seq {
+            // Remove transactions that are no longer needed for conflict checking.
+            // A transaction can be garbage collected when all active non-readonly transactions
+            // have started_seq strictly greater than the transaction's committed_seq.
+            // This means we keep transactions where committed_seq >= min_seq.
+            self.recent_committed_txns.retain(|txn| {
+                if let Some(committed_seq) = txn.committed_seq {
+                    committed_seq >= min_seq
+                } else {
+                    // If committed_seq is None, this shouldn't happen in practice,
+                    // but we'll keep it to be safe
+                    true
+                }
+            });
+        } else {
+            // No active non-readonly transactions, can drain the entire deque
+            self.recent_committed_txns.clear();
+        }
     }
 }
