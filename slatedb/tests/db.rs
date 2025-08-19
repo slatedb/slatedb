@@ -6,14 +6,13 @@ use slatedb::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
-use tokio_util::sync::CancellationToken;
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::EnvFilter;
 use std::collections::HashMap;
-use std::error::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_writers_and_readers() {
