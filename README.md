@@ -7,6 +7,7 @@
 <a href="https://slatedb.io">![slatedb.io](https://img.shields.io/badge/site-slatedb.io-00A1FF?style=flat-square)</a>
 <a href="https://discord.gg/mHYmGy5MgA">![Discord](https://img.shields.io/discord/1232385660460204122?style=flat-square)</a>
 <a href="https://docs.rs/slatedb/latest/slatedb/">![Docs](https://img.shields.io/badge/docs-docs.rs-00A1FF?style=flat-square)</a>
+<a href="https://app.dosu.dev/d8f2da6d-6c4e-43a9-b5f2-b03db801b4d1/ask">![Dosu](https://img.shields.io/badge/bot-dosu.dev-dd404a?style=flat-square)</a>
 
 ## Introduction
 
