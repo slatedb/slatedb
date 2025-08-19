@@ -9,6 +9,8 @@ on:
 permissions:
   # Required for storing benchmark results
   contents: write
+  # Required for reading ZeroFS's main action status
+  actions: read
 
 jobs:
   # Run and save nightly microbenchmark data so PRs have a fresh baseline to compare against
@@ -24,7 +26,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ./microbenchmarks-cache
-          key: ${{ runner.os }}-microbenchmarks
+          key: ${{ runner.os }}-microbenchmarks-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-microbenchmarks-
 
       - name: Update microbenchmark result
         uses: benchmark-action/github-action-benchmark@v1
@@ -42,7 +46,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ./microbenchmarks-cache
-          key: ${{ runner.os }}-microbenchmarks
+          key: ${{ runner.os }}-microbenchmarks-${{ github.run_id }}
 
   benchmarks:
     runs-on: warp-ubuntu-latest-x64-16x
@@ -87,7 +91,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ./target/bencher/results/mermaid
-          key: ${{ runner.os }}-mermaid-plots
+          key: ${{ runner.os }}-mermaid-plots-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-mermaid-plots-
 
       - name: Run benchmark
         env:
@@ -106,7 +112,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ./target/bencher/results/mermaid
-          key: ${{ runner.os }}-mermaid-plots
+          key: ${{ runner.os }}-mermaid-plots-${{ github.run_id }}
 
       - name: Add mermaid diagrams to summary
         run: |
@@ -203,182 +209,56 @@ jobs:
           RUST_LOG: "warn"
           SLATEDB_DST_ROOT: "./"
 
-  # This is an integration test that makes sure SlateDB works with ZeroFS.
-  # ZeroFS has discovered some issues with SlateDB so we want to make sure
-  # we catch them early. Moreover, ZeroFS is an important project in the
-  # SlateDB ecosystem, so we want to make sure SlateDB doesn't break it.
-  zerofs-kernel-compile-9p:
-    name: Compile Linux Kernel on 9P (WAL ${{ matrix.wal_mode }})
+  notify:
+    needs: [microbenchmarks, benchmarks, microbenchmark-pprofs, deterministic-simulation-test]
+    if: ${{ always() }}
+    permissions:
+      issues: write
+      contents: read
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        wal_mode: [enabled, disabled]
-      fail-fast: false
-
-    env:
-      CARGO_INCREMENTAL: 0
-      RUSTFLAGS: "-Dwarnings"
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - name: Comment or open issue if any dependency failed
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        uses: actions/github-script@v7
         with:
-          toolchain: nightly-2025-04-12
-          components: rustfmt, clippy, rust-analyzer
+          script: |
+            const {owner, repo} = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = `Another failure.\n\nRun: ${runUrl}`;
 
-      - name: Start MinIO
-        run: |
-          docker run -d \
-            --name minio \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data
-          for i in {1..30}; do
-            if curl -f http://localhost:9000/minio/health/live; then
-              echo "MinIO is ready"
-              break
-            fi
-            sleep 1
-          done
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            );
+            const hit = issues.find(i => i.title === 'Nightly failed');
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc
-          sudo modprobe 9p
-          sudo modprobe 9pnet
-          sudo modprobe 9pnet_virtio
-          lsmod | grep 9p || echo "No 9p modules loaded yet"
+            if (hit) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: hit.number, body });
+            } else {
+              await github.rest.issues.create({
+                owner, repo,
+                title: 'Nightly failed',
+                body: `Run: ${runUrl}`,
+                labels: ['ci-failure']
+              });
+            }
 
-      - name: Setup MinIO bucket
-        run: |
-          wget https://dl.min.io/client/mc/release/linux-amd64/mc
-          chmod +x mc
-          ./mc alias set myminio http://localhost:9000 minioadmin minioadmin
-          ./mc mb myminio/slatedb-test || true
+      - name: 'Close any open "Nightly failed" issues on success'
+        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = `Nightly succeeded.\n\nRun: ${runUrl}\n\nClosing this issue.`;
 
-      - name: Clone and configure ZeroFS
-        run: |
-          # Clone ZeroFS outside of the workspace
-          cd /tmp
-          git clone https://github.com/Barre/ZeroFS.git zerofs
-          cd zerofs
-          git checkout bea734e71b788b4ba7ac7ed4cef324aac3fd4470
-          # Update ZeroFS Cargo.toml to use local SlateDB with current changes
-          if grep -q "slatedb" Cargo.toml; then
-            # Always enable wal_disable feature so we can control it at runtime
-            sed -i 's|slatedb = .*|slatedb = { path = "'$GITHUB_WORKSPACE'/slatedb", features = ["wal_disable"] }|' Cargo.toml
-          fi
-          # Add wal_enabled field to slatedb::config::Settings
-          echo "Finding all files with slatedb::config::Settings..."
-          SETTINGS_FILES=$(grep -r "slatedb::config::Settings {" --include="*.rs" | cut -d: -f1 | sort -u)
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            );
+            const toClose = issues.filter(i => i.title === 'Nightly failed');
 
-          for SETTINGS_FILE in $SETTINGS_FILES; do
-            echo "Processing: $SETTINGS_FILE"
-            echo "Adding wal_enabled field for mode: ${{ matrix.wal_mode }}"
-
-            # Count occurrences before
-            BEFORE_COUNT=$(grep -c "compression_codec: None," "$SETTINGS_FILE" || true)
-            echo "Found $BEFORE_COUNT occurrences of compression_codec: None,"
-
-            # Insert wal_enabled field after ALL compression_codec lines
-            if [ "${{ matrix.wal_mode }}" = "disabled" ]; then
-              # Use perl for more reliable multi-line replacement
-              perl -i -pe 's/(compression_codec: None,)/\1\n            wal_enabled: false,/g' "$SETTINGS_FILE"
-            else
-              perl -i -pe 's/(compression_codec: None,)/\1\n            wal_enabled: true,/g' "$SETTINGS_FILE"
-            fi
-
-            # Verify the changes
-            AFTER_COUNT=$(grep -c "wal_enabled" "$SETTINGS_FILE" || true)
-            echo "Added $AFTER_COUNT wal_enabled fields"
-          done
-          RUSTFLAGS="-Awarnings" cargo build --profile ci
-
-      - name: Start ZeroFS with 9P support
-        run: |
-          cd /tmp/zerofs
-          mkdir -p /tmp/zerofs-cache
-          AWS_ENDPOINT=http://localhost:9000 \
-          AWS_ACCESS_KEY_ID=minioadmin \
-          AWS_SECRET_ACCESS_KEY=minioadmin \
-          AWS_ALLOW_HTTP=true \
-          SLATEDB_CACHE_DIR=/tmp/zerofs-cache \
-          SLATEDB_CACHE_SIZE_GB=5 \
-          ZEROFS_MEMORY_CACHE_SIZE_GB=10 \
-          ZEROFS_ENCRYPTION_PASSWORD=secret \
-          RUSTFLAGS="-Awarnings" cargo run --profile ci s3://slatedb-test/test &
-          echo $! > /tmp/zerofs.pid
-          echo "Waiting for ZeroFS 9P server to start..."
-          for i in {1..30}; do
-            if nc -z 127.0.0.1 5564 2>/dev/null; then
-              echo "ZeroFS 9P server is ready"
-              break
-            fi
-            sleep 1
-          done
-          if ! nc -z 127.0.0.1 5564 2>/dev/null; then
-            echo "ZeroFS 9P server failed to start"
-            exit 1
-          fi
-
-      - name: Mount 9P filesystem
-        run: |
-          sudo mkdir -p /mnt/zerofs
-          sudo mount -t 9p -o trans=tcp,port=5564,version=9p2000.L,msize=1048576,cache=mmap,access=user 127.0.0.1 /mnt/zerofs
-          mount | grep zerofs
-          touch /mnt/zerofs/test_file && rm /mnt/zerofs/test_file
-
-      - name: Check disk space
-        run: df -h
-
-      - name: Download Linux kernel
-        run: |
-          cd /mnt/zerofs
-          wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.11.tar.xz
-          tar -xvf linux-6.11.tar.xz
-          rm linux-6.11.tar.xz
-
-      - name: Compile kernel
-        run: |
-          cd /mnt/zerofs/linux-6.11
-          make tinyconfig
-          echo "Config size: $(wc -l < .config) lines"
-          echo "Starting kernel compilation with $(nproc) cores..."
-          time make -j$(nproc) 2>&1 | tee /tmp/kernel-build.log
-          if [ -f vmlinux ]; then
-            echo "Kernel compilation successful!"
-            ls -lh vmlinux
-          else
-            echo "Kernel compilation failed!"
-            exit 1
-          fi
-
-      - name: Collect ZeroFS stats
-        if: always()
-        run: |
-          if [ -f /tmp/zerofs.pid ]; then
-            PID=$(cat /tmp/zerofs.pid)
-            if kill -0 $PID 2>/dev/null; then
-              echo "ZeroFS process stats:"
-              ps aux | grep $PID | grep -v grep || true
-              echo ""
-              echo "ZeroFS memory usage:"
-              cat /proc/$PID/status | grep -E "Vm|Rss" || true
-            fi
-          fi
-
-      - name: Cleanup
-        if: always()
-        run: |
-          sudo umount /mnt/zerofs || true
-          if [ -f /tmp/zerofs.pid ]; then
-            kill $(cat /tmp/zerofs.pid) || true
-          fi
-          pkill -f "cargo run --profile ci s3://slatedb-test/test" || true
-          docker stop minio || true
-          docker rm minio || true
+            for (const issue of toClose) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body });
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed' });
+            }

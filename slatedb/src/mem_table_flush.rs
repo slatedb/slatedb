@@ -6,7 +6,7 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use std::cmp;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -71,7 +71,7 @@ impl MemtableFlusher {
             self.load_manifest().await?;
             let result = self.write_checkpoint(options).await;
             if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
-                warn!("conflicting manifest version. updating and retrying write again.");
+                debug!("conflicting manifest version. updating and retrying write again.");
             } else {
                 return result;
             }
@@ -82,7 +82,7 @@ impl MemtableFlusher {
         loop {
             let result = self.write_manifest().await;
             if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
-                warn!("conflicting manifest version. updating and retrying write again.");
+                debug!("conflicting manifest version. updating and retrying write again.");
                 self.load_manifest().await?;
             } else {
                 return result;
