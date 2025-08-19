@@ -161,13 +161,10 @@ async fn test_concurrent_writers_and_readers() {
         .expect("Writer handles failed");
 
     // Shut down readers
-    let reader_handles = reader_handles
-        .into_iter()
-        .inspect(|handle| {
-            handle.abort();
-        })
-        .collect::<Vec<_>>();
-    let _ = futures::future::try_join_all(reader_handles).await;
+    reader_cancellation_token.cancel();
+    futures::future::try_join_all(reader_handles)
+        .await
+        .expect("Reader handles failed");
 
     db.close().await.unwrap();
 }
