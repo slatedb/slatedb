@@ -82,6 +82,13 @@ impl TransactionManager {
         }
     }
 
+    /// The min started_seq of all active transactions, including snapshots. This value
+    /// is useful to inform the compactor about the min seq of data still needed to be
+    /// retained for active transactions, so that the compactor can avoid deleting the
+    /// data that is still needed.
+    ///
+    /// min_active_seq will be persisted to the `recent_snapshot_min_seq` in the manifest
+    /// when a new L0 is flushed.
     pub fn min_active_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
         inner
