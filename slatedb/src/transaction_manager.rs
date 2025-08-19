@@ -26,6 +26,16 @@ pub(crate) struct TransactionState {
     pub(crate) write_keys: HashSet<Bytes>,
 }
 
+impl TransactionState {
+    fn track_write_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
+        todo!()
+    }
+
+    fn mark_as_committed(&mut self, seq: u64) {
+        self.committed_seq = Some(seq);
+    }
+}
+
 /// Manages the lifecycle of DbSnapshot objects, tracking all living transaction states
 pub struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
