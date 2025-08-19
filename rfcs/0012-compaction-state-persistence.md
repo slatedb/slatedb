@@ -686,6 +686,8 @@ The .sst file is deemed to be garbage collected if it satisfies the following co
 
   - SST is not referenced by any active manifest checkpoint. 
 
+  Note: We would also need to handle the scenario mentioned in https://github.com/slatedb/slatedb/issues/604 to avoid deletion of compacted SSTs and prevent data corruption.
+
 The .manifest file is deemed to be garbage collected if it satisfies the following conditions:  
 
   - Avoid deletion of the latest manifest
