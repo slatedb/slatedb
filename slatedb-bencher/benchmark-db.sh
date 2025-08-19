@@ -86,6 +86,9 @@ generate_mermaid () {
         cat > "$mermaid_file" << EOF
 ---
 config:
+  xyChart:
+    chartOrientation: horizontal
+    height: 768
   themeVariables:
     xyChart:
       plotColorPalette: '#1e81b0, #e28743'
@@ -94,18 +97,18 @@ xychart-beta
     title "SlateDB [puts=${put_percentage}%, threads=${concurrency}, 🔵=puts, 🟠=get]"
     x-axis ["$x_entry"]
     y-axis "requests/s" 0 --> $y_max
-    line [$put_value]
-    line [$get_value]
+    bar [$put_value]
+    bar [$get_value]
 EOF
     else
         # Update existing mermaid file
         local temp_file=$(mktemp)
 
-        # Read current content
-        local title_line=$(grep "title" "$mermaid_file" | sed 's/^[[:space:]]*//')
-        local x_axis_line=$(grep "x-axis" "$mermaid_file")
-        local put_line=$(grep -m1 "line" "$mermaid_file")
-        local get_line=$(grep "line" "$mermaid_file" | tail -n1)
+        # Read current content (match only Mermaid series lines, not YAML like plotColorPalette)
+        local title_line=$(grep -E "^[[:space:]]*title[[:space:]]" "$mermaid_file" | sed 's/^[[:space:]]*//')
+        local x_axis_line=$(grep -E "^[[:space:]]*x-axis[[:space:]]*\\[" "$mermaid_file")
+        local put_line=$(grep -E "^[[:space:]]*bar[[:space:]]*\\[" "$mermaid_file" | head -n1)
+        local get_line=$(grep -E "^[[:space:]]*bar[[:space:]]*\\[" "$mermaid_file" | tail -n1)
 
         # Extract current values
         local current_x_values=$(echo "$x_axis_line" | sed 's/.*\[//;s/\].*//' | tr ',' '\n' | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
@@ -118,9 +121,9 @@ EOF
         local get_array=()
 
         # Parse existing x-axis values
-        while IFS= read -r line; do
-            if [ -n "$line" ]; then
-                x_array+=("$line")
+        while IFS= read -r bar; do
+            if [ -n "$bar" ]; then
+                x_array+=("$bar")
             fi
         done <<< "$current_x_values"
 
@@ -153,7 +156,7 @@ EOF
         new_x_axis="$new_x_axis]"
 
         # Build new put line string
-        local new_put_line="line ["
+        local new_put_line="bar ["
         for i in "${!put_array[@]}"; do
             if [ $i -gt 0 ]; then
                 new_put_line="$new_put_line, "
@@ -163,7 +166,7 @@ EOF
         new_put_line="$new_put_line]"
 
         # Build new get line string
-        local new_get_line="line ["
+        local new_get_line="bar ["
         for i in "${!get_array[@]}"; do
             if [ $i -gt 0 ]; then
                 new_get_line="$new_get_line, "
