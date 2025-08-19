@@ -1,5 +1,6 @@
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
+use crate::WriteBatch;
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -78,12 +79,18 @@ impl TransactionManager {
         txn_state
     }
 
-    /// Remove a transaction state when it's dropped
-    pub fn remove_txn(&self, txn_state: &TransactionState) {
+    /// Remove a transaction state when it's dropped. The dropped txn is considered
+    /// as rolled back, no side effect is ever produced.
+    pub fn drop_txn(&self, txn_state: &TransactionState) {
         {
             let mut inner = self.inner.write();
             inner.active_txns.remove(&txn_state.id);
         }
+    }
+
+    /// Mark the txn as committed, and record it in recent_committed_txns.
+    pub fn mark_committed(&self, txn_state: &TransactionState, seq: u64) {
+        todo!();
     }
 
     /// The min started_seq of all active transactions, including snapshots. This value
@@ -100,5 +107,15 @@ impl TransactionManager {
             .values()
             .map(|state| state.started_seq)
             .min()
+    }
+
+    /// The min started_seq of all non-readonly transactions, this seq is useful to garbage
+    /// collect the entries in the `recent_committed_txns` deque.
+    pub fn min_conflict_check_seq(&self) -> Option<u64> {
+        todo!();
+    }
+
+    pub fn check_conflict(&self, txn_state: &TransactionState) -> bool {
+        todo!();
     }
 }
