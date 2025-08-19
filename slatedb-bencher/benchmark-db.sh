@@ -134,16 +134,16 @@ EOF
         # Parse existing get values
         IFS=',' read -ra get_array <<< "$current_get_values"
 
-        # Add new values
-        x_array+=("$x_entry")
-        put_array+=("$put_value")
-        get_array+=("$get_value")
+        # Prepend new values (newest first)
+        x_array=("$x_entry" "${x_array[@]}")
+        put_array=("$put_value" "${put_array[@]}")
+        get_array=("$get_value" "${get_array[@]}")
 
-        # Keep only last 30 values if we have more
+        # Keep only first 30 values (newest-first) if we have more
         if [ ${#x_array[@]} -gt 30 ]; then
-            x_array=("${x_array[@]: -30}")
-            put_array=("${put_array[@]: -30}")
-            get_array=("${get_array[@]: -30}")
+            x_array=("${x_array[@]:0:30}")
+            put_array=("${put_array[@]:0:30}")
+            get_array=("${get_array[@]:0:30}")
         fi
 
         # Build new x-axis string
