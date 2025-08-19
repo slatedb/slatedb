@@ -62,7 +62,7 @@ impl DbSnapshot {
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader
-            .get_with_options(key, options, &db_state, Some(self.txn_state.seq))
+            .get_with_options(key, options, &db_state, Some(self.txn_state.started_seq))
             .await
             .map_err(Into::into)
     }
@@ -115,7 +115,7 @@ impl DbSnapshot {
                 BytesRange::from(range),
                 options,
                 &db_state,
-                Some(self.txn_state.seq),
+                Some(self.txn_state.started_seq),
             )
             .await
             .map_err(Into::into)
@@ -674,7 +674,7 @@ mod tests {
 
         // At this point the data is in the memtable but not committed; create the snapshot
         let snapshot = db.snapshot().await?;
-        assert_eq!(snapshot.txn_state.seq, recent_commited_seq);
+        assert_eq!(snapshot.txn_state.started_seq, recent_commited_seq);
 
         // Turn off the failpoint to let the put complete
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "off").unwrap();
