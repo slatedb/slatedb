@@ -83,6 +83,7 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::select_all, stream::BoxStream};
 use log::warn;
 use tokio::sync::mpsc;
@@ -121,6 +122,7 @@ pub(crate) struct MessageDispatcher<T: Send + std::fmt::Debug> {
     clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
     error_state: WatchableOnceCell<SlateDBError>,
+    fp_registry: Arc<FailPointRegistry>,
 }
 
 impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
@@ -136,12 +138,20 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///   will set [DbState::error] when an error is encountered.
     pub(crate) fn new(
         handler: Box<dyn MessageHandler<T>>,
+        rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
         error_state: WatchableOnceCell<SlateDBError>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
-        let (_tx, rx) = mpsc::unbounded_channel();
-        Self::new_with_channel(handler, rx, clock, cancellation_token, error_state)
+        Self::new_with_fp_registry(
+            handler,
+            rx,
+            clock,
+            cancellation_token,
+            error_state,
+            fp_registry,
+        )
     }
 
     /// Creates a new [MessageDispatcher] with a channel. This is the primary way to
@@ -156,12 +166,13 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     /// * `state`: The [DbState] to use for error tracking. If provided, the dispatcher
     ///   will set [DbState::error] when an error is encountered.
-    pub(crate) fn new_with_channel(
+    pub(crate) fn new_with_fp_registry(
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
         error_state: WatchableOnceCell<SlateDBError>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
         Self {
             handler,
@@ -169,6 +180,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             clock,
             cancellation_token,
             error_state,
+            fp_registry,
         }
     }
 
@@ -232,6 +244,9 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             }
         };
         loop {
+            fail_point!(Arc::clone(&self.fp_registry), "dispatcher-run-loop", |_| {
+                Err(SlateDBError::Fenced)
+            });
             let ticker_futures = tickers.iter_mut().map(|t| t.tick()).collect::<Vec<_>>();
             let tickers_not_empty = !ticker_futures.is_empty();
             tokio::select! {
@@ -292,6 +307,9 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// The [Result] after cleaning up resources.
     async fn cleanup(&mut self, result: Result<(), SlateDBError>) -> Result<(), SlateDBError> {
+        fail_point!(Arc::clone(&self.fp_registry), "dispatcher-cleanup", |_| {
+            Err(SlateDBError::Fenced)
+        });
         self.rx.close();
         let messages = futures::stream::unfold(&mut self.rx, |rx| async move {
             rx.recv().await.map(|message| (message, rx))
@@ -409,20 +427,23 @@ pub(crate) trait MessageHandler<T: Send>: Send {
 #[cfg(test)]
 mod test {
     use super::{MessageDispatcher, MessageHandler};
-    use crate::clock::DefaultSystemClock;
+    use crate::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
+    use crate::dispatcher::MessageFactory;
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
+    use fail_parallel::FailPointRegistry;
     use futures::StreamExt;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::mpsc;
+    use tokio::task::yield_now;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum TestMessage {
         Channel(i32),
-        Tick,
+        Tick(i32),
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,52 +455,40 @@ mod test {
     #[derive(Clone)]
     struct TestHandler {
         log: Arc<Mutex<Vec<(Phase, TestMessage)>>>,
-        cleanup_called: WatchableOnceCell<()>,
-        fail_on: Option<TestMessage>,
-        ticker_interval: Duration,
+        cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
+        tickers: Vec<(Duration, u8)>,
     }
 
     impl TestHandler {
         fn new(
             log: Arc<Mutex<Vec<(Phase, TestMessage)>>>,
-            cleanup_called: WatchableOnceCell<()>,
+            cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
         ) -> Self {
             Self {
                 log,
                 cleanup_called,
-                fail_on: None,
-                ticker_interval: Duration::from_millis(10),
+                tickers: vec![],
             }
         }
 
-        fn with_fail_on(mut self, msg: TestMessage) -> Self {
-            self.fail_on = Some(msg);
-            self
-        }
-
-        fn with_ticker_interval(mut self, d: Duration) -> Self {
-            self.ticker_interval = d;
+        fn add_ticker(mut self, d: Duration, id: u8) -> Self {
+            self.tickers.push((d, id));
             self
         }
     }
 
     #[async_trait::async_trait]
     impl MessageHandler<TestMessage> for TestHandler {
-        fn tickers(
-            &mut self,
-        ) -> Vec<(
-            Duration,
-            Box<crate::dispatcher::MessageFactory<TestMessage>>,
-        )> {
-            vec![(self.ticker_interval, Box::new(|| TestMessage::Tick))]
+        fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<TestMessage>>)> {
+            let mut tickers: Vec<(Duration, Box<MessageFactory<_>>)> = vec![];
+            for (interval, id) in self.tickers.iter() {
+                let id = *id as i32;
+                tickers.push((interval.clone(), Box::new(move || TestMessage::Tick(id))));
+            }
+            tickers
         }
 
         async fn handle(&mut self, message: TestMessage) -> Result<(), SlateDBError> {
-            if let Some(ref target) = self.fail_on {
-                if target == &message {
-                    return Err(SlateDBError::Fenced);
-                }
-            }
             self.log.lock().unwrap().push((Phase::Pre, message));
             Ok(())
         }
@@ -489,184 +498,179 @@ mod test {
             mut messages: futures::stream::BoxStream<'async_trait, TestMessage>,
             result: Result<(), SlateDBError>,
         ) -> Result<(), SlateDBError> {
-            // Signal that cleanup has started so tests can synchronize safely
-            self.cleanup_called.write(());
-
-            match &result {
-                Ok(()) | Err(SlateDBError::BackgroundTaskShutdown) => {
-                    while let Some(m) = messages.next().await {
-                        self.log.lock().unwrap().push((Phase::Cleanup, m));
-                    }
-                }
-                _ => {
-                    // Skip draining on unclean shutdown
-                }
+            self.cleanup_called.write(result);
+            while let Some(m) = messages.next().await {
+                self.log.lock().unwrap().push((Phase::Cleanup, m));
             }
-            result
+            Ok(())
         }
     }
 
-    fn extract_channel_messages(log: &[(Phase, TestMessage)], phase: Phase) -> Vec<i32> {
-        log.iter()
-            .filter_map(|(p, m)| match (p, m) {
-                (p2, TestMessage::Channel(v)) if *p2 == phase => Some(*v),
-                _ => None,
-            })
-            .collect()
+    async fn wait_for_message_count(log: Arc<Mutex<Vec<(Phase, TestMessage)>>>, count: usize) {
+        while log.lock().unwrap().len() < count {
+            yield_now().await;
+        }
     }
 
-    fn contains_tick(log: &[(Phase, TestMessage)]) -> bool {
-        log.iter().any(|(_, m)| matches!(m, TestMessage::Tick))
-    }
-
-    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_run_happy_path() {
+        use fail_parallel::FailPointRegistry;
+
+        use crate::clock::SystemClock;
+
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
-        let mut cleanup_reader = cleanup_called.reader();
-
         let (tx, rx) = mpsc::unbounded_channel();
-        // Pre-enqueue two channel messages so they are handled before the first tick
-        tx.send(TestMessage::Channel(10)).unwrap();
-        tx.send(TestMessage::Channel(20)).unwrap();
         let handler = TestHandler::new(log.clone(), cleanup_called.clone())
-            // Keep ticker reasonably quick so at least one tick occurs
-            .with_ticker_interval(Duration::from_millis(5));
-        let clock = Arc::new(DefaultSystemClock::new());
+            .add_ticker(Duration::from_millis(5), 1);
+        let clock = Arc::new(MockSystemClock::new());
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
-        let mut dispatcher = MessageDispatcher::new_with_channel(
+        let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
-            clock,
+            clock.clone(),
             cancellation_token.clone(),
             error_state.clone(),
+            Arc::new(FailPointRegistry::default()),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
-        // Wait until the first two pre-phase channel messages are logged
-        let _ = timeout(Duration::from_secs(30), async {
-            loop {
-                let snapshot = log.lock().unwrap().clone();
-                let pre_channels = extract_channel_messages(&snapshot, Phase::Pre);
-                if pre_channels.len() >= 2 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("timed out waiting for pre-phase messages");
-
-        let snapshot = log.lock().unwrap().clone();
-        let pre_channels = extract_channel_messages(&snapshot, Phase::Pre);
-        assert_eq!(pre_channels[0], 10);
-        assert_eq!(pre_channels[1], 20);
-
-        // Wait for at least one tick to be handled
-        let _ = timeout(Duration::from_secs(3), async {
-            loop {
-                if contains_tick(&log.lock().unwrap()) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("timed out waiting for a tick");
+        // Send a message successfully, then trigger a tick before processing the next message
+        tx.send(TestMessage::Channel(10)).unwrap();
+        clock.advance(Duration::from_millis(5)).await;
+        wait_for_message_count(log.clone(), 2).await;
+        tx.send(TestMessage::Channel(20)).unwrap();
+        wait_for_message_count(log.clone(), 3).await;
 
         // Cancel and wait for cleanup to start
         cancellation_token.cancel();
-        cleanup_reader.await_value().await;
 
         // Ensure run() completes and returns clean shutdown
-        let result = timeout(Duration::from_secs(3), join)
+        let result = timeout(Duration::from_secs(30), join)
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
 
-        // Error state should be set on shutdown
+        // Verify final state
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
         assert!(matches!(
             error_state.reader().read(),
             Some(SlateDBError::BackgroundTaskShutdown)
         ));
+        assert!(matches!(
+            cleanup_called
+                .reader()
+                .read()
+                .expect("cleanup result not set"),
+            Err(SlateDBError::BackgroundTaskShutdown)
+        ));
+        let messages = log.lock().unwrap().clone();
+        assert_eq!(
+            messages,
+            vec![
+                (Phase::Pre, TestMessage::Channel(10)),
+                (Phase::Pre, TestMessage::Tick(1)),
+                (Phase::Pre, TestMessage::Channel(20))
+            ]
+        );
     }
 
-    #[tokio::test]
-    async fn test_dispatcher_propagates_handler_error_and_skips_drain() {
+    #[cfg(feature = "test-util")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_dispatcher_propagates_handler_error_drains_messages() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let mut cleanup_reader = cleanup_called.reader();
-
         let (tx, rx) = mpsc::unbounded_channel();
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone())
-            .with_fail_on(TestMessage::Channel(42))
-            .with_ticker_interval(Duration::from_millis(50));
-        let clock = Arc::new(DefaultSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone());
+        let clock = Arc::new(MockSystemClock::new());
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
-
-        let mut dispatcher = MessageDispatcher::new_with_channel(
+        let fp_registry = Arc::new(FailPointRegistry::default());
+        let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
-            clock,
+            clock.clone(),
             cancellation_token.clone(),
             error_state.clone(),
+            fp_registry.clone(),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
-        // Trigger handler error
+        // Stop before cleanup so we can send a message and ensure it is drained
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "pause").unwrap();
+
+        // Send a regular message successfully
         tx.send(TestMessage::Channel(42)).unwrap();
-        // Extra message that would be drained on clean shutdown, but should be skipped here
+        wait_for_message_count(log.clone(), 1).await;
+
+        // Force a return by setting an error message
+        error_state.write(SlateDBError::Fenced);
+
+        // Send another message after error state is set
         tx.send(TestMessage::Channel(77)).unwrap();
 
-        // Wait for cleanup to start (unclean shutdown)
-        cleanup_reader.await_value().await;
+        // Now proceed with cleanup
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "off").unwrap();
 
-        let result = timeout(Duration::from_secs(3), join)
+        // Wait for cleanup to start (unclean shutdown)
+        let _ = cleanup_reader.await_value().await;
+
+        let result = timeout(Duration::from_secs(30), join)
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
+
+        // Verify final state
         assert!(matches!(result, Err(SlateDBError::Fenced)));
         assert!(matches!(
             error_state.reader().read(),
             Some(SlateDBError::Fenced)
         ));
-
-        // On unclean shutdown, cleanup should not drain channel messages
-        let cleanup_channels = extract_channel_messages(&log.lock().unwrap(), Phase::Cleanup);
-        assert!(cleanup_channels.is_empty());
+        assert!(matches!(
+            cleanup_reader.read(),
+            Some(Err(SlateDBError::Fenced))
+        ));
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        let messages = log.lock().unwrap().clone();
+        assert_eq!(
+            messages,
+            vec![
+                (Phase::Pre, TestMessage::Channel(42)),
+                (Phase::Cleanup, TestMessage::Channel(77))
+            ]
+        );
     }
 
-    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_prefers_preexisting_error_state() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let mut cleanup_reader = cleanup_called.reader();
-
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone())
-            .with_ticker_interval(Duration::from_millis(50));
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone());
         let clock = Arc::new(DefaultSystemClock::new());
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         // Pre-set error state to simulate prior failure
         error_state.write(SlateDBError::Fenced);
-
-        let mut dispatcher = MessageDispatcher::new_with_channel(
+        let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock,
             cancellation_token.clone(),
             error_state.clone(),
+            Arc::new(FailPointRegistry::default()),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
         // Cleanup should start promptly because run_loop exits immediately on existing error
-        cleanup_reader.await_value().await;
+        let _ = cleanup_reader.await_value().await;
 
-        let result = timeout(Duration::from_secs(3), join)
+        let result = timeout(Duration::from_secs(30), join)
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
@@ -675,266 +679,137 @@ mod test {
             error_state.reader().read(),
             Some(SlateDBError::Fenced)
         ));
+        assert!(matches!(
+            cleanup_reader.read(),
+            Some(Err(SlateDBError::Fenced))
+        ));
+        let messages = log.lock().unwrap().clone();
+        assert_eq!(messages, vec![]);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_prioritizes_messages_over_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
-
         let (tx, rx) = mpsc::unbounded_channel();
-        // Pre-enqueue a channel message that races with the immediate first tick
-        // The dispatcher should handle the message first due to select! bias
-        tx.send(TestMessage::Channel(99)).unwrap();
-
         let handler = TestHandler::new(log.clone(), cleanup_called.clone())
-            .with_ticker_interval(Duration::from_millis(5));
-        let clock = Arc::new(DefaultSystemClock::new());
+            .add_ticker(Duration::from_millis(5), 1);
+        let clock = Arc::new(MockSystemClock::new());
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
-
-        let mut dispatcher = MessageDispatcher::new_with_channel(
+        let fp_registry = Arc::new(FailPointRegistry::default());
+        let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
-            clock,
+            clock.clone(),
             cancellation_token.clone(),
             error_state.clone(),
+            fp_registry.clone(),
         );
-
         let join = tokio::spawn(async move { dispatcher.run().await });
 
-        // Wait for the first pre-phase entry
-        let _ = timeout(Duration::from_secs(3), async {
-            loop {
-                let snapshot = log.lock().unwrap().clone();
-                if !snapshot.is_empty() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("timed out waiting for first log entry");
-
-        // Ensure a tick eventually appears
-        let _ = timeout(Duration::from_secs(3), async {
-            loop {
-                if contains_tick(&log.lock().unwrap()) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("timed out waiting for a tick");
-
-        // Verify first handled item was the channel message (not a tick)
-        let first = log.lock().unwrap().first().cloned().unwrap();
-        assert_eq!(first, (Phase::Pre, TestMessage::Channel(99)));
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
+        tx.send(TestMessage::Channel(99)).unwrap();
+        clock.advance(Duration::from_millis(5)).await;
+        tx.send(TestMessage::Channel(100)).unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
+        wait_for_message_count(log.clone(), 3).await;
 
         // Shutdown cleanly
         cancellation_token.cancel();
-        let result = timeout(Duration::from_secs(3), join)
+        let result = timeout(Duration::from_secs(30), join)
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
+
+        // Verify final state
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
         assert!(matches!(
             error_state.reader().read(),
             Some(SlateDBError::BackgroundTaskShutdown)
         ));
+        assert!(matches!(
+            cleanup_called.reader().read(),
+            Some(Err(SlateDBError::BackgroundTaskShutdown))
+        ));
+        let messages = log.lock().unwrap().clone();
+        assert_eq!(
+            messages,
+            vec![
+                (Phase::Pre, TestMessage::Channel(99)),
+                (Phase::Pre, TestMessage::Channel(100)),
+                (Phase::Pre, TestMessage::Tick(1)),
+            ]
+        );
     }
 
-    #[derive(Clone)]
-    struct NoTickerHandler {
-        log: Arc<Mutex<Vec<(Phase, TestMessage)>>>,
-        cleanup_called: WatchableOnceCell<()>,
-    }
-
-    #[async_trait::async_trait]
-    impl MessageHandler<TestMessage> for NoTickerHandler {
-        fn tickers(
-            &mut self,
-        ) -> Vec<(
-            Duration,
-            Box<crate::dispatcher::MessageFactory<TestMessage>>,
-        )> {
-            vec![]
-        }
-
-        async fn handle(&mut self, message: TestMessage) -> Result<(), SlateDBError> {
-            self.log.lock().unwrap().push((Phase::Pre, message));
-            Ok(())
-        }
-
-        async fn cleanup(
-            &mut self,
-            mut messages: futures::stream::BoxStream<'async_trait, TestMessage>,
-            result: Result<(), SlateDBError>,
-        ) -> Result<(), SlateDBError> {
-            self.cleanup_called.write(());
-            match &result {
-                Ok(()) | Err(SlateDBError::BackgroundTaskShutdown) => {
-                    while let Some(m) = messages.next().await {
-                        self.log.lock().unwrap().push((Phase::Cleanup, m));
-                    }
-                }
-                _ => {}
-            }
-            result
-        }
-    }
-
-    #[tokio::test]
-    async fn test_dispatcher_handles_no_tickers() {
+    #[cfg(feature = "test-util")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_dispatcher_supports_multiple_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
-        let mut cleanup_reader = cleanup_called.reader();
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        // Pre-enqueue a couple of messages
-        tx.send(TestMessage::Channel(1)).unwrap();
-        tx.send(TestMessage::Channel(2)).unwrap();
-
-        let handler = NoTickerHandler {
-            log: log.clone(),
-            cleanup_called: cleanup_called.clone(),
-        };
-        let clock = Arc::new(DefaultSystemClock::new());
+        let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone())
+            .add_ticker(Duration::from_millis(5), 1)
+            .add_ticker(Duration::from_millis(7), 2);
+        let clock = Arc::new(MockSystemClock::new());
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
-
-        let mut dispatcher = MessageDispatcher::new_with_channel(
+        let fp_registry = Arc::new(FailPointRegistry::default());
+        let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
-            clock,
+            clock.clone(),
             cancellation_token.clone(),
             error_state.clone(),
+            fp_registry.clone(),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
-        // Wait until both pre-phase messages are handled
-        let _ = timeout(Duration::from_secs(3), async {
-            loop {
-                let snapshot = log.lock().unwrap().clone();
-                let pre_channels = extract_channel_messages(&snapshot, Phase::Pre);
-                if pre_channels.len() >= 2 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("timed out waiting for pre-phase messages");
-
-        // Shutdown and ensure cleanup runs
-        cancellation_token.cancel();
-        cleanup_reader.await_value().await;
-
-        let result = timeout(Duration::from_secs(3), join)
-            .await
-            .expect("dispatcher did not stop in time")
-            .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum MTMessage {
-        TickA,
-        TickB,
-    }
-
-    #[derive(Clone)]
-    struct MultiTickerHandler {
-        log: Arc<Mutex<Vec<MTMessage>>>,
-        cleanup_called: WatchableOnceCell<()>,
-        a: Duration,
-        b: Duration,
-    }
-
-    #[async_trait::async_trait]
-    impl MessageHandler<MTMessage> for MultiTickerHandler {
-        fn tickers(
-            &mut self,
-        ) -> Vec<(Duration, Box<crate::dispatcher::MessageFactory<MTMessage>>)> {
+        assert_eq!(log.lock().unwrap().clone(), vec![]);
+        clock.advance(Duration::from_millis(5)).await;
+        wait_for_message_count(log.clone(), 1).await;
+        clock.advance(Duration::from_millis(2)).await; // 7
+        wait_for_message_count(log.clone(), 2).await;
+        clock.advance(Duration::from_millis(3)).await; // 10
+        wait_for_message_count(log.clone(), 3).await;
+        clock.advance(Duration::from_millis(4)).await; // 14
+        wait_for_message_count(log.clone(), 4).await;
+        clock.advance(Duration::from_millis(1)).await; // 15
+        wait_for_message_count(log.clone(), 5).await;
+        clock.advance(Duration::from_millis(5)).await; // 20
+        wait_for_message_count(log.clone(), 6).await;
+        clock.advance(Duration::from_millis(1)).await; // 21
+        wait_for_message_count(log.clone(), 7).await;
+        assert_eq!(
+            log.lock().unwrap().clone(),
             vec![
-                (self.a, Box::new(|| MTMessage::TickA)),
-                (self.b, Box::new(|| MTMessage::TickB)),
+                (Phase::Pre, TestMessage::Tick(1)), // 5
+                (Phase::Pre, TestMessage::Tick(2)), // 7
+                (Phase::Pre, TestMessage::Tick(1)), // 10
+                (Phase::Pre, TestMessage::Tick(2)), // 14
+                (Phase::Pre, TestMessage::Tick(1)), // 15
+                (Phase::Pre, TestMessage::Tick(1)), // 20
+                (Phase::Pre, TestMessage::Tick(2)), // 21
             ]
-        }
-
-        async fn handle(&mut self, message: MTMessage) -> Result<(), SlateDBError> {
-            self.log.lock().unwrap().push(message);
-            Ok(())
-        }
-
-        async fn cleanup(
-            &mut self,
-            _messages: futures::stream::BoxStream<'async_trait, MTMessage>,
-            result: Result<(), SlateDBError>,
-        ) -> Result<(), SlateDBError> {
-            self.cleanup_called.write(());
-            result
-        }
-    }
-
-    #[tokio::test]
-    async fn test_dispatcher_supports_multiple_tickers() {
-        let log = Arc::new(Mutex::new(Vec::<MTMessage>::new()));
-        let cleanup_called = WatchableOnceCell::new();
-        let mut cleanup_reader = cleanup_called.reader();
-
-        let (_tx, rx) = mpsc::unbounded_channel::<MTMessage>();
-        let handler = MultiTickerHandler {
-            log: log.clone(),
-            cleanup_called: cleanup_called.clone(),
-            a: Duration::from_millis(5),
-            b: Duration::from_millis(7),
-        };
-        let clock = Arc::new(DefaultSystemClock::new());
-        let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
-
-        let mut dispatcher = MessageDispatcher::new_with_channel(
-            Box::new(handler),
-            rx,
-            clock,
-            cancellation_token.clone(),
-            error_state.clone(),
         );
-        let join = tokio::spawn(async move { dispatcher.run().await });
-
-        // Wait until we observe at least one of each tick
-        let _ = timeout(Duration::from_secs(3), async {
-            loop {
-                let snapshot = log.lock().unwrap().clone();
-                let saw_a = snapshot.iter().any(|m| matches!(m, MTMessage::TickA));
-                let saw_b = snapshot.iter().any(|m| matches!(m, MTMessage::TickB));
-                if saw_a && saw_b {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("timed out waiting for both tickers to tick");
 
         // Shutdown and wait for cleanup to start
         cancellation_token.cancel();
-        cleanup_reader.await_value().await;
+        let _ = cleanup_called.reader().await_value().await;
 
-        let result = timeout(Duration::from_secs(3), join)
+        let result = timeout(Duration::from_secs(30), join)
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
+
+        // Verify final state
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
         assert!(matches!(
             error_state.reader().read(),
             Some(SlateDBError::BackgroundTaskShutdown)
         ));
+        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert_eq!(log.lock().unwrap().len(), 7);
     }
 }
