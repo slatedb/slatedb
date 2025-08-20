@@ -18,11 +18,13 @@
 //! ## Example
 //!
 //! ```ignore
-//! # use slatedb::dispatcher::{MessageDispatcher, MessageHandler};
-//! # use slatedb::error::SlateDBError;
-//! # use slatedb::clock::SystemClock;
+//! # use crate::dispatcher::{MessageDispatcher, MessageHandler};
+//! # use crate::error::SlateDBError;
+//! # use crate::clock::DefaultSystemClock;
+//! # use crate::watchable_once_cell::WatchableOnceCell;
 //! # use tokio::sync::mpsc;
 //! # use tokio_util::sync::CancellationToken;
+//! # use futures::stream::BoxStream;
 //! # #[tokio::main]
 //! # async fn main() {
 //! enum Message {
@@ -31,6 +33,7 @@
 //!
 //! struct PrintMessageHandler;
 //!
+//! #[async_trait::async_trait]
 //! impl MessageHandler<Message> for PrintMessageHandler {
 //!     async fn handle(
 //!         &mut self,
@@ -64,14 +67,16 @@
 //!     }
 //! }
 //!
-//! let clock = SystemClock::default();
+//! let clock = DefaultSystemClock::default();
 //! let cancellation_token = CancellationToken::new();
 //! let (tx, rx) = mpsc::unbounded_channel();
-//! let dispatcher = MessageDispatcher::new_with_channel(
+//! let error_state = WatchableOnceCell::new(None);
+//! let dispatcher = MessageDispatcher::new(
 //!     Box::new(PrintMessageHandler),
+//!     rx,
 //!     clock,
 //!     cancellation_token,
-//!     None,
+//!     error_state,
 //! );
 //! let join_handle = tokio::spawn(async move { dispatcher.run().await });
 //! tx.send(Message::Say("hello".to_string())).await;
@@ -145,7 +150,6 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
         error_state: WatchableOnceCell<SlateDBError>,
-        fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
         Self::new_with_fp_registry(
             handler,
@@ -153,7 +157,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             clock,
             cancellation_token,
             error_state,
-            fp_registry,
+            Arc::new(FailPointRegistry::new()),
         )
     }
 
@@ -427,7 +431,7 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     ) -> Result<(), SlateDBError>;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-util"))]
 mod test {
     use super::{MessageDispatcher, MessageHandler};
     use crate::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
@@ -515,13 +519,8 @@ mod test {
         }
     }
 
-    #[cfg(feature = "test-util")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_run_happy_path() {
-        use fail_parallel::FailPointRegistry;
-
-        use crate::clock::SystemClock;
-
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -536,7 +535,6 @@ mod test {
             clock.clone(),
             cancellation_token.clone(),
             error_state.clone(),
-            Arc::new(FailPointRegistry::default()),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
@@ -592,7 +590,7 @@ mod test {
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let mut dispatcher = MessageDispatcher::new(
+        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
@@ -666,7 +664,6 @@ mod test {
             clock,
             cancellation_token.clone(),
             error_state.clone(),
-            Arc::new(FailPointRegistry::default()),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
@@ -701,7 +698,7 @@ mod test {
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let mut dispatcher = MessageDispatcher::new(
+        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
@@ -758,14 +755,12 @@ mod test {
         let clock = Arc::new(MockSystemClock::new());
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
-        let fp_registry = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
             error_state.clone(),
-            fp_registry.clone(),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
