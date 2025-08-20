@@ -211,20 +211,20 @@ impl SstBlockSize {
 /// that the data is currently stored in. Currently this is used to define a
 /// durability filter for data served by a read.
 #[non_exhaustive]
-#[derive(Clone, Default, Debug, Copy)]
+#[derive(Clone, Default, Debug, Copy, PartialEq)]
 pub enum DurabilityLevel {
     /// Includes only data currently stored durably in object storage.
-    #[default]
     Remote,
 
     /// Includes data with level Remote and data currently only stored in-memory awaiting flush
     /// to object storage.
+    #[default]
     Memory,
 }
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -233,15 +233,6 @@ pub struct ReadOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
-}
-
-impl Default for ReadOptions {
-    fn default() -> Self {
-        Self {
-            durability_filter: DurabilityLevel::Memory,
-            dirty: false,
-        }
-    }
 }
 
 impl ReadOptions {
@@ -281,7 +272,7 @@ impl Default for ScanOptions {
     /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Remote`].
     fn default() -> Self {
         Self {
-            durability_filter: DurabilityLevel::Remote,
+            durability_filter: DurabilityLevel::default(),
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
@@ -1200,5 +1191,18 @@ object_store_cache_options:
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_default_read_options() {
+        let options = ReadOptions::default();
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+
+        let options = ScanOptions::default();
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+        assert_eq!(options.read_ahead_bytes, 1);
+        assert!(!options.cache_blocks);
     }
 }
