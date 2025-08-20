@@ -94,7 +94,7 @@ impl DbInner {
         }
 
         {
-            let mut guard = self.state.write();
+            let guard = self.state.read();
             let memtable = guard.memtable();
             entries.into_iter().for_each(|entry| memtable.put(entry));
         }
