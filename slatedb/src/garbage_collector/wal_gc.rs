@@ -1,14 +1,14 @@
 use crate::manifest::Manifest;
 use crate::tablestore::SstFileMetadata;
 use crate::{
-    config::GarbageCollectorDirectoryOptions, manifest::store::ManifestStore,
-    tablestore::TableStore, SlateDBError,
+    config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
+    tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
+use log::error;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::error;
 
 use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
@@ -99,7 +99,7 @@ impl GcTask for WalGcTask {
 
         for id in sst_ids_to_delete {
             if let Err(e) = self.table_store.delete_sst(&id).await {
-                error!("Error deleting WAL SST: {}", e);
+                error!("error deleting WAL SST [id={:?}, error={}]", id, e);
             } else {
                 self.stats.gc_wal_count.inc();
             }

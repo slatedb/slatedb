@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
+use chrono::{DateTime, Utc};
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
@@ -12,7 +12,7 @@ use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
 
 #[path = "./generated/manifest_generated.rs"]
-#[allow(warnings)]
+#[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
 #[rustfmt::skip]
 mod manifest_generated;
 pub use manifest_generated::{
@@ -143,18 +143,6 @@ impl ManifestCodec for FlatBufferManifestCodec {
 }
 
 impl FlatBufferManifestCodec {
-    fn unix_ts_to_time(unix_ts: u32) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(unix_ts as u64)
-    }
-
-    fn maybe_unix_ts_to_time(unix_ts: u32) -> Option<SystemTime> {
-        if unix_ts == 0 {
-            None
-        } else {
-            Some(Self::unix_ts_to_time(unix_ts))
-        }
-    }
-
     fn decode_uuid(uuid: Uuid) -> uuid::Uuid {
         uuid::Uuid::from_u64_pair(uuid.high(), uuid.low())
     }
@@ -221,8 +209,18 @@ impl FlatBufferManifestCodec {
             .map(|cp| checkpoint::Checkpoint {
                 id: Self::decode_uuid(cp.id()),
                 manifest_id: cp.manifest_id(),
-                expire_time: Self::maybe_unix_ts_to_time(cp.checkpoint_expire_time_s()),
-                create_time: Self::unix_ts_to_time(cp.checkpoint_create_time_s()),
+                expire_time: match cp.checkpoint_expire_time_s() {
+                    0 => None,
+                    _ => Some(
+                        DateTime::<Utc>::from_timestamp(cp.checkpoint_expire_time_s() as i64, 0)
+                            .expect("invalid timestamp"),
+                    ),
+                },
+                create_time: DateTime::<Utc>::from_timestamp(
+                    cp.checkpoint_create_time_s() as i64,
+                    0,
+                )
+                .expect("invalid timestamp"),
             })
             .collect();
         let core = CoreDbState {
@@ -236,6 +234,7 @@ impl FlatBufferManifestCodec {
             last_l0_clock_tick: manifest.last_l0_clock_tick(),
             checkpoints,
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
+            recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -381,20 +380,11 @@ impl<'b> DbFlatBufferBuilder<'b> {
         Uuid::create(&mut self.builder, &UuidArgs { high, low })
     }
 
-    fn time_to_unix_ts(time: &SystemTime) -> u32 {
-        time.duration_since(UNIX_EPOCH)
-            .expect("manifest expire time cannot be earlier than epoch")
-            .as_secs() as u32 // TODO: check bounds
-    }
-
-    fn maybe_time_to_unix_ts(time: Option<&SystemTime>) -> u32 {
-        time.map(Self::time_to_unix_ts).unwrap_or(0)
-    }
-
     fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
         let id = self.add_uuid(checkpoint.id);
-        let checkpoint_expire_time_s = Self::maybe_time_to_unix_ts(checkpoint.expire_time.as_ref());
-        let checkpoint_create_time_s = Self::time_to_unix_ts(&checkpoint.create_time);
+        let checkpoint_expire_time_s =
+            checkpoint.expire_time.map(|t| t.timestamp()).unwrap_or(0) as u32;
+        let checkpoint_create_time_s = checkpoint.create_time.timestamp() as u32;
         Checkpoint::create(
             &mut self.builder,
             &CheckpointArgs {
@@ -499,6 +489,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 checkpoints: Some(checkpoints),
                 last_l0_seq: core.last_l0_seq,
                 wal_object_store_uri,
+                recent_snapshot_min_seq: core.recent_snapshot_min_seq,
             },
         );
         self.builder.finish(manifest, None);
@@ -565,14 +556,14 @@ mod tests {
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
-    use crate::{checkpoint, SlateDBError};
+    use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
-    use std::time::{Duration, SystemTime};
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
     use crate::sst::SsTableFormat;
     use crate::test_utils::build_test_sst;
     use bytes::{BufMut, Bytes, BytesMut};
+    use chrono::{DateTime, Utc};
 
     use super::{manifest_generated, MANIFEST_FORMAT_VERSION};
 
@@ -585,13 +576,15 @@ mod tests {
                 id: uuid::Uuid::new_v4(),
                 manifest_id: 1,
                 expire_time: None,
-                create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+                create_time: DateTime::<Utc>::from_timestamp(100, 0).expect("invalid timestamp"),
             },
             checkpoint::Checkpoint {
                 id: uuid::Uuid::new_v4(),
                 manifest_id: 2,
-                expire_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)),
-                create_time: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
+                expire_time: Some(
+                    DateTime::<Utc>::from_timestamp(1000, 0).expect("invalid timestamp"),
+                ),
+                create_time: DateTime::<Utc>::from_timestamp(200, 0).expect("invalid timestamp"),
             },
         ];
         let manifest = Manifest::initial(core);
@@ -727,6 +720,7 @@ mod tests {
                 last_l0_clock_tick: 0,
                 last_l0_seq: 0,
                 wal_object_store_uri: None,
+                recent_snapshot_min_seq: 0,
             },
         );
         fbb.finish(manifest, None);
@@ -771,5 +765,27 @@ mod tests {
         let decoded = codec.decode(&bytes).unwrap();
 
         assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn test_should_encode_decode_retention_min_seq() {
+        let mut manifest = Manifest::initial(CoreDbState::new());
+        manifest.core.last_l0_seq = 11111;
+        manifest.core.recent_snapshot_min_seq = 12345;
+
+        let codec = FlatBufferManifestCodec {};
+        let bytes = codec.encode(&manifest);
+        let decoded = codec.decode(&bytes).unwrap();
+
+        assert_eq!(decoded.core.recent_snapshot_min_seq, 12345);
+
+        // Test None case
+        let mut manifest_none = Manifest::initial(CoreDbState::new());
+        manifest_none.core.recent_snapshot_min_seq = 0;
+
+        let bytes_none = codec.encode(&manifest_none);
+        let decoded_none = codec.decode(&bytes_none).unwrap();
+
+        assert_eq!(decoded_none.core.recent_snapshot_min_seq, 0);
     }
 }

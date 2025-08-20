@@ -44,7 +44,7 @@
 //!             .with_name("hybrid_cache")
 //!             .memory(1024)
 //!             .with_weighter(|_, v: &CachedEntry| v.size())
-//!             .storage(Engine::Large)
+//!             .storage(Engine::large())
 //!             .with_device_options(
 //!                 DirectFsDeviceOptions::new("/tmp/slatedb-cache").with_capacity(1024 * 1024))
 //!             .build()
@@ -52,16 +52,17 @@
 //!             .unwrap();
 //!     let cache = Arc::new(FoyerHybridCache::new_with_cache(cache));
 //!     let db = Db::builder("path/to/db", object_store)
-//!         .with_block_cache(cache)
+//!         .with_memory_cache(cache)
 //!         .build()
 //!         .await;
 //! }
 //! ```
 //!
 
+use std::sync::Arc;
+
 use crate::db_cache::{CachedEntry, CachedKey, DbCache};
-use crate::SlateDBError;
-use crate::SlateDBError::DbCacheError;
+use crate::error::SlateDBError::FoyerCacheReadingError;
 use async_trait::async_trait;
 
 pub struct FoyerHybridCache {
@@ -75,26 +76,26 @@ impl FoyerHybridCache {
 }
 
 impl FoyerHybridCache {
-    async fn get(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         self.inner
-            .get(&key)
+            .get(key)
             .await
-            .map_err(|e| DbCacheError { msg: e.to_string() })
+            .map_err(|e| FoyerCacheReadingError(Arc::new(e.into())).into())
             .map(|maybe_v| maybe_v.map(|v| v.value().clone()))
     }
 }
 
 #[async_trait]
 impl DbCache for FoyerHybridCache {
-    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         self.get(key).await
     }
 
-    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         self.get(key).await
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
         self.get(key).await
     }
 
@@ -102,8 +103,8 @@ impl DbCache for FoyerHybridCache {
         self.inner.insert(key, value);
     }
 
-    async fn remove(&self, key: CachedKey) {
-        self.inner.remove(&key);
+    async fn remove(&self, key: &CachedKey) {
+        self.inner.remove(key);
     }
 
     fn entry_count(&self) -> u64 {
@@ -140,7 +141,7 @@ mod tests {
         let mut found = 0;
         let mut notfound = 0;
         for (k, v) in items {
-            let cached_v = cache.get_block(k).await.unwrap();
+            let cached_v = cache.get_block(&k).await.unwrap();
             if let Some(cached_v) = cached_v {
                 assert!(v.block().unwrap().as_ref() == cached_v.block().unwrap().as_ref());
                 found += 1;
@@ -181,7 +182,7 @@ mod tests {
             .with_name("hybrid_cache_test")
             .memory(1024)
             .with_weighter(|_, v: &CachedEntry| v.size())
-            .storage(Engine::Large)
+            .storage(Engine::large())
             .with_device_options(
                 DirectFsDeviceOptions::new(tempdir.path()).with_capacity(1024 * 1024),
             )

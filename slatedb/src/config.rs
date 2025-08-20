@@ -65,15 +65,15 @@
 //! scan_interval = "3600s"
 //!
 //! [garbage_collector_options.manifest_options]
-//! poll_interval = "300s"
+//! interval = "300s"
 //! min_age = "86400s"
 //!
 //! [garbage_collector_options.wal_options]
-//! poll_interval = "60s"
+//! interval = "60s"
 //! min_age = "60s"
 //!
 //! [garbage_collector_options.compacted_options]
-//! poll_interval = "300s"
+//! interval = "300s"
 //! min_age = "86400s"
 //! ```
 //!
@@ -104,15 +104,15 @@
 //!  },
 //!  "garbage_collector_options": {
 //!    "manifest_options": {
-//!      "poll_interval": "300s",
+//!      "interval": "300s",
 //!      "min_age": "86400s"
 //!    },
 //!    "wal_options": {
-//!      "poll_interval": "60s",
+//!      "interval": "60s",
 //!      "min_age": "60s"
 //!    },
 //!    "compacted_options": {
-//!      "poll_interval": "300s",
+//!      "interval": "300s",
 //!      "min_age": "86400s"
 //!    }
 //!  }
@@ -143,13 +143,13 @@
 //!   scan_interval: '3600s'
 //! garbage_collector_options:
 //!   manifest_options:
-//!     poll_interval: '300s'
+//!     interval: '300s'
 //!     min_age: '86400s'
 //!   wal_options:
-//!     poll_interval: '60s'
+//!     interval: '60s'
 //!     min_age: '60s'
 //!   compacted_options:
-//!     poll_interval: '300s'
+//!     interval: '300s'
 //!     min_age: '86400s'
 //! ```
 //!
@@ -162,7 +162,7 @@ use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 
-use crate::error::{SettingsError, SlateDBError};
+use crate::error::SlateDBError;
 
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
@@ -185,6 +185,9 @@ pub enum SstBlockSize {
     Block32Kib,
     /// 64KiB blocks
     Block64Kib,
+    /// Other block sizes
+    #[cfg(test)]
+    Other(usize),
 }
 
 impl SstBlockSize {
@@ -198,6 +201,8 @@ impl SstBlockSize {
             SstBlockSize::Block16Kib => 16384,
             SstBlockSize::Block32Kib => 32768,
             SstBlockSize::Block64Kib => 65536,
+            #[cfg(test)]
+            SstBlockSize::Other(size) => *size,
         }
     }
 }
@@ -206,20 +211,20 @@ impl SstBlockSize {
 /// that the data is currently stored in. Currently this is used to define a
 /// durability filter for data served by a read.
 #[non_exhaustive]
-#[derive(Clone, Default, Debug, Copy)]
+#[derive(Clone, Default, Debug, Copy, PartialEq)]
 pub enum DurabilityLevel {
     /// Includes only data currently stored durably in object storage.
-    #[default]
     Remote,
 
     /// Includes data with level Remote and data currently only stored in-memory awaiting flush
     /// to object storage.
+    #[default]
     Memory,
 }
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
-#[derive(Clone)]
+#[derive(Clone, Debug, Default)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -228,15 +233,6 @@ pub struct ReadOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
-}
-
-impl Default for ReadOptions {
-    fn default() -> Self {
-        Self {
-            durability_filter: DurabilityLevel::Memory,
-            dirty: false,
-        }
-    }
 }
 
 impl ReadOptions {
@@ -255,7 +251,7 @@ impl ReadOptions {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ScanOptions {
     /// Specifies the minimum durability level for data returned by this scan. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -276,7 +272,7 @@ impl Default for ScanOptions {
     /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Remote`].
     fn default() -> Self {
         Self {
-            durability_filter: DurabilityLevel::Remote,
+            durability_filter: DurabilityLevel::default(),
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
@@ -315,9 +311,36 @@ impl ScanOptions {
     }
 }
 
+/// Enum representing the type of flush to perform.
+#[derive(Clone)]
+pub enum FlushType {
+    /// Freeze the active memtable [crate::mem_table::KVTable] and write
+    /// all immutable memtable entries (including the formerly active
+    /// memtable) to the object store.
+    MemTable,
+    /// Freeze the active WAL [crate::mem_table::KVTable] and write all
+    /// immutable WAL entries (including the formerly active WAL) to the
+    /// object store.
+    Wal,
+}
+
+#[derive(Clone)]
+pub struct FlushOptions {
+    /// The type of flush to perform.
+    pub flush_type: FlushType,
+}
+
+impl Default for FlushOptions {
+    fn default() -> Self {
+        Self {
+            flush_type: FlushType::Wal,
+        }
+    }
+}
+
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
@@ -577,7 +600,7 @@ impl Settings {
     /// # Returns
     ///
     /// * `Ok(Settings)` if the file was successfully read and parsed.
-    /// * `Err(SettingsError)` if there was an error reading or parsing the file.
+    /// * `Err(Error)` if there was an error reading or parsing the file.
     ///
     /// # Errors
     ///
@@ -593,10 +616,10 @@ impl Settings {
     ///
     /// let config = Settings::from_file("config.toml").expect("Failed to load options from file");
     /// ```
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Settings, SettingsError> {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Settings, crate::Error> {
         let path = path.as_ref();
         let Some(ext) = path.extension() else {
-            return Err(SettingsError::UnknownFormat(path.into()));
+            return Err(SlateDBError::UnknownConfigurationFormat(path.into()).into());
         };
 
         let mut builder = Figment::from(Settings::default());
@@ -604,11 +627,11 @@ impl Settings {
             "json" => builder = builder.merge(Json::file(path)),
             "toml" => builder = builder.merge(Toml::file(path)),
             "yaml" | "yml" => builder = builder.merge(Yaml::file(path)),
-            _ => return Err(SettingsError::UnknownFormat(path.into())),
+            _ => return Err(SlateDBError::UnknownConfigurationFormat(path.into()).into()),
         }
         builder
             .extract()
-            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)))
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
     }
 
     /// Loads Settings from environment variables with a specified prefix.
@@ -628,7 +651,7 @@ impl Settings {
     /// # Returns
     ///
     /// * `Ok(Settings)` if the environment variables were successfully read and parsed.
-    /// * `Err(SettingsError)` if there was an error reading or parsing the environment variables.
+    /// * `Err(Error)` if there was an error reading or parsing the environment variables.
     ///
     /// # Examples
     ///
@@ -638,11 +661,11 @@ impl Settings {
     /// // Assuming environment variables like SLATEDB_FLUSH_INTERVAL, SLATEDB_WAL_ENABLED, etc. are set
     /// let config = Settings::from_env("SLATEDB_").expect("Failed to load options from env");
     /// ```
-    pub fn from_env(prefix: &str) -> Result<Settings, SettingsError> {
+    pub fn from_env(prefix: &str) -> Result<Settings, crate::Error> {
         Figment::from(Settings::default())
             .merge(Env::prefixed(prefix))
             .extract()
-            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)))
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
     }
 
     /// Loads Settings from multiple configuration sources in a specific order.
@@ -660,7 +683,7 @@ impl Settings {
     /// # Returns
     ///
     /// * `Ok(Settings)` if the configuration was successfully loaded and parsed.
-    /// * `Err(SettingsError)` if there was an error reading or parsing the configuration.
+    /// * `Err(Error)` if there was an error reading or parsing the configuration.
     ///
     /// # Examples
     ///
@@ -669,7 +692,7 @@ impl Settings {
     ///
     /// let config = Settings::load().expect("Failed to load options");
     /// ```
-    pub fn load() -> Result<Settings, SettingsError> {
+    pub fn load() -> Result<Settings, crate::Error> {
         Figment::from(Settings::default())
             .merge(Json::file("SlateDb.json"))
             .merge(Toml::file("SlateDb.toml"))
@@ -677,7 +700,7 @@ impl Settings {
             .merge(Yaml::file("SlateDb.yml"))
             .admerge(Env::prefixed("SLATEDB_"))
             .extract()
-            .map_err(|e| SettingsError::InvalidFormat(Box::new(e)))
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
     }
 }
 
@@ -752,11 +775,44 @@ impl Default for DbReaderOptions {
 pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
     #[cfg(feature = "moka")]
     {
-        return Some(Arc::new(crate::db_cache::moka::MokaCache::new()));
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
     }
     #[cfg(feature = "foyer")]
     {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()));
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+            },
+        )));
+    }
+    None
+}
+
+#[allow(unreachable_code)]
+pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
+    #[cfg(feature = "moka")]
+    {
+        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
+            crate::db_cache::moka::MokaCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                time_to_live: None,
+                time_to_idle: None,
+            },
+        )));
+    }
+    #[cfg(feature = "foyer")]
+    {
+        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
+            crate::db_cache::foyer::FoyerCacheOptions {
+                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+            },
+        )));
     }
     None
 }
@@ -780,7 +836,7 @@ pub enum CompressionCodec {
 }
 
 impl FromStr for CompressionCodec {
-    type Err = SlateDBError;
+    type Err = crate::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -792,7 +848,7 @@ impl FromStr for CompressionCodec {
             "lz4" => Ok(Self::Lz4),
             #[cfg(feature = "zstd")]
             "zstd" => Ok(Self::Zstd),
-            _ => Err(SlateDBError::InvalidCompressionCodec),
+            _ => Err(SlateDBError::InvalidCompressionCodec.into()),
         }
     }
 }
@@ -1135,5 +1191,18 @@ object_store_cache_options:
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_default_read_options() {
+        let options = ReadOptions::default();
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+
+        let options = ScanOptions::default();
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+        assert_eq!(options.read_ahead_bytes, 1);
+        assert!(!options.cache_blocks);
     }
 }

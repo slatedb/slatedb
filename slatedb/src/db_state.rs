@@ -4,18 +4,17 @@ use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
-use crate::reader::ReadSnapshot;
+use crate::reader::DbStateReader;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
+use log::debug;
 use serde::Serialize;
-use std::cmp;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
-use tracing::debug;
 use ulid::Ulid;
 use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
@@ -336,6 +335,11 @@ pub(crate) struct CoreDbState {
     /// it's persisted in the manifest, and only updated when a new L0
     /// SST is created in the manifest.
     pub(crate) last_l0_seq: u64,
+    /// Minimum sequence number across all recent in-memory snapshots. The compactor
+    /// needs this to determine whether it's safe to drop duplicate key writes. If a
+    /// recent snapshot still references an older version of a key, it should not be
+    /// recycled. This field is updated when a new L0 is flushed.
+    pub(crate) recent_snapshot_min_seq: u64,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) wal_object_store_uri: Option<String>,
 }
@@ -353,6 +357,7 @@ impl CoreDbState {
             last_l0_seq: 0,
             checkpoints: vec![],
             wal_object_store_uri: None,
+            recent_snapshot_min_seq: 0,
         }
     }
 
@@ -388,14 +393,14 @@ impl CoreDbState {
     }
 }
 
-// represents a read-snapshot of the current db state
+// represents a consistent view of the current db state
 #[derive(Clone)]
-pub(crate) struct DbStateSnapshot {
+pub(crate) struct DbStateView {
     pub(crate) memtable: Arc<KVTable>,
     pub(crate) state: Arc<COWDbState>,
 }
 
-impl ReadSnapshot for DbStateSnapshot {
+impl DbStateReader for DbStateView {
     fn memtable(&self) -> Arc<KVTable> {
         Arc::clone(&self.memtable)
     }
@@ -425,8 +430,8 @@ impl DbState {
         self.state.clone()
     }
 
-    pub fn snapshot(&self) -> DbStateSnapshot {
-        DbStateSnapshot {
+    pub fn view(&self) -> DbStateView {
+        DbStateView {
             memtable: self.memtable.table().clone(),
             state: self.state.clone(),
         }
@@ -436,21 +441,12 @@ impl DbState {
         self.error.reader()
     }
 
-    // mutations
     pub fn record_fatal_error(&mut self, error: SlateDBError) {
         self.error.write(error);
     }
 
-    pub fn memtable(&mut self) -> &mut WritableKVTable {
-        &mut self.memtable
-    }
-
-    fn state_copy(&self) -> COWDbState {
-        self.state.as_ref().clone()
-    }
-
-    fn update_state(&mut self, state: COWDbState) {
-        self.state = Arc::new(state);
+    pub fn memtable(&self) -> &WritableKVTable {
+        &self.memtable
     }
 
     pub fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) -> Result<(), SlateDBError> {
@@ -458,14 +454,15 @@ impl DbState {
             return Err(err.clone());
         }
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
-        let mut state = self.state_copy();
-        state
-            .imm_memtable
-            .push_front(Arc::new(ImmutableMemtable::new(
-                old_memtable,
-                recent_flushed_wal_id,
-            )));
-        self.update_state(state);
+        self.modify(|modifier| {
+            modifier
+                .state
+                .imm_memtable
+                .push_front(Arc::new(ImmutableMemtable::new(
+                    old_memtable,
+                    recent_flushed_wal_id,
+                )))
+        });
         Ok(())
     }
 
@@ -481,52 +478,31 @@ impl DbState {
         Ok(())
     }
 
-    pub fn move_imm_memtable_to_l0(
-        &mut self,
-        imm_memtable: Arc<ImmutableMemtable>,
-        sst_handle: SsTableHandle,
-    ) -> Result<(), SlateDBError> {
-        let mut state = self.state_copy();
-        let popped = state
-            .imm_memtable
-            .pop_back()
-            .expect("expected imm memtable");
-        assert!(Arc::ptr_eq(&popped, &imm_memtable));
-        state.manifest.core.l0.push_front(sst_handle);
-        state.manifest.core.replay_after_wal_id = imm_memtable.recent_flushed_wal_id();
-
-        // ensure the persisted manifest tick never goes backwards in time
-        let memtable_tick = imm_memtable.table().last_tick();
-        state.manifest.core.last_l0_clock_tick =
-            cmp::max(state.manifest.core.last_l0_clock_tick, memtable_tick);
-        if state.manifest.core.last_l0_clock_tick != memtable_tick {
-            return Err(SlateDBError::InvalidClockTick {
-                last_tick: state.manifest.core.last_l0_clock_tick,
-                next_tick: memtable_tick,
-            });
-        }
-        // update the persisted manifest last_l0_seq as the latest seq in the imm.
-        if let Some(seq) = imm_memtable.table().last_seq() {
-            state.manifest.core.last_l0_seq = seq;
-        }
-
-        self.update_state(state);
-        Ok(())
+    pub fn merge_remote_manifest(&mut self, remote_manifest: DirtyManifest) {
+        self.modify(|modifier| modifier.merge_remote_manifest(remote_manifest));
     }
 
-    /// increment the next wal id, and return the previous value.
-    pub fn increment_next_wal_id(&mut self) -> u64 {
-        let mut state = self.state_copy();
-        let next_wal_id = state.manifest.core.next_wal_sst_id;
-        state.manifest.core.next_wal_sst_id += 1;
-        self.update_state(state);
-        next_wal_id
+    pub fn modify<F, R>(&mut self, fun: F) -> R
+    where
+        F: FnOnce(&mut StateModifier<'_>) -> R,
+    {
+        let mut modifier = StateModifier::new(self);
+        let result = fun(&mut modifier);
+        modifier.finish();
+        result
     }
+}
 
-    pub fn set_next_wal_id(&mut self, next_wal_id: u64) {
-        let mut state = self.state_copy();
-        state.manifest.core.next_wal_sst_id = next_wal_id;
-        self.update_state(state);
+pub(crate) struct StateModifier<'a> {
+    db_state: &'a mut DbState,
+    pub state: COWDbState,
+}
+
+impl<'a> StateModifier<'a> {
+    /// Create a new state modifier
+    fn new(db_state: &'a mut DbState) -> Self {
+        let state = db_state.state.as_ref().clone();
+        Self { db_state, state }
     }
 
     pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
@@ -546,8 +522,7 @@ impl DbState {
             self.state.manifest.core.l0.iter().cloned().collect()
         };
 
-        let mut state = self.state_copy();
-        let my_db_state = state.core();
+        let my_db_state = self.state.core();
         remote_manifest.core = CoreDbState {
             initialized: my_db_state.initialized,
             l0_last_compacted: remote_manifest.core.l0_last_compacted,
@@ -559,9 +534,13 @@ impl DbState {
             last_l0_seq: my_db_state.last_l0_seq,
             checkpoints: remote_manifest.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
+            recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
         };
-        state.manifest = remote_manifest;
-        self.update_state(state);
+        self.state.manifest = remote_manifest;
+    }
+
+    fn finish(self) {
+        self.db_state.state = Arc::new(self.state);
     }
 }
 
@@ -569,7 +548,15 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
     /// increment the next wal id, and return the previous value.
     fn next_wal_id(&self) -> u64 {
         let mut state = self.write();
-        state.increment_next_wal_id()
+
+        // not sure why, but it doesn't compile without the return
+        // statement -- probably some generic inference bug
+        #[allow(clippy::needless_return)]
+        return state.modify(|modifier| {
+            let next_wal_id = modifier.state.manifest.core.next_wal_sst_id;
+            modifier.state.manifest.core.next_wal_sst_id += 1;
+            next_wal_id
+        });
     }
 }
 
@@ -655,7 +642,10 @@ mod tests {
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle =
                 SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), dummy_info.clone());
-            db_state.move_imm_memtable_to_l0(imm, handle).unwrap();
+            db_state.modify(|modifier| {
+                modifier.state.manifest.core.l0.push_front(handle);
+                modifier.state.manifest.core.replay_after_wal_id = imm.recent_flushed_wal_id();
+            });
         }
     }
 

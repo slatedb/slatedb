@@ -1,10 +1,18 @@
+#![doc = include_str!("../../README.md")]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 #![allow(clippy::result_large_err)]
 // Disallow non-approved non-deterministic types and functions in production code
 #![deny(clippy::disallowed_types, clippy::disallowed_methods)]
-#![cfg_attr(test, allow(clippy::disallowed_types, clippy::disallowed_methods))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        clippy::disallowed_types,
+        clippy::disallowed_methods
+    )
+)]
 
 /// Re-export the bytes crate.
 ///
@@ -33,10 +41,12 @@ pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder};
 pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
+pub use db_read::DbRead;
 pub use db_reader::DbReader;
-pub use error::{SettingsError, SlateDBError};
+pub use error::{Error, ErrorKind};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
+pub use rand::DbRand;
 pub use types::KeyValue;
 
 pub mod admin;
@@ -68,7 +78,9 @@ mod comparable_range;
 mod db;
 mod db_common;
 mod db_iter;
+mod db_read;
 mod db_reader;
+mod db_snapshot;
 mod db_state;
 mod error;
 mod filter;
@@ -92,6 +104,7 @@ mod rand;
 mod reader;
 mod retention_iterator;
 mod row_codec;
+mod seq_tracker;
 mod sorted_run_iterator;
 mod sst;
 mod sst_iter;
@@ -99,6 +112,7 @@ mod store_provider;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;
+mod transaction_manager;
 mod transactional_object_store;
 mod types;
 mod utils;

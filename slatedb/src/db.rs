@@ -8,12 +8,12 @@
 //! Basic usage of the `Db` struct:
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::open("test_db", object_store).await?;
 //!     Ok(())
@@ -24,7 +24,9 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
+use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 use parking_lot::{Mutex, RwLock};
 use std::time::Duration;
@@ -36,8 +38,12 @@ use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
-use crate::config::{PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions};
+use crate::config::{
+    FlushOptions, FlushType, PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions,
+};
 use crate::db_iter::DbIterator;
+use crate::db_read::DbRead;
+use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
@@ -50,10 +56,11 @@ use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::transaction_manager::TransactionManager;
 use crate::utils::{MonotonicSeq, SendSafely};
 use crate::wal_buffer::WalBufferManager;
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use tracing::{info, trace, warn};
+use log::{info, trace, warn};
 
 pub mod builder;
 pub use builder::DbBuilder;
@@ -66,6 +73,8 @@ pub(crate) struct DbInner {
     pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
+    #[allow(dead_code)]
+    pub(crate) fp_registry: Arc<FailPointRegistry>,
     /// A clock which is guaranteed to be monotonic. it's previous value is
     /// stored in the manifest and WAL, will be updated after WAL replay.
     pub(crate) mono_clock: Arc<MonotonicClock>,
@@ -77,6 +86,8 @@ pub(crate) struct DbInner {
     /// of the WAL buffer to the remote storage.
     pub(crate) wal_buffer: Arc<WalBufferManager>,
     pub(crate) wal_enabled: bool,
+    /// [`txn_manager`] tracks all the live transactions and related metadata.
+    pub(crate) txn_manager: Arc<TransactionManager>,
 }
 
 impl DbInner {
@@ -92,6 +103,7 @@ impl DbInner {
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMsg>,
         stat_registry: Arc<StatRegistry>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
@@ -136,6 +148,8 @@ impl DbInner {
             settings.flush_interval,
         ));
 
+        let txn_manager = Arc::new(TransactionManager::new(rand.clone()));
+
         let db_inner = Self {
             state,
             settings,
@@ -150,7 +164,9 @@ impl DbInner {
             system_clock,
             rand,
             stat_registry,
+            fp_registry,
             reader,
+            txn_manager,
         };
         Ok(db_inner)
     }
@@ -163,22 +179,22 @@ impl DbInner {
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.db_stats.get_requests.inc();
         self.check_error()?;
-        let snapshot = self.state.read().snapshot();
+        let db_state = self.state.read().view();
         self.reader
-            .get_with_options(key, options, &snapshot, None)
+            .get_with_options(key, options, &db_state, None)
             .await
     }
 
-    pub async fn scan_with_options<'a>(
-        &'a self,
+    pub async fn scan_with_options(
+        &self,
         range: BytesRange,
         options: &ScanOptions,
-    ) -> Result<DbIterator<'a>, SlateDBError> {
+    ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.inc();
         self.check_error()?;
-        let snapshot = self.state.read().snapshot();
+        let db_state = self.state.read().view();
         self.reader
-            .scan_with_options(range, options, &snapshot, None)
+            .scan_with_options(range, options, &db_state, None)
             .await
     }
 
@@ -284,21 +300,21 @@ impl DbInner {
             let total_mem_size_bytes = wal_size_bytes + imm_memtable_size_bytes;
 
             trace!(
+                "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
                 total_mem_size_bytes,
                 wal_size_bytes,
                 imm_memtable_size_bytes,
-                max_unflushed_bytes = self.settings.max_unflushed_bytes,
-                "checking backpressure",
+                self.settings.max_unflushed_bytes,
             );
 
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();
                 warn!(
+                    "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
                     total_mem_size_bytes,
                     wal_size_bytes,
                     imm_memtable_size_bytes,
-                    max_unflushed_bytes = self.settings.max_unflushed_bytes,
-                    "Unflushed memtable size exceeds max_unflushed_bytes. Applying backpressure.",
+                    self.settings.max_unflushed_bytes,
                 );
 
                 let maybe_oldest_unflushed_memtable = {
@@ -341,7 +357,7 @@ impl DbInner {
                     result = await_flush_memtable => result?,
                     result = await_flush_wal => result?,
                     _ = timeout_fut => {
-                        warn!("Backpressure timeout: waited 30s, no memtable/WAL flushed yet");
+                        warn!("backpressure timeout: waited 30s, no memtable/WAL flushed yet");
                     }
                 };
             } else {
@@ -445,17 +461,17 @@ impl Db {
     /// - `Db`: the database
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error opening the database
+    /// - `Error`: if there was an error opening the database
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Error};
     /// use slatedb::object_store::memory::InMemory;
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     Ok(())
@@ -464,7 +480,7 @@ impl Db {
     pub async fn open<P: Into<Path>>(
         path: P,
         object_store: Arc<dyn ObjectStore>,
-    ) -> Result<Self, SlateDBError> {
+    ) -> Result<Self, crate::Error> {
         // Use the builder API internally
         Self::builder(path, object_store).build().await
     }
@@ -481,12 +497,12 @@ impl Db {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Error};
     /// use slatedb::object_store::memory::InMemory;
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store = Arc::new(InMemory::new());
     ///     let db = Db::builder("/tmp/test_db", object_store)
     ///         .build()
@@ -501,32 +517,32 @@ impl Db {
     /// Close the database.
     ///
     /// ## Returns
-    /// - `Result<(), SlateDBError>`: if there was an error closing the database
+    /// - `Result<(), Error>`: if there was an error closing the database
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.close().await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn close(&self) -> Result<(), SlateDBError> {
+    pub async fn close(&self) -> Result<(), crate::Error> {
         self.cancellation_token.cancel();
 
         if let Some(compactor_task) = {
             let mut maybe_compactor_task = self.compactor_task.lock();
             maybe_compactor_task.take()
         } {
-            let result = compactor_task.await.expect("Failed to join compactor task");
-            info!("compactor task exited with: {:?}", result);
+            let result = compactor_task.await.expect("failed to join compactor task");
+            info!("compactor task exited [result={:?}]", result);
         }
 
         if let Some(garbage_collector_task) = {
@@ -535,8 +551,8 @@ impl Db {
         } {
             let result = garbage_collector_task
                 .await
-                .expect("Failed to join garbage collector task");
-            info!("garbage collector task exited with: {:?}", result);
+                .expect("failed to join garbage collector task");
+            info!("garbage collector task exited [result={:?}]", result);
         }
 
         // Shutdown the write batch thread.
@@ -552,8 +568,8 @@ impl Db {
             let mut write_task = self.write_task.lock();
             write_task.take()
         } {
-            let result = write_task.await.expect("Failed to join write thread");
-            info!("write task exited with {:?}", result);
+            let result = write_task.await.expect("failed to join write thread");
+            info!("write task exited [result={:?}]", result);
         }
 
         // Shutdown the WAL flush thread.
@@ -561,7 +577,7 @@ impl Db {
             .wal_buffer
             .close()
             .await
-            .expect("Failed to close WAL buffer");
+            .expect("failed to close WAL buffer");
 
         // Shutdown the memtable flush thread.
         self.inner
@@ -578,11 +594,55 @@ impl Db {
         } {
             let result = memtable_flush_task
                 .await
-                .expect("Failed to join memtable flush thread");
-            info!("mem table flush task exited with: {:?}", result);
+                .expect("failed to join memtable flush thread");
+            info!("mem table flush task exited [result={:?}]", result);
         }
 
         Ok(())
+    }
+
+    /// Create a snapshot of the database.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<DbSnapshot>, Error>`: the snapshot of the database, it represents
+    ///   a consistent view of the database at the time of the snapshot.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    /// use bytes::Bytes;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     
+    ///     // Write some data and create a snapshot
+    ///     db.put(b"key1", b"value1").await?;
+    ///     let snapshot = db.snapshot().await?;
+    ///     
+    ///     // Snapshot provides read-only access to database state
+    ///     let value = snapshot.get(b"key1").await?;
+    ///     assert_eq!(value, Some(Bytes::from(b"value1".as_ref())));
+    ///     
+    ///     // Write more data to original database
+    ///     db.put(b"key2", b"value2").await?;
+    ///     
+    ///     // Snapshot still sees old state, original db sees new data
+    ///     assert_eq!(snapshot.get(b"key2").await?, None);
+    ///     assert_eq!(db.get(b"key2").await?, Some(Bytes::from(b"value2".as_ref())));
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
+        self.inner.check_error()?;
+        let seq = self.inner.oracle.last_committed_seq.load();
+        let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
+        Ok(snapshot)
     }
 
     /// Get a value from the database with default read options.
@@ -596,22 +656,22 @@ impl Db {
     /// - `key`: the key to get
     ///
     /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`:
+    /// - `Result<Option<Bytes>, Error>`:
     ///     - `Some(Bytes)`: the value if it exists
     ///     - `None`: if the value does not exist
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error getting the value
+    /// - `Error`: if there was an error getting the value
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"key", b"value").await?;
@@ -619,7 +679,7 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, SlateDBError> {
+    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
         self.get_with_options(key, &ReadOptions::default()).await
     }
 
@@ -636,22 +696,22 @@ impl Db {
     ///   can only observe committed state).
     ///
     /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`:
+    /// - `Result<Option<Bytes>, Error>`:
     ///   - `Some(Bytes)`: the value if it exists
     ///   - `None`: if the value does not exist
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error getting the value
+    /// - `Error`: if there was an error getting the value
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, config::ReadOptions, SlateDBError};
+    /// use slatedb::{Db, config::ReadOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"key", b"value").await?;
@@ -663,8 +723,11 @@ impl Db {
         &self,
         key: K,
         options: &ReadOptions,
-    ) -> Result<Option<Bytes>, SlateDBError> {
-        self.inner.get_with_options(key, options).await
+    ) -> Result<Option<Bytes>, crate::Error> {
+        self.inner
+            .get_with_options(key, options)
+            .await
+            .map_err(Into::into)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -672,20 +735,20 @@ impl Db {
     /// returns a `DbIterator`
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
+    /// - `Error`: if there was an error scanning the range of keys
     ///
     /// ## Returns
-    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"a", b"a_value").await?;
@@ -697,7 +760,7 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, SlateDBError>
+    pub async fn scan<K, T>(&self, range: T) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
@@ -710,17 +773,17 @@ impl Db {
     /// returns a `DbIterator`
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error scanning the range of keys
+    /// - `Error`: if there was an error scanning the range of keys
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, config::ScanOptions, config::DurabilityLevel, SlateDBError};
+    /// use slatedb::{Db, config::ScanOptions, config::DurabilityLevel, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"a", b"a_value").await?;
@@ -739,7 +802,7 @@ impl Db {
         &self,
         range: T,
         options: &ScanOptions,
-    ) -> Result<DbIterator, SlateDBError>
+    ) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
@@ -754,6 +817,7 @@ impl Db {
         self.inner
             .scan_with_options(BytesRange::from(range), options)
             .await
+            .map_err(Into::into)
     }
 
     /// Write a value into the database with default `WriteOptions`.
@@ -763,24 +827,24 @@ impl Db {
     /// - `value`: the value to write
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error writing the value.
+    /// - `Error`: if there was an error writing the value.
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put(b"key", b"value").await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn put<K, V>(&self, key: K, value: V) -> Result<(), SlateDBError>
+    pub async fn put<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -799,17 +863,17 @@ impl Db {
     /// - `write_opts`: the write options to use
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error writing the value.
+    /// - `Error`: if there was an error writing the value.
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, config::{PutOptions, WriteOptions}, SlateDBError};
+    /// use slatedb::{Db, config::{PutOptions, WriteOptions}, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.put_with_options(b"key", b"value", &PutOptions::default(), &WriteOptions::default()).await?;
@@ -822,7 +886,7 @@ impl Db {
         value: V,
         put_opts: &PutOptions,
         write_opts: &WriteOptions,
-    ) -> Result<(), SlateDBError>
+    ) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -838,24 +902,24 @@ impl Db {
     /// - `key`: the key to delete
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error deleting the key.
+    /// - `Error`: if there was an error deleting the key.
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.delete(b"key").await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), SlateDBError> {
+    pub async fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), crate::Error> {
         let mut batch = WriteBatch::new();
         batch.delete(key.as_ref());
         self.write(batch).await
@@ -868,17 +932,17 @@ impl Db {
     /// - `options`: the write options to use
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error deleting the key.
+    /// - `Error`: if there was an error deleting the key.
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, config::WriteOptions, SlateDBError};
+    /// use slatedb::{Db, config::WriteOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.delete_with_options(b"key", &WriteOptions::default()).await?;
@@ -889,7 +953,7 @@ impl Db {
         &self,
         key: K,
         options: &WriteOptions,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), crate::Error> {
         let mut batch = WriteBatch::new();
         batch.delete(key);
         self.write_with_options(batch, options).await
@@ -903,17 +967,17 @@ impl Db {
     /// - `batch`: the batch of put/delete operations to write
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error writing the batch.
+    /// - `Error`: if there was an error writing the batch.
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{WriteBatch, Db, SlateDBError};
+    /// use slatedb::{WriteBatch, Db, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///
@@ -926,7 +990,7 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn write(&self, batch: WriteBatch) -> Result<(), SlateDBError> {
+    pub async fn write(&self, batch: WriteBatch) -> Result<(), crate::Error> {
         self.write_with_options(batch, &WriteOptions::default())
             .await
     }
@@ -940,17 +1004,17 @@ impl Db {
     /// - `options`: the write options to use
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error writing the batch.
+    /// - `Error`: if there was an error writing the batch.
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{WriteBatch, Db, config::WriteOptions, SlateDBError};
+    /// use slatedb::{WriteBatch, Db, config::WriteOptions, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///
@@ -967,48 +1031,152 @@ impl Db {
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-    ) -> Result<(), SlateDBError> {
-        self.inner.write_with_options(batch, options).await
+    ) -> Result<(), crate::Error> {
+        self.inner
+            .write_with_options(batch, options)
+            .await
+            .map_err(Into::into)
     }
 
-    /// Flush the database to disk.
-    /// If WAL is enabled, flushes the WAL to disk.
-    /// If WAL is disabled, flushes the memtables to disk.
+    /// Flush in-memory writes to disk. This function blocks until the in-memory
+    /// data has been durably written to object storage.
+    ///
+    /// If WAL is enabled, this method is equivalent to:
+    /// `flush_with_options(FlushOptions { flush_type: FlushType::Wal })`
+    ///
+    /// If WAL is disabled, this method is equivalent to:
+    /// `flush_with_options(FlushOptions { flush_type: FlushType::Memtable })`.
     ///
     /// ## Errors
-    /// - `SlateDBError`: if there was an error flushing the database
+    /// - `Error`: if there was an error flushing the database
     ///
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, SlateDBError};
+    /// use slatedb::{Db, Error};
     /// use slatedb::object_store::{ObjectStore, memory::InMemory};
     /// use std::sync::Arc;
     ///
     /// #[tokio::main]
-    /// async fn main() -> Result<(), SlateDBError> {
+    /// async fn main() -> Result<(), Error> {
     ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
     ///     db.flush().await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn flush(&self) -> Result<(), SlateDBError> {
+    pub async fn flush(&self) -> Result<(), crate::Error> {
         if self.inner.wal_enabled {
-            self.inner.flush_wals().await
+            self.flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
         } else {
-            self.inner.flush_memtables().await
+            self.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
         }
     }
 
+    /// Flush in-memory writes to disk with custom options.
+    ///
+    /// An error will be returned if `options.flush_type` is `FlushType::Wal` and the WAL
+    /// is disabled.
+    ///
+    /// `FlushType::Memtable` is allowed even if WAL is enabled.
+    ///
+    /// ## Arguments
+    /// - `options`: the flush options
+    ///
+    /// ## Returns
+    /// - `Result<(), crate::Error>`: the result of the flush operation.
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error flushing the database
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::config::{FlushOptions, FlushType};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.flush_with_options(FlushOptions {
+    ///         flush_type: FlushType::Wal,
+    ///     })
+    ///     .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
+        match options.flush_type {
+            FlushType::Wal => {
+                if self.inner.wal_enabled {
+                    self.inner.flush_wals().await
+                } else {
+                    Err(SlateDBError::WalDisabled)
+                }
+            }
+            FlushType::MemTable => self.inner.flush_memtables().await,
+        }
+        .map_err(Into::into)
+    }
+
+    /// Get the metrics registry for the database.
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
+    }
+
+    /// Resolve an object store from a URL.
+    ///
+    /// ## Arguments
+    /// - `url`: the URL to resolve, for example `s3://my-bucket/my-prefix`.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
+    pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
+        let registry = DefaultObjectStoreRegistry::new();
+        let url = url
+            .try_into()
+            .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
+        let (object_store, _) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        Ok(object_store)
+    }
+}
+
+#[async_trait::async_trait]
+impl DbRead for Db {
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, crate::Error> {
+        self.get_with_options(key, options).await
+    }
+
+    async fn scan_with_options<K, T>(
+        &self,
+        range: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        K: AsRef<[u8]> + Send,
+        T: RangeBounds<K> + Send,
+    {
+        self.scan_with_options(range, options).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use chrono::TimeDelta;
     use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
@@ -1406,7 +1574,7 @@ mod tests {
         );
         db.flush().await.unwrap();
 
-        let state = db.inner.state.read().snapshot();
+        let state = db.inner.state.read().view();
         assert_eq!(1, state.state.manifest.core.l0.len());
         let sst = state.state.manifest.core.l0.front().unwrap();
         let index = db.inner.table_store.read_index(sst).await.unwrap();
@@ -1493,7 +1661,7 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
         opts.object_store_cache_options.part_size_bytes = 1024;
         let kv_store = Db::builder(
             "/tmp/test_kv_store_with_cache_metrics",
@@ -1561,7 +1729,7 @@ mod tests {
         )
         .unwrap();
 
-        opts.object_store_cache_options.root_folder = Some(temp_dir.into_path());
+        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
         let kv_store = Db::builder(
             "/tmp/test_kv_store_with_cache_stored_files",
             cached_object_store.clone(),
@@ -1676,12 +1844,12 @@ mod tests {
 
         #[async_trait]
         trait IteratorTrait {
-            async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError>;
+            async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error>;
         }
 
         #[async_trait]
         impl IteratorTrait for DbIterator<'_> {
-            async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+            async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
                 DbIterator::next(self).await
             }
         }
@@ -1796,10 +1964,13 @@ mod tests {
 
             let lower_bounded_range = BytesRange::from(arbitrary_key.clone()..);
             let value = sample::bytes_in_range(rng, &lower_bounded_range);
-            assert!(matches!(
-                iter.seek(value).await,
-                Err(SlateDBError::InvalidArgument { msg: _ })
-            ));
+            let err = iter.seek(value.clone()).await.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("cannot seek to a key outside the iterator range"),
+                "{}",
+                err
+            );
 
             let mut iter = db
                 .scan_with_options(arbitrary_key.clone().., &ScanOptions::default())
@@ -1808,10 +1979,13 @@ mod tests {
 
             let upper_bounded_range = BytesRange::from(..arbitrary_key.clone());
             let value = sample::bytes_in_range(rng, &upper_bounded_range);
-            assert!(matches!(
-                iter.seek(value).await,
-                Err(SlateDBError::InvalidArgument { msg: _ })
-            ));
+            let err = iter.seek(value.clone()).await.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("cannot seek to a key outside the iterator range"),
+                "{}",
+                err
+            );
         }
     }
 
@@ -2235,6 +2409,278 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_flush_memtable_with_wal_enabled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_with_options";
+        let mut options = test_db_options(0, 256, None);
+        options.flush_interval = Some(Duration::from_secs(u64::MAX));
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let sst_format = SsTableFormat {
+            min_filter_keys: 10,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            sst_format,
+            path,
+            None,
+        ));
+
+        // Write some data to populate the memtable
+        let key1 = b"test_key_1";
+        let value1 = b"test_value_1";
+        kv_store
+            .put_with_options(
+                key1,
+                value1,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        let key2 = b"test_key_2";
+        let value2 = b"test_value_2";
+        kv_store
+            .put_with_options(
+                key2,
+                value2,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Get initial state
+        let initial_manifest = stored_manifest.refresh().await.unwrap();
+        let initial_l0_count = initial_manifest.core.l0.len();
+
+        let initial_flush_count = kv_store
+            .metrics()
+            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+            .unwrap()
+            .get();
+
+        // Flush memtable using flush_with_options
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        // Wait for the flush to complete and manifest to be updated
+        let db_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| s.l0.len() > initial_l0_count,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        // Verify that a new SST was created in L0
+        assert_eq!(db_state.l0.len(), initial_l0_count + 1);
+
+        // Verify that the flush metrics were updated
+        let final_flush_count = kv_store
+            .metrics()
+            .lookup(IMMUTABLE_MEMTABLE_FLUSHES)
+            .unwrap()
+            .get();
+        assert!(final_flush_count > initial_flush_count);
+
+        // Verify tha the WAL has not been flushed
+        let recent_flushed_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert_eq!(recent_flushed_wal_id, 0);
+
+        // Verify that the data is still accessible after flush
+        let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
+        assert_eq!(retrieved_value1.as_ref(), value1);
+
+        let retrieved_value2 = kv_store.get(key2).await.unwrap().unwrap();
+        assert_eq!(retrieved_value2.as_ref(), value2);
+
+        // Verify the data exists in the newly created SST
+        let latest_sst = db_state.l0.back().unwrap();
+        let sst_iter_options = SstIteratorOptions::default();
+        let mut iter =
+            SstIterator::new_borrowed(.., latest_sst, table_store.clone(), sst_iter_options)
+                .await
+                .unwrap()
+                .expect("Expected Some(iter) but got None");
+
+        // Collect all key-value pairs from the SST
+        let mut found_keys = std::collections::HashSet::new();
+        while let Some(kv) = iter.next().await.unwrap() {
+            found_keys.insert(kv.key.to_vec());
+        }
+
+        // Verify our keys are in the SST
+        assert!(found_keys.contains(key1.as_slice()));
+        assert!(found_keys.contains(key2.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn test_flush_with_options_wal() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_with_options_wal";
+        let mut options = test_db_options(0, 1024, None);
+        // Larger memtable to avoid memtable flushes
+        options.flush_interval = Some(Duration::from_secs(u64::MAX));
+        // Fail all memtable writes before the DB starts, so we can be sure that
+        // only the WAL is flushed.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Write some data to populate the WAL buffer
+        let key1 = b"wal_test_key_1";
+        let value1 = b"wal_test_value_1";
+        kv_store
+            .put_with_options(
+                key1,
+                value1,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        let key2 = b"wal_test_key_2";
+        let value2 = b"wal_test_value_2";
+        kv_store
+            .put_with_options(
+                key2,
+                value2,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Get initial WAL ID to verify flush occurred
+        let initial_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+
+        // Flush WAL using flush_with_options - this should succeed without error
+        let flush_result = kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await;
+
+        // Verify the flush operation completed successfully
+        assert!(flush_result.is_ok(), "WAL flush should succeed");
+
+        // Verify that the data is still accessible after WAL flush
+        let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
+        assert_eq!(retrieved_value1.as_ref(), value1);
+
+        let retrieved_value2 = kv_store.get(key2).await.unwrap().unwrap();
+        assert_eq!(retrieved_value2.as_ref(), value2);
+
+        // Verify that the WAL buffer is in a consistent state after flush
+        // The recent_flushed_wal_id should be at least as high as before
+        let final_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
+        assert!(
+            final_wal_id >= initial_wal_id,
+            "WAL ID should not decrease after flush"
+        );
+
+        // Verify that the memtable has not been flushed by checking the db for error state
+        assert!(
+            kv_store.inner.check_error().is_ok(),
+            "DB should not have an error state"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_flush_with_options_wal_disabled_error() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_flush_with_options_wal_disabled";
+        let mut options = test_db_options(0, 1024, None);
+        options.wal_enabled = false; // Disable WAL
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        // Write some data to the database
+        let key1 = b"test_key_1";
+        let value1 = b"test_value_1";
+        kv_store
+            .put_with_options(
+                key1,
+                value1,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Attempt to flush WAL on a WAL-disabled database
+        let flush_result = kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await;
+
+        // Verify that we get the WalDisabled error
+        assert!(flush_result.is_err(), "Expected WalDisabled error");
+        let error = flush_result.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("attempted a WAL operation when the WAL is disabled"),
+            "Expected WalDisabled error message, got: {}",
+            error
+        );
+
+        // Verify that memtable flush still works when WAL is disabled
+        let memtable_flush_result = kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await;
+        assert!(
+            memtable_flush_result.is_ok(),
+            "Memtable flush should work even when WAL is disabled"
+        );
+
+        // Verify that the data is still accessible
+        let retrieved_value1 = kv_store.get(key1).await.unwrap().unwrap();
+        assert_eq!(retrieved_value1.as_ref(), value1);
+    }
+
     // 2 threads so we can can wait on the write_with_options (main) thread
     // while the write_batch (background) thread is blocked on writing the
     // WAL SST.
@@ -2328,8 +2774,8 @@ mod tests {
 
         db.flush().await.unwrap();
 
-        let snapshot = db.inner.state.read().snapshot();
-        assert_eq!(snapshot.state.imm_memtable.len(), 1);
+        let db_state = db.inner.state.read().view();
+        assert_eq!(db_state.state.imm_memtable.len(), 1);
     }
 
     #[tokio::test]
@@ -2362,7 +2808,7 @@ mod tests {
             .unwrap();
 
         let memtable = {
-            let mut lock = kv_store.inner.state.write();
+            let lock = kv_store.inner.state.read();
             lock.memtable()
                 .put(RowEntry::new_value(b"abc1111", b"value1111", 1));
             lock.memtable()
@@ -2480,7 +2926,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut state = db_restored.inner.state.write();
+        let state = db_restored.inner.state.read();
         let memtable = state.memtable();
         let mut iter = memtable.table().iter();
         assert_iterator(
@@ -2510,7 +2956,7 @@ mod tests {
         let val = db.get(b"key1").await.unwrap();
         assert_eq!(val, Some(Bytes::from_static(b"value1")));
 
-        let mut state = db.inner.state.write();
+        let state = db.inner.state.read();
         let memtable = state.memtable();
         assert_eq!(memtable.table().last_seq(), Some(1));
     }
@@ -2699,12 +3145,12 @@ mod tests {
         next_wal_id += 1;
 
         // verify that we reload imm
-        let snapshot = reader.inner.state.read().snapshot();
-        assert_eq!(snapshot.state.imm_memtable.len(), 2);
+        let db_state = reader.inner.state.read().view();
+        assert_eq!(db_state.state.imm_memtable.len(), 2);
 
         // one empty wal and two wals for the puts
         assert_eq!(
-            snapshot
+            db_state
                 .state
                 .imm_memtable
                 .front()
@@ -2713,7 +3159,7 @@ mod tests {
             1 + 2
         );
         assert_eq!(
-            snapshot
+            db_state
                 .state
                 .imm_memtable
                 .get(1)
@@ -2721,7 +3167,7 @@ mod tests {
                 .recent_flushed_wal_id(),
             2
         );
-        assert_eq!(snapshot.state.core().next_wal_sst_id, next_wal_id);
+        assert_eq!(db_state.state.core().next_wal_sst_id, next_wal_id);
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -2780,17 +3226,17 @@ mod tests {
             .unwrap();
 
         // verify that we reload imm
-        let snapshot = db.inner.state.read().snapshot();
+        let db_state = db.inner.state.read().view();
 
         // resume write-compacted-sst-io-error since we got a snapshot and
         // want to let the test finish.
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
-        assert_eq!(snapshot.state.imm_memtable.len(), 1);
+        assert_eq!(db_state.state.imm_memtable.len(), 1);
 
         // one empty wal and one wal for the first put
         assert_eq!(
-            snapshot
+            db_state
                 .state
                 .imm_memtable
                 .front()
@@ -2798,9 +3244,9 @@ mod tests {
                 .recent_flushed_wal_id(),
             1 + 1
         );
-        assert!(snapshot.state.imm_memtable.get(1).is_none());
+        assert!(db_state.state.imm_memtable.get(1).is_none());
 
-        assert_eq!(snapshot.state.core().next_wal_sst_id, 4);
+        assert_eq!(db_state.state.core().next_wal_sst_id, 4);
         assert_eq!(
             db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -2822,8 +3268,8 @@ mod tests {
         );
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
-        let result = db.put(b"foo", b"bar").await;
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        let result = db.put(b"foo", b"bar").await.unwrap_err();
+        assert!(result.to_string().contains("background task panic'd"));
     }
 
     #[tokio::test]
@@ -2843,8 +3289,11 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
 
         // Trigger a WAL write, which should not advance the manifest WAL ID
-        let result = db.put(b"foo", b"bar").await;
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        let result = db.put(b"foo", b"bar").await.unwrap_err();
+        assert_eq!(
+            result.to_string(),
+            "System error: background task panic'd (failpoint write-wal-sst-io-error panic)"
+        );
 
         // Close, which flushes the latest manifest to the object store
         // TODO: it might make sense to return an error if there're unflushed wals in memory
@@ -3025,7 +3474,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<(), SlateDBError> {
+        async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<(), crate::Error> {
             db.put_with_options(
                 key,
                 val,
@@ -3053,11 +3502,10 @@ mod tests {
             .unwrap();
 
         // assert that db1 can no longer write.
-        let err = do_put(&db1, b"1", b"1").await;
-        assert!(
-            matches!(err, Err(SlateDBError::Fenced)),
-            "got non-fenced error: {:?}",
-            err
+        let err = do_put(&db1, b"1", b"1").await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Permission error: detected newer DB client"
         );
 
         do_put(&db2, b"2", b"2").await.unwrap();
@@ -3088,11 +3536,7 @@ mod tests {
         clock.ticker.store(5, Ordering::SeqCst);
         match db.put(b"1", b"1").await {
             Ok(_) => panic!("expected an error on inserting backwards time"),
-            Err(e) => assert!(
-                e.to_string().contains("Last tick: 10, Next tick: 5"),
-                "{}",
-                e.to_string()
-            ),
+            Err(e) => assert_eq!(e.to_string(), "Operation error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
     }
 
@@ -3125,11 +3569,7 @@ mod tests {
         clock.ticker.store(5, Ordering::SeqCst);
         match db2.put(b"1", b"1").await {
             Ok(_) => panic!("expected an error on inserting backwards time"),
-            Err(e) => assert!(
-                e.to_string().contains("Last tick: 10, Next tick: 5"),
-                "{}",
-                e.to_string()
-            ),
+            Err(e) => assert_eq!(e.to_string(), "Operation error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
     }
 
@@ -3390,7 +3830,7 @@ mod tests {
 
         let mut options = test_db_options(0, 32, None);
         options.flush_interval = None;
-        options.manifest_poll_interval = Duration::MAX;
+        options.manifest_poll_interval = TimeDelta::MAX.to_std().unwrap();
 
         let db1 = Db::builder(path, object_store.clone())
             .with_settings(options.clone())
@@ -3450,7 +3890,12 @@ mod tests {
             .with_settings(test_db_options(0, 1024, None))
             .build()
             .await;
-        assert!(matches!(result, Err(SlateDBError::Unsupported(..))));
+        match result {
+            Err(err) => {
+                assert!(err.to_string().contains("unsupported"));
+            }
+            _ => panic!("expected Unsupported error"),
+        }
     }
 
     #[test]
@@ -3552,6 +3997,125 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             default_ttl: ttl,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_basic_functionality() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open("test_db", object_store).await.unwrap();
+
+        // Write some data
+        db.put(b"key1", b"value1").await.unwrap();
+        db.put(b"key2", b"value2").await.unwrap();
+
+        // Create a snapshot
+        let snapshot = db.snapshot().await.unwrap();
+
+        // Verify snapshot can read the data
+        assert_eq!(
+            snapshot.get(b"key1").await.unwrap(),
+            Some(Bytes::from(b"value1".as_ref()))
+        );
+        assert_eq!(
+            snapshot.get(b"key2").await.unwrap(),
+            Some(Bytes::from(b"value2".as_ref()))
+        );
+
+        // Write more data to the original database
+        db.put(b"key3", b"value3").await.unwrap();
+
+        // Snapshot should not see the new data
+        assert_eq!(snapshot.get(b"key3").await.unwrap(), None);
+
+        // Original database should see the new data
+        assert_eq!(
+            db.get(b"key3").await.unwrap(),
+            Some(Bytes::from(b"value3".as_ref()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recent_snapshot_min_seq_monotonic() {
+        let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
+        let object_store = Arc::new(InMemory::new());
+        let settings = Settings {
+            l0_sst_size_bytes: 4 * 1024,   // Smaller to trigger flush more easily
+            max_unflushed_bytes: 2 * 1024, // Smaller to trigger flush more easily
+            min_filter_keys: 0,
+            flush_interval: Some(Duration::from_millis(100)),
+            ..Default::default()
+        };
+
+        let db = Db::builder(path, object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+
+        // Initial state: recent_snapshot_min_seq should be 0
+        {
+            let state = db.inner.state.read();
+            assert_eq!(state.state().core().recent_snapshot_min_seq, 0);
+        }
+
+        // Test 1: Force memtable flush to update recent_snapshot_min_seq
+        db.put(b"key1", b"value1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            // After flush, recent_snapshot_min_seq should be updated (no active snapshots)
+            assert!(
+                recent_min_seq > 0,
+                "recent_snapshot_min_seq should be > 0 after flush"
+            );
+        }
+
+        // Test 2: With active snapshots
+        let _snapshot = db.snapshot().await.unwrap();
+        let snapshot_seq = db.inner.oracle.last_committed_seq.load();
+
+        // Write more data and force flush
+        db.put(b"key2", b"value2").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        // Verify that txn_manager.min_active_seq() returns the snapshot seq
+        let min_active_seq = db.inner.txn_manager.min_active_seq();
+        assert!(min_active_seq.is_some());
+        assert_eq!(min_active_seq.unwrap(), snapshot_seq);
+
+        // Verify recent_snapshot_min_seq should be the minimum active seq after flush
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            assert_eq!(
+                recent_min_seq,
+                min_active_seq.unwrap(),
+                "recent_snapshot_min_seq should equal min_active_seq after flush"
+            );
+        }
+
+        // Test 3: Drop snapshot and check update
+        drop(_snapshot);
+
+        // Write more data and flush to trigger update
+        db.put(b"key3", b"value3").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+
+        // Now recent_snapshot_min_seq should be updated to higher value (no active snapshots)
+        {
+            let state = db.inner.state.read();
+            let recent_min_seq = state.state().core().recent_snapshot_min_seq;
+            let last_l0_seq = state.state().core().last_l0_seq;
+
+            // Should be updated to last_l0_seq since no active snapshots
+            assert_eq!(
+                recent_min_seq, last_l0_seq,
+                "recent_snapshot_min_seq should equal last_l0_seq when no active snapshots"
+            );
+            assert!(recent_min_seq > snapshot_seq);
         }
     }
 }

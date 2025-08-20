@@ -13,16 +13,16 @@
 //! ## Examples
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::db_cache::moka::MokaCache;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_block_cache(Arc::new(MokaCache::new()))
+//!         .with_memory_cache(Arc::new(MokaCache::new()))
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -30,7 +30,6 @@
 //! ```
 //!
 use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
-use crate::SlateDBError;
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -107,24 +106,24 @@ impl Default for MokaCache {
 
 #[async_trait]
 impl DbCache for MokaCache {
-    async fn get_block(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        Ok(self.inner.get(&key).await)
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).await)
     }
 
-    async fn get_index(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        Ok(self.inner.get(&key).await)
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).await)
     }
 
-    async fn get_filter(&self, key: CachedKey) -> Result<Option<CachedEntry>, SlateDBError> {
-        Ok(self.inner.get(&key).await)
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        Ok(self.inner.get(key).await)
     }
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         self.inner.insert(key, value).await;
     }
 
-    async fn remove(&self, key: CachedKey) {
-        self.inner.remove(&key).await;
+    async fn remove(&self, key: &CachedKey) {
+        self.inner.remove(key).await;
     }
 
     fn entry_count(&self) -> u64 {

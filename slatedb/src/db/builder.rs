@@ -8,12 +8,12 @@
 //! Basic usage of the `DbBuilder` struct:
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
 //!         .build()
@@ -25,12 +25,12 @@
 //! Example with custom settings:
 //!
 //! ```
-//! use slatedb::{Db, config::Settings, SlateDBError};
+//! use slatedb::{Db, config::Settings, Error};
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
 //!         .with_settings(Settings {
@@ -46,16 +46,16 @@
 //! Example with a custom block cache:
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::object_store::memory::InMemory;
 //! use slatedb::db_cache::moka::MokaCache;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_block_cache(Arc::new(MokaCache::new()))
+//!         .with_memory_cache(Arc::new(MokaCache::new()))
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -65,13 +65,13 @@
 //! Example with a custom clock:
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::clock::DefaultLogicalClock;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let clock = Arc::new(DefaultLogicalClock::new());
 //!     let db = Db::builder("test_db", object_store)
@@ -85,13 +85,13 @@
 //! Example with a custom SST block size:
 //!
 //! ```
-//! use slatedb::{Db, SlateDBError};
+//! use slatedb::{Db, Error};
 //! use slatedb::config::SstBlockSize;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), SlateDBError> {
+//! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
 //!         .with_sst_block_size(SstBlockSize::Block8Kib) // 8KiB blocks
@@ -105,12 +105,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fail_parallel::FailPointRegistry;
+use log::{info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
 
 use crate::admin::Admin;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
@@ -123,12 +123,14 @@ use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::default_block_cache;
+use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::SizeTieredCompactionSchedulerOptions;
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
+use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -152,7 +154,7 @@ pub struct DbBuilder<P: Into<Path>> {
     settings: Settings,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
-    block_cache: Option<Arc<dyn DbCache>>,
+    memory_cache: Option<Arc<dyn DbCache>>,
     logical_clock: Option<Arc<dyn LogicalClock>>,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
@@ -172,7 +174,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             main_object_store,
             settings: Settings::default(),
             wal_object_store: None,
-            block_cache: None,
+            memory_cache: None,
             logical_clock: None,
             system_clock: None,
             gc_runtime: None,
@@ -201,9 +203,12 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the block cache to use for the database.
-    pub fn with_block_cache(mut self, block_cache: Arc<dyn DbCache>) -> Self {
-        self.block_cache = Some(block_cache);
+    /// Sets the memory cache to use for the database.
+    ///
+    /// SlateDB uses a cache to efficiently store and retrieve blocks and SST metadata locally.
+    /// [`slatedb::db_cache::SplitCache`] is used by default.
+    pub fn with_memory_cache(mut self, memory_cache: Arc<dyn DbCache>) -> Self {
+        self.memory_cache = Some(memory_cache);
         self
     }
 
@@ -283,16 +288,22 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 
     /// Builds and opens the database.
-    pub async fn build(self) -> Result<Db, SlateDBError> {
+    pub async fn build(self) -> Result<Db, crate::Error> {
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
-            info!(?path, settings = settings_json, "Opening SlateDB database");
+            info!(
+                "opening SlateDB database [path={}, settings={}]",
+                path, settings_json
+            );
         } else {
-            info!(?path, ?self.settings, "Opening SlateDB database");
+            info!(
+                "opening SlateDB database [path={}, settings={:?}]",
+                path, self.settings
+            );
         }
 
         let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
@@ -300,7 +311,16 @@ impl<P: Into<Path>> DbBuilder<P> {
         let logical_clock = self
             .logical_clock
             .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
-        let block_cache = self.block_cache.or_else(default_block_cache);
+        let memory_cache = self.memory_cache.or_else(|| {
+            let block_cache = default_block_cache();
+            let meta_cache = default_meta_cache();
+            Some(Arc::new(
+                SplitCache::new()
+                    .with_block_cache(block_cache)
+                    .with_meta_cache(meta_cache)
+                    .build(),
+            ))
+        });
 
         let system_clock = self
             .system_clock
@@ -356,7 +376,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
                 return Err(SlateDBError::Unsupported(String::from(
                     "WAL object store reconfiguration is not supported",
-                )));
+                ))
+                .into());
             }
         }
 
@@ -384,7 +405,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
-            block_cache.as_ref().map(|c| {
+            memory_cache.as_ref().map(|c| {
                 Arc::new(DbCacheWrapper::new(
                     c.clone(),
                     stat_registry.as_ref(),
@@ -431,6 +452,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 memtable_flush_tx,
                 write_tx,
                 stat_registry,
+                self.fp_registry.clone(),
             )
             .await?,
         );
@@ -490,7 +512,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 &tokio_handle,
                 move |result: &Result<(), SlateDBError>| {
                     let err = bg_task_result_into_err(result);
-                    warn!("compactor thread exited with {:?}", err);
+                    warn!("compactor thread exited [error={}]", err);
                     let mut state = cleanup_inner.state.write();
                     state.record_fatal_error(err.clone())
                 },
@@ -521,7 +543,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     &gc_handle,
                     move |result| {
                         let err = bg_task_result_into_err(result);
-                        warn!("GC thread exited with {:?}", err);
+                        warn!("GC thread exited [error={}]", err);
                         let mut state = cleanup_inner.state.write();
                         state.record_fatal_error(err.clone())
                     },

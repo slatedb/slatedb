@@ -1,13 +1,15 @@
 use std::ops::{DerefMut, Range};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{fmt::Display, io::SeekFrom};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::clock::SystemClock;
 use crate::rand::DbRand;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use log::{debug, warn};
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
 use radix_trie::{Trie, TrieCommon};
@@ -19,7 +21,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{Mutex, OnceCell},
 };
-use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};
@@ -456,7 +457,7 @@ struct FsCacheEvictorInner {
     batch_factor: usize,
     max_cache_size_bytes: usize,
     track_lock: Mutex<()>,
-    cache_entries: Mutex<Trie<std::path::PathBuf, (SystemTime, usize)>>,
+    cache_entries: Mutex<Trie<std::path::PathBuf, (DateTime<Utc>, usize)>>,
     cache_size_bytes: AtomicU64,
     stats: Arc<CachedObjectStoreStats>,
     rand: Arc<DbRand>,
@@ -491,7 +492,7 @@ impl FsCacheEvictorInner {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    warn!("evictor: failed to walk the cache folder: {}", err);
+                    warn!("evictor failed to walk the cache folder [error={}]", err);
                     continue;
                 }
             };
@@ -503,13 +504,18 @@ impl FsCacheEvictorInner {
                 Ok(metadata) => metadata,
                 Err(err) => {
                     warn!(
-                        "evictor: failed to get the metadata of the cache file: {}",
+                        "evictor failed to get the metadata of the cache file [path={:?}, error={}]",
+                        entry.path(),
                         err
                     );
                     continue;
                 }
             };
-            let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
+            #[allow(clippy::disallowed_types)]
+            let atime = metadata
+                .accessed()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                .into();
             let path = entry.path().to_path_buf();
             let bytes = metadata.len() as usize;
 
@@ -524,7 +530,7 @@ impl FsCacheEvictorInner {
         &self,
         path: std::path::PathBuf,
         bytes: usize,
-        accessed_time: SystemTime,
+        accessed_time: DateTime<Utc>,
         evict: bool,
     ) -> usize {
         let _track_guard = self.track_lock.lock().await;
@@ -584,14 +590,14 @@ impl FsCacheEvictorInner {
         // if the file is not found, still try to remove it from the cache_entries, and decrease the cache_size_bytes.
         // this might happen when the file is removed by other processes, but the cache_entries is not updated yet.
         if let Err(err) = tokio::fs::remove_file(&target).await {
-            warn!("evictor: failed to remove the cache file: {}", err);
+            warn!("evictor failed to remove the cache file [error={}]", err);
             if err.kind() != std::io::ErrorKind::NotFound {
                 return 0;
             }
         }
 
         debug!(
-            "evictor: evicted cache file: {:?}, bytes: {}",
+            "evictor evicted cache file [path={:?}, bytes={}]",
             target, target_bytes
         );
 
@@ -649,7 +655,7 @@ impl FsCacheEvictorInner {
         }
     }
 
-    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (SystemTime, usize))> {
+    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (DateTime<Utc>, usize))> {
         let cache_entries = self.cache_entries.lock().await;
         let mut rng = self.rand.rng();
 

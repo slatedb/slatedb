@@ -6,11 +6,11 @@ use bytes::Bytes;
 use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
+use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, warn};
 use ulid::Ulid;
 
 use crate::db_cache::{CachedEntry, DbCache};
@@ -30,8 +30,8 @@ pub struct TableStore {
     path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
-    /// In-memory cache for blocks
-    block_cache: Option<Arc<dyn DbCache>>,
+    /// In-memory cache for data blocks, indices, and filters
+    cache: Option<Arc<dyn DbCache>>,
 }
 
 struct ReadOnlyObject {
@@ -88,14 +88,14 @@ impl TableStore {
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
-        block_cache: Option<Arc<dyn DbCache>>,
+        cache: Option<Arc<dyn DbCache>>,
     ) -> Self {
         Self {
             object_stores,
             sst_format,
             path_resolver,
             fp_registry,
-            block_cache,
+            cache,
         }
     }
 
@@ -208,7 +208,7 @@ impl TableStore {
             .map_err(|e| match e {
                 object_store::Error::AlreadyExists { path: _, source: _ } => match id {
                     SsTableId::Wal(_) => {
-                        debug!("Path {path} already exists");
+                        debug!("path already exists [path={}]", path);
                         SlateDBError::Fenced
                     }
                     SsTableId::Compacted(_) => SlateDBError::from(e),
@@ -216,7 +216,7 @@ impl TableStore {
                 _ => SlateDBError::from(e),
             })?;
 
-        if let Some(cache) = self.block_cache.as_ref() {
+        if let Some(ref cache) = self.cache {
             if write_cache {
                 for block in encoded_sst.unconsumed_blocks {
                     let offset = block.offset;
@@ -239,7 +239,7 @@ impl TableStore {
     }
 
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
-        let Some(cache) = &self.block_cache else {
+        let Some(ref cache) = self.cache else {
             return;
         };
         if let Some(filter) = filter {
@@ -253,7 +253,7 @@ impl TableStore {
     pub(crate) async fn delete_sst(&self, id: &SsTableId) -> Result<(), SlateDBError> {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
-        debug!(%path, "deleting SST");
+        debug!("deleting SST [path={}]", path);
         object_store.delete(&path).await.map_err(SlateDBError::from)
     }
 
@@ -288,11 +288,14 @@ impl TableStore {
                     }
                 }
                 Err(e) => {
-                    warn!("Error while parsing file id: {}", e);
+                    warn!(
+                        "error while parsing file id [location={}, error={}]",
+                        file.location, e
+                    );
                 }
                 _ => {
                     warn!(
-                        "Unexpected file found in compacted directory: {:?}",
+                        "unexpected file found in compacted directory [location={}]",
                         file.location
                     );
                 }
@@ -315,9 +318,9 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             if let Some(filter) = cache
-                .get_filter((handle.id, handle.info.filter_offset).into())
+                .get_filter(&(handle.id, handle.info.filter_offset).into())
                 .await
                 .unwrap_or(None)
                 .and_then(|e| e.bloom_filter())
@@ -329,7 +332,7 @@ impl TableStore {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             if let Some(filter) = filter.as_ref() {
                 cache
                     .insert(
@@ -346,9 +349,9 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             if let Some(index) = cache
-                .get_index((handle.id, handle.info.index_offset).into())
+                .get_index(&(handle.id, handle.info.index_offset).into())
                 .await
                 .unwrap_or(None)
                 .and_then(|e| e.sst_index())
@@ -360,7 +363,7 @@ impl TableStore {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             cache
                 .insert(
                     (handle.id, handle.info.index_offset).into(),
@@ -408,14 +411,14 @@ impl TableStore {
         let mut uncached_ranges = Vec::new();
 
         // If block cache is available, try to retrieve cached blocks
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             let index_borrow = index.borrow();
             // Attempt to get all requested blocks from cache concurrently
             let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
                 let block_meta = index_borrow.block_meta().get(block_num);
                 let offset = block_meta.offset();
                 cache
-                    .get_block((handle.id, offset).into())
+                    .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
                     .and_then(|entry| entry.block())
@@ -476,7 +479,7 @@ impl TableStore {
         }
 
         // Cache the newly read blocks if caching is enabled
-        if let Some(cache) = &self.block_cache {
+        if let Some(ref cache) = self.cache {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
                     cache.insert((id, offset).into(), CachedEntry::with_block(block))
@@ -523,9 +526,13 @@ pub(crate) struct EncodedSsTableWriter<'a> {
 }
 
 impl EncodedSsTableWriter<'_> {
-    pub async fn add(&mut self, entry: RowEntry) -> Result<(), SlateDBError> {
-        self.builder.add(entry)?;
-        self.drain_blocks().await
+    /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
+    /// The block size is calculated after applying any compression if enabled.
+    /// The block size is None if the builder has not finished compacting a block yet.
+    pub async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
+        let block_size = self.builder.add(entry)?;
+        self.drain_blocks().await?;
+        Ok(block_size)
     }
 
     pub async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
@@ -533,6 +540,7 @@ impl EncodedSsTableWriter<'_> {
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
         }
+
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
         self.writer.shutdown().await?;
         self.table_store
@@ -550,6 +558,10 @@ impl EncodedSsTableWriter<'_> {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn is_drained(&self) -> bool {
+        self.builder.is_drained()
     }
 
     #[cfg(test)]
@@ -577,6 +589,7 @@ mod tests {
 
     use crate::clock::DefaultSystemClock;
     use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::SplitCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
     use crate::object_stores::ObjectStores;
@@ -786,7 +799,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "moka")]
     async fn test_tablestore_sst_and_partial_cache_hits() {
-        use crate::db_cache::moka::MokaCache;
+        use crate::db_cache::{moka::MokaCache, SplitCache};
 
         // Setup
         let os = Arc::new(InMemory::new());
@@ -797,8 +810,17 @@ mod tests {
 
         let stat_registry = StatRegistry::new();
         let block_cache = Arc::new(MokaCache::new());
+        let meta_cache = Arc::new(MokaCache::new());
+
+        let split_cache = Arc::new(
+            SplitCache::new()
+                .with_block_cache(Some(block_cache.clone()))
+                .with_meta_cache(Some(meta_cache))
+                .build(),
+        );
+
         let wrapper = Arc::new(DbCacheWrapper::new(
-            block_cache.clone(),
+            split_cache,
             &stat_registry,
             Arc::new(DefaultSystemClock::default()),
         ));
@@ -843,7 +865,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get_block((handle.id, offset).into())
+                    .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
                     .is_some(),
@@ -855,11 +877,11 @@ mod tests {
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove((handle.id, offset).into()).await;
+            block_cache.remove(&(handle.id, offset).into()).await;
         }
         for i in 15..20 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove((handle.id, offset).into()).await;
+            block_cache.remove(&(handle.id, offset).into()).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -874,7 +896,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get_block((handle.id, offset).into())
+                    .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
                     .is_some(),
@@ -899,7 +921,7 @@ mod tests {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
                 block_cache
-                    .get_block((handle.id, offset).into())
+                    .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
                     .is_some(),
@@ -926,9 +948,18 @@ mod tests {
     async fn test_write_sst_should_write_cache() {
         let os = Arc::new(InMemory::new());
         let stat_registry = StatRegistry::new();
-        let cache = Arc::new(TestCache::new());
+
+        let block_cache = Arc::new(TestCache::new());
+        let meta_cache = Arc::new(TestCache::new());
+        let split_cache = Arc::new(
+            SplitCache::new()
+                .with_block_cache(Some(block_cache.clone()))
+                .with_meta_cache(Some(meta_cache))
+                .build(),
+        );
+
         let wrapper = Arc::new(DbCacheWrapper::new(
-            cache.clone(),
+            split_cache,
             &stat_registry,
             Arc::new(DefaultSystemClock::default()),
         ));
@@ -953,8 +984,8 @@ mod tests {
                 .sst_format
                 .read_block_raw(&sst_info, &index, i, &sst_bytes)
                 .unwrap();
-            let cached_block = cache
-                .get_block((id, block_meta.offset()).into())
+            let cached_block = block_cache
+                .get_block(&(id, block_meta.offset()).into())
                 .await
                 .unwrap();
             assert!(cached_block.is_some());
@@ -990,7 +1021,7 @@ mod tests {
         for i in 0..block_metas.len() {
             let block_meta = block_metas.get(i);
             let cached_block = cache
-                .get_block((id, block_meta.offset()).into())
+                .get_block(&(id, block_meta.offset()).into())
                 .await
                 .unwrap();
             assert!(cached_block.is_none());

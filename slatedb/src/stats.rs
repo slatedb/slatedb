@@ -34,12 +34,33 @@
 //! component.
 //!
 //! [`Db::metrics`]: crate::db::Db::metrics
+//!
+//! Example:
+//!
+//! Read compactor stats:
+//!
+//! ```
+//! use slatedb::{Db, Error};
+//! use slatedb::object_store::memory::InMemory;
+//! use std::sync::Arc;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Error> {
+//!     let object_store = Arc::new(InMemory::new());
+//!     let db = Db::open("test_db", object_store).await?;
+//!     let metrics = db.metrics();
+//!     if let Some(bytes_compacted) = metrics.lookup("bytes_compacted") {
+//!         println!("bytes_compacted: {}", bytes_compacted.get());
+//!     }
+//!     Ok(())
+//! }
+//! ```
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use atomic::{Atomic, Ordering};
 use bytemuck::NoUninit;
-use tracing::warn;
+use log::warn;
 
 pub trait ReadableStat: Send + Sync + std::fmt::Debug {
     fn get(&self) -> i64;

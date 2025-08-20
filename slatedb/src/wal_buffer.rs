@@ -1,5 +1,6 @@
 use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc, time::Duration};
 
+use log::{debug, error, trace};
 use parking_lot::RwLock;
 use tokio::{
     select,
@@ -9,12 +10,13 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tracing::{debug, error, instrument, trace};
+use tracing::instrument;
 
 use crate::{
     clock::{MonotonicClock, SystemClock},
     db_state::{DbState, SsTableId},
     db_stats::DbStats,
+    error::SlateDBError,
     iter::KeyValueIterator,
     mem_table::KVTable,
     oracle::Oracle,
@@ -22,7 +24,6 @@ use crate::{
     types::RowEntry,
     utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader},
     wal_id::WalIdStore,
-    SlateDBError,
 };
 
 /// [`WalBufferManager`] buffers write operations in memory before flushing them to persistent storage.
@@ -121,9 +122,7 @@ impl WalBufferManager {
 
     pub async fn start_background(self: &Arc<Self>) -> Result<(), SlateDBError> {
         if self.inner.read().background_task.is_some() {
-            return Err(SlateDBError::UnexpectedError {
-                msg: "wal_buffer already started".to_string(),
-            });
+            return Err(SlateDBError::WalBufferAlreadyStarted);
         }
 
         let (flush_tx, flush_rx) = mpsc::channel(128);
@@ -199,7 +198,7 @@ impl WalBufferManager {
     pub async fn append(&self, entries: &[RowEntry]) -> Result<Option<u64>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
 
-        let inner = self.inner.read();
+        let inner = self.inner.write();
         for entry in entries {
             inner.current_wal.put(entry.clone());
         }
@@ -219,9 +218,9 @@ impl WalBufferManager {
                 inner.current_wal.metadata().entries_size_in_bytes,
             );
             trace!(
-                ?current_wal_size,
-                max_wal_bytes_size = ?self.max_wal_bytes_size,
-                "checking flush trigger",
+                "checking flush trigger [current_wal_size={}, max_wal_bytes_size={}]",
+                current_wal_size,
+                self.max_wal_bytes_size,
             );
             let need_flush = current_wal_size >= self.max_wal_bytes_size;
             (
@@ -409,7 +408,7 @@ impl WalBufferManager {
                 // a KV table can be retried to flush multiple times, but WatchableOnceCell is only set once.
                 // we do NOT call `wal.notify_durable` as soon as encountered any error here, but notify
                 // the error when we're sure enters fatal state in `do_cleanup`.
-                error!(wal_id = %wal_id, "failed to flush WAL");
+                error!("failed to flush WAL [wal_id={}]", wal_id);
                 return Err(e.clone());
             }
 
@@ -498,7 +497,10 @@ impl WalBufferManager {
         }
 
         if releaseable_count > 0 {
-            trace!("draining immutable wals: ..{}", releaseable_count);
+            trace!(
+                "draining immutable wals [releaseable_count={}]",
+                releaseable_count
+            );
             inner.immutable_wals.drain(..releaseable_count);
         }
     }

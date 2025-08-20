@@ -6,13 +6,13 @@ use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -97,24 +97,6 @@ where
         result
     });
     handle.spawn(wrapped)
-}
-
-pub(crate) fn system_time_to_millis(system_time: SystemTime) -> i64 {
-    match system_time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_millis() as i64, // Time is after the epoch
-        Err(e) => -(e.duration().as_millis() as i64), // Time is before the epoch, return negative
-    }
-}
-
-pub(crate) fn system_time_from_millis(ms: i64) -> SystemTime {
-    if ms >= 0 {
-        // positive or zero: just add
-        UNIX_EPOCH + Duration::from_millis(ms as u64)
-    } else {
-        // negative (including i64::MIN): convert to i128, take abs, cast back to u64
-        let abs_ms = (ms as i128).unsigned_abs() as u64;
-        UNIX_EPOCH - Duration::from_millis(abs_ms)
-    }
 }
 
 pub(crate) async fn get_now_for_read(
@@ -281,7 +263,7 @@ impl<T> SendSafely<T> for UnboundedSender<T> {
 /// Trait for generating UUIDs and ULIDs from a random number generator.
 pub trait IdGenerator {
     fn gen_uuid(&mut self) -> Uuid;
-    fn gen_ulid(&mut self) -> Ulid;
+    fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid;
 }
 
 impl<R: RngCore> IdGenerator for R {
@@ -296,26 +278,169 @@ impl<R: RngCore> IdGenerator for R {
         Uuid::from_bytes(bytes)
     }
 
-    /// Generates a random ULID using the provided RNG.
-    fn gen_ulid(&mut self) -> Ulid {
-        Ulid::with_source(self)
+    /// Generates a random ULID using the provided RNG. The clock is used to generate
+    /// the timestamp component of the ULID.
+    fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid {
+        let now = u64::try_from(clock.now().timestamp_millis())
+            .expect("timestamp outside u64 range in gen_ulid");
+        let random_bytes = self.random::<u128>();
+        Ulid::from_parts(now, random_bytes)
     }
 }
 
 /// A timeout wrapper for futures that returns a SlateDBError::Timeout if the future
 /// does not complete within the specified duration.
+///
+/// Arguments:
+/// - `clock`: The clock to use for the timeout.
+/// - `duration`: The duration to wait for the future to complete.
+/// - `op`: The name of the operation that will time out, for logging purposes.
+/// - `future`: The future to timeout
+///
+/// Returns:
+/// - `Ok(T)`: If the future completes within the specified duration.
+/// - `Err(SlateDBError::Timeout)`: If the future does not complete within the specified duration.
 pub async fn timeout<T>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
+    op: &'static str,
     future: impl Future<Output = Result<T, SlateDBError>> + Send,
 ) -> Result<T, SlateDBError> {
     tokio::select! {
         biased;
         res = future => res,
         _ = clock.sleep(duration) => Err(SlateDBError::Timeout {
-            msg: "Timeout".to_string(),
+            op,
+            backoff: duration,
         })
     }
+}
+
+/// A simple bit-level writer that packs bits into a `[u8]`
+pub(crate) struct BitWriter {
+    buf: Vec<u8>,
+    cur: u8, // the currently assembling byte
+    n: u8,   // the number of "filled" bytes in `cur`
+}
+
+impl BitWriter {
+    pub(crate) fn new() -> Self {
+        BitWriter {
+            buf: Vec::new(),
+            cur: 0,
+            n: 0,
+        }
+    }
+
+    /// Push a single bit into the buffer
+    pub(crate) fn push(&mut self, bit: bool) {
+        if bit {
+            self.cur |= 1 << (7 - self.n);
+        }
+        self.n += 1;
+        if self.n == 8 {
+            self.flush_byte();
+        }
+    }
+
+    /// Push up to a u32 into the buffer, only considering
+    /// the first `bits` number of bits
+    pub(crate) fn push32(&mut self, value: u32, bits: u8) {
+        // writes the lowest `bits` bits from `value` into
+        // the current buffer (most significant bits first)
+        for i in (0..bits).rev() {
+            let bit = ((value >> i) & 1) != 0;
+            self.push(bit);
+        }
+    }
+
+    /// Push up to a u32 into the buffer, only considering
+    /// the first `bits` number of bits
+    pub(crate) fn push64(&mut self, value: u64, bits: u8) {
+        for i in (0..bits).rev() {
+            let bit = ((value >> i) & 1) != 0;
+            self.push(bit);
+        }
+    }
+
+    fn flush_byte(&mut self) {
+        self.buf.push(self.cur);
+        self.cur = 0;
+        self.n = 0;
+    }
+
+    /// Extrat the finalized buffer from the writer
+    pub(crate) fn finish(mut self) -> Vec<u8> {
+        if self.n > 0 {
+            self.buf.push(self.cur);
+        }
+        self.buf
+    }
+}
+
+pub(crate) struct BitReader<'a> {
+    buf: &'a [u8],
+    byte_pos: usize,
+    bit_pos: u8, // 0..8; next bit to read is at (7 - bit_pos)
+}
+
+impl<'a> BitReader<'a> {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
+        BitReader {
+            buf,
+            byte_pos: 0,
+            bit_pos: 0,
+        }
+    }
+
+    /// Read one bit, or None if we've exhausted the buffer.
+    pub(crate) fn read_bit(&mut self) -> Option<bool> {
+        if self.byte_pos >= self.buf.len() {
+            return None;
+        }
+        let byte = self.buf[self.byte_pos];
+        let bit = ((byte >> (7 - self.bit_pos)) & 1) != 0;
+        self.bit_pos += 1;
+        if self.bit_pos == 8 {
+            self.bit_pos = 0;
+            self.byte_pos += 1;
+        }
+        Some(bit)
+    }
+
+    /// Read `bits` bits, MSB first, returning them as the low `bits` of a u32.
+    pub(crate) fn read32(&mut self, bits: u8) -> Option<u32> {
+        let mut val = 0u32;
+        for _ in 0..bits {
+            val <<= 1;
+            match self.read_bit() {
+                Some(true) => val |= 1,
+                Some(false) => (),
+                None => return None,
+            }
+        }
+        Some(val)
+    }
+
+    /// Read `bits` bits, MSB first, returning them as the low `bits` of a u64.
+    pub(crate) fn read64(&mut self, bits: u8) -> Option<u64> {
+        let mut val = 0u64;
+        for _ in 0..bits {
+            val <<= 1;
+            match self.read_bit() {
+                Some(true) => val |= 1,
+                Some(false) => (),
+                None => return None,
+            }
+        }
+        Some(val)
+    }
+}
+
+/// Sign‐extend the low `bits` of `val` into a full i32.
+pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
+    let shift = 32 - bits;
+    ((val << shift) as i32) >> shift
 }
 
 #[cfg(test)]
@@ -327,7 +452,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        WatchableOnceCell,
+        BitReader, BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -591,7 +716,7 @@ mod tests {
 
         // When: we execute a future with a timeout
         let completed_future = async { Ok::<_, SlateDBError>(42) };
-        let timeout_future = timeout(clock, Duration::from_millis(100), completed_future);
+        let timeout_future = timeout(clock, Duration::from_millis(100), "test", completed_future);
 
         // Then: the future should complete successfully with the expected value
         let result = timeout_future.await;
@@ -611,7 +736,12 @@ mod tests {
         let never_completes = std::future::pending::<Result<(), SlateDBError>>();
 
         // When: we execute the future with a timeout and advance the clock past the timeout duration
-        let timeout_future = timeout(clock.clone(), Duration::from_millis(100), never_completes);
+        let timeout_future = timeout(
+            clock.clone(),
+            Duration::from_millis(100),
+            "test",
+            never_completes,
+        );
         let done = Arc::new(AtomicBool::new(false));
         let this_done = done.clone();
 
@@ -640,11 +770,138 @@ mod tests {
         let completes_immediately = async { Ok::<_, SlateDBError>(42) };
 
         // When: we execute the future with a timeout and both are ready immediately
-        let timeout_future = timeout(clock, Duration::from_millis(100), completes_immediately);
+        let timeout_future = timeout(
+            clock,
+            Duration::from_millis(100),
+            "test",
+            completes_immediately,
+        );
 
         // Then: because of the 'biased' select, the future should complete with the value
         // rather than timing out, even though both are ready
         let result = timeout_future.await;
         assert_eq!(result.unwrap(), 42);
+    }
+
+    #[rstest]
+    #[case("alternating_bits", vec![true, false, true, false, true, false, true, false], vec![], vec![], vec![0xAA])]
+    #[case("u64_value", vec![], vec![(0xAB, 8)], vec![], vec![0xAB])]
+    #[case("partial_and_multiple_bytes", vec![true, false], vec![(0x3F, 6), (0xCD, 8)], vec![], vec![0xBF, 0xCD])]
+    #[case("empty_writer", vec![], vec![], vec![], vec![])]
+    #[case("single_bit_true", vec![true], vec![], vec![], vec![0x80])]
+    #[case("single_bit_false", vec![false], vec![], vec![], vec![0x00])]
+    #[case("all_zeros", vec![false, false, false, false, false, false, false, false], vec![], vec![], vec![0x00])]
+    #[case("all_ones", vec![true, true, true, true, true, true, true, true], vec![], vec![], vec![0xFF])]
+    #[case("partial_byte_padding", vec![true, false, true], vec![], vec![], vec![0xA0])]
+    #[case("push32_single_bit", vec![], vec![(1, 1)], vec![], vec![0x80])]
+    #[case("push32_zero_bits", vec![], vec![(0xFF, 0)], vec![], vec![])]
+    #[case("push32_max_bits", vec![], vec![(0xDEADBEEF, 32)], vec![], vec![0xDE, 0xAD, 0xBE, 0xEF])]
+    #[case("push64_operations", vec![], vec![], vec![(0x123456789ABCDEF0, 64)], vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0])]
+    #[case("push64_partial", vec![], vec![], vec![(0xABCD, 12)], vec![0xBC, 0xD0])]
+    #[case("mixed_operations", vec![true], vec![(0x7F, 7)], vec![], vec![0xFF])]
+    #[case("boundary_crossing", vec![true, false, true, false], vec![(0xF0, 4)], vec![], vec![0xA0])]
+    #[case("multiple_partial_bytes", vec![true], vec![(0x5, 3), (0x2, 2), (0x1, 2)], vec![], vec![0xD9])]
+    fn test_bit_writer(
+        #[case] _description: &str,
+        #[case] individual_bits: Vec<bool>,
+        #[case] push32_operations: Vec<(u32, u8)>,
+        #[case] push64_operations: Vec<(u64, u8)>,
+        #[case] expected: Vec<u8>,
+    ) {
+        // Given: a new BitWriter
+        let mut writer = BitWriter::new();
+
+        // When: we perform the specified operations
+        // Push individual bits first
+        for bit in individual_bits {
+            writer.push(bit);
+        }
+        // Then push32 operations
+        for (value, bits) in push32_operations {
+            writer.push32(value, bits);
+        }
+        // Finally push64 operations
+        for (value, bits) in push64_operations {
+            writer.push64(value, bits);
+        }
+        let result = writer.finish();
+
+        // Then: it should return the expected result
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case("alternating_bits", vec![0xAA], vec![true, false, true, false, true, false, true, false], vec![], vec![])]
+    #[case("u64_value", vec![0xAB], vec![], vec![(0xAB, 8)], vec![])]
+    #[case("partial_and_multiple_bytes", vec![0xBF, 0xCD], vec![true, false], vec![(0x3F, 6), (0xCD, 8)], vec![])]
+    #[case("empty_reader", vec![], vec![], vec![], vec![])]
+    #[case("single_bit_true", vec![0x80], vec![true], vec![], vec![])]
+    #[case("single_bit_false", vec![0x00], vec![false], vec![], vec![])]
+    #[case("all_zeros", vec![0x00], vec![false, false, false, false, false, false, false, false], vec![], vec![])]
+    #[case("all_ones", vec![0xFF], vec![true, true, true, true, true, true, true, true], vec![], vec![])]
+    #[case("partial_byte_padding", vec![0xA0], vec![true, false, true], vec![], vec![])]
+    #[case("push32_single_bit", vec![0x80], vec![], vec![(1, 1)], vec![])]
+    #[case("push32_zero_bits", vec![], vec![], vec![], vec![])]
+    #[case("push32_max_bits", vec![0xDE, 0xAD, 0xBE, 0xEF], vec![], vec![(0xDEADBEEF, 32)], vec![])]
+    #[case("push64_operations", vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0], vec![], vec![], vec![(0x123456789ABCDEF0, 64)])]
+    #[case("push64_partial", vec![0xBC, 0xD0], vec![], vec![], vec![(0xBCD, 12)])]
+    #[case("mixed_operations", vec![0xFF], vec![true], vec![(0x7F, 7)], vec![])]
+    #[case("boundary_crossing", vec![0xA0], vec![true, false, true, false], vec![(0x0, 4)], vec![])]
+    #[case("multiple_partial_bytes", vec![0xD9], vec![true], vec![(0x5, 3), (0x2, 2), (0x1, 2)], vec![])]
+    fn test_bit_reader(
+        #[case] _description: &str,
+        #[case] input_bytes: Vec<u8>,
+        #[case] expected_individual_bits: Vec<bool>,
+        #[case] expected_read32_operations: Vec<(u32, u8)>,
+        #[case] expected_read64_operations: Vec<(u64, u8)>,
+    ) {
+        // Given: a BitReader with the input bytes
+
+        let mut reader = BitReader::new(&input_bytes);
+
+        // When: we read individual bits
+        for expected_bit in expected_individual_bits {
+            let actual_bit = reader.read_bit();
+            assert_eq!(actual_bit, Some(expected_bit));
+        }
+
+        // Then: read32 operations
+        for (expected_value, bits) in expected_read32_operations {
+            let actual_value = reader.read32(bits);
+            assert_eq!(actual_value, Some(expected_value));
+        }
+
+        // Finally: read64 operations
+        for (expected_value, bits) in expected_read64_operations {
+            let actual_value = reader.read64(bits);
+            assert_eq!(actual_value, Some(expected_value));
+        }
+
+        // Verify we've consumed all bits for non-empty inputs
+        if !input_bytes.is_empty() {
+            // For partial bytes, there might be padding bits we should be able to read as false
+            let next_bit = reader.read_bit();
+            if let Some(bit) = next_bit {
+                // If there are remaining bits, they should be padding (false)
+                assert!(!bit);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bit_reader_exhaustion() {
+        // Test that BitReader properly returns None when exhausted
+        let bytes = vec![0xFF]; // Single byte with all bits set
+        let mut reader = BitReader::new(&bytes);
+
+        // Read all 8 bits
+        for _ in 0..8 {
+            assert_eq!(reader.read_bit(), Some(true));
+        }
+
+        // Next read should return None
+        assert_eq!(reader.read_bit(), None);
+        assert_eq!(reader.read32(1), None);
+        assert_eq!(reader.read64(1), None);
     }
 }

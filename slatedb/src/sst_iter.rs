@@ -346,9 +346,10 @@ impl KeyValueIterator for SstIterator<'_> {
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         if !self.view.contains(next_key) {
-            return Err(SlateDBError::InvalidArgument {
-                msg: format!("Cannot seek to a key '{:?}' which is outside the iterator range (start: {:?}, end: {:?})",
-                             next_key, self.view.start_key(), self.view.end_key())
+            return Err(SlateDBError::SeekKeyOutOfKeyRange {
+                key: next_key.to_vec(),
+                start_key: self.view.start_key().map(|b| b.to_vec()),
+                end_key: self.view.end_key().map(|b| b.to_vec()),
             });
         }
         if !self.state.is_finished() {
@@ -722,6 +723,7 @@ mod tests {
             writer.add(entry).await.unwrap();
             nkeys += 1;
         }
-        (writer.close().await.unwrap(), nkeys)
+        let sst = writer.close().await.unwrap();
+        (sst, nkeys)
     }
 }

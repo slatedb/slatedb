@@ -13,23 +13,31 @@ use bytes::Bytes;
 /// dropped.
 ///
 /// # Examples
-/// ```rust,no_run,compile_fail
-/// use slatedb::batch::{WriteBatch, WriteOp};
+/// ```rust
+/// # async fn run() -> Result<(), slatedb::Error> {
+/// #     use std::sync::Arc;
+/// #     use slatedb::object_store::memory::InMemory;
+///     use slatedb::Db;
+///     use slatedb::WriteBatch;
 ///
-/// let object_store = Arc::new(LocalFileSystem::new());
-/// let db = Db::open("path/to/db".into(), object_store).await;
+///     let object_store = Arc::new(InMemory::new());
+///     let db = Db::open("path/to/db", object_store).await?;
 ///
-/// let mut batch = WriteBatch::new();
-/// batch.put(b"key1", b"value1");
-/// batch.put(b"key2", b"value2");
-/// batch.delete(b"key3");
+///     let mut batch = WriteBatch::new();
+///     batch.put(b"key1", b"value1");
+///     batch.put(b"key2", b"value2");
+///     batch.delete(b"key3");
 ///
-/// db.write(batch).await;
+///     db.write(batch).await;
+///     Ok(())
+/// # };
+/// # tokio_test::block_on(run());
 /// ```
 ///
 /// Note that the `WriteBatch` has an unlimited size. This means that batch
 /// writes can exceed `l0_sst_size_bytes` (when `WAL` is disabled). It also
 /// means that WAL SSTs could get large if there's a large batch write.
+#[derive(Clone, Debug)]
 pub struct WriteBatch {
     pub(crate) ops: Vec<WriteOp>,
 }
@@ -40,7 +48,8 @@ impl Default for WriteBatch {
     }
 }
 
-#[derive(PartialEq)]
+/// A write operation in a batch.
+#[derive(PartialEq, Clone)]
 pub(crate) enum WriteOp {
     Put(Bytes, Bytes, PutOptions),
     Delete(Bytes),

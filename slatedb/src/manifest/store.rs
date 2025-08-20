@@ -3,6 +3,7 @@ use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
+use crate::error::SlateDBError::ManifestVersionExists;
 use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
 };
@@ -13,9 +14,9 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::utils;
-use crate::SlateDBError::ManifestVersionExists;
 use chrono::Utc;
 use futures::StreamExt;
+use log::{debug, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore};
@@ -24,7 +25,6 @@ use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, warn};
 use uuid::Uuid;
 
 /// Represents a local view of the manifest that is in the process of being updated
@@ -112,34 +112,40 @@ impl FenceableManifest {
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        utils::timeout(system_clock, manifest_update_timeout, async {
-            loop {
-                let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
-                let mut manifest = stored_manifest.prepare_dirty();
-                set_epoch(&mut manifest, local_epoch);
-                match stored_manifest.update_manifest(manifest).await {
-                    Err(ManifestVersionExists) => {
-                        // The manifest may have been updated by a reader, or
-                        // we may have gotten this error after successfully updating
-                        // if we failed to get the response. Either way, refresh
-                        // the manifest and try the bump again.
-                        stored_manifest.refresh().await?;
-                        continue;
-                    }
-                    Err(err) => return Err(err),
-                    Ok(()) => {
-                        return Ok(Self {
-                            stored_manifest,
-                            local_epoch,
-                            stored_epoch,
-                        })
+        utils::timeout(
+            system_clock,
+            manifest_update_timeout,
+            "manifest update",
+            async {
+                loop {
+                    let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
+                    let mut manifest = stored_manifest.prepare_dirty();
+                    set_epoch(&mut manifest, local_epoch);
+                    match stored_manifest.update_manifest(manifest).await {
+                        Err(ManifestVersionExists) => {
+                            // The manifest may have been updated by a reader, or
+                            // we may have gotten this error after successfully updating
+                            // if we failed to get the response. Either way, refresh
+                            // the manifest and try the bump again.
+                            stored_manifest.refresh().await?;
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                        Ok(()) => {
+                            return Ok(Self {
+                                stored_manifest,
+                                local_epoch,
+                                stored_epoch,
+                            })
+                        }
                     }
                 }
-            }
-        })
+            },
+        )
         .await
         .map_err(|_| SlateDBError::Timeout {
-            msg: "Manifest update".to_string(),
+            op: "manifest update",
+            backoff: Duration::from_secs(1),
         })
     }
 
@@ -603,7 +609,7 @@ impl ManifestStore {
         }
 
         let manifest_path = &self.get_manifest_path(id);
-        debug!(%manifest_path, "deleting manifest");
+        debug!("deleting manifest [manifest_path={}]", manifest_path);
         self.object_store.delete(manifest_path).await?;
         Ok(())
     }
@@ -633,7 +639,10 @@ impl ManifestStore {
                         size: file.size as u32,
                     });
                 }
-                Err(_) => warn!("Unknown file in manifest directory: {:?}", file.location),
+                Err(_) => warn!(
+                    "unknown file in manifest directory [location={:?}]",
+                    file.location
+                ),
                 _ => {}
             }
         }
@@ -760,10 +769,11 @@ mod tests {
     use crate::error;
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     const ROOT: &str = "/root/path";
 
@@ -1078,21 +1088,16 @@ mod tests {
         Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
     }
 
-    fn now_rounded_to_nearest_sec() -> SystemTime {
-        let now_secs = DefaultSystemClock::default()
-            .now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs)
-    }
-
     fn new_checkpoint(manifest_id: u64) -> Checkpoint {
+        let create_time = DefaultSystemClock::default()
+            .now()
+            .with_nanosecond(0)
+            .unwrap();
         Checkpoint {
             id: uuid::Uuid::new_v4(),
             manifest_id,
             expire_time: None,
-            create_time: now_rounded_to_nearest_sec(),
+            create_time,
         }
     }
 

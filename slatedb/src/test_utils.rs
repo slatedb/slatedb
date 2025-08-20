@@ -100,7 +100,6 @@ impl KeyValueIterator for TestIterator {
     }
 }
 
-// TODO can we get rid of TestClock?
 #[derive(Debug)]
 pub(crate) struct TestClock {
     pub(crate) ticker: AtomicI64,
@@ -240,7 +239,7 @@ pub(crate) async fn seed_database(
     db: &Db,
     table: &BTreeMap<Bytes, Bytes>,
     await_durable: bool,
-) -> Result<(), SlateDBError> {
+) -> Result<(), crate::Error> {
     let put_options = PutOptions::default();
     let write_options = WriteOptions { await_durable };
 

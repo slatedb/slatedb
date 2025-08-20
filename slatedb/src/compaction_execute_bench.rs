@@ -6,12 +6,12 @@ use std::time::Duration;
 use bytes::BufMut;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use log::{error, info};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
@@ -65,7 +65,7 @@ impl CompactionExecuteBench {
         key_bytes: usize,
         val_bytes: usize,
         compression_codec: Option<CompressionCodec>,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), crate::Error> {
         let sst_format = SsTableFormat {
             compression_codec,
             ..SsTableFormat::default()
@@ -138,7 +138,7 @@ impl CompactionExecuteBench {
                     if retries >= 3 {
                         return Err(err);
                     } else {
-                        error!("error loading sst: {:?}", err)
+                        error!("error loading sst [retry={}]: {:?}", retries, err)
                     }
                 }
             }
@@ -172,18 +172,17 @@ impl CompactionExecuteBench {
             let row_entry = RowEntry::new(key, ValueDeletable::Value(val.into()), 0, None, None);
             sst_writer.add(row_entry).await?;
         }
-        let encoded = sst_writer.close().await?;
+        let sst = sst_writer.close().await?;
         let elapsed_ms = system_clock
             .now()
-            .duration_since(start)
-            .expect("clock moved backwards")
-            .as_millis();
-        info!("wrote sst with id: {:?} {:?}ms", &encoded.id, elapsed_ms);
+            .signed_duration_since(start)
+            .num_milliseconds();
+        info!("wrote sst [id={:?}, elapsed_ms={}]", &sst.id, elapsed_ms);
         Ok(())
     }
 
     #[allow(clippy::panic)]
-    pub async fn run_clear(&self, num_ssts: usize) -> Result<(), SlateDBError> {
+    pub async fn run_clear(&self, num_ssts: usize) -> Result<(), crate::Error> {
         let mut del_tasks = Vec::new();
         for i in 0u32..num_ssts as u32 {
             let os = self.object_store.clone();
@@ -198,8 +197,8 @@ impl CompactionExecuteBench {
         for result in results {
             match result {
                 Ok(Ok(())) => {}
-                Ok(Err(err)) => return Err(err.into()),
-                Err(err) => panic!("task failed: {:?}", err),
+                Ok(Err(err)) => return Err(SlateDBError::from(err).into()),
+                Err(err) => panic!("task failed [error={:?}]", err),
             }
         }
         Ok(())
@@ -252,6 +251,7 @@ impl CompactionExecuteBench {
             ssts,
             sorted_runs: vec![],
             compaction_ts: manifest.db_state().last_l0_clock_tick,
+            retention_min_seq: Some(manifest.db_state().recent_snapshot_min_seq),
             is_dest_last_run,
         })
     }
@@ -285,6 +285,7 @@ impl CompactionExecuteBench {
             ssts: vec![],
             sorted_runs: srs,
             compaction_ts: state.last_l0_clock_tick,
+            retention_min_seq: Some(state.recent_snapshot_min_seq),
             is_dest_last_run,
         }
     }
@@ -295,7 +296,7 @@ impl CompactionExecuteBench {
         source_sr_ids: Option<Vec<u32>>,
         destination_sr_id: u32,
         compression_codec: Option<CompressionCodec>,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<(), crate::Error> {
         let sst_format = SsTableFormat {
             compression_codec,
             ..SsTableFormat::default()
@@ -353,6 +354,7 @@ impl CompactionExecuteBench {
         };
         let start = self.system_clock.now();
         info!("start compaction job");
+        #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
         while let Some(msg) = rx.recv().await {
             if let WorkerToOrchestratorMsg::CompactionFinished { id: _, result } = msg {
@@ -361,12 +363,11 @@ impl CompactionExecuteBench {
                         let elapsed_ms = self
                             .system_clock
                             .now()
-                            .duration_since(start)
-                            .expect("clock moved backwards")
-                            .as_millis();
-                        info!(elapsed_ms, "compaction finished");
+                            .signed_duration_since(start)
+                            .num_milliseconds();
+                        info!("compaction finished [elapsed_ms={}]", elapsed_ms);
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => return Err(err.into()),
                 }
             }
         }

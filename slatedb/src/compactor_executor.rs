@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
-use std::time::Duration;
 
+use chrono::TimeDelta;
 use futures::future::join_all;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
@@ -24,7 +24,8 @@ use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
 use crate::utils::{spawn_bg_task, IdGenerator};
-use tracing::{debug, error, instrument};
+use log::{debug, error};
+use tracing::instrument;
 use uuid::Uuid;
 
 pub(crate) struct CompactionJob {
@@ -34,6 +35,7 @@ pub(crate) struct CompactionJob {
     pub(crate) sorted_runs: Vec<SortedRun>,
     pub(crate) compaction_ts: i64,
     pub(crate) is_dest_last_run: bool,
+    pub(crate) retention_min_seq: Option<u64>,
 }
 
 impl std::fmt::Debug for CompactionJob {
@@ -46,6 +48,7 @@ impl std::fmt::Debug for CompactionJob {
             .field("compaction_ts", &self.compaction_ts)
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("estimated_source_bytes", &self.estimated_source_bytes())
+            .field("retention_min_seq", &self.retention_min_seq)
             .finish()
     }
 }
@@ -181,25 +184,19 @@ impl TokioCompactionExecutorInner {
         &self,
         compaction: CompactionJob,
     ) -> Result<SortedRun, SlateDBError> {
-        debug!(?compaction, "executing compaction");
+        debug!("executing compaction [compaction={:?}]", compaction);
         let mut all_iter = self.load_iterators(&compaction).await?;
         let mut output_ssts = Vec::new();
-        let mut current_writer = self
-            .table_store
-            .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid()));
-        let mut current_size = 0usize;
+        let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
+            self.rand.rng().gen_ulid(self.clock.as_ref()),
+        ));
+        let mut bytes_written = 0usize;
         let mut last_progress_report = self.clock.now();
 
         while let Some(kv) = all_iter.next_entry().await? {
-            let key_len = kv.key.len();
-            let value_len = kv.value.len();
-
-            let duration_since_last_report = self
-                .clock
-                .now()
-                .duration_since(last_progress_report)
-                .unwrap_or(Duration::from_secs(0));
-            if duration_since_last_report > Duration::from_secs(1) {
+            let duration_since_last_report =
+                self.clock.now().signed_duration_since(last_progress_report);
+            if duration_since_last_report > TimeDelta::seconds(1) {
                 // Allow send() because we are treating the executor like an external
                 // component. They can do what they want. The send().expect() will raise
                 // a SendErr, which will be caught in the cleanup_fn and set if there's
@@ -214,25 +211,32 @@ impl TokioCompactionExecutorInner {
                 last_progress_report = self.clock.now();
             }
 
-            current_writer.add(kv).await?;
-            current_size += key_len + value_len;
+            if let Some(block_size) = current_writer.add(kv).await? {
+                bytes_written += block_size;
+            }
 
-            if current_size > self.options.max_sst_size {
+            if bytes_written > self.options.max_sst_size {
                 let finished_writer = mem::replace(
                     &mut current_writer,
-                    self.table_store
-                        .table_writer(SsTableId::Compacted(self.rand.rng().gen_ulid())),
+                    self.table_store.table_writer(SsTableId::Compacted(
+                        self.rand.rng().gen_ulid(self.clock.as_ref()),
+                    )),
                 );
-                output_ssts.push(finished_writer.close().await?);
-                self.stats.bytes_compacted.add(current_size as u64);
-                current_size = 0;
+                let sst = finished_writer.close().await?;
+
+                self.stats.bytes_compacted.add(sst.info.filter_offset);
+                output_ssts.push(sst);
+                bytes_written = 0;
             }
         }
 
-        if current_size > 0 {
-            output_ssts.push(current_writer.close().await?);
-            self.stats.bytes_compacted.add(current_size as u64);
+        if !current_writer.is_drained() {
+            let sst = current_writer.close().await?;
+
+            self.stats.bytes_compacted.add(sst.info.filter_offset);
+            output_ssts.push(sst);
         }
+
         Ok(SortedRun {
             id: compaction.destination,
             ssts: output_ssts,
@@ -293,7 +297,7 @@ impl TokioCompactionExecutorInner {
             for result in results {
                 match result {
                     Err(e) if !e.is_cancelled() => {
-                        error!("Shutdown error in compaction task: {:?}", e);
+                        error!("shutdown error in compaction task [error={:?}]", e);
                     }
                     _ => {}
                 }

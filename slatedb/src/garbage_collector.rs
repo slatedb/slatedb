@@ -21,12 +21,13 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
+use log::{debug, error, info};
 use manifest_gc::ManifestGcTask;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument};
+use tracing::instrument;
 use wal_gc::WalGcTask;
 
 mod compacted_gc;
@@ -192,9 +193,9 @@ impl GarbageCollector {
     #[instrument(level = "debug", skip_all, fields(resource = task.resource()))]
     async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &mut T) {
         if let Err(e) = self.remove_expired_checkpoints().await {
-            error!("Error removing expired checkpoints: {}", e);
-        } else if let Err(e) = task.collect(self.system_clock.now().into()).await {
-            error!("Error collecting compacted garbage: {}", e);
+            error!("error removing expired checkpoints [error={}]", e);
+        } else if let Err(e) = task.collect(self.system_clock.now()).await {
+            error!("error collecting compacted garbage [error={}]", e);
         }
     }
 
@@ -210,14 +211,14 @@ impl GarbageCollector {
         &self,
         manifest: &StoredManifest,
     ) -> Result<Option<DirtyManifest>, SlateDBError> {
-        let utc_now: DateTime<Utc> = self.system_clock.now().into();
+        let utc_now: DateTime<Utc> = self.system_clock.now();
         let mut dirty = manifest.prepare_dirty();
         let retained_checkpoints: Vec<Checkpoint> = dirty
             .core
             .checkpoints
             .iter()
             .filter(|checkpoint| match checkpoint.expire_time {
-                Some(expire_time) => DateTime::<Utc>::from(expire_time) > utc_now,
+                Some(expire_time) => expire_time > utc_now,
                 None => true,
             })
             .cloned()
@@ -238,9 +239,9 @@ mod tests {
     use super::*;
 
     use std::collections::HashSet;
-    use std::{fs::File, sync::Arc, time::SystemTime};
+    use std::{fs::File, sync::Arc};
 
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
     use tokio::runtime::Handle;
     use uuid::Uuid;
@@ -332,7 +333,7 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
     }
 
-    fn new_checkpoint(manifest_id: u64, expire_time: Option<SystemTime>) -> Checkpoint {
+    fn new_checkpoint(manifest_id: u64, expire_time: Option<DateTime<Utc>>) -> Checkpoint {
         Checkpoint {
             id: uuid::Uuid::new_v4(),
             manifest_id,
@@ -343,7 +344,7 @@ mod tests {
 
     async fn checkpoint_current_manifest(
         stored_manifest: &mut StoredManifest,
-        expire_time: Option<SystemTime>,
+        expire_time: Option<DateTime<Utc>>,
     ) -> Result<Uuid, SlateDBError> {
         let mut dirty = stored_manifest.prepare_dirty();
         let checkpoint = new_checkpoint(stored_manifest.id(), expire_time);
@@ -384,7 +385,7 @@ mod tests {
         // Manifest 2 (expired_checkpoint_id -> 1)
         let one_day_ago = DefaultSystemClock::default()
             .now()
-            .checked_sub(std::time::Duration::from_secs(86400))
+            .checked_sub_days(Days::new(1))
             .unwrap();
         let _expired_checkpoint_id =
             checkpoint_current_manifest(&mut stored_manifest, Some(one_day_ago))
@@ -393,7 +394,7 @@ mod tests {
         // Manifest 3 (expired_checkpoint_id -> 1, unexpired_checkpoint_id -> 2)
         let one_day_ahead = DefaultSystemClock::default()
             .now()
-            .checked_add(std::time::Duration::from_secs(86400))
+            .checked_add_days(Days::new(1))
             .unwrap();
         let unexpired_checkpoint_id =
             checkpoint_current_manifest(&mut stored_manifest, Some(one_day_ahead))
@@ -912,7 +913,7 @@ mod tests {
     /// A tuple containing the manifest store, table store, local object store,
     /// and database stats
     fn build_objects() -> (Arc<ManifestStore>, Arc<TableStore>, Arc<LocalFileSystem>) {
-        let tempdir = tempfile::tempdir().unwrap().into_path();
+        let tempdir = tempfile::tempdir().unwrap().keep();
         let local_object_store = Arc::new(
             LocalFileSystem::new_with_prefix(tempdir)
                 .unwrap()
@@ -963,12 +964,10 @@ mod tests {
     ) -> DateTime<Utc> {
         let file = local_object_store.path_to_filesystem(path).unwrap();
         let file = File::open(file).unwrap();
-        let now_minus_24h = DefaultSystemClock::default()
-            .now()
-            .checked_sub(std::time::Duration::from_secs(seconds_ago))
-            .unwrap();
-        file.set_modified(now_minus_24h).unwrap();
-        DateTime::<Utc>::from(now_minus_24h)
+        let now_minus_24h = DefaultSystemClock::default().now()
+            - TimeDelta::seconds(seconds_ago.try_into().unwrap());
+        file.set_modified(now_minus_24h.into()).unwrap();
+        now_minus_24h
     }
 
     async fn assert_no_dangling_references(

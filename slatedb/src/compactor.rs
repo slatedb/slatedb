@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::UNIX_EPOCH;
 
 use crossbeam_skiplist::SkipMap;
+use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
 use tracing::instrument;
-use tracing::{error, info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -83,7 +81,7 @@ impl CompactionProgressTracker {
             self.processed_bytes
                 .insert(id, (bytes_processed, total_bytes));
         } else {
-            warn!(%id, "compaction progress tracker missing for job");
+            warn!("compaction progress tracker missing for job [id={}]", id);
         }
     }
 
@@ -94,11 +92,11 @@ impl CompactionProgressTracker {
             let (processed_bytes, total_bytes) = entry.value();
             let percentage = (processed_bytes * 100 / total_bytes) as u32;
             debug!(
-                id = %id,
-                current_percentage = format!("{percentage}%"),
-                processed_bytes = processed_bytes,
-                estimated_total_bytes = total_bytes,
-                "compaction progress"
+                "compaction progress [id={}, current_percentage={}%, processed_bytes={}, estimated_total_bytes={}]",
+                id,
+                percentage,
+                processed_bytes,
+                total_bytes,
             );
         }
     }
@@ -308,7 +306,7 @@ impl CompactorEventHandler {
                     .await
                     .expect("fatal error finishing compaction"),
                 Err(err) => {
-                    error!("error executing compaction: {:#?}", err);
+                    error!("error executing compaction [error={:#?}]", err);
                     self.finish_failed_compaction(id);
                 }
             },
@@ -323,11 +321,24 @@ impl CompactorEventHandler {
 
     async fn stop_executor(&self) -> Result<(), SlateDBError> {
         let this_executor = self.executor.clone();
-        tokio::task::spawn_blocking(move || {
+        // Explicitly allow spawn_blocking for compactors since we can't trust them
+        // not to block the runtime. This could cause non-determinism, since it creates
+        // a race between the executor's first .await call and the runtime awaiting
+        // on the join handle. We use tokio::spawn for DST since we need full determinism.
+        #[cfg(not(dst))]
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
             this_executor.stop();
         })
         .await
-        .map_err(|_| SlateDBError::CompactionExecutorFailed)
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        #[cfg(dst)]
+        let result = tokio::spawn(async move {
+            this_executor.stop();
+        })
+        .await
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        result
     }
 
     fn is_executor_stopped(&self) -> bool {
@@ -371,7 +382,7 @@ impl CompactorEventHandler {
             match self.write_manifest().await {
                 Ok(_) => return Ok(()),
                 Err(SlateDBError::ManifestVersionExists) => {
-                    warn!("conflicting manifest version. updating and retrying write again.");
+                    debug!("conflicting manifest version. updating and retrying write again.");
                 }
                 Err(err) => return Err(err),
             }
@@ -435,16 +446,30 @@ impl CompactorEventHandler {
             ssts,
             sorted_runs,
             compaction_ts: db_state.last_l0_clock_tick,
+            retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
         };
         self.progress_tracker
             .add_job(id, job.estimated_source_bytes());
         let this_executor = self.executor.clone();
-        tokio::task::spawn_blocking(move || {
+        // Explicitly allow spawn_blocking for compactors since we can't trust them
+        // not to block the runtime. This could cause non-determinism, since it creates
+        // a race between the executor's first .await call and the runtime awaiting
+        // on the join handle. We use tokio::spawn for DST since we need full determinism.
+        #[cfg(not(dst))]
+        #[allow(clippy::disallowed_methods)]
+        let result = tokio::task::spawn_blocking(move || {
             this_executor.start_compaction(job);
         })
         .await
-        .map_err(|_| SlateDBError::CompactionExecutorFailed)
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        #[cfg(dst)]
+        let result = tokio::spawn(async move {
+            this_executor.start_compaction(job);
+        })
+        .await
+        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        result
     }
 
     // state writers
@@ -464,13 +489,9 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         self.write_manifest_safely().await?;
         self.maybe_schedule_compactions().await?;
-        self.stats.last_compaction_ts.set(
-            self.system_clock
-                .now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
+        self.stats
+            .last_compaction_ts
+            .set(self.system_clock.now().timestamp() as u64);
         Ok(())
     }
 
@@ -484,7 +505,7 @@ impl CompactorEventHandler {
                 self.start_compaction(id, compaction).await?;
             }
             Err(err) => {
-                warn!("invalid compaction: {:?}", err);
+                warn!("invalid compaction [error={:?}]", err);
             }
         }
         Ok(())
@@ -501,7 +522,7 @@ impl CompactorEventHandler {
         self.state.db_state().log_db_runs();
         let compactions = self.state.compactions();
         for compaction in compactions.iter() {
-            info!("in-flight compaction: {}", compaction);
+            info!("in-flight compaction [compaction={}]", compaction);
         }
     }
 }
@@ -565,6 +586,7 @@ mod tests {
     };
     use crate::db::Db;
     use crate::db_state::{CoreDbState, SortedRun};
+    use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
@@ -576,7 +598,6 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
-    use crate::SlateDBError;
 
     const PATH: &str = "/test/db";
 
@@ -1124,6 +1145,60 @@ mod tests {
         assert_eq!(l0_ids, compaction.sources);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "zstd")]
+    async fn test_compactor_compressed_block_size() {
+        use crate::compactor_stats::BYTES_COMPACTED;
+        use crate::config::{CompressionCodec, SstBlockSize};
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+            SizeTieredCompactionSchedulerOptions {
+                min_compaction_sources: 1,
+                max_compaction_sources: 999,
+                include_size_threshold: 4.0,
+            },
+        ));
+
+        let mut options = db_options(Some(compactor_options()));
+        options.l0_sst_size_bytes = 128;
+        options.compression_codec = Some(CompressionCodec::Zstd);
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_sst_block_size(SstBlockSize::Other(128))
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, _) = build_test_stores(os.clone());
+        for i in 0..4 {
+            let k = vec![b'a' + i as u8; 16];
+            let v = vec![b'b' + i as u8; 48];
+            db.put(&k, &v).await.unwrap();
+            let k = vec![b'j' + i as u8; 16];
+            let v = vec![b'k' + i as u8; 48];
+            db.put(&k, &v).await.unwrap();
+        }
+
+        db.flush().await.unwrap();
+
+        // when:
+        await_compaction(&db, manifest_store)
+            .await
+            .expect("db was not compacted");
+
+        // then:
+        let metrics = db.metrics();
+        let bytes_compacted = metrics.lookup(BYTES_COMPACTED).unwrap().get();
+
+        assert!(bytes_compacted > 0, "bytes_compacted: {}", bytes_compacted);
+    }
+
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>
     where
         F: Future<Output = Option<T>>,
@@ -1161,7 +1236,7 @@ mod tests {
     async fn await_compaction(db: &Db, manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
             let (empty_wal, empty_memtable) = {
-                let mut db_state = db.inner.state.write();
+                let db_state = db.inner.state.read();
                 let cow_db_state = db_state.state();
                 (
                     db.inner.wal_buffer.is_empty(),

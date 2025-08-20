@@ -7,6 +7,7 @@
 <a href="https://slatedb.io">![slatedb.io](https://img.shields.io/badge/site-slatedb.io-00A1FF?style=flat-square)</a>
 <a href="https://discord.gg/mHYmGy5MgA">![Discord](https://img.shields.io/discord/1232385660460204122?style=flat-square)</a>
 <a href="https://docs.rs/slatedb/latest/slatedb/">![Docs](https://img.shields.io/badge/docs-docs.rs-00A1FF?style=flat-square)</a>
+<a href="https://github.dosu.com/slatedb/slatedb/ask">![Dosu](https://img.shields.io/badge/bot-dosu.dev-dd404a?style=flat-square)</a>
 
 ## Introduction
 
@@ -33,12 +34,12 @@ tokio = "*"
 Then you can use SlateDB in your Rust code:
 
 ```rust
-use slatedb::{Db, SlateDBError};
+use slatedb::{Db, Error};
 use slatedb::object_store::{ObjectStore, memory::InMemory};
 use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<(), SlateDBError> {
+async fn main() -> Result<(), Error> {
     // Setup
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let kv_store = Db::open("/tmp/test_kv_store", object_store).await?;

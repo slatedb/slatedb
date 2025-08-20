@@ -137,11 +137,10 @@ impl BlockBuilder {
 
         self.offsets.push(self.data.len() as u16);
         let codec = SstRowCodecV0::new();
-        let key = entry.key.clone();
         codec.encode(&mut self.data, sst_row_entry);
 
         if self.first_key.is_empty() {
-            self.first_key = Bytes::copy_from_slice(&key);
+            self.first_key = Bytes::copy_from_slice(entry.key.as_ref());
         }
 
         true

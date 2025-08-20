@@ -1,11 +1,11 @@
 use crate::{
-    config::GarbageCollectorDirectoryOptions, manifest::store::ManifestStore, SlateDBError,
+    config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
 };
 use chrono::{DateTime, Utc};
+use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::error;
 
 use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
@@ -79,7 +79,10 @@ impl GcTask for ManifestGcTask {
                     .delete_manifest(manifest_metadata.id)
                     .await
                 {
-                    error!("Error deleting manifest: {}", e);
+                    error!(
+                        "error deleting manifest [id={:?}, error={}]",
+                        manifest_metadata.id, e
+                    );
                 } else {
                     self.stats.gc_manifest_count.inc();
                 }

@@ -18,16 +18,20 @@ async fn test_configurable_block_size() {
     assert!(db.is_ok());
 
     // Write some data and verify the DB works correctly
-    let db = db.unwrap();
-    db.put(b"key1", b"value1").await.unwrap();
-    db.put(b"key2", b"value2").await.unwrap();
-    db.flush().await.unwrap();
+    let db = db.expect("Failed to create DB");
+    db.put(b"key1", b"value1")
+        .await
+        .expect("Failed to put key1");
+    db.put(b"key2", b"value2")
+        .await
+        .expect("Failed to put key2");
+    db.flush().await.expect("Failed to flush");
 
-    let value1 = db.get(b"key1").await.unwrap();
-    assert_eq!(&value1.unwrap()[..], b"value1");
+    let value1 = db.get(b"key1").await.expect("Failed to get key1");
+    assert_eq!(&value1.expect("Failed to get key1")[..], b"value1");
 
-    let value2 = db.get(b"key2").await.unwrap();
-    assert_eq!(&value2.unwrap()[..], b"value2");
+    let value2 = db.get(b"key2").await.expect("Failed to get key2");
+    assert_eq!(&value2.expect("Failed to get key2")[..], b"value2");
 }
 
 #[tokio::test]
@@ -72,7 +76,7 @@ async fn test_block_size_actually_used() {
         .with_sst_block_size(SstBlockSize::Block1Kib) // 1KiB blocks
         .build()
         .await
-        .unwrap();
+        .expect("Failed to create DB");
 
     // Write enough data to force multiple blocks
     // Each key-value pair is roughly 16 + value_size bytes
@@ -80,17 +84,22 @@ async fn test_block_size_actually_used() {
 
     for i in 0..100 {
         let key = format!("key_{:04}", i);
-        db.put(key.as_bytes(), &value).await.unwrap();
+        db.put(key.as_bytes(), &value)
+            .await
+            .expect("Failed to put key");
     }
 
     // Force flush to create SST
-    db.flush().await.unwrap();
+    db.flush().await.expect("Failed to flush");
 
     // Verify all data can be read back
     for i in 0..100 {
         let key = format!("key_{:04}", i);
-        let result = db.get(key.as_bytes()).await.unwrap();
-        assert_eq!(result.unwrap().as_ref(), value.as_slice());
+        let result = db.get(key.as_bytes()).await.expect("Failed to get key");
+        assert_eq!(
+            result.expect("Failed to get key").as_ref(),
+            value.as_slice()
+        );
     }
 }
 

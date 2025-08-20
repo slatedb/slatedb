@@ -3,8 +3,8 @@ use crate::db::Db;
 use crate::error::SlateDBError;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::utils::SendSafely;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::time::SystemTime;
 use uuid::Uuid;
 
 #[non_exhaustive]
@@ -12,8 +12,8 @@ use uuid::Uuid;
 pub struct Checkpoint {
     pub id: Uuid,
     pub manifest_id: u64,
-    pub expire_time: Option<SystemTime>,
-    pub create_time: SystemTime,
+    pub expire_time: Option<DateTime<Utc>>,
+    pub create_time: DateTime<Utc>,
 }
 
 #[non_exhaustive]
@@ -32,7 +32,7 @@ impl Db {
         &self,
         scope: CheckpointScope,
         options: &CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, SlateDBError> {
+    ) -> Result<CheckpointCreateResult, crate::Error> {
         // flush all the data into SSTs
         if let CheckpointScope::All = scope {
             if self.inner.wal_enabled {
@@ -50,7 +50,8 @@ impl Db {
             },
         )?;
 
-        rx.await?
+        let result = rx.await.map_err(SlateDBError::ReadChannelError)?;
+        result.map_err(Into::into)
     }
 }
 
@@ -64,7 +65,6 @@ mod tests {
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
-    use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
@@ -75,6 +75,7 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::test_utils;
     use bytes::Bytes;
+    use chrono::TimeDelta;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -146,9 +147,9 @@ mod tests {
         let expected = checkpoint_time + Duration::from_secs(3600);
         // check that expire time is close to the expected value (account for delay/time adjustment)
         if expire_time >= expected {
-            assert!(expire_time.duration_since(expected).unwrap() < Duration::from_secs(5))
+            assert!(expire_time.signed_duration_since(expected) < TimeDelta::seconds(5))
         } else {
-            assert!(expected.duration_since(expire_time).unwrap() < Duration::from_secs(5))
+            assert!(expected.signed_duration_since(expire_time) < TimeDelta::seconds(5))
         }
     }
 
@@ -203,11 +204,15 @@ mod tests {
                 source: Some(source_checkpoint_id),
                 ..CheckpointOptions::default()
             })
-            .await;
+            .await
+            .unwrap_err();
 
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), SlateDBError::CheckpointMissing(id) if id == source_checkpoint_id)
+        assert_eq!(
+            result.to_string(),
+            format!(
+                "Persistent state error: checkpoint missing. checkpoint_id=`{}`",
+                source_checkpoint_id
+            )
         );
     }
 
@@ -218,13 +223,13 @@ mod tests {
         let admin = AdminBuilder::new(path, object_store.clone()).build();
         let result = admin
             .create_detached_checkpoint(&CheckpointOptions::default())
-            .await;
+            .await
+            .unwrap_err();
 
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            SlateDBError::LatestManifestMissing
-        ));
+        assert_eq!(
+            result.to_string(),
+            "Persistent state error: failed to find latest manifest"
+        );
     }
 
     #[tokio::test]
@@ -284,9 +289,13 @@ mod tests {
 
         let result = admin
             .refresh_checkpoint(uuid::Uuid::new_v4(), Some(Duration::from_secs(1000)))
-            .await;
+            .await
+            .unwrap_err();
 
-        assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
+        assert_eq!(
+            result.to_string(),
+            "Persistent state error: invalid DB state error"
+        );
     }
 
     #[tokio::test]

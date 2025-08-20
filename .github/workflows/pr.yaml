@@ -94,6 +94,10 @@ jobs:
         run: cargo nextest run --workspace --all-features --profile ci
       - name: Run Doc Tests
         run: cargo test --doc --all-features
+      - name: Run DST Tests
+        run: cargo nextest run -p slatedb-dst --all-features --profile dst
+        env:
+          RUSTFLAGS: "--cfg dst --cfg tokio_unstable"
 
   bindings:
     runs-on: ubuntu-latest
@@ -148,3 +152,21 @@ jobs:
           comment-on-alert: true
           summary-always: true
           max-items-in-chart: 30
+
+  test_website:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get changed files
+        id: changed-website-files
+        uses: tj-actions/changed-files@6cb76d07bee4c9772c6882c06c37837bf82a04d3 # v46
+        with:
+          files: website/**
+
+      - name: Build website
+        shell: bash
+        if: steps.changed-website-files.outputs.any_changed == 'true'
+        working-directory: ./website
+        run: |
+          npm install
+          npm run build

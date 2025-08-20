@@ -4,7 +4,7 @@ use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
-use ::slatedb::{KeyValue, SlateDBError};
+use ::slatedb::{Error, KeyValue};
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -12,7 +12,7 @@ use pyo3::types::{PyBytes, PyDict, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
 use std::backtrace::Backtrace;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -37,10 +37,28 @@ fn load_object_store(env_file: Option<String>) -> PyResult<Arc<dyn ObjectStore>>
     }
 }
 
-fn to_millis(time: SystemTime) -> u64 {
-    time.duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+async fn load_db_from_url(path: &str, url: &str, settings: Settings) -> PyResult<Db> {
+    let object_store = Db::resolve_object_store(url).map_err(create_value_error)?;
+
+    Db::builder(path, object_store)
+        .with_settings(settings)
+        .build()
+        .await
+        .map_err(create_value_error)
+}
+
+async fn load_db_from_env(
+    path: &str,
+    env_file: Option<String>,
+    settings: Settings,
+) -> PyResult<Db> {
+    let object_store = load_object_store(env_file)?;
+
+    Db::builder(path, object_store)
+        .with_settings(settings)
+        .build()
+        .await
+        .map_err(create_value_error)
 }
 
 /// A Python module implemented in Rust.
@@ -78,30 +96,30 @@ impl PySlateDB {
 #[pymethods]
 impl PySlateDB {
     #[new]
-    #[pyo3(signature = (path, env_file = None, *, **kwargs))]
+    #[pyo3(signature = (path, url = None, env_file = None, *, **kwargs))]
     fn new(
         path: String,
+        url: Option<String>,
         env_file: Option<String>,
         kwargs: Option<&Bound<PyDict>>,
     ) -> PyResult<Self> {
         let rt = get_runtime();
-        let object_store = load_object_store(env_file)?;
-        let db = rt.block_on(async {
-            let settings = match kwargs.and_then(|k| k.get_item("settings").ok().flatten()) {
-                Some(settings_item) => {
-                    let settings_path = settings_item
-                        .extract::<String>()
-                        .map_err(create_value_error)?;
-                    Settings::from_file(settings_path).map_err(create_value_error)?
-                }
-                None => Settings::load().map_err(create_value_error)?,
-            };
+        let settings = match kwargs.and_then(|k| k.get_item("settings").ok().flatten()) {
+            Some(settings_item) => {
+                let settings_path = settings_item
+                    .extract::<String>()
+                    .map_err(create_value_error)?;
+                Settings::from_file(settings_path).map_err(create_value_error)?
+            }
+            None => Settings::load().map_err(create_value_error)?,
+        };
 
-            Db::builder(path, object_store)
-                .with_settings(settings)
-                .build()
-                .await
-                .map_err(create_value_error)
+        let db = rt.block_on(async move {
+            if let Some(url) = url {
+                load_db_from_url(&path, &url, settings).await
+            } else {
+                load_db_from_env(&path, env_file, settings).await
+            }
         })?;
         Ok(Self {
             inner: Arc::new(db),
@@ -409,15 +427,15 @@ impl PySlateDBAdmin {
                 let dict = PyDict::new(py);
                 dict.set_item("id", c.id.to_string())?;
                 dict.set_item("manifest_id", c.manifest_id)?;
-                dict.set_item("expire_time", c.expire_time.map(to_millis))?;
-                dict.set_item("create_time", to_millis(c.create_time))?;
+                dict.set_item("expire_time", c.expire_time.map(|t| t.timestamp_millis()))?;
+                dict.set_item("create_time", c.create_time.timestamp_millis())?;
                 Ok(dict)
             })
             .collect::<PyResult<Vec<Bound<PyDict>>>>()
     }
 }
 
-type IteratorReceiver = Arc<Mutex<mpsc::UnboundedReceiver<Result<Option<KeyValue>, SlateDBError>>>>;
+type IteratorReceiver = Arc<Mutex<mpsc::UnboundedReceiver<Result<Option<KeyValue>, Error>>>>;
 
 #[pyclass(name = "DbIterator")]
 pub struct PyDbIterator {
@@ -473,7 +491,7 @@ impl PyDbIterator {
                         }
                     }
                     let _ = sender.send(Ok(None)); // End of iteration
-                    Ok::<(), SlateDBError>(())
+                    Ok::<(), Error>(())
                 }
                 .await;
 
@@ -494,7 +512,7 @@ impl PyDbIterator {
                         }
                     }
                     let _ = sender.send(Ok(None)); // End of iteration
-                    Ok::<(), SlateDBError>(())
+                    Ok::<(), Error>(())
                 }
                 .await;
 

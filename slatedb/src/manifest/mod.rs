@@ -10,6 +10,7 @@ use crate::error::SlateDBError;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
+use log::warn;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -130,7 +131,7 @@ impl Manifest {
                 if let Some(range) = range {
                     ranges.push((manifest, range));
                 } else {
-                    tracing::warn!("Manifest {:?} has no SST files", manifest);
+                    warn!("manifest has no SST files [manifest={:?}]", manifest);
                 }
             }
             ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
@@ -140,7 +141,7 @@ impl Manifest {
             for (_, range) in ranges.iter() {
                 if let Some(previous_range) = previous_range {
                     if range.intersect(previous_range).is_some() {
-                        unreachable!("Overlapping ranges found");
+                        unreachable!("overlapping ranges found");
                     }
                 }
                 previous_range = Some(range);
