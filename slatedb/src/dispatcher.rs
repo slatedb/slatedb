@@ -80,6 +80,9 @@
 //! # }
 //! ```
 
+// TODO Remove once we've migrated to MessgaeDispatcher
+#![allow(dead_code)]
+
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
