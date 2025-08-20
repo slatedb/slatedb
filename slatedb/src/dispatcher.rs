@@ -194,9 +194,9 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// 1. Running the main event loop ([MessageDispatcher::run_loop]).
     /// 2. Processing the final result when the event loop exits
-    ///   ([MessageDispatcher::handle_result]).
+    ///    ([MessageDispatcher::handle_result]).
     /// 4. Cleaning up resources and processing any remaining messages
-    ///   ([MessageDispatcher::cleanup]).
+    ///    ([MessageDispatcher::cleanup]).
     ///
     /// ## Returns
     ///
@@ -486,7 +486,7 @@ mod test {
             let mut tickers: Vec<(Duration, Box<MessageFactory<_>>)> = vec![];
             for (interval, id) in self.tickers.iter() {
                 let id = *id as i32;
-                tickers.push((interval.clone(), Box::new(move || TestMessage::Tick(id))));
+                tickers.push((*interval, Box::new(move || TestMessage::Tick(id))));
             }
             tickers
         }
