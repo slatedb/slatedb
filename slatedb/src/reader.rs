@@ -14,9 +14,9 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
+use crate::utils::build_iters_concurrent;
 use crate::utils::{get_now_for_read, is_not_expired};
 use crate::{error::SlateDBError, filter, DbIterator};
-use crate::utils::build_iters_concurrent;
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -141,19 +141,17 @@ impl Reader {
             eager_spawn: true,
         };
 
-        let l0_iters_futures = build_iters_concurrent(
-            db_state.core().l0.iter().clone(),
-            |sst| SstIterator::new_owned(
+        let l0_iters_futures = build_iters_concurrent(db_state.core().l0.iter().clone(), |sst| {
+            SstIterator::new_owned(
                 range.clone(),
                 sst.clone(),
                 self.table_store.clone(),
                 sst_iter_options,
             )
-        );
+        });
 
-        let sr_iters_futures = build_iters_concurrent(
-            db_state.core().compacted.iter().cloned(),
-            |sr| async {
+        let sr_iters_futures =
+            build_iters_concurrent(db_state.core().compacted.iter().cloned(), |sr| async {
                 SortedRunIterator::new_owned(
                     range.clone(),
                     sr,
@@ -162,8 +160,7 @@ impl Reader {
                 )
                 .await
                 .map(Some)
-            },
-        );
+            });
 
         let (l0_iters, sr_iters) = futures::try_join!(l0_iters_futures, sr_iters_futures)?;
 
