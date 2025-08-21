@@ -114,7 +114,7 @@ impl TransactionManager {
                 None => return false,
             };
 
-            if inner.check_conflict(keys, txn_state.started_seq, committed_seq) {
+            if inner.check_conflict(keys, txn_state.started_seq) {
                 return false;
             }
         }
@@ -178,12 +178,29 @@ impl TransactionManagerInner {
         }
     }
 
-    fn check_conflict(
-        &self,
-        write_keys: &HashSet<Bytes>,
-        started_seq: u64,
-        committed_seq: u64,
-    ) -> bool {
-        todo!()
+    fn check_conflict(&self, write_keys: &HashSet<Bytes>, started_seq: u64) -> bool {
+        for committed_txn in &self.recent_committed_txns {
+            // skip read-only transactions as they don't cause write conflicts
+            if committed_txn.read_only {
+                continue;
+            }
+
+            // this shouldn't happen in recent_committed_txns but let's skip it for safety
+            let other_committed_seq = committed_txn.committed_seq.expect(
+                "all txns in recent_committed_txns should be committed with committed_seq set",
+            );
+
+            // if another transaction committed after the current transaction started,
+            // and they have overlapping write keys, then there's a conflict.
+            // this means the current transaction couldn't see the other transaction's writes
+            // when it started, but they modified the same keys.
+            if other_committed_seq > started_seq {
+                if !write_keys.is_disjoint(&committed_txn.write_keys) {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 }
