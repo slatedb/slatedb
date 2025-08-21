@@ -204,3 +204,197 @@ impl TransactionManagerInner {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rand::DbRand;
+    use bytes::Bytes;
+    use std::collections::HashSet;
+    use uuid::Uuid;
+
+    struct ConflictTestCase {
+        name: &'static str,
+        recent_committed_txns: Vec<TransactionState>,
+        current_write_keys: Vec<&'static str>,
+        current_started_seq: u64,
+        expected_conflict: bool,
+    }
+
+    #[test]
+    fn test_check_conflict_table_driven() {
+        let test_cases = vec![
+            ConflictTestCase {
+                name: "no_recent_committed_txns",
+                recent_committed_txns: vec![],
+                current_write_keys: vec!["key1", "key2"],
+                current_started_seq: 100,
+                expected_conflict: false,
+            },
+
+            ConflictTestCase {
+                name: "no_overlapping_keys",
+                recent_committed_txns: vec![
+                    TransactionState {
+                        id: Uuid::new_v4(),
+                        read_only: false,
+                        started_seq: 50,
+                        committed_seq: Some(80),
+                        write_keys: ["key1", "key2"].into_iter().map(Bytes::from).collect(),
+                    }
+                ],
+                current_write_keys: vec!["key3", "key4"],
+                current_started_seq: 100,
+                expected_conflict: false,
+            },
+
+            ConflictTestCase {
+                name: "concurrent_write_same_key",
+                recent_committed_txns: vec![
+                    TransactionState {
+                        id: Uuid::new_v4(),
+                        read_only: false,
+                        started_seq: 50,
+                        committed_seq: Some(150),
+                        write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+                    }
+                ],
+                current_write_keys: vec!["key1"],
+                current_started_seq: 100,
+                expected_conflict: true,
+            },
+
+            ConflictTestCase {
+                name: "multiple_committed_mixed_conflict",
+                recent_committed_txns: vec![
+                    TransactionState {
+                        id: Uuid::new_v4(),
+                        read_only: false,
+                        started_seq: 30,
+                        committed_seq: Some(50),
+                        write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+                    },
+                    TransactionState {
+                        id: Uuid::new_v4(),
+                        read_only: false,
+                        started_seq: 80,
+                        committed_seq: Some(150),
+                        write_keys: ["key2"].into_iter().map(Bytes::from).collect(),
+                    }
+                ],
+                current_write_keys: vec!["key1", "key2"],
+                current_started_seq: 100,
+                expected_conflict: true,
+            },
+
+            ConflictTestCase {
+                name: "readonly_committed_no_conflict",
+                recent_committed_txns: vec![
+                    TransactionState {
+                        id: Uuid::new_v4(),
+                        read_only: true,
+                        started_seq: 80,
+                        committed_seq: Some(150),
+                        write_keys: HashSet::new(),
+                    }
+                ],
+                current_write_keys: vec!["key1"],
+                current_started_seq: 100,
+                expected_conflict: false,
+            },
+
+            ConflictTestCase {
+                name: "committed_before_current_started",
+                recent_committed_txns: vec![
+                    TransactionState {
+                        id: Uuid::new_v4(),
+                        read_only: false,
+                        started_seq: 30,
+                        committed_seq: Some(50),
+                        write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+                    }
+                ],
+                current_write_keys: vec!["key1"],
+                current_started_seq: 100,
+                expected_conflict: false,
+            },
+
+            ConflictTestCase {
+                name: "exact_seq_boundary",
+                recent_committed_txns: vec![
+                    TransactionState {
+                        id: Uuid::new_v4(),
+                        read_only: false,
+                        started_seq: 100,
+                        committed_seq: Some(100),
+                        write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+                    }
+                ],
+                current_write_keys: vec!["key1"],
+                current_started_seq: 100,
+                expected_conflict: false,
+            },
+
+            ConflictTestCase {
+                name: "partial_key_overlap_conflict",
+                recent_committed_txns: vec![
+                    TransactionState {
+                        id: Uuid::new_v4(),
+                        read_only: false,
+                        started_seq: 80,
+                        committed_seq: Some(150),
+                        write_keys: ["key1", "key2", "key3"].into_iter().map(Bytes::from).collect(),
+                    }
+                ],
+                current_write_keys: vec!["key3", "key4", "key5"],
+                current_started_seq: 100,
+                expected_conflict: true,
+            },
+
+            ConflictTestCase {
+                name: "max_seq_values",
+                recent_committed_txns: vec![
+                    TransactionState {
+                        id: Uuid::new_v4(),
+                        read_only: false,
+                        started_seq: u64::MAX - 1,
+                        committed_seq: Some(u64::MAX),
+                        write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+                    }
+                ],
+                current_write_keys: vec!["key1"],
+                current_started_seq: u64::MAX - 1,
+                expected_conflict: true, // Should be true since committed_seq > started_seq
+            },
+        ];
+
+        for case in test_cases {
+            let db_rand = Arc::new(DbRand::new(0));
+            let txn_manager = TransactionManager::new(db_rand);
+
+            // Set up recent_committed_txns directly
+            {
+                let mut inner = txn_manager.inner.write();
+                inner.recent_committed_txns = case.recent_committed_txns.into();
+            }
+
+            // Convert current transaction write keys
+            let write_keys: HashSet<Bytes> = case.current_write_keys
+                .into_iter()
+                .map(Bytes::from)
+                .collect();
+
+            // Call the method under test
+            let inner = txn_manager.inner.read();
+            let has_conflict = inner.check_conflict(&write_keys, case.current_started_seq);
+
+            // Verify result
+            assert_eq!(
+                has_conflict,
+                case.expected_conflict,
+                "Test case '{}' failed",
+                case.name
+            );
+        }
+    }
+}
