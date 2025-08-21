@@ -129,6 +129,14 @@ impl TransactionManager {
 
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
+
+        // if there's no active non-readonly transactions, we don't need to track the recent
+        // committed txn, since it's impossible to have any conflict.
+        if !inner.active_txns.values().any(|txn| !txn.read_only) {
+            return;
+        }
+
+        // remove the txn from active txns and append it to recent_committed_txns.
         if let Some(mut txn_state) = inner.active_txns.remove(txn_id) {
             txn_state.track_write_keys(keys.iter().cloned());
             txn_state.mark_as_committed(committed_seq);
