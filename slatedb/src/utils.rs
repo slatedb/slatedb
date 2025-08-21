@@ -5,8 +5,10 @@ use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
+use futures::future::try_join_all;
 use futures::FutureExt;
 use rand::{Rng, RngCore};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
@@ -16,8 +18,6 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
-use std::collections::VecDeque;
-use futures::future::try_join_all;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -454,7 +454,7 @@ pub(crate) async fn build_iters_concurrent<I, T, F, Fut>(
 where
     I: IntoIterator,
     F: Fn(I::Item) -> Fut,
-    Fut: std::future::Future<Output = Result<Option<T>, SlateDBError>>, 
+    Fut: std::future::Future<Output = Result<Option<T>, SlateDBError>>,
 {
     let results = try_join_all(inputs.into_iter().map(f)).await?;
     Ok(results.into_iter().filter_map(|x| x).collect())

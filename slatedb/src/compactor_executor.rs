@@ -1,4 +1,4 @@
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
@@ -145,30 +145,15 @@ impl TokioCompactionExecutorInner {
             eager_spawn: true,
         };
 
-        let l0_iters_futures = build_iters_concurrent(
-            compaction.ssts.iter(),
-            |l0| SstIterator::new_borrowed(
-                ..,
-                l0,
-                self.table_store.clone(),
-                sst_iter_options,
-            ),
-        );
+        let l0_iters_futures = build_iters_concurrent(compaction.ssts.iter(), |l0| {
+            SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options)
+        });
 
-        
-        let sr_iters_futures = build_iters_concurrent(
-            compaction.sorted_runs.iter(),
-            |sr| async {
-                SortedRunIterator::new_borrowed(
-                    ..,
-                    sr,
-                    self.table_store.clone(),
-                    sst_iter_options,
-                )
+        let sr_iters_futures = build_iters_concurrent(compaction.sorted_runs.iter(), |sr| async {
+            SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
                 .await
                 .map(Some)
-            },
-        );
+        });
 
         let (l0_iters, sr_iters) = futures::try_join!(l0_iters_futures, sr_iters_futures)?;
         let l0_merge_iter = MergeIterator::new(l0_iters).await?.with_dedup(false);
