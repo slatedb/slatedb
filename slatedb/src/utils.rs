@@ -16,6 +16,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
+use std::collections::VecDeque;
+use futures::future::try_join_all;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -441,6 +443,21 @@ impl<'a> BitReader<'a> {
 pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
     let shift = 32 - bits;
     ((val << shift) as i32) >> shift
+}
+
+// Generic concurrent builder. `f` must return Result<Option<T>> so you can
+// reuse it for both Some/None (SST) and always-Some (wrap as Some).
+pub(crate) async fn build_iters_concurrent<I, T, F, Fut>(
+    inputs: I,
+    f: F,
+) -> Result<VecDeque<T>, SlateDBError>
+where
+    I: IntoIterator,
+    F: Fn(I::Item) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<T>, SlateDBError>>, 
+{
+    let results = try_join_all(inputs.into_iter().map(f)).await?;
+    Ok(results.into_iter().filter_map(|x| x).collect())
 }
 
 #[cfg(test)]
