@@ -8,7 +8,7 @@ use crate::config::{ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
 
 use crate::db::DbInner;
-use crate::transaction_manager::{TransactionManager, TransactionState};
+use crate::transaction_manager::TransactionManager;
 use crate::DbRead;
 
 pub struct DbSnapshot {

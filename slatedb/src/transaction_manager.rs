@@ -7,11 +7,6 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub(crate) struct TransactionState {
-    /// id is used to track the lifecycle of a transaction. when a snapshot/transaction
-    /// ends, we can remove the transaction state from the transaction manager by this
-    /// id. we can not use seq as the txn id, because it's possible to start multiple
-    /// transactions with the same seq number.
-    pub(crate) id: Uuid,
     pub(crate) read_only: bool,
     /// seq is the sequence number when the transaction started. this is used to establish
     /// a snapshot of this transaction. we should ensure the compactor cannot recycle
@@ -74,9 +69,8 @@ impl TransactionManager {
     pub fn new_txn(&self, seq: u64, read_only: bool) -> Uuid {
         let id = self.db_rand.rng().gen_uuid();
         let txn_state = TransactionState {
-            id,
-            started_seq: seq,
             read_only,
+            started_seq: seq,
             committed_seq: None,
             conflict_keys: HashSet::new(),
         };
@@ -122,7 +116,6 @@ impl TransactionManager {
             None => {
                 let mut inner = self.inner.write();
                 inner.recent_committed_txns.push_back(TransactionState {
-                    id: self.db_rand.rng().gen_uuid(),
                     read_only: false,
                     started_seq: committed_seq,
                     committed_seq: Some(committed_seq),
@@ -215,10 +208,10 @@ impl TransactionManagerInner {
             // and they have overlapping write keys, then there's a conflict.
             // this means the current transaction couldn't see the other transaction's writes
             // when it started, but they modified the same keys.
-            if other_committed_seq > started_seq {
-                if !conflict_keys.is_disjoint(&committed_txn.conflict_keys) {
-                    return true;
-                }
+            if other_committed_seq > started_seq
+                && !conflict_keys.is_disjoint(&committed_txn.conflict_keys)
+            {
+                return true;
             }
         }
 
@@ -232,7 +225,6 @@ mod tests {
     use crate::rand::DbRand;
     use bytes::Bytes;
     use std::collections::HashSet;
-    use uuid::Uuid;
 
     struct ConflictTestCase {
         name: &'static str,
@@ -255,7 +247,6 @@ mod tests {
             ConflictTestCase {
                 name: "no_overlapping_keys",
                 recent_committed_txns: vec![TransactionState {
-                    id: Uuid::new_v4(),
                     read_only: false,
                     started_seq: 50,
                     committed_seq: Some(80),
@@ -268,7 +259,6 @@ mod tests {
             ConflictTestCase {
                 name: "concurrent_write_same_key",
                 recent_committed_txns: vec![TransactionState {
-                    id: Uuid::new_v4(),
                     read_only: false,
                     started_seq: 50,
                     committed_seq: Some(150),
@@ -282,14 +272,12 @@ mod tests {
                 name: "multiple_committed_mixed_conflict",
                 recent_committed_txns: vec![
                     TransactionState {
-                        id: Uuid::new_v4(),
                         read_only: false,
                         started_seq: 30,
                         committed_seq: Some(50),
                         conflict_keys: ["key1"].into_iter().map(Bytes::from).collect(),
                     },
                     TransactionState {
-                        id: Uuid::new_v4(),
                         read_only: false,
                         started_seq: 80,
                         committed_seq: Some(150),
@@ -303,7 +291,6 @@ mod tests {
             ConflictTestCase {
                 name: "readonly_committed_no_conflict",
                 recent_committed_txns: vec![TransactionState {
-                    id: Uuid::new_v4(),
                     read_only: true,
                     started_seq: 80,
                     committed_seq: Some(150),
@@ -316,7 +303,6 @@ mod tests {
             ConflictTestCase {
                 name: "committed_before_current_started",
                 recent_committed_txns: vec![TransactionState {
-                    id: Uuid::new_v4(),
                     read_only: false,
                     started_seq: 30,
                     committed_seq: Some(50),
@@ -329,7 +315,6 @@ mod tests {
             ConflictTestCase {
                 name: "exact_seq_boundary",
                 recent_committed_txns: vec![TransactionState {
-                    id: Uuid::new_v4(),
                     read_only: false,
                     started_seq: 100,
                     committed_seq: Some(100),
@@ -342,7 +327,6 @@ mod tests {
             ConflictTestCase {
                 name: "partial_key_overlap_conflict",
                 recent_committed_txns: vec![TransactionState {
-                    id: Uuid::new_v4(),
                     read_only: false,
                     started_seq: 80,
                     committed_seq: Some(150),
@@ -358,7 +342,6 @@ mod tests {
             ConflictTestCase {
                 name: "max_seq_values",
                 recent_committed_txns: vec![TransactionState {
-                    id: Uuid::new_v4(),
                     read_only: false,
                     started_seq: u64::MAX - 1,
                     committed_seq: Some(u64::MAX),

@@ -63,7 +63,7 @@ impl DbInner {
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         let now = self.mono_clock.now().await?;
         let commit_seq = self.oracle.last_seq.next();
-        let txn_id = batch.txn_id.clone();
+        let txn_id = batch.txn_id;
 
         let entries = self.extract_row_entries(batch, commit_seq, now);
         let conflict_keys = entries
@@ -73,7 +73,7 @@ impl DbInner {
 
         // check if there's any conflict if this write batch is bound with a txn.
         if let Some(txn_id) = &txn_id {
-            if self.txn_manager.check_conflict(&txn_id, &conflict_keys) {
+            if self.txn_manager.check_conflict(txn_id, &conflict_keys) {
                 return Err(SlateDBError::TranscationConflict);
             }
         }
@@ -134,7 +134,7 @@ impl DbInner {
     }
 
     fn extract_row_entries(&self, batch: WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
-        let entries = batch
+        batch
             .ops
             .into_iter()
             .map(|op| match op {
@@ -153,8 +153,7 @@ impl DbInner {
                     seq,
                 },
             })
-            .collect::<Vec<_>>();
-        entries
+            .collect::<Vec<_>>()
     }
 
     pub(crate) fn spawn_write_task(

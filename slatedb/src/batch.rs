@@ -4,10 +4,7 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
-use crate::{
-    config::PutOptions,
-    types::{RowEntry, ValueDeletable},
-};
+use crate::config::PutOptions;
 use bytes::Bytes;
 use uuid::Uuid;
 
