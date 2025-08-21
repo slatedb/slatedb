@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap};
 use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
+use crate::utils::build_iters_concurrent;
 
 use crate::compactor::stats::CompactionStats;
 use crate::utils::{spawn_bg_task, IdGenerator};
@@ -144,24 +145,33 @@ impl TokioCompactionExecutorInner {
             eager_spawn: true,
         };
 
-        let mut l0_iters = VecDeque::new();
-        for l0 in compaction.ssts.iter() {
-            let maybe_iter =
-                SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options)
-                    .await?;
-            if let Some(iter) = maybe_iter {
-                l0_iters.push_back(iter);
-            }
-        }
-        let l0_merge_iter = MergeIterator::new(l0_iters).await?.with_dedup(false);
+        let l0_iters_futures = build_iters_concurrent(
+            compaction.ssts.iter(),
+            |l0| SstIterator::new_borrowed(
+                ..,
+                l0,
+                self.table_store.clone(),
+                sst_iter_options,
+            ),
+        );
 
-        let mut sr_iters = VecDeque::new();
-        for sr in compaction.sorted_runs.iter() {
-            let iter =
-                SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
-                    .await?;
-            sr_iters.push_back(iter);
-        }
+        
+        let sr_iters_futures = build_iters_concurrent(
+            compaction.sorted_runs.iter(),
+            |sr| async {
+                SortedRunIterator::new_borrowed(
+                    ..,
+                    sr,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await
+                .map(Some)
+            },
+        );
+
+        let (l0_iters, sr_iters) = futures::try_join!(l0_iters_futures, sr_iters_futures)?;
+        let l0_merge_iter = MergeIterator::new(l0_iters).await?.with_dedup(false);
         let sr_merge_iter = MergeIterator::new(sr_iters).await?.with_dedup(false);
 
         let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])

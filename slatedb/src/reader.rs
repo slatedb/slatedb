@@ -16,6 +16,8 @@ use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{get_now_for_read, is_not_expired};
 use crate::{error::SlateDBError, filter, DbIterator};
+use crate::utils::build_iters_concurrent;
+
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::FutureExt;
@@ -139,31 +141,31 @@ impl Reader {
             eager_spawn: true,
         };
 
-        let mut l0_iters = VecDeque::new();
-        for sst in &db_state.core().l0 {
-            if let Some(iter) = SstIterator::new_owned(
+        let l0_iters_futures = build_iters_concurrent(
+            db_state.core().l0.iter().clone(),
+            |sst| SstIterator::new_owned(
                 range.clone(),
                 sst.clone(),
                 self.table_store.clone(),
                 sst_iter_options,
             )
-            .await?
-            {
-                l0_iters.push_back(iter);
-            }
-        }
+        );
 
-        let mut sr_iters = VecDeque::new();
-        for sr in &db_state.core().compacted {
-            let iter = SortedRunIterator::new_owned(
-                range.clone(),
-                sr.clone(),
-                self.table_store.clone(),
-                sst_iter_options,
-            )
-            .await?;
-            sr_iters.push_back(iter);
-        }
+        let sr_iters_futures = build_iters_concurrent(
+            db_state.core().compacted.iter().cloned(),
+            |sr| async {
+                SortedRunIterator::new_owned(
+                    range.clone(),
+                    sr,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await
+                .map(Some)
+            },
+        );
+
+        let (l0_iters, sr_iters) = futures::try_join!(l0_iters_futures, sr_iters_futures)?;
 
         DbIterator::new(range, memtable_iters, l0_iters, sr_iters, max_seq).await
     }
