@@ -62,13 +62,21 @@ impl DbInner {
         batch: WriteBatch,
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         let now = self.mono_clock.now().await?;
-        let seq = self.oracle.last_seq.next();
+        let commit_seq = self.oracle.last_seq.next();
+        let txn_id = batch.txn_id.clone();
 
-        let entries = self.extract_row_entries(batch, seq, now);
+        let entries = self.extract_row_entries(batch, commit_seq, now);
         let conflict_keys = entries
             .iter()
             .map(|entry| entry.key.clone())
             .collect::<HashSet<_>>();
+
+        // check if there's any conflict if this write batch is bound with a txn.
+        if let Some(txn_id) = &txn_id {
+            if self.txn_manager.check_conflict(&txn_id, &conflict_keys) {
+                return Err(SlateDBError::TranscationConflict);
+            }
+        }
 
         if self.wal_enabled {
             // WAL entries must be appended to the wal buffer atomically. Otherwise,
@@ -87,7 +95,7 @@ impl DbInner {
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
-        self.wal_buffer.track_last_applied_seq(seq).await;
+        self.wal_buffer.track_last_applied_seq(commit_seq).await;
 
         // insert a fail point for easier to test the case where the last_committed_seq is not updated.
         // this is useful for testing the case where the reader is not able to see the writes.
@@ -108,8 +116,12 @@ impl DbInner {
             self.state.write().memtable().table().durable_watcher()
         };
 
+        // track the recent committed txn for conflict check.
+        self.txn_manager
+            .track_recent_committed_txn(txn_id.as_ref(), &conflict_keys, commit_seq);
+
         // update the last_committed_seq, so the writes will be visible to the readers.
-        self.oracle.last_committed_seq.store(seq);
+        self.oracle.last_committed_seq.store(commit_seq);
 
         // maybe freeze the memtable.
         {

@@ -97,8 +97,13 @@ impl TransactionManager {
         inner.recycle_recent_committed_txns();
     }
 
-    pub fn check_conflict(&self, keys: &HashSet<Bytes>, started_seq: u64) -> bool {
+    pub fn check_conflict(&self, txn_id: &Uuid, keys: &HashSet<Bytes>) -> bool {
         let inner = self.inner.read();
+        let started_seq = match inner.active_txns.get(txn_id) {
+            None => return false,
+            Some(txn_state) => txn_state.started_seq,
+        };
+
         inner.check_conflict(keys, started_seq)
     }
 
