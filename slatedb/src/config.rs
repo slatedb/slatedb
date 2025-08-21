@@ -167,6 +167,15 @@ use crate::error::SlateDBError;
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
+/// Enum representing different levels of cache preloading on startup
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum PreloadLevel {
+    /// Preload only L0 SSTs (most recently written files)
+    L0Sst,
+    /// Preload all SSTs (both L0 and compacted levels)
+    AllSst,
+}
+
 /// Enum representing valid SST block sizes
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub enum SstBlockSize {
@@ -1011,6 +1020,15 @@ pub struct ObjectStoreCacheOptions {
     /// its default value is 4mb.
     pub part_size_bytes: usize,
 
+    /// Whether to cache PUT operations to disk. When enabled, data written via PUT operations
+    /// will be cached locally for faster subsequent reads. Default is false.
+    pub cache_puts: bool,
+
+    /// Whether to preload SST files into cache during database startup. When enabled,
+    /// the database will load SST files into the cache up to the cache size limit
+    /// to warm up the cache for faster access. Default is None (no preloading).
+    pub preload_disk_cache_on_startup: Option<PreloadLevel>,
+
     /// Interval to scan the cache directory to rebuild the in-memory map for evictor.
     /// The default value is 1 hour. If set to None, the cache directory will be only
     /// scanned once on start up.
@@ -1031,6 +1049,8 @@ impl Default for ObjectStoreCacheOptions {
             #[cfg(not(target_pointer_width = "32"))]
             max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
             part_size_bytes: 4 * 1024 * 1024,
+            cache_puts: false,
+            preload_disk_cache_on_startup: None,
             scan_interval: Some(Duration::from_secs(3600)),
         }
     }
@@ -1104,7 +1124,7 @@ mod tests {
     "flush_interval": "1s",
     "object_store_cache_options": {
         "root_folder": "/tmp/slatedb-root"
-    } 
+    }
 }
 "#,
             )
