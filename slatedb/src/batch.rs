@@ -4,7 +4,10 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
-use crate::config::PutOptions;
+use crate::{
+    config::PutOptions,
+    types::{RowEntry, ValueDeletable},
+};
 use bytes::Bytes;
 
 /// A batch of write operations (puts and/or deletes). All operations in the
@@ -48,7 +51,6 @@ impl Default for WriteBatch {
     }
 }
 
-/// A write operation in a batch.
 #[derive(PartialEq, Clone)]
 pub(crate) enum WriteOp {
     Put(Bytes, Bytes, PutOptions),

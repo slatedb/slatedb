@@ -27,6 +27,7 @@
 
 use fail_parallel::fail_point;
 use log::{info, warn};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -63,26 +64,11 @@ impl DbInner {
         let now = self.mono_clock.now().await?;
         let seq = self.oracle.last_seq.next();
 
-        let entries = batch
-            .ops
-            .into_iter()
-            .map(|op| match op {
-                WriteOp::Put(key, value, opts) => RowEntry {
-                    key,
-                    value: ValueDeletable::Value(value),
-                    create_ts: Some(now),
-                    expire_ts: opts.expire_ts_from(self.settings.default_ttl, now),
-                    seq,
-                },
-                WriteOp::Delete(key) => RowEntry {
-                    key,
-                    value: ValueDeletable::Tombstone,
-                    create_ts: Some(now),
-                    expire_ts: None,
-                    seq,
-                },
-            })
-            .collect::<Vec<_>>();
+        let entries = self.extract_row_entries(batch, seq, now);
+        let conflict_keys = entries
+            .iter()
+            .map(|entry| entry.key.clone())
+            .collect::<HashSet<_>>();
 
         if self.wal_enabled {
             // WAL entries must be appended to the wal buffer atomically. Otherwise,
@@ -133,6 +119,30 @@ impl DbInner {
         }
 
         Ok(durable_watcher)
+    }
+
+    fn extract_row_entries(&self, batch: WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
+        let entries = batch
+            .ops
+            .into_iter()
+            .map(|op| match op {
+                WriteOp::Put(key, value, opts) => RowEntry {
+                    key,
+                    value: ValueDeletable::Value(value.clone()),
+                    create_ts: Some(now),
+                    expire_ts: opts.expire_ts_from(self.settings.default_ttl, now),
+                    seq,
+                },
+                WriteOp::Delete(key) => RowEntry {
+                    key,
+                    value: ValueDeletable::Tombstone,
+                    create_ts: Some(now),
+                    expire_ts: None,
+                    seq,
+                },
+            })
+            .collect::<Vec<_>>();
+        entries
     }
 
     pub(crate) fn spawn_write_task(
