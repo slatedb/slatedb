@@ -357,14 +357,6 @@ Note:
 
 The section below is under discussion here: https://github.com/slatedb/slatedb/pull/695/files#r2239561471
 
-#### **5. Migrate `compaction_epoch` from Manifest to CompactionState**
-**Decision**: Deprecate `compaction_epoch` from Manifest.
-
-**Rationale**: 
-- Clean separation: DB state vs process coordination
-- Process independence: Compactor can run separately
-- Logical grouping: Epoch lives with compaction concerns
-
 
 ### **Persistent State Storage**
 

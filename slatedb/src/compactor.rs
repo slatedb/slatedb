@@ -264,19 +264,13 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        /* State Management Protocol Compactor Startup:*/
-        // let stored_compactor_state = CompactionState::load(compactor_state_store.clone()).await?;
         let stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
-        // let compactor_state = FenceableCompactionState::init_compactor(stored_compactor_state,
-        // options.compactor_update_timeout,
-        // system_clock.clone()).await?;
         let manifest = FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
             system_clock.clone(),
         )
         .await?;
-        /* State Management Protocol Compactor Startup Complete:*/
         let state = CompactorState::new(manifest.prepare_dirty()?);
         Ok(Self {
             state,
@@ -417,7 +411,6 @@ impl CompactorEventHandler {
         id: Uuid,
         compaction: Compaction,
     ) -> Result<(), SlateDBError> {
-        // Update code to handle resuming compactions
         self.log_compaction_state();
         let db_state = self.state.db_state();
         let compacted_sst_iter = db_state.compacted.iter().flat_map(|sr| sr.ssts.iter());
@@ -494,7 +487,6 @@ impl CompactorEventHandler {
         self.state.finish_compaction(id, output_sr);
         self.progress_tracker.remove_job(id);
         self.log_compaction_state();
-        // Write compaction state to the .compactor file as part of the state management protocol
         self.write_manifest_safely().await?;
         self.maybe_schedule_compactions().await?;
         self.stats
@@ -507,7 +499,6 @@ impl CompactorEventHandler {
     async fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
         let id = self.rand.rng().gen_uuid();
         tracing::Span::current().record("id", tracing::field::display(&id));
-        // Compaction validations need to be added in submit_compaction
         let result = self.state.submit_compaction(id, compaction.clone());
         match result {
             Ok(_) => {
