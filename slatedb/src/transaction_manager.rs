@@ -73,7 +73,7 @@ impl TransactionManager {
     }
 
     /// Register a transaction state with a specific ID
-    pub fn new_txn(&self, seq: u64, read_only: bool) -> (Uuid, u64) {
+    pub fn new_txn(&self, seq: u64, read_only: bool) -> Uuid {
         let id = self.db_rand.rng().gen_uuid();
         let txn_state = TransactionState {
             id,
@@ -88,7 +88,7 @@ impl TransactionManager {
             inner.active_txns.insert(id, txn_state);
         }
 
-        (id, seq)
+        id
     }
 
     /// Remove a transaction state when it's dropped. The dropped txn is considered
