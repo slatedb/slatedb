@@ -4,7 +4,7 @@ use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 
 use chrono::TimeDelta;
-use futures::future::{join_all, join};
+use futures::future::{join, join_all};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
@@ -18,8 +18,7 @@ use crate::iter::KeyValueIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::rand::DbRand;
 use crate::retention_iterator::RetentionIterator;
-use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
