@@ -323,7 +323,7 @@ pub(crate) struct CoreDbState {
     pub(crate) compacted: Vec<SortedRun>,
     /// the last WAL ID seen when the manifest is flushed (when memtable is flushed to
     /// L0). this WAL file might has not been flushed to disk yet.
-    pub(crate) last_seen_wal_id: u64,
+    pub(crate) wal_id_last_seen: u64,
     /// the WAL ID after which the WAL replay should start. Default to 0,
     /// which means all the WAL IDs should be greater than or equal to 1.
     /// When a new L0 is flushed, we update this field to the recent
