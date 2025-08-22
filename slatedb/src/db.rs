@@ -114,9 +114,13 @@ impl DbInner {
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
         let oracle = Arc::new(
-            Oracle::new(last_committed_seq)
-                .with_last_seq(last_seq)
-                .with_last_remote_persisted_seq(last_remote_persisted_seq),
+            Oracle::new(
+                manifest.core.seq_tracker.clone(),
+                last_committed_seq,
+                system_clock.clone(),
+            )
+            .with_last_seq(last_seq)
+            .with_last_remote_persisted_seq(last_remote_persisted_seq),
         );
 
         let mono_clock = Arc::new(MonotonicClock::new(
@@ -4079,10 +4083,27 @@ mod tests {
         compactor_options: Option<CompactorOptions>,
         ttl: Option<u64>,
     ) -> Settings {
+        test_db_options_with_wal_and_ttl(
+            min_filter_keys,
+            l0_sst_size_bytes,
+            compactor_options,
+            ttl,
+            #[cfg(feature = "wal_disable")]
+            true,
+        )
+    }
+
+    fn test_db_options_with_wal_and_ttl(
+        min_filter_keys: u32,
+        l0_sst_size_bytes: usize,
+        compactor_options: Option<CompactorOptions>,
+        ttl: Option<u64>,
+        #[cfg(feature = "wal_disable")] wal_enabled: bool,
+    ) -> Settings {
         Settings {
             flush_interval: Some(Duration::from_millis(100)),
             #[cfg(feature = "wal_disable")]
-            wal_enabled: true,
+            wal_enabled,
             manifest_poll_interval: Duration::from_millis(100),
             manifest_update_timeout: Duration::from_secs(300),
             max_unflushed_bytes: 134_217_728,
@@ -4215,5 +4236,86 @@ mod tests {
             );
             assert!(recent_min_seq > snapshot_seq);
         }
+    }
+
+    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    async fn do_test_manifest_sequence_tracker_after_flush(wal_enabled: bool) {
+        use crate::{clock::MockSystemClock, seq_tracker::FindOption};
+
+        let clock = Arc::new(MockSystemClock::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+        let options = test_db_options_with_wal_and_ttl(0, 1 << 18, None, None, wal_enabled);
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+        let put_options = PutOptions::default();
+
+        // first seq number in slateDB is 1  -- test 8k insertions
+        // so that we can test the downsampling logic (default is 4096 seqs per tier)
+        for i in 1..8000 {
+            clock.set(i * 1000 as i64);
+            db.put_with_options(
+                &[b'a'; 4],
+                &[b'j'; 28],
+                &put_options.clone(),
+                &write_options.clone(),
+            )
+            .await
+            .expect("write batch failed");
+        }
+
+        // close the db to flush the manifest
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        let options = test_db_options_with_wal_and_ttl(0, 32, None, None, wal_enabled);
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+
+        let state = db.inner.state.read().state();
+        let tracker = state.core().seq_tracker.clone();
+
+        // the first seq number in slateDB is 1
+        for i in 1..4000 {
+            let seq = i * 2;
+            let expected_ts = seq;
+            assert_eq!(
+                tracker
+                    .find_ts(seq, FindOption::RoundDown)
+                    .map(|ts| ts.timestamp() as u64),
+                Some(expected_ts),
+                "seq {} should have timestamp {}",
+                seq,
+                expected_ts
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    async fn test_manifest_sequence_tracker_after_flush_wal_enabled() {
+        do_test_manifest_sequence_tracker_after_flush(true).await;
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    async fn test_manifest_sequence_tracker_after_flush_wal_disabled() {
+        do_test_manifest_sequence_tracker_after_flush(false).await;
     }
 }

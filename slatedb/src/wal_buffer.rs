@@ -524,6 +524,7 @@ mod tests {
     use crate::manifest::store::DirtyManifest;
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
+    use crate::seq_tracker::TieredSequenceTracker;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
@@ -560,7 +561,11 @@ mod tests {
         ));
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
-        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
+        let oracle = Arc::new(Oracle::new(
+            TieredSequenceTracker::new(1, 4096),
+            MonotonicSeq::new(0),
+            Arc::new(DefaultSystemClock::default()),
+        ));
         let db_state = Arc::new(RwLock::new(DbState::new(DirtyManifest::new(
             0,
             Manifest::initial(CoreDbState::new()),

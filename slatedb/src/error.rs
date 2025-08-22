@@ -190,6 +190,9 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid object store URL. url=`{0}`")]
     InvalidObjectStoreURL(String, #[source] url::ParseError),
+
+    #[error("internal error. message=`{0}`")]
+    Internal(String),
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -410,6 +413,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidObjectStoreURL(_, err) => {
                 Error::configuration(msg).with_source(Box::new(err))
             }
+            SlateDBError::Internal(msg) => Error::system(msg),
         }
     }
 }

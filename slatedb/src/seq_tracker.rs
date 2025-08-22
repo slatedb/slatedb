@@ -115,6 +115,30 @@ impl Tier {
         assert!(seq >= self.last_seq);
         assert!(ts >= *self.timestamps.last().unwrap_or(&ts));
 
+        // if we are at capacity then downsample the
+        // sequence numbers and double the step size
+        if self.timestamps.len() as u32 == self.capacity {
+            let old = std::mem::take(&mut self.timestamps);
+            let mut downsampled = Vec::with_capacity(self.capacity as usize);
+
+            let first_seq = self.first_seq;
+            for (i, &ts) in old.iter().enumerate() {
+                // only keep the timestamps that are divisible by the new step size
+                // to maintain the invariant that seq % step == 0
+                let seq = first_seq + i as u64 * self.step;
+
+                if seq % (self.step * 2) == 0 {
+                    if downsampled.is_empty() {
+                        self.first_seq = seq;
+                    }
+                    downsampled.push(ts);
+                }
+            }
+
+            self.step *= 2;
+            self.timestamps = downsampled;
+        }
+
         if seq % self.step != 0 {
             return;
         }
@@ -125,20 +149,6 @@ impl Tier {
 
         self.last_seq = seq;
         self.timestamps.push(ts);
-
-        // if we've exceeded the capacity then downsample the
-        // sequence numbers and double the step size
-        if self.timestamps.len() as u32 > self.capacity {
-            let old = std::mem::take(&mut self.timestamps);
-            let mut downsampled = Vec::with_capacity(self.capacity as usize);
-            for (i, &ts) in old.iter().enumerate() {
-                if i % 2 == 0 {
-                    downsampled.push(ts);
-                }
-            }
-            self.timestamps = downsampled;
-            self.step *= 2;
-        }
     }
 
     /// finds the timestamp associated with `seq`, rounding up or down
@@ -439,18 +449,40 @@ mod tests {
         let mut tier = Tier::new(2, 3);
 
         // Insert step-aligned sequences (step=2)
-        tier.insert(2, 100);
-        tier.insert(3, 150); // Should be ignored (not divisible by step=2)
-        tier.insert(4, 200);
-        tier.insert(5, 250); // Should be ignored (not divisible by step=2)
-        tier.insert(6, 300);
+        tier.insert(0, 100);
+        tier.insert(1, 150); // Should be ignored (not divisible by step=2)
+        tier.insert(2, 200);
+        tier.insert(3, 250); // Should be ignored (not divisible by step=2)
+        tier.insert(4, 300);
 
         // when - this should trigger downsampling
-        tier.insert(8, 400);
+        tier.insert(5, 400);
 
         // then
         assert_eq!(tier.step, 4); // step doubled
         assert_eq!(tier.timestamps, vec![100, 300]); // downsampled (only step-aligned sequences)
-        assert_eq!(tier.last_seq, 8);
+        assert_eq!(tier.first_seq, 0);
+        assert_eq!(tier.last_seq, 4);
+    }
+
+    #[test]
+    fn should_downsample_unaligned_sequences() {
+        // given
+        let mut tier = Tier::new(1, 4);
+
+        // Insert step-aligned sequences (step=2)
+        tier.insert(1, 100);
+        tier.insert(2, 150);
+        tier.insert(3, 200);
+        tier.insert(4, 250);
+
+        // when - this should trigger downsampling
+        tier.insert(5, 300);
+
+        // then
+        assert_eq!(tier.step, 2); // step doubled
+        assert_eq!(tier.timestamps, vec![150, 250]); // downsampled (only step-aligned sequences)
+        assert_eq!(tier.first_seq, 2);
+        assert_eq!(tier.last_seq, 4);
     }
 }

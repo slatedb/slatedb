@@ -7,9 +7,10 @@ use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector,
 use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
-use crate::checkpoint;
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
+use crate::seq_tracker::TieredSequenceTracker;
+use crate::{checkpoint, seq_tracker};
 
 #[path = "./generated/manifest_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
@@ -26,8 +27,8 @@ use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::manifest_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
-    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun,
-    SortedRunArgs, Uuid, UuidArgs,
+    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat,
+    SequenceTrackerTier, SequenceTrackerTierArgs, SortedRun, SortedRunArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
@@ -223,6 +224,26 @@ impl FlatBufferManifestCodec {
                 .expect("invalid timestamp"),
             })
             .collect();
+
+        let seq_tracker = if let Some(tiers) = manifest.seq_tracker() {
+            let tiers: Vec<seq_tracker::Tier> = tiers
+                .iter()
+                .map(|tier| seq_tracker::Tier {
+                    step: tier.step(),
+                    first_seq: tier.first_seq(),
+                    last_seq: tier.last_seq(),
+                    capacity: tier.capacity(),
+                    timestamps: seq_tracker::decode_timestamps_from_bytes(
+                        tier.timestamps().bytes(),
+                    )
+                    .expect("Invalid sequence tracker timestamps"),
+                })
+                .collect();
+            TieredSequenceTracker { tiers }
+        } else {
+            TieredSequenceTracker::new(1, 4096)
+        };
+
         let core = CoreDbState {
             initialized: manifest.initialized(),
             l0_last_compacted,
@@ -235,6 +256,7 @@ impl FlatBufferManifestCodec {
             checkpoints,
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
+            seq_tracker,
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -380,6 +402,33 @@ impl<'b> DbFlatBufferBuilder<'b> {
         Uuid::create(&mut self.builder, &UuidArgs { high, low })
     }
 
+    fn add_tier(&mut self, tier: &seq_tracker::Tier) -> WIPOffset<SequenceTrackerTier<'b>> {
+        let timestamps = Some(
+            self.builder
+                .create_vector(seq_tracker::encode_timestamps_to_bytes(&tier.timestamps).as_ref()),
+        );
+        SequenceTrackerTier::create(
+            &mut self.builder,
+            &SequenceTrackerTierArgs {
+                step: tier.step,
+                first_seq: tier.first_seq,
+                last_seq: tier.last_seq,
+                capacity: tier.capacity,
+                timestamps,
+            },
+        )
+    }
+
+    fn add_seq_tracker(
+        &mut self,
+        seq_tracker: &seq_tracker::TieredSequenceTracker,
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<SequenceTrackerTier<'b>>>> {
+        // note that tiers should already be sorted by step size (ascending).
+        let tiers_fb_vec: Vec<WIPOffset<SequenceTrackerTier>> =
+            seq_tracker.tiers.iter().map(|t| self.add_tier(t)).collect();
+        self.builder.create_vector(tiers_fb_vec.as_ref())
+    }
+
     fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
         let id = self.add_uuid(checkpoint.id);
         let checkpoint_expire_time_s =
@@ -467,6 +516,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
             Some(self.builder.create_vector(external_dbs.as_ref()))
         };
 
+        let seq_tracker_tiers = &self.add_seq_tracker(&core.seq_tracker);
+
         let wal_object_store_uri = core
             .wal_object_store_uri
             .as_ref()
@@ -490,6 +541,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 last_l0_seq: core.last_l0_seq,
                 wal_object_store_uri,
                 recent_snapshot_min_seq: core.recent_snapshot_min_seq,
+                seq_tracker: Some(*seq_tracker_tiers),
             },
         );
         self.builder.finish(manifest, None);
@@ -554,8 +606,12 @@ pub(crate) mod test_utils {
 mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::flatbuffer_types::manifest_generated::{
+        SequenceTrackerTier, SequenceTrackerTierArgs,
+    };
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+    use crate::seq_tracker;
     use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
 
@@ -702,6 +758,21 @@ mod tests {
         let l0 = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
         let compacted = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
         let checkpoints = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
+        let timestamps =
+            Some(fbb.create_vector::<u8>(&seq_tracker::encode_timestamps_to_bytes(&[0])));
+
+        let tiers = vec![SequenceTrackerTier::create(
+            &mut fbb,
+            &SequenceTrackerTierArgs {
+                step: 1,
+                first_seq: 1,
+                timestamps,
+                last_seq: 1,
+                capacity: 1,
+            },
+        )];
+
+        let tiers = fbb.create_vector(tiers.as_ref());
 
         let manifest = manifest_generated::ManifestV1::create(
             &mut fbb,
@@ -721,6 +792,7 @@ mod tests {
                 last_l0_seq: 0,
                 wal_object_store_uri: None,
                 recent_snapshot_min_seq: 0,
+                seq_tracker: Some(tiers),
             },
         );
         fbb.finish(manifest, None);
