@@ -19,7 +19,7 @@ use crate::utils::{get_now_for_read, is_not_expired};
 use crate::{error::SlateDBError, filter, DbIterator};
 
 use bytes::Bytes;
-use futures::future::{BoxFuture, join};
+use futures::future::{join, BoxFuture};
 use futures::FutureExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
