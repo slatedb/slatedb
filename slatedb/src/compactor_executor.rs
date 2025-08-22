@@ -4,7 +4,7 @@ use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 
 use chrono::TimeDelta;
-use futures::future::join_all;
+use futures::future::{join_all, join};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
@@ -21,10 +21,9 @@ use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::utils::build_iters_concurrent;
 
 use crate::compactor::stats::CompactionStats;
-use crate::utils::{spawn_bg_task, IdGenerator};
+use crate::utils::{compute_max_parallel, spawn_bg_task, IdGenerator, IteratorBuilder};
 use log::{debug, error};
 use tracing::instrument;
 use uuid::Uuid;
@@ -145,17 +144,18 @@ impl TokioCompactionExecutorInner {
             eager_spawn: true,
         };
 
-        let l0_iters_futures = build_iters_concurrent(compaction.ssts.iter(), |l0| {
-            SstIterator::new_borrowed(.., l0, self.table_store.clone(), sst_iter_options)
-        });
+        // TODO: Need to decide on an upper bound for the number of parallel iterators.
+        let max_parallel = compute_max_parallel(compaction.ssts.len(), &compaction.sorted_runs, 8);
 
-        let sr_iters_futures = build_iters_concurrent(compaction.sorted_runs.iter(), |sr| async {
-            SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
-                .await
-                .map(Some)
-        });
+        let ib = IteratorBuilder::new(self.table_store.clone(), sst_iter_options, max_parallel);
+        let l0_iters_futures = ib.build_sst_borrowed(compaction.ssts.iter(), ..);
 
-        let (l0_iters, sr_iters) = futures::try_join!(l0_iters_futures, sr_iters_futures)?;
+        let sr_iters_futures = ib.build_sr_borrowed(compaction.sorted_runs.iter(), ..);
+
+        let (l0_iters_res, sr_iters_res) = join(l0_iters_futures, sr_iters_futures).await;
+        let l0_iters = l0_iters_res?;
+        let sr_iters = sr_iters_res?;
+
         let l0_merge_iter = MergeIterator::new(l0_iters).await?.with_dedup(false);
         let sr_merge_iter = MergeIterator::new(sr_iters).await?.with_dedup(false);
 

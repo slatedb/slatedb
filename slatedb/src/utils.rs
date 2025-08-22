@@ -1,14 +1,16 @@
 use crate::clock::{MonotonicClock, SystemClock};
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
+use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
+use crate::sorted_run_iterator::SortedRunIterator;
+use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
-use futures::future::try_join_all;
 use futures::FutureExt;
 use rand::{Rng, RngCore};
-use std::collections::VecDeque;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
@@ -18,6 +20,9 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
+
+use futures::StreamExt;
+use std::collections::VecDeque;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -445,19 +450,147 @@ pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
     ((val << shift) as i32) >> shift
 }
 
-// Generic concurrent builder. `f` must return Result<Option<T>> so you can
-// reuse it for both Some/None (SST) and always-Some (wrap as Some).
-pub(crate) async fn build_iters_concurrent<I, T, F, Fut>(
-    inputs: I,
-    f: F,
-) -> Result<VecDeque<T>, SlateDBError>
-where
-    I: IntoIterator,
-    F: Fn(I::Item) -> Fut,
-    Fut: std::future::Future<Output = Result<Option<T>, SlateDBError>>,
-{
-    let results = try_join_all(inputs.into_iter().map(f)).await?;
-    Ok(results.into_iter().filter_map(|x| x).collect())
+pub(crate) struct IteratorBuilder {
+    table_store: Arc<TableStore>,
+    options: SstIteratorOptions,
+    max_parallel: usize,
+}
+
+pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usize) -> usize {
+    let total_ssts = l0_count + srs.iter().map(|sr| sr.ssts.len()).sum::<usize>();
+    total_ssts.min(cap).max(1)
+}
+
+impl IteratorBuilder {
+    pub(crate) fn new(
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        max_parallel: usize,
+    ) -> Self {
+        assert!(max_parallel > 0, "max_parallel must be > 0");
+        Self {
+            table_store,
+            options,
+            max_parallel,
+        }
+    }
+
+    // Small, local runner with a concurrency cap. No 'static on the closure/future.
+    async fn run_bounded<I, T, B, Fut>(
+        &self,
+        inputs: I,
+        mut builder: B,
+    ) -> Result<VecDeque<T>, SlateDBError>
+    where
+        I: IntoIterator,
+        I::Item: Send,
+        T: Send,
+        B: FnMut(I::Item) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<Option<T>, SlateDBError>> + Send,
+    {
+        let mut out = VecDeque::new();
+        let s = futures::stream::iter(inputs.into_iter().map(move |it| builder(it)));
+        let results = s
+            .buffer_unordered(self.max_parallel)
+            .collect::<Vec<_>>()
+            .await;
+        for r in results {
+            match r {
+                Ok(Some(t)) => out.push_back(t),
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    // SST: owned (range: RangeBounds<Bytes>)
+    pub(crate) async fn build_sst_owned<'a, I, R>(
+        &self,
+        ssts: I,
+        range: R,
+    ) -> Result<VecDeque<SstIterator<'a>>, SlateDBError>
+    where
+        I: IntoIterator<Item = SsTableHandle>,
+        R: Clone + Send + Sync + std::ops::RangeBounds<Bytes>,
+    {
+        let ts = self.table_store.clone();
+        let opts = self.options;
+        self.run_bounded(ssts, move |h: SsTableHandle| {
+            let ts = ts.clone();
+            let rg = range.clone();
+            async move { SstIterator::new_owned(rg, h, ts, opts).await }
+        })
+        .await
+    }
+
+    // SST: borrowed (range: RangeBounds<Bytes>)
+    pub(crate) async fn build_sst_borrowed<'a, I, R>(
+        &self,
+        ssts: I,
+        range: R,
+    ) -> Result<VecDeque<SstIterator<'a>>, SlateDBError>
+    where
+        I: IntoIterator<Item = &'a SsTableHandle>,
+        R: Clone + Send + Sync + std::ops::RangeBounds<Bytes>,
+    {
+        let ts = self.table_store.clone();
+        let opts = self.options;
+        self.run_bounded(ssts, move |h: &'a SsTableHandle| {
+            let ts = ts.clone();
+            let rg = range.clone();
+            async move { SstIterator::new_borrowed(rg, h, ts, opts).await }
+        })
+        .await
+    }
+
+    // SR: owned (range: RangeBounds<Bytes>)
+    pub(crate) async fn build_sr_owned<'a, I, R>(
+        &self,
+        srs: I,
+        range: R,
+    ) -> Result<VecDeque<SortedRunIterator<'a>>, SlateDBError>
+    where
+        I: IntoIterator<Item = SortedRun>,
+        R: Clone + Send + Sync + std::ops::RangeBounds<Bytes>,
+    {
+        let ts = self.table_store.clone();
+        let opts = self.options;
+        self.run_bounded(srs, move |sr: SortedRun| {
+            let ts = ts.clone();
+            let rg = range.clone();
+            async move {
+                SortedRunIterator::new_owned(rg, sr, ts, opts)
+                    .await
+                    .map(Some)
+            }
+        })
+        .await
+    }
+
+    // SR: borrowed (range: RangeBounds<&'a [u8]>)
+    pub(crate) async fn build_sr_borrowed<'a, I, R>(
+        &self,
+        srs: I,
+        range: R,
+    ) -> Result<VecDeque<SortedRunIterator<'a>>, SlateDBError>
+    where
+        I: IntoIterator<Item = &'a SortedRun>,
+        R: Clone + Send + Sync + std::ops::RangeBounds<&'a [u8]>,
+    {
+        let ts = self.table_store.clone();
+        let opts = self.options;
+        self.run_bounded(srs, move |sr: &'a SortedRun| {
+            let ts = ts.clone();
+            let rg = range.clone();
+            async move {
+                SortedRunIterator::new_borrowed(rg, sr, ts, opts)
+                    .await
+                    .map(Some)
+            }
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
