@@ -476,6 +476,7 @@ impl IteratorBuilder {
     }
 
     // Small, local runner with a concurrency cap. No 'static on the closure/future.
+    #[allow(clippy::redundant_closure)]
     async fn run_bounded<I, T, B, Fut>(
         &self,
         inputs: I,
