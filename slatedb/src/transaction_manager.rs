@@ -17,12 +17,12 @@ pub(crate) struct TransactionState {
     /// transactions.
     committed_seq: Option<u64>,
     /// the conflict keys of the transaction.
-    conflict_keys: HashSet<Bytes>,
+    write_keys: HashSet<Bytes>,
 }
 
 impl TransactionState {
-    fn track_conflict_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
-        self.conflict_keys.extend(keys);
+    fn track_write_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
+        self.write_keys.extend(keys);
     }
 
     fn mark_as_committed(&mut self, seq: u64) {
@@ -72,7 +72,7 @@ impl TransactionManager {
             read_only,
             started_seq: seq,
             committed_seq: None,
-            conflict_keys: HashSet::new(),
+            write_keys: HashSet::new(),
         };
 
         {
@@ -119,7 +119,7 @@ impl TransactionManager {
                     read_only: false,
                     started_seq: committed_seq,
                     committed_seq: Some(committed_seq),
-                    conflict_keys: keys.clone(),
+                    write_keys: keys.clone(),
                 });
                 return;
             }
@@ -136,7 +136,7 @@ impl TransactionManager {
 
         // remove the txn from active txns and append it to recent_committed_txns.
         if let Some(mut txn_state) = inner.active_txns.remove(txn_id) {
-            txn_state.track_conflict_keys(keys.iter().cloned());
+            txn_state.track_write_keys(keys.iter().cloned());
             txn_state.mark_as_committed(committed_seq);
             inner.recent_committed_txns.push_back(txn_state);
         }
@@ -209,7 +209,7 @@ impl TransactionManagerInner {
             // this means the current transaction couldn't see the other transaction's writes
             // when it started, but they modified the same keys.
             if other_committed_seq > started_seq
-                && !conflict_keys.is_disjoint(&committed_txn.conflict_keys)
+                && !conflict_keys.is_disjoint(&committed_txn.write_keys)
             {
                 return true;
             }
@@ -319,7 +319,7 @@ mod tests {
             read_only: false,
             started_seq: 50,
             committed_seq: Some(80),
-            conflict_keys: ["key1", "key2"].into_iter().map(Bytes::from).collect(),
+            write_keys: ["key1", "key2"].into_iter().map(Bytes::from).collect(),
         }],
         current_write_keys: vec!["key3", "key4"],
         current_started_seq: 100,
@@ -331,7 +331,7 @@ mod tests {
             read_only: false,
             started_seq: 50,
             committed_seq: Some(150),
-            conflict_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+            write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: 100,
@@ -344,13 +344,13 @@ mod tests {
                 read_only: false,
                 started_seq: 30,
                 committed_seq: Some(50),
-                conflict_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+                write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
             },
             TransactionState {
                 read_only: false,
                 started_seq: 80,
                 committed_seq: Some(150),
-                conflict_keys: ["key2"].into_iter().map(Bytes::from).collect(),
+                write_keys: ["key2"].into_iter().map(Bytes::from).collect(),
             },
         ],
         current_write_keys: vec!["key1", "key2"],
@@ -363,7 +363,7 @@ mod tests {
             read_only: true,
             started_seq: 80,
             committed_seq: Some(150),
-            conflict_keys: HashSet::new(),
+            write_keys: HashSet::new(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: 100,
@@ -375,7 +375,7 @@ mod tests {
             read_only: false,
             started_seq: 30,
             committed_seq: Some(50),
-            conflict_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+            write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: 100,
@@ -387,7 +387,7 @@ mod tests {
             read_only: false,
             started_seq: 100,
             committed_seq: Some(100),
-            conflict_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+            write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: 100,
@@ -399,7 +399,7 @@ mod tests {
             read_only: false,
             started_seq: 80,
             committed_seq: Some(150),
-            conflict_keys: ["key1", "key2", "key3"]
+            write_keys: ["key1", "key2", "key3"]
                 .into_iter()
                 .map(Bytes::from)
                 .collect(),
@@ -414,7 +414,7 @@ mod tests {
             read_only: false,
             started_seq: u64::MAX - 1,
             committed_seq: Some(u64::MAX),
-            conflict_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+            write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: u64::MAX - 1,
@@ -514,7 +514,7 @@ mod tests {
             let committed_txn = &inner.recent_committed_txns[0];
             assert_eq!(committed_txn.started_seq, 100);
             assert_eq!(committed_txn.committed_seq, Some(150));
-            assert_eq!(committed_txn.conflict_keys, keys);
+            assert_eq!(committed_txn.write_keys, keys);
         }
     }
 
@@ -578,7 +578,7 @@ mod tests {
             let committed_txn = &inner.recent_committed_txns[0];
             assert_eq!(committed_txn.started_seq, 100);
             assert_eq!(committed_txn.committed_seq, Some(100));
-            assert_eq!(committed_txn.conflict_keys, keys);
+            assert_eq!(committed_txn.write_keys, keys);
             assert!(!committed_txn.read_only);
         }
     }
@@ -598,7 +598,7 @@ mod tests {
         {
             let mut inner = txn_manager.inner.write();
             if let Some(txn_state) = inner.active_txns.get_mut(&txn_id) {
-                txn_state.track_conflict_keys(["existing_key"].into_iter().map(Bytes::from));
+                txn_state.track_write_keys(["existing_key"].into_iter().map(Bytes::from));
             }
         }
 
@@ -617,7 +617,7 @@ mod tests {
                 .into_iter()
                 .map(Bytes::from)
                 .collect();
-            assert_eq!(committed_txn.conflict_keys, expected_keys);
+            assert_eq!(committed_txn.write_keys, expected_keys);
         }
     }
 
@@ -728,7 +728,7 @@ mod tests {
                 read_only: false,
                 started_seq: 50,
                 committed_seq: None, // This should not happen in practice but let's test
-                conflict_keys: HashSet::new(),
+                write_keys: HashSet::new(),
             });
         }
 
