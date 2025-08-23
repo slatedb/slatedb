@@ -479,124 +479,188 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_track_recent_committed_txn_with_valid_id() {
-        let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand);
-
-        // Create a transaction
-        let txn_id = txn_manager.new_txn(100, false);
-
-        // Create another active transaction to ensure recent_committed_txns is tracked
-        let _other_txn = txn_manager.new_txn(200, false);
-
-        // Track committed transaction
-        let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
-
-        // Verify transaction was removed from active_txns and added to recent_committed_txns
-        assert!(!txn_manager.inner.read().active_txns.contains_key(&txn_id));
-        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 1);
-
-        let committed_txn = &txn_manager.inner.read().recent_committed_txns[0];
-        assert_eq!(committed_txn.started_seq, 100);
-        assert_eq!(committed_txn.committed_seq, Some(150));
-        assert_eq!(committed_txn.write_keys, keys);
+    struct TrackRecentCommittedTxnTestCase {
+        name: &'static str,
+        setup: Box<dyn Fn(&mut TransactionManager)>,
+        expected_recent_committed_txn: Option<TransactionState>,
+        expected_recent_committed_txns_len: usize,
+        expected_active_txns_len: usize,
     }
 
-    #[test]
-    fn test_track_recent_committed_txn_nonexistent_id() {
-        let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand);
-
-        // Create an active transaction to ensure recent_committed_txns would be tracked
-        let _active_txn = txn_manager.new_txn(100, false);
-
-        // Try to track a non-existent transaction
-        let fake_id = Uuid::new_v4();
-        let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(Some(&fake_id), &keys, 150);
-
-        // Should not add anything to recent_committed_txns
-        assert!(txn_manager.inner.read().recent_committed_txns.is_empty());
-    }
-
-    #[test]
-    fn test_track_recent_committed_txn_no_tracking_when_only_readonly_active() {
-        let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand);
-
-        // Create a transaction and a readonly transaction
-        let txn_id = txn_manager.new_txn(100, false);
-        let _readonly_txn = txn_manager.new_txn(200, true);
-
-        // Drop the transaction first so that after removal, only readonly remains
-        txn_manager.drop_txn(&txn_id);
-
-        // Now track committed transaction - this should not be tracked since no active writers
-        let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
-
-        // Should not track since only readonly transactions remain active
-        assert!(txn_manager.inner.read().recent_committed_txns.is_empty());
-    }
-
-    #[test]
-    fn test_track_recent_committed_txn_without_id_creates_record() {
-        let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand);
-
-        // Track without transaction ID (non-transactional write)
-        let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(None, &keys, 100);
-
-        // Should create a record in recent_committed_txns
-        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 1);
-
-        let committed_txn = &txn_manager.inner.read().recent_committed_txns[0];
-        assert_eq!(committed_txn.started_seq, 100);
-        assert_eq!(committed_txn.committed_seq, Some(100));
-        assert_eq!(committed_txn.write_keys, keys);
-        assert!(!committed_txn.read_only);
-    }
-
-    #[test]
-    fn test_track_recent_committed_txn_merges_conflict_keys() {
-        let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand);
-
-        // Create a transaction with some conflict keys already tracked
-        let txn_id = txn_manager.new_txn(100, false);
-
-        // Create another active transaction to ensure tracking happens
-        let _other_txn = txn_manager.new_txn(200, false);
-
-        // Add some keys to the transaction's conflict_keys before committing
-        {
-            let mut inner = txn_manager.inner.write();
-            if let Some(txn_state) = inner.active_txns.get_mut(&txn_id) {
-                txn_state.track_write_keys(["existing_key"].into_iter().map(Bytes::from));
+    #[rstest]
+    #[case::valid_id(TrackRecentCommittedTxnTestCase {
+        name: "track committed transaction with valid id",
+        setup: Box::new(|txn_manager| {
+            // Create a transaction
+            let txn_id = txn_manager.new_txn(100, false);
+            
+            // Create another active transaction to ensure recent_committed_txns is tracked
+            let _other_txn = txn_manager.new_txn(200, false);
+            
+            // Track committed transaction
+            let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
+            txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
+        }),
+        expected_recent_committed_txn: Some(TransactionState {
+            started_seq: 100,
+            committed_seq: Some(150),
+            write_keys: ["key1", "key2"].into_iter().map(Bytes::from).collect(),
+            read_only: false,
+        }),
+        expected_recent_committed_txns_len: 1,
+        expected_active_txns_len: 1, // Only the other transaction remains
+    })]
+    #[case::nonexistent_id(TrackRecentCommittedTxnTestCase {
+        name: "track committed transaction with nonexistent id",
+        setup: Box::new(|txn_manager| {
+            // Create an active transaction to ensure recent_committed_txns would be tracked
+            let _active_txn = txn_manager.new_txn(100, false);
+            
+            // Try to track a non-existent transaction
+            let fake_id = Uuid::new_v4();
+            let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+            txn_manager.track_recent_committed_txn(Some(&fake_id), &keys, 150);
+        }),
+        expected_recent_committed_txn: None,
+        expected_recent_committed_txns_len: 0,
+        expected_active_txns_len: 1, // The active transaction remains
+    })]
+    #[case::no_tracking_when_only_readonly_active(TrackRecentCommittedTxnTestCase {
+        name: "no tracking when only readonly transactions active",
+        setup: Box::new(|txn_manager| {
+            // Create a transaction and a readonly transaction
+            let txn_id = txn_manager.new_txn(100, false);
+            let _readonly_txn = txn_manager.new_txn(200, true);
+            
+            // Drop the transaction first so that after removal, only readonly remains
+            txn_manager.drop_txn(&txn_id);
+            
+            // Now track committed transaction - this should not be tracked since no active writers
+            let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+            txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
+        }),
+        expected_recent_committed_txn: None,
+        expected_recent_committed_txns_len: 0,
+        expected_active_txns_len: 1, // Only the readonly transaction remains
+    })]
+    #[case::without_id_creates_record(TrackRecentCommittedTxnTestCase {
+        name: "track without id creates record",
+        setup: Box::new(|txn_manager| {
+            // Track without transaction ID (non-transactional write)
+            let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
+            txn_manager.track_recent_committed_txn(None, &keys, 100);
+        }),
+        expected_recent_committed_txn: Some(TransactionState {
+            started_seq: 100,
+            committed_seq: Some(100),
+            write_keys: ["key1", "key2"].into_iter().map(Bytes::from).collect(),
+            read_only: false,
+        }),
+        expected_recent_committed_txns_len: 1,
+        expected_active_txns_len: 0,
+    })]
+    #[case::merges_conflict_keys(TrackRecentCommittedTxnTestCase {
+        name: "merges conflict keys from existing transaction",
+        setup: Box::new(|txn_manager| {
+            // Create a transaction with some conflict keys already tracked
+            let txn_id = txn_manager.new_txn(100, false);
+            
+            // Create another active transaction to ensure tracking happens
+            let _other_txn = txn_manager.new_txn(200, false);
+            
+            // Add some keys to the transaction's conflict_keys before committing
+            {
+                let mut inner = txn_manager.inner.write();
+                if let Some(txn_state) = inner.active_txns.get_mut(&txn_id) {
+                    txn_state.track_write_keys(["existing_key"].into_iter().map(Bytes::from));
+                }
             }
-        }
+            
+            // Track committed transaction with additional keys
+            let additional_keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
+            txn_manager.track_recent_committed_txn(Some(&txn_id), &additional_keys, 150);
+        }),
+        expected_recent_committed_txn: Some(TransactionState {
+            started_seq: 100,
+            committed_seq: Some(150),
+            write_keys: ["existing_key", "key1", "key2"].into_iter().map(Bytes::from).collect(),
+            read_only: false,
+        }),
+        expected_recent_committed_txns_len: 1,
+        expected_active_txns_len: 1, // Only the other transaction remains
+    })]
+    fn test_track_recent_committed_txn_table_driven(#[case] test_case: TrackRecentCommittedTxnTestCase) {
+        let db_rand = Arc::new(DbRand::new(0));
+        let mut txn_manager = TransactionManager::new(db_rand);
 
-        // Track committed transaction with additional keys
-        let additional_keys: HashSet<Bytes> =
-            ["key1", "key2"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(Some(&txn_id), &additional_keys, 150);
+        // Run the setup
+        (test_case.setup)(&mut txn_manager);
 
-        // Verify all keys are merged
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 1);
+        // Verify the results
+        let inner = txn_manager.inner.read();
+        
+        assert_eq!(
+            inner.recent_committed_txns.len(),
+            test_case.expected_recent_committed_txns_len,
+            "Test case '{}' failed: expected {} recent committed transactions, got {}",
+            test_case.name,
+            test_case.expected_recent_committed_txns_len,
+            inner.recent_committed_txns.len()
+        );
 
-            let committed_txn = &inner.recent_committed_txns[0];
-            let expected_keys: HashSet<Bytes> = ["existing_key", "key1", "key2"]
-                .into_iter()
-                .map(Bytes::from)
-                .collect();
-            assert_eq!(committed_txn.write_keys, expected_keys);
+        assert_eq!(
+            inner.active_txns.len(),
+            test_case.expected_active_txns_len,
+            "Test case '{}' failed: expected {} active transactions, got {}",
+            test_case.name,
+            test_case.expected_active_txns_len,
+            inner.active_txns.len()
+        );
+
+        if let Some(expected_txn) = test_case.expected_recent_committed_txn {
+            assert!(
+                !inner.recent_committed_txns.is_empty(),
+                "Test case '{}' failed: expected a committed transaction but none found",
+                test_case.name
+            );
+
+            let actual_txn = &inner.recent_committed_txns[0];
+            assert_eq!(
+                actual_txn.started_seq,
+                expected_txn.started_seq,
+                "Test case '{}' failed: expected started_seq {}, got {}",
+                test_case.name,
+                expected_txn.started_seq,
+                actual_txn.started_seq
+            );
+            assert_eq!(
+                actual_txn.committed_seq,
+                expected_txn.committed_seq,
+                "Test case '{}' failed: expected committed_seq {:?}, got {:?}",
+                test_case.name,
+                expected_txn.committed_seq,
+                actual_txn.committed_seq
+            );
+            assert_eq!(
+                actual_txn.write_keys,
+                expected_txn.write_keys,
+                "Test case '{}' failed: expected write_keys {:?}, got {:?}",
+                test_case.name,
+                expected_txn.write_keys,
+                actual_txn.write_keys
+            );
+            assert_eq!(
+                actual_txn.read_only,
+                expected_txn.read_only,
+                "Test case '{}' failed: expected read_only {}, got {}",
+                test_case.name,
+                expected_txn.read_only,
+                actual_txn.read_only
+            );
         }
     }
+
+
 
     #[test]
     fn test_recycle_recent_committed_txns_filters_by_min_seq() {
