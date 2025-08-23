@@ -244,19 +244,13 @@ mod tests {
         let txn_id = txn_manager.new_txn(100, false);
 
         // Verify it exists in active transactions
-        {
-            let inner = txn_manager.inner.read();
-            assert!(inner.active_txns.contains_key(&txn_id));
-        }
+        assert!(txn_manager.inner.read().active_txns.contains_key(&txn_id));
 
         // Drop the transaction
         txn_manager.drop_txn(&txn_id);
 
         // Verify it's removed
-        {
-            let inner = txn_manager.inner.read();
-            assert!(!inner.active_txns.contains_key(&txn_id));
-        }
+        assert!(!txn_manager.inner.read().active_txns.contains_key(&txn_id));
     }
 
     #[test]
@@ -270,10 +264,7 @@ mod tests {
 
         // Should still be able to create new transactions
         let txn_id = txn_manager.new_txn(100, false);
-        {
-            let inner = txn_manager.inner.read();
-            assert!(inner.active_txns.contains_key(&txn_id));
-        }
+        assert!(txn_manager.inner.read().active_txns.contains_key(&txn_id));
     }
 
     #[test]
@@ -289,20 +280,14 @@ mod tests {
         let txn_id = txn_manager.new_txn(100, false);
 
         // Verify recent_committed_txns has content
-        {
-            let inner = txn_manager.inner.read();
-            assert!(!inner.recent_committed_txns.is_empty());
-        }
+        assert!(!txn_manager.inner.read().recent_committed_txns.is_empty());
 
         // Drop the active transaction (this should trigger garbage collection)
         txn_manager.drop_txn(&txn_id);
 
         // Since there are no more active non-readonly transactions,
         // recent_committed_txns should be cleared
-        {
-            let inner = txn_manager.inner.read();
-            assert!(inner.recent_committed_txns.is_empty());
-        }
+        assert!(txn_manager.inner.read().recent_committed_txns.is_empty());
     }
 
     #[rstest]
@@ -506,16 +491,13 @@ mod tests {
         txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
 
         // Verify transaction was removed from active_txns and added to recent_committed_txns
-        {
-            let inner = txn_manager.inner.read();
-            assert!(!inner.active_txns.contains_key(&txn_id));
-            assert_eq!(inner.recent_committed_txns.len(), 1);
+        assert!(!txn_manager.inner.read().active_txns.contains_key(&txn_id));
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 1);
 
-            let committed_txn = &inner.recent_committed_txns[0];
-            assert_eq!(committed_txn.started_seq, 100);
-            assert_eq!(committed_txn.committed_seq, Some(150));
-            assert_eq!(committed_txn.write_keys, keys);
-        }
+        let committed_txn = &txn_manager.inner.read().recent_committed_txns[0];
+        assert_eq!(committed_txn.started_seq, 100);
+        assert_eq!(committed_txn.committed_seq, Some(150));
+        assert_eq!(committed_txn.write_keys, keys);
     }
 
     #[test]
@@ -532,10 +514,7 @@ mod tests {
         txn_manager.track_recent_committed_txn(Some(&fake_id), &keys, 150);
 
         // Should not add anything to recent_committed_txns
-        {
-            let inner = txn_manager.inner.read();
-            assert!(inner.recent_committed_txns.is_empty());
-        }
+        assert!(txn_manager.inner.read().recent_committed_txns.is_empty());
     }
 
     #[test]
@@ -555,10 +534,7 @@ mod tests {
         txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
 
         // Should not track since only readonly transactions remain active
-        {
-            let inner = txn_manager.inner.read();
-            assert!(inner.recent_committed_txns.is_empty());
-        }
+        assert!(txn_manager.inner.read().recent_committed_txns.is_empty());
     }
 
     #[test]
@@ -571,16 +547,13 @@ mod tests {
         txn_manager.track_recent_committed_txn(None, &keys, 100);
 
         // Should create a record in recent_committed_txns
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 1);
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 1);
 
-            let committed_txn = &inner.recent_committed_txns[0];
-            assert_eq!(committed_txn.started_seq, 100);
-            assert_eq!(committed_txn.committed_seq, Some(100));
-            assert_eq!(committed_txn.write_keys, keys);
-            assert!(!committed_txn.read_only);
-        }
+        let committed_txn = &txn_manager.inner.read().recent_committed_txns[0];
+        assert_eq!(committed_txn.started_seq, 100);
+        assert_eq!(committed_txn.committed_seq, Some(100));
+        assert_eq!(committed_txn.write_keys, keys);
+        assert!(!committed_txn.read_only);
     }
 
     #[test]
@@ -640,10 +613,7 @@ mod tests {
         let active_txn1 = txn_manager.new_txn(120, false);
 
         // Verify we have all 3 committed transactions
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 3);
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 3);
 
         // Trigger garbage collection by dropping the transaction
         // Since there will be no active non-readonly transactions after dropping,
@@ -651,10 +621,7 @@ mod tests {
         txn_manager.drop_txn(&active_txn1);
 
         // All should be cleared since no active non-readonly transactions remain
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 0);
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 0);
     }
 
     #[test]
@@ -668,20 +635,14 @@ mod tests {
         txn_manager.track_recent_committed_txn(None, &keys, 200);
 
         // Verify they exist
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 2);
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 2);
 
         // Create and drop a write transaction (this triggers recycle)
         let txn_id = txn_manager.new_txn(300, false);
         txn_manager.drop_txn(&txn_id);
 
         // Since no active non-readonly transactions remain, should clear all
-        {
-            let inner = txn_manager.inner.read();
-            assert!(inner.recent_committed_txns.is_empty());
-        }
+        assert!(txn_manager.inner.read().recent_committed_txns.is_empty());
     }
 
     #[test]
@@ -703,17 +664,16 @@ mod tests {
         txn_manager.drop_txn(&active_txn2);
 
         // Should keep transactions with committed_seq >= 100
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 2);
-            let committed_seqs: Vec<u64> = inner
-                .recent_committed_txns
-                .iter()
-                .map(|txn| txn.committed_seq.unwrap())
-                .collect();
-            assert!(committed_seqs.contains(&100));
-            assert!(committed_seqs.contains(&101));
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 2);
+        let committed_seqs: Vec<u64> = txn_manager
+            .inner
+            .read()
+            .recent_committed_txns
+            .iter()
+            .map(|txn| txn.committed_seq.unwrap())
+            .collect();
+        assert!(committed_seqs.contains(&100));
+        assert!(committed_seqs.contains(&101));
     }
 
     #[test]
@@ -744,11 +704,11 @@ mod tests {
 
         // The transaction with None committed_seq should be kept (safety)
         // The transaction with committed_seq=100 should be removed since 100 < 150
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 1);
-            assert_eq!(inner.recent_committed_txns[0].committed_seq, None);
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 1);
+        assert_eq!(
+            txn_manager.inner.read().recent_committed_txns[0].committed_seq,
+            None
+        );
     }
 
     // Integration tests for complete transaction lifecycles and complex interactions
@@ -782,11 +742,8 @@ mod tests {
         txn_manager.track_recent_committed_txn(Some(&txn_id), &write_keys, 150);
 
         // Step 7: Verify final state
-        {
-            let inner = txn_manager.inner.read();
-            assert!(inner.active_txns.is_empty());
-            assert_eq!(inner.recent_committed_txns.len(), 2);
-        }
+        assert!(txn_manager.inner.read().active_txns.is_empty());
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 2);
 
         // Step 8: Verify min_active_seq is now None
         assert_eq!(txn_manager.min_active_seq(), None);
@@ -827,11 +784,8 @@ mod tests {
         assert!(txn_manager.check_conflict(&txn3, &keys_ab));
 
         // Verify state
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.active_txns.len(), 1); // Only T3 remains active
-            assert_eq!(inner.recent_committed_txns.len(), 2); // T1 and T2 committed
-        }
+        assert_eq!(txn_manager.inner.read().active_txns.len(), 1); // Only T3 remains active
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 2); // T1 and T2 committed
     }
 
     #[test]
@@ -851,10 +805,7 @@ mod tests {
         let short_txn2 = txn_manager.new_txn(200, false); // Short transaction 2
 
         // Verify old committed transactions are kept (min_conflict_check_seq = 100)
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 2);
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 2);
 
         // Commit short transactions
         let short_keys: HashSet<Bytes> = ["short_key"].into_iter().map(Bytes::from).collect();
@@ -862,20 +813,14 @@ mod tests {
         txn_manager.track_recent_committed_txn(Some(&short_txn2), &short_keys, 220);
 
         // Old transactions should still be kept (long_txn still active with seq 100)
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 4); // 2 old + 2 new
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 4); // 2 old + 2 new
 
         // Drop the long-running transaction - this should trigger aggressive cleanup
         txn_manager.drop_txn(&long_txn);
 
         // All committed transactions should be cleared (no active writers remain)
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 0);
-            assert!(inner.active_txns.is_empty());
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 0);
+        assert!(txn_manager.inner.read().active_txns.is_empty());
     }
 
     #[test]
@@ -893,20 +838,14 @@ mod tests {
         assert_eq!(txn_manager.min_active_seq(), Some(50));
 
         // min_conflict_check_seq should only consider write transactions
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.min_conflict_check_seq(), Some(100));
-        }
+        assert_eq!(txn_manager.inner.read().min_conflict_check_seq(), Some(100));
 
         // Commit a write transaction
         let keys: HashSet<Bytes> = ["test_key"].into_iter().map(Bytes::from).collect();
         txn_manager.track_recent_committed_txn(Some(&write_txn1), &keys, 120);
 
         // Should track committed transaction because write_txn2 is still active
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 1);
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 1);
 
         // Drop one read-only transaction - should not affect conflict tracking
         // The key insight: dropping a readonly transaction still calls recycle_recent_committed_txns
@@ -914,22 +853,16 @@ mod tests {
         // The committed transaction has committed_seq=120, which is < 200, so it gets removed!
         txn_manager.drop_txn(&readonly_txn1);
 
-        {
-            let inner = txn_manager.inner.read();
-            // The committed transaction should be removed because 120 < 200 (min_conflict_check_seq)
-            assert_eq!(inner.recent_committed_txns.len(), 0); // Removed due to garbage collection
-            assert_eq!(inner.min_conflict_check_seq(), Some(200)); // Only write_txn2 remains
-        }
+        // The committed transaction should be removed because 120 < 200 (min_conflict_check_seq)
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 0); // Removed due to garbage collection
+        assert_eq!(txn_manager.inner.read().min_conflict_check_seq(), Some(200)); // Only write_txn2 remains
 
         // Drop the remaining write transaction
         txn_manager.drop_txn(&write_txn2);
 
         // Should clear committed transactions (no active write transactions)
-        {
-            let inner = txn_manager.inner.read();
-            assert_eq!(inner.recent_committed_txns.len(), 0);
-            assert_eq!(inner.min_conflict_check_seq(), None);
-        }
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 0);
+        assert_eq!(txn_manager.inner.read().min_conflict_check_seq(), None);
 
         // Read-only transaction should still be active and affect min_active_seq
         assert_eq!(txn_manager.min_active_seq(), Some(150));
