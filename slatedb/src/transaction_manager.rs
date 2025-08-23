@@ -109,7 +109,7 @@ impl TransactionManager {
     }
 
     /// Record the a recent write to `recent_commited_txns`. This method should be called after
-    /// [`Self::check_conflict`] is passed.
+    /// [`Self::has_conflict`] is checked as false.
     ///
     /// Please note that it's not necessary to be a "transaction" to call this method. The normal
     /// write operations in a WriteBatch should also be considered as a recent committed txn, and
