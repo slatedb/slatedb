@@ -145,6 +145,10 @@ impl TransactionManager {
 
         // remove the txn from active txns and append it to recent_committed_txns.
         if let Some(mut txn_state) = inner.active_txns.remove(txn_id) {
+            // this should never happen, but having this check may let proptest easier to have.
+            if txn_state.read_only {
+                return;
+            }
             txn_state.track_write_keys(keys.iter().cloned());
             txn_state.mark_as_committed(committed_seq);
             inner.recent_committed_txns.push_back(txn_state);
@@ -1079,6 +1083,23 @@ mod tests {
             }
         }
 
+        #[test]
+        fn prop_no_active_non_readonly_txn_and_recent_committed_txns(ops in operation_sequence_strategy()) {
+            let db_rand = Arc::new(DbRand::new(0));
+            let txn_manager = TransactionManager::new(db_rand);
+            let mut exec_state = ExecutionState::new();
+            
+            for op in ops {
+                exec_state.execute_operation(&txn_manager, op);
+
+                let inner = txn_manager.inner.read();
+                // when there's no active non-readonly transactions, recent_committed_txns should be empty
+                if !inner.active_txns.values().any(|t| !t.read_only) {
+                    prop_assert!(inner.recent_committed_txns.is_empty(), "If there's no active non-readonly transactions, recent_committed_txns should be empty");
+                } 
+            }
+        }
+
         #[test] 
         fn prop_inv_min_active_seq_correctness(ops in operation_sequence_strategy()) {
             let db_rand = Arc::new(DbRand::new(0));
@@ -1111,7 +1132,6 @@ mod tests {
             }
         }
 
-
         #[test] 
         fn prop_inv_garbage_collection_correctness(ops in operation_sequence_strategy()) {
             let db_rand = Arc::new(DbRand::new(0));
@@ -1133,16 +1153,6 @@ mod tests {
                         "invariant violation: recent_committed_txns is not empty but there are no active write transactions. \
                          Active transaction IDs: {:?}, Number of recent committed: {}",
                         inner.active_txns.keys().collect::<Vec<_>>(),
-                        inner.recent_committed_txns.len()
-                    );
-                }
-                // Conversely, if there are no active write transactions, the recent_committed_txns queue should be empty
-                let has_active_writer = inner.active_txns.values().any(|txn| !txn.read_only);
-                if !has_active_writer {
-                    prop_assert!(
-                        inner.recent_committed_txns.is_empty(),
-                        "invariant violation: there are no active write transactions but recent_committed_txns is not empty. \
-                         Number of recent committed: {}",
                         inner.recent_committed_txns.len()
                     );
                 }
