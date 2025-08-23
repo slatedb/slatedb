@@ -948,7 +948,6 @@ mod tests {
     #[derive(Debug, Clone)]
     enum TxnOperation {
         Create {
-            seq: u64,
             read_only: bool,
             txn_id: Uuid,
         },
@@ -958,7 +957,6 @@ mod tests {
         Commit {
             txn_id: Option<Uuid>,
             keys: Vec<String>,
-            committed_seq: u64,
         },
     }
 
@@ -981,14 +979,10 @@ mod tests {
 
         prop_oneof![
             // Create transaction with increasing seq numbers
-            (100u64..10000u64, any::<bool>()).prop_map(move |(seq, read_only)| {
+            (any::<bool>()).prop_map(move |read_only| {
                 let txn_id = Uuid::new_v4();
                 tracked_txn_ids.lock().push(txn_id);
-                TxnOperation::Create {
-                    seq,
-                    read_only,
-                    txn_id,
-                }
+                TxnOperation::Create { read_only, txn_id }
             }),
             // Drop transaction - sample from tracked_txn_ids_for_drop
             (0..1000u32).prop_map(move |_| {
@@ -1003,13 +997,8 @@ mod tests {
                         .prop_map(move |_| sample_txn_id(tracked_txn_ids_for_commit.clone()))
                 ),
                 vec("key[0-9][0-9]", 1..5),
-                1000u64..20000u64
             )
-                .prop_map(|(txn_id, keys, seq)| TxnOperation::Commit {
-                    txn_id,
-                    keys,
-                    committed_seq: seq
-                })
+                .prop_map(|(txn_id, keys)| TxnOperation::Commit { txn_id, keys })
         ]
     }
 
@@ -1042,34 +1031,23 @@ mod tests {
             op: &TxnOperation,
         ) -> ExcutionEffect {
             match op {
-                TxnOperation::Create {
-                    seq,
-                    read_only,
-                    txn_id,
-                } => {
-                    *seq = self.seq_counter;
-                    self.seq_counter += 10;
-                    manager.new_txn(*seq, *read_only, Some(*txn_id));
+                TxnOperation::Create { read_only, txn_id } => {
+                    manager.new_txn(self.seq_counter, *read_only, Some(*txn_id));
                     ExcutionEffect::Nothing
                 }
                 TxnOperation::Drop { txn_id } => {
                     manager.drop_txn(txn_id);
                     ExcutionEffect::Nothing
                 }
-                TxnOperation::Commit {
-                    txn_id,
-                    keys,
-                    committed_seq,
-                } => {
+                TxnOperation::Commit { txn_id, keys } => {
                     let key_set = keys
                         .iter()
                         .map(|k: &String| Bytes::from(k.clone()))
                         .collect();
+                    self.seq_counter += 10;
                     match txn_id {
                         None => {
-                            *committed_seq = self.seq_counter;
-                            self.seq_counter += 10;
-                            manager.track_recent_committed_txn(None, &key_set, *committed_seq);
+                            manager.track_recent_committed_txn(None, &key_set, self.seq_counter);
                             ExcutionEffect::CommitSuccess
                         }
                         Some(txn_id) => {
@@ -1078,7 +1056,7 @@ mod tests {
                                 manager.track_recent_committed_txn(
                                     Some(txn_id),
                                     &key_set,
-                                    *committed_seq,
+                                    self.seq_counter,
                                 );
                                 ExcutionEffect::CommitSuccess
                             } else {
@@ -1130,7 +1108,7 @@ mod tests {
             for op in ops {
                 let effect = exec_state.execute_operation(&txn_manager, &op);
 
-                if let TxnOperation::Commit { txn_id: None, keys: _, committed_seq: _ } = &op {
+                if let TxnOperation::Commit { txn_id: None, keys: _, } = &op {
                     prop_assert!(effect == ExcutionEffect::CommitSuccess, "If the commit is successful, the transaction should have conflict");
                 }
             }
