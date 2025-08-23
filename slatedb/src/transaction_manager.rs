@@ -434,45 +434,49 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_min_active_seq_no_transactions_returns_none() {
-        let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand);
-
-        assert_eq!(txn_manager.min_active_seq(), None);
+    #[derive(Debug)]
+    struct MinActiveSeqTestCase {
+        name: &'static str,
+        transactions: Vec<(u64, bool)>, // (seq_no, read_only)
+        expected_min_seq: Option<u64>,
     }
 
-    #[test]
-    fn test_min_active_seq_single_transaction() {
+    #[rstest]
+    #[case::no_transactions_returns_none(MinActiveSeqTestCase {
+        name: "no transactions returns none",
+        transactions: vec![],
+        expected_min_seq: None,
+    })]
+    #[case::single_transaction(MinActiveSeqTestCase {
+        name: "single transaction",
+        transactions: vec![(100, false)],
+        expected_min_seq: Some(100),
+    })]
+    #[case::multiple_transactions_returns_minimum(MinActiveSeqTestCase {
+        name: "multiple transactions returns minimum",
+        transactions: vec![(200, false), (100, true), (150, false)],
+        expected_min_seq: Some(100),
+    })]
+    #[case::mixed_readonly_and_write_transactions(MinActiveSeqTestCase {
+        name: "mixed readonly and write transactions",
+        transactions: vec![(50, true), (100, false)],
+        expected_min_seq: Some(50),
+    })]
+    fn test_min_active_seq_table_driven(#[case] case: MinActiveSeqTestCase) {
         let db_rand = Arc::new(DbRand::new(0));
         let txn_manager = TransactionManager::new(db_rand);
 
-        let _txn_id = txn_manager.new_txn(100, false);
-        assert_eq!(txn_manager.min_active_seq(), Some(100));
-    }
+        // Create transactions according to the test case
+        for (seq_no, read_only) in case.transactions {
+            let _txn_id = txn_manager.new_txn(seq_no, read_only);
+        }
 
-    #[test]
-    fn test_min_active_seq_multiple_transactions_returns_minimum() {
-        let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand);
-
-        let _txn_id1 = txn_manager.new_txn(200, false);
-        let _txn_id2 = txn_manager.new_txn(100, true);
-        let _txn_id3 = txn_manager.new_txn(150, false);
-
-        assert_eq!(txn_manager.min_active_seq(), Some(100));
-    }
-
-    #[test]
-    fn test_min_active_seq_mixed_readonly_and_write_transactions() {
-        let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand);
-
-        let _readonly_txn = txn_manager.new_txn(50, true);
-        let _write_txn = txn_manager.new_txn(100, false);
-
-        // Both readonly and write transactions should be considered
-        assert_eq!(txn_manager.min_active_seq(), Some(50));
+        assert_eq!(
+            txn_manager.min_active_seq(),
+            case.expected_min_seq,
+            "Test case '{}' failed",
+            case.name
+        );
     }
 
     #[test]
