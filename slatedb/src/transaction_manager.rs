@@ -98,14 +98,14 @@ impl TransactionManager {
     }
 
     /// Check if the current transaction conflicts with any recent committed transactions.
-    pub fn check_conflict(&self, txn_id: &Uuid, keys: &HashSet<Bytes>) -> bool {
+    pub fn has_conflict(&self, txn_id: &Uuid, keys: &HashSet<Bytes>) -> bool {
         let inner = self.inner.read();
         let started_seq = match inner.active_txns.get(txn_id) {
             None => return false,
             Some(txn_state) => txn_state.started_seq,
         };
 
-        inner.check_conflict(keys, started_seq)
+        inner.has_conflict(keys, started_seq)
     }
 
     /// Record the a recent write to `recent_commited_txns`. This method should be called after
@@ -205,7 +205,7 @@ impl TransactionManagerInner {
         }
     }
 
-    fn check_conflict(&self, conflict_keys: &HashSet<Bytes>, started_seq: u64) -> bool {
+    fn has_conflict(&self, conflict_keys: &HashSet<Bytes>, started_seq: u64) -> bool {
         for committed_txn in &self.recent_committed_txns {
             // skip read-only transactions as they don't cause write conflicts
             if committed_txn.read_only {
@@ -436,7 +436,7 @@ mod tests {
 
         // Call the method under test
         let inner = txn_manager.inner.read();
-        let has_conflict = inner.check_conflict(&conflict_keys, case.current_started_seq);
+        let has_conflict = inner.has_conflict(&conflict_keys, case.current_started_seq);
 
         // Verify result
         assert_eq!(
@@ -795,7 +795,7 @@ mod tests {
 
         // Step 2: Simulate conflict detection during transaction
         let write_keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
-        let has_conflict = txn_manager.check_conflict(&txn_id, &write_keys);
+        let has_conflict = txn_manager.has_conflict(&txn_id, &write_keys);
         assert!(!has_conflict); // No conflicts initially
 
         // Step 3: Create another transaction that will commit first
@@ -806,7 +806,7 @@ mod tests {
         txn_manager.track_recent_committed_txn(Some(&other_txn), &other_keys, 120);
 
         // Step 5: Check for conflicts again - should detect conflict on key1
-        let has_conflict = txn_manager.check_conflict(&txn_id, &write_keys);
+        let has_conflict = txn_manager.has_conflict(&txn_id, &write_keys);
         assert!(has_conflict); // Should conflict on key1
 
         // Step 6: Commit our transaction despite conflict (simulating retry logic)
@@ -835,24 +835,24 @@ mod tests {
         let keys_ab: HashSet<Bytes> = ["keyA", "keyB"].into_iter().map(Bytes::from).collect();
 
         // Initially no conflicts
-        assert!(!txn_manager.check_conflict(&txn1, &keys_a));
-        assert!(!txn_manager.check_conflict(&txn2, &keys_b));
-        assert!(!txn_manager.check_conflict(&txn3, &keys_ab));
+        assert!(!txn_manager.has_conflict(&txn1, &keys_a));
+        assert!(!txn_manager.has_conflict(&txn2, &keys_b));
+        assert!(!txn_manager.has_conflict(&txn3, &keys_ab));
 
         // T1 commits at seq 130, writing keyA
         txn_manager.track_recent_committed_txn(Some(&txn1), &keys_a, 130);
 
         // T2 should not conflict (writes different key)
-        assert!(!txn_manager.check_conflict(&txn2, &keys_b));
+        assert!(!txn_manager.has_conflict(&txn2, &keys_b));
 
         // T3 should conflict (writes keyA, started at 120 < 130)
-        assert!(txn_manager.check_conflict(&txn3, &keys_ab));
+        assert!(txn_manager.has_conflict(&txn3, &keys_ab));
 
         // T2 commits at seq 140, writing keyB
         txn_manager.track_recent_committed_txn(Some(&txn2), &keys_b, 140);
 
         // T3 should still conflict (now conflicts on both keyA and keyB)
-        assert!(txn_manager.check_conflict(&txn3, &keys_ab));
+        assert!(txn_manager.has_conflict(&txn3, &keys_ab));
 
         // Verify state
         assert_eq!(txn_manager.inner.read().active_txns.len(), 1); // Only T3 remains active
@@ -1059,7 +1059,7 @@ mod tests {
                         }
                         Some(txn_id) => {
                             // only record committed txn if there is no conflict
-                            if manager.check_conflict(txn_id, &key_set) {
+                            if !manager.has_conflict(txn_id, &key_set) {
                                 manager.track_recent_committed_txn(
                                     Some(txn_id),
                                     &key_set,
