@@ -36,10 +36,12 @@ use tokio_util::sync::CancellationToken;
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
 use crate::bytes_range::BytesRange;
+use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
 use crate::config::{
-    FlushOptions, FlushType, PutOptions, ReadOptions, ScanOptions, Settings, WriteOptions,
+    FlushOptions, FlushType, PreloadLevel, PutOptions, ReadOptions, ScanOptions, Settings,
+    WriteOptions,
 };
 use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
@@ -51,6 +53,7 @@ use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::MemtableFlushMsg;
 use crate::oracle::Oracle;
+use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
 use crate::sst_iter::SstIteratorOptions;
@@ -426,6 +429,94 @@ impl DbInner {
         Ok(())
     }
 
+    async fn preload_cache(
+        &self,
+        cached_obj_store: &CachedObjectStore,
+        path_resolver: &PathResolver,
+    ) -> Result<(), SlateDBError> {
+        let current_state = self.state.read().state();
+        let max_cache_size = self
+            .settings
+            .object_store_cache_options
+            .max_cache_size_bytes
+            .unwrap_or(usize::MAX);
+
+        match self
+            .settings
+            .object_store_cache_options
+            .preload_disk_cache_on_startup
+        {
+            Some(PreloadLevel::AllSst) => {
+                // Preload both L0 and compacted SSTs
+                let l0_count = current_state.manifest.core.l0.len();
+                let compacted_count: usize = current_state
+                    .manifest
+                    .core
+                    .compacted
+                    .iter()
+                    .map(|level| level.ssts.len())
+                    .sum();
+                let total_capacity = l0_count + compacted_count;
+
+                let mut all_sst_paths: Vec<object_store::path::Path> =
+                    Vec::with_capacity(total_capacity);
+
+                // Add L0 SSTs
+                all_sst_paths.extend(
+                    current_state
+                        .manifest
+                        .core
+                        .l0
+                        .iter()
+                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
+                );
+
+                // Add compacted SSTs
+                all_sst_paths.extend(
+                    current_state
+                        .manifest
+                        .core
+                        .compacted
+                        .iter()
+                        .flat_map(|level| &level.ssts)
+                        .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
+                );
+
+                if !all_sst_paths.is_empty() {
+                    if let Err(e) = cached_obj_store
+                        .load_files_to_cache(all_sst_paths, max_cache_size)
+                        .await
+                    {
+                        warn!("Failed to preload all SSTs to cache: {:?}", e);
+                    }
+                }
+            }
+            Some(PreloadLevel::L0Sst) => {
+                // Preload only L0 SSTs
+                let l0_sst_paths: Vec<object_store::path::Path> = current_state
+                    .manifest
+                    .core
+                    .l0
+                    .iter()
+                    .map(|sst_handle| path_resolver.table_path(&sst_handle.id))
+                    .collect();
+
+                if !l0_sst_paths.is_empty() {
+                    if let Err(e) = cached_obj_store
+                        .load_files_to_cache(l0_sst_paths, max_cache_size)
+                        .await
+                    {
+                        warn!("failed to preload L0 SSTs to cache [error={:?}]", e);
+                    }
+                }
+            }
+            None => {
+                // No preloading
+            }
+        }
+        Ok(())
+    }
+
     /// Return an error if the state has encountered
     /// an unrecoverable error.
     pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
@@ -619,22 +710,22 @@ impl Db {
     /// async fn main() -> Result<(), Error> {
     ///     let object_store = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     
+    ///
     ///     // Write some data and create a snapshot
     ///     db.put(b"key1", b"value1").await?;
     ///     let snapshot = db.snapshot().await?;
-    ///     
+    ///
     ///     // Snapshot provides read-only access to database state
     ///     let value = snapshot.get(b"key1").await?;
     ///     assert_eq!(value, Some(Bytes::from(b"value1".as_ref())));
-    ///     
+    ///
     ///     // Write more data to original database
     ///     db.put(b"key2", b"value2").await?;
-    ///     
+    ///
     ///     // Snapshot still sees old state, original db sees new data
     ///     assert_eq!(snapshot.get(b"key2").await?, None);
     ///     assert_eq!(db.get(b"key2").await?, Some(Bytes::from(b"value2".as_ref())));
-    ///     
+    ///
     ///     Ok(())
     /// }
     /// ```
@@ -1701,17 +1792,22 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_get_with_object_store_cache_stored_files() {
+    async fn test_object_store_cache_helper(
+        cache_puts_enabled: bool,
+        db_path: &str,
+        expected_cache_parts: Vec<(&str, usize)>,
+    ) -> (Arc<CachedObjectStore>, Db) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_")
             .tempdir()
             .unwrap();
+
         let stats_registry = StatRegistry::new();
         let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let part_size = 1024;
+
         let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.path().to_path_buf(),
             None,
@@ -1725,75 +1821,77 @@ mod tests {
             object_store.clone(),
             cache_storage,
             part_size,
+            cache_puts_enabled,
             cache_stats.clone(),
         )
         .unwrap();
 
         opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
-        let kv_store = Db::builder(
-            "/tmp/test_kv_store_with_cache_stored_files",
-            cached_object_store.clone(),
-        )
-        .with_settings(opts)
-        .build()
-        .await
-        .unwrap();
+        opts.object_store_cache_options.cache_puts = cache_puts_enabled;
+        let kv_store = Db::builder(db_path, cached_object_store.clone())
+            .with_settings(opts)
+            .build()
+            .await
+            .unwrap();
         let key = b"test_key";
         let value = b"test_value";
         kv_store.put(key, value).await.unwrap();
         kv_store.flush().await.unwrap();
 
-        assert_eq!(
-            cached_object_store
-                .list(None)
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .filter_map(Result::ok)
-                .map(|meta| meta.location.to_string())
-                .collect::<Vec<_>>(),
-            vec![
-                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest"
-                    .to_string(),
-                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest"
-                    .to_string(),
-                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst"
-                    .to_string(),
-                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst"
-                    .to_string(),
-            ],
-        );
-
-        // check the files are cached as expected
-        let tests = vec![
-            (
-                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest",
-                0,
-            ),
-            (
-                "tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest",
-                2,
-            ),
-            (
-                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst",
-                2,
-            ),
-            (
-                "tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst",
-                0,
-            ),
-        ];
-        for (path, expected) in tests {
+        // Verify cache behavior
+        for (path, expected_parts) in expected_cache_parts {
             let entry = cached_object_store
                 .cache_storage
                 .entry(&object_store::path::Path::from(path), part_size);
             assert_eq!(
                 entry.cached_parts().await.unwrap().len(),
-                expected,
-                "{}",
+                expected_parts,
+                "Path: {}",
                 path
             );
         }
+
+        (cached_object_store, kv_store)
+    }
+
+    #[tokio::test]
+    async fn test_get_with_object_store_cache_stored_files() {
+        let expected_cache_parts =
+            vec![
+            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
+            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 2),
+            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 2),
+            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
+        ];
+
+        let (_cached_object_store, kv_store) = test_object_store_cache_helper(
+            false, // cache_puts disabled
+            "/tmp/test_kv_store_with_cache_stored_files",
+            expected_cache_parts,
+        )
+        .await;
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_with_object_store_cache_put_caching_enabled() {
+        let expected_cache_parts =
+            vec![
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 2),
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 2),
+            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 2),
+            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000002.sst", 2),
+        ];
+
+        let (_cached_object_store, kv_store) = test_object_store_cache_helper(
+            true, // cache_puts enabled
+            "/tmp/test_kv_store_with_put_cache_enabled",
+            expected_cache_parts,
+        )
+        .await;
+
+        kv_store.close().await.unwrap();
     }
 
     async fn build_database_from_table(
@@ -2808,7 +2906,7 @@ mod tests {
             .unwrap();
 
         let memtable = {
-            let mut lock = kv_store.inner.state.write();
+            let lock = kv_store.inner.state.read();
             lock.memtable()
                 .put(RowEntry::new_value(b"abc1111", b"value1111", 1));
             lock.memtable()
@@ -2926,7 +3024,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut state = db_restored.inner.state.write();
+        let state = db_restored.inner.state.read();
         let memtable = state.memtable();
         let mut iter = memtable.table().iter();
         assert_iterator(
@@ -2956,7 +3054,7 @@ mod tests {
         let val = db.get(b"key1").await.unwrap();
         assert_eq!(val, Some(Bytes::from_static(b"value1")));
 
-        let mut state = db.inner.state.write();
+        let state = db.inner.state.read();
         let memtable = state.memtable();
         assert_eq!(memtable.table().last_seq(), Some(1));
     }
