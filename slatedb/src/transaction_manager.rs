@@ -898,6 +898,51 @@ mod tests {
         assert!(txn_manager.inner.read().active_txns.is_empty());
     }
 
+    #[test]
+    fn test_readonly_vs_write_transaction_interactions() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+
+        // Create mixed read-only and write transactions
+        let readonly_txn1 = txn_manager.new_txn(50, true); // Read-only at seq 50
+        let write_txn1 = txn_manager.new_txn(100, false); // Write at seq 100
+        let _readonly_txn2 = txn_manager.new_txn(150, true); // Read-only at seq 150
+        let write_txn2 = txn_manager.new_txn(200, false); // Write at seq 200
+
+        // min_active_seq should include all transactions (read-only and write)
+        assert_eq!(txn_manager.min_active_seq(), Some(50));
+
+        // min_conflict_check_seq should only consider write transactions
+        assert_eq!(txn_manager.inner.read().min_conflict_check_seq(), Some(100));
+
+        // Commit a write transaction
+        let keys: HashSet<Bytes> = ["test_key"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(Some(&write_txn1), &keys, 120);
+
+        // Should track committed transaction because write_txn2 is still active
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 1);
+
+        // Drop one read-only transaction - should not affect conflict tracking
+        // The key insight: dropping a readonly transaction still calls recycle_recent_committed_txns
+        // But since write_txn2 is still active, the min_conflict_check_seq is still 200
+        // The committed transaction has committed_seq=120, which is < 200, so it gets removed!
+        txn_manager.drop_txn(&readonly_txn1);
+
+        // The committed transaction should be removed because 120 < 200 (min_conflict_check_seq)
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 0); // Removed due to garbage collection
+        assert_eq!(txn_manager.inner.read().min_conflict_check_seq(), Some(200)); // Only write_txn2 remains
+
+        // Drop the remaining write transaction
+        txn_manager.drop_txn(&write_txn2);
+
+        // Should clear committed transactions (no active write transactions)
+        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 0);
+        assert_eq!(txn_manager.inner.read().min_conflict_check_seq(), None);
+
+        // Read-only transaction should still be active and affect min_active_seq
+        assert_eq!(txn_manager.min_active_seq(), Some(150));
+    }
+
     // Property-based tests using proptest for invariant verification
     use proptest::prelude::*;
     use proptest::collection::vec;
@@ -966,13 +1011,12 @@ mod tests {
                 TxnOperation::Drop { txn_id } => {
                     if let Some(pos) = self.active_txn_ids.iter().position(|id| id == txn_id) {
                         self.active_txn_ids.remove(pos);
-                    } else if let Some(&real_id) = self.active_txn_ids.first() {
-                        *txn_id = real_id;
-                        self.active_txn_ids.remove(0);
-                    } else {
-                        return; // No active transactions to drop
+                        manager.drop_txn(txn_id);
+                    } else if !self.active_txn_ids.is_empty() {
+                        let real_id = self.active_txn_ids.remove(0);
+                        manager.drop_txn(&real_id);
                     }
-                    manager.drop_txn(txn_id);
+                    // If no active transactions, this is a no-op
                 },
                 TxnOperation::CheckConflict { txn_id, keys } => {
                     if let Some(&real_id) = self.active_txn_ids.first() {
@@ -985,34 +1029,62 @@ mod tests {
                     *committed_seq = self.seq_counter;
                     self.seq_counter += 10;
                     
+                    let key_set: HashSet<Bytes> = keys.iter().map(|k| Bytes::from(k.clone())).collect();
+                    
                     // If txn_id is None, this is a non-transactional write
                     if txn_id.is_none() {
-                        let key_set: HashSet<Bytes> = keys.iter().map(|k| Bytes::from(k.clone())).collect();
+                        // Before tracking, ensure there are active write transactions
+                        // If there are none, create one to make the operation meaningful
+                        if !manager.inner.read().active_txns.values().any(|txn| !txn.read_only) {
+                            let dummy_seq = self.seq_counter;
+                            self.seq_counter += 10;
+                            let dummy_txn = manager.new_txn(dummy_seq, false);
+                            self.active_txn_ids.push(dummy_txn);
+                        }
                         manager.track_recent_committed_txn(None, &key_set, *committed_seq);
                         return;
                     }
                     
-                    // For transactional commits, ensure we have at least one active transaction
-                    // to commit, and at least one other active transaction to make the commit meaningful
-                    if self.active_txn_ids.len() < 2 {
-                        // Create an additional transaction to ensure we have multiple active transactions
+                    // For transactional commits, we need at least one active transaction to commit
+                    if self.active_txn_ids.is_empty() {
+                        return; // No transaction to commit
+                    }
+                    
+                    // Find a transaction to commit, but don't remove it from our tracking yet
+                    let commit_id = if let Some(ref id) = txn_id {
+                        if let Some(_pos) = self.active_txn_ids.iter().position(|active_id| active_id == id) {
+                            *id
+                        } else {
+                            // Use the first available transaction
+                            self.active_txn_ids[0]
+                        }
+                    } else {
+                        // This shouldn't happen as we handled None case above
+                        return;
+                    };
+                    
+                    // Check if after committing this transaction, there will be any active write transactions left
+                    // We need to check this BEFORE calling track_recent_committed_txn because it will remove the transaction
+                    let remaining_writers = manager.inner.read().active_txns.values()
+                        .filter(|txn| !txn.read_only)
+                        .count();
+                    
+                    let needs_dummy = remaining_writers <= 1; // If only 1 writer (the one we're committing), need dummy
+                    
+                    if needs_dummy {
                         let dummy_seq = self.seq_counter;
                         self.seq_counter += 10;
                         let dummy_txn = manager.new_txn(dummy_seq, false);
                         self.active_txn_ids.push(dummy_txn);
                     }
                     
-                    if let Some(ref mut id) = txn_id {
-                        if let Some(pos) = self.active_txn_ids.iter().position(|active_id| active_id == id) {
-                            self.active_txn_ids.remove(pos);
-                        } else if let Some(&real_id) = self.active_txn_ids.first() {
-                            *id = real_id;
-                            self.active_txn_ids.remove(0);
-                        }
-                    }
+                    // Now commit the transaction - this will remove it from active_txns
+                    manager.track_recent_committed_txn(Some(&commit_id), &key_set, *committed_seq);
                     
-                    let key_set: HashSet<Bytes> = keys.iter().map(|k| Bytes::from(k.clone())).collect();
-                    manager.track_recent_committed_txn(txn_id.as_ref(), &key_set, *committed_seq);
+                    // Remove from our tracking after successful commit
+                    if let Some(pos) = self.active_txn_ids.iter().position(|active_id| *active_id == commit_id) {
+                        self.active_txn_ids.remove(pos);
+                    }
                 }
             }
         }
@@ -1087,50 +1159,42 @@ mod tests {
         }
 
 
+        #[test] 
+        fn prop_inv_tm_3_garbage_collection_correctness(ops in operation_sequence_strategy()) {
+            let db_rand = Arc::new(DbRand::new(0));
+            let txn_manager = TransactionManager::new(db_rand);
+            let mut exec_state = ExecutionState::new();
+            
+            for op in ops {
+                exec_state.execute_operation(&txn_manager, op);
+                
+                // INV-TM-3: 垃圾回收正确性不变式
+                // recent_committed_txns.is_empty() ∨ (∃ active_ts ∈ active_txns.values(): !active_ts.read_only)
+                let inner = txn_manager.inner.read();
+                
+                if !inner.recent_committed_txns.is_empty() {
+                    // 如果队列不为空，必须存在活跃的写事务
+                    let has_active_writer = inner.active_txns.values().any(|txn| !txn.read_only);
+                    prop_assert!(
+                        has_active_writer,
+                        "INV-TM-3 violation: recent_committed_txns is not empty but no active write transactions exist. \
+                         Active txns: {:?}, Recent committed: {}",
+                        inner.active_txns.keys().collect::<Vec<_>>(),
+                        inner.recent_committed_txns.len()
+                    );
+                }
+                // 反过来，如果没有活跃写事务，队列应该为空
+                let has_active_writer = inner.active_txns.values().any(|txn| !txn.read_only);
+                if !has_active_writer {
+                    prop_assert!(
+                        inner.recent_committed_txns.is_empty(),
+                        "INV-TM-3 violation: no active write transactions but recent_committed_txns is not empty. \
+                         Recent committed: {}",
+                        inner.recent_committed_txns.len()
+                    );
+                }
+            }
+        }
     }
 
-    #[test]
-    fn test_readonly_vs_write_transaction_interactions() {
-        let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand);
-
-        // Create mixed read-only and write transactions
-        let readonly_txn1 = txn_manager.new_txn(50, true); // Read-only at seq 50
-        let write_txn1 = txn_manager.new_txn(100, false); // Write at seq 100
-        let _readonly_txn2 = txn_manager.new_txn(150, true); // Read-only at seq 150
-        let write_txn2 = txn_manager.new_txn(200, false); // Write at seq 200
-
-        // min_active_seq should include all transactions (read-only and write)
-        assert_eq!(txn_manager.min_active_seq(), Some(50));
-
-        // min_conflict_check_seq should only consider write transactions
-        assert_eq!(txn_manager.inner.read().min_conflict_check_seq(), Some(100));
-
-        // Commit a write transaction
-        let keys: HashSet<Bytes> = ["test_key"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(Some(&write_txn1), &keys, 120);
-
-        // Should track committed transaction because write_txn2 is still active
-        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 1);
-
-        // Drop one read-only transaction - should not affect conflict tracking
-        // The key insight: dropping a readonly transaction still calls recycle_recent_committed_txns
-        // But since write_txn2 is still active, the min_conflict_check_seq is still 200
-        // The committed transaction has committed_seq=120, which is < 200, so it gets removed!
-        txn_manager.drop_txn(&readonly_txn1);
-
-        // The committed transaction should be removed because 120 < 200 (min_conflict_check_seq)
-        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 0); // Removed due to garbage collection
-        assert_eq!(txn_manager.inner.read().min_conflict_check_seq(), Some(200)); // Only write_txn2 remains
-
-        // Drop the remaining write transaction
-        txn_manager.drop_txn(&write_txn2);
-
-        // Should clear committed transactions (no active write transactions)
-        assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 0);
-        assert_eq!(txn_manager.inner.read().min_conflict_check_seq(), None);
-
-        // Read-only transaction should still be active and affect min_active_seq
-        assert_eq!(txn_manager.min_active_seq(), Some(150));
-    }
 }
