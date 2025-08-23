@@ -1002,7 +1002,7 @@ mod tests {
                     (0..100u32)
                         .prop_map(move |_| sample_txn_id(tracked_txn_ids_for_commit.clone()))
                 ),
-                vec("key[0-9]+", 1..5),
+                vec("key[0-9][0-9]", 1..5),
                 1000u64..20000u64
             )
                 .prop_map(|(txn_id, keys, seq)| TxnOperation::Commit {
