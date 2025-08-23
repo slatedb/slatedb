@@ -14,7 +14,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::{compute_max_parallel, IteratorBuilder};
+use crate::utils::{build_iters_concurrent, compute_max_parallel};
 use crate::utils::{get_now_for_read, is_not_expired};
 use crate::{error::SlateDBError, filter, DbIterator};
 
@@ -144,12 +144,32 @@ impl Reader {
         // TODO: Need to decide on an upper bound for the number of parallel iterators.
         let max_parallel =
             compute_max_parallel(db_state.core().l0.len(), &db_state.core().compacted, 8);
-        let ib = IteratorBuilder::new(self.table_store.clone(), sst_iter_options, max_parallel);
-        let l0_iters_futures =
-            ib.build_sst_owned(db_state.core().l0.iter().cloned(), range.clone());
 
-        let sr_iters_futures =
-            ib.build_sr_owned(db_state.core().compacted.iter().cloned(), range.clone());
+        let l0_iters_futures =
+            build_iters_concurrent(db_state.core().l0.iter().cloned(), max_parallel, |sst| {
+                SstIterator::new_owned(
+                    range.clone(),
+                    sst,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+            });
+
+        // SR (owned)
+        let sr_iters_futures = build_iters_concurrent(
+            db_state.core().compacted.iter().cloned(),
+            max_parallel,
+            |sr| async {
+                SortedRunIterator::new_owned(
+                    range.clone(),
+                    sr,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await
+                .map(Some)
+            },
+        );
 
         let (l0_iters_res, sr_iters_res) = join(l0_iters_futures, sr_iters_futures).await;
         let l0_iters = l0_iters_res?;

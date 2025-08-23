@@ -18,11 +18,12 @@ use crate::iter::KeyValueIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::rand::DbRand;
 use crate::retention_iterator::RetentionIterator;
-use crate::sst_iter::SstIteratorOptions;
+use crate::sorted_run_iterator::SortedRunIterator;
+use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
-use crate::utils::{compute_max_parallel, spawn_bg_task, IdGenerator, IteratorBuilder};
+use crate::utils::{build_iters_concurrent, compute_max_parallel, spawn_bg_task, IdGenerator};
 use log::{debug, error};
 use tracing::instrument;
 use uuid::Uuid;
@@ -145,11 +146,28 @@ impl TokioCompactionExecutorInner {
 
         // TODO: Need to decide on an upper bound for the number of parallel iterators.
         let max_parallel = compute_max_parallel(compaction.ssts.len(), &compaction.sorted_runs, 8);
+        // L0 (borrowed)
+        let l0_iters_futures = build_iters_concurrent(compaction.ssts.iter(), max_parallel, |h| {
+            SstIterator::new_borrowed(
+                .., // full range for compaction or your range
+                h,
+                self.table_store.clone(),
+                sst_iter_options,
+            )
+        });
 
-        let ib = IteratorBuilder::new(self.table_store.clone(), sst_iter_options, max_parallel);
-        let l0_iters_futures = ib.build_sst_borrowed(compaction.ssts.iter(), ..);
-
-        let sr_iters_futures = ib.build_sr_borrowed(compaction.sorted_runs.iter(), ..);
+        // SR (borrowed)
+        let sr_iters_futures =
+            build_iters_concurrent(compaction.sorted_runs.iter(), max_parallel, |sr| async {
+                SortedRunIterator::new_borrowed(
+                    .., // full range for compaction or your range
+                    sr,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await
+                .map(Some)
+            });
 
         let (l0_iters_res, sr_iters_res) = join(l0_iters_futures, sr_iters_futures).await;
         let l0_iters = l0_iters_res?;
