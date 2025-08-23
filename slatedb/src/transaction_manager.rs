@@ -84,13 +84,15 @@ impl TransactionManager {
     }
 
     /// Remove a transaction state when it's dropped. The dropped txn is considered
-    /// as rolled back, no side effect is ever produced.
+    /// as rolled back, no side effect should be produced.
+    /// When a txn is dropped, it's a chance to recycle the recent committed txns.
     pub fn drop_txn(&self, txn_id: &Uuid) {
         let mut inner = self.inner.write();
         inner.active_txns.remove(txn_id);
         inner.recycle_recent_committed_txns();
     }
 
+    /// Check if the current transaction conflicts with any recent committed transactions.
     pub fn check_conflict(&self, txn_id: &Uuid, keys: &HashSet<Bytes>) -> bool {
         let inner = self.inner.read();
         let started_seq = match inner.active_txns.get(txn_id) {
@@ -101,7 +103,12 @@ impl TransactionManager {
         inner.check_conflict(keys, started_seq)
     }
 
-    /// Mark the txn as committed, and record it in recent_committed_txns.
+    /// Record the a recent write to `recent_commited_txns`. This method should be called after
+    /// [`Self::check_conflict`] is passed.
+    /// 
+    /// Please note that it's not necessary to be a "transaction" to call this method. The normal
+    /// write operations in a WriteBatch should also be considered as a recent committed txn, and
+    /// it's a MUST to track them for conflict check. In this case, the `txn_id` is `None`.
     pub fn track_recent_committed_txn(
         &self,
         txn_id: Option<&Uuid>,
@@ -109,8 +116,6 @@ impl TransactionManager {
         committed_seq: u64,
     ) {
         // if txn_id is not provided, we simply track the write keys as a recent committed txn.
-        // it's not needed to make conflict check, because it's a write batch that not bounded
-        // with any transaction.
         let txn_id = match txn_id {
             Some(txn_id) => txn_id,
             None => {
@@ -199,15 +204,13 @@ impl TransactionManagerInner {
                 continue;
             }
 
-            // this shouldn't happen in recent_committed_txns but let's skip it for safety
+            // All the recent committed txn should have committed_seq set.
             let other_committed_seq = committed_txn.committed_seq.expect(
                 "all txns in recent_committed_txns should be committed with committed_seq set",
             );
 
             // if another transaction committed after the current transaction started,
             // and they have overlapping write keys, then there's a conflict.
-            // this means the current transaction couldn't see the other transaction's writes
-            // when it started, but they modified the same keys.
             if other_committed_seq > started_seq
                 && !conflict_keys.is_disjoint(&committed_txn.write_keys)
             {
