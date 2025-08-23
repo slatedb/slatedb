@@ -1024,7 +1024,7 @@ mod tests {
         seq_counter: u64,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     enum ExcutionEffect {
         Nothing,
         CommitSuccess,
@@ -1039,9 +1039,9 @@ mod tests {
         fn execute_operation(
             &mut self,
             manager: &TransactionManager,
-            mut op: TxnOperation,
+            op: &TxnOperation,
         ) -> ExcutionEffect {
-            match &mut op {
+            match op {
                 TxnOperation::Create {
                     seq,
                     read_only,
@@ -1099,7 +1099,7 @@ mod tests {
             let mut exec_state = ExecutionState::new();
 
             for op in ops {
-                exec_state.execute_operation(&txn_manager, op);
+                exec_state.execute_operation(&txn_manager, &op);
 
                 // Verify that active_txns.keys() and committed transaction IDs are disjoint
                 let inner = txn_manager.inner.read();
@@ -1122,13 +1122,28 @@ mod tests {
         }
 
         #[test]
+        fn prop_all_write_without_conflict_should_be_committed(ops in operation_sequence_strategy()) {
+            let db_rand = Arc::new(DbRand::new(0));
+            let txn_manager = TransactionManager::new(db_rand);
+            let mut exec_state = ExecutionState::new();
+
+            for op in ops {
+                let effect = exec_state.execute_operation(&txn_manager, &op);
+
+                if let TxnOperation::Commit { txn_id: None, keys: _, committed_seq: _ } = &op {
+                    prop_assert!(effect == ExcutionEffect::CommitSuccess, "If the commit is successful, the transaction should have conflict");
+                }
+            }
+        }
+
+        #[test]
         fn prop_no_active_non_readonly_txn_and_recent_committed_txns(ops in operation_sequence_strategy()) {
             let db_rand = Arc::new(DbRand::new(0));
             let txn_manager = TransactionManager::new(db_rand);
             let mut exec_state = ExecutionState::new();
 
             for op in ops {
-                exec_state.execute_operation(&txn_manager, op);
+                exec_state.execute_operation(&txn_manager, &op);
 
                 let inner = txn_manager.inner.read();
                 // when there's no active non-readonly transactions, recent_committed_txns should be empty
@@ -1145,7 +1160,7 @@ mod tests {
             let mut exec_state = ExecutionState::new();
 
             for op in ops {
-                exec_state.execute_operation(&txn_manager, op);
+                exec_state.execute_operation(&txn_manager, &op);
 
                 // Verify min_active_seq correctness
                 let min_active_seq = txn_manager.min_active_seq();
@@ -1177,7 +1192,7 @@ mod tests {
             let mut exec_state = ExecutionState::new();
 
             for op in ops {
-                exec_state.execute_operation(&txn_manager, op);
+                exec_state.execute_operation(&txn_manager, &op);
 
                 // Garbage collection correctness invariant
                 // recent_committed_txns.is_empty() OR (there exists an active transaction in active_txns.values() that is not read-only)
