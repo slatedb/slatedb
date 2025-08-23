@@ -110,7 +110,7 @@ impl TransactionManager {
 
     /// Record the a recent write to `recent_commited_txns`. This method should be called after
     /// [`Self::check_conflict`] is passed.
-    /// 
+    ///
     /// Please note that it's not necessary to be a "transaction" to call this method. The normal
     /// write operations in a WriteBatch should also be considered as a recent committed txn, and
     /// it's a MUST to track them for conflict check. In this case, the `txn_id` is `None`.
@@ -505,10 +505,10 @@ mod tests {
         setup: Box::new(|txn_manager| {
             // Create a transaction
             let txn_id = txn_manager.new_txn(100, false, None);
-            
+
             // Create another active transaction to ensure recent_committed_txns is tracked
             let _other_txn = txn_manager.new_txn(200, false, None);
-            
+
             // Track committed transaction
             let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
             txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
@@ -527,7 +527,7 @@ mod tests {
         setup: Box::new(|txn_manager| {
             // Create an active transaction to ensure recent_committed_txns would be tracked
             let _active_txn = txn_manager.new_txn(100, false, None);
-            
+
             // Try to track a non-existent transaction
             let fake_id = Uuid::new_v4();
             let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
@@ -543,10 +543,10 @@ mod tests {
             // Create a transaction and a readonly transaction
             let txn_id = txn_manager.new_txn(100, false, None);
             let _readonly_txn = txn_manager.new_txn(200, true, None);
-            
+
             // Drop the transaction first so that after removal, only readonly remains
             txn_manager.drop_txn(&txn_id);
-            
+
             // Now track committed transaction - this should not be tracked since no active writers
             let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
             txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
@@ -578,10 +578,10 @@ mod tests {
         setup: Box::new(|txn_manager| {
             // Create a transaction with some conflict keys already tracked
             let txn_id = txn_manager.new_txn(100, false, None);
-            
+
             // Create another active transaction to ensure tracking happens
             let _other_txn = txn_manager.new_txn(200, false, None);
-            
+
             // Add some keys to the transaction's conflict_keys before committing
             {
                 let mut inner = txn_manager.inner.write();
@@ -589,7 +589,6 @@ mod tests {
                     txn_state.track_write_keys(["existing_key"].into_iter().map(Bytes::from));
                 }
             }
-            
             // Track committed transaction with additional keys
             let additional_keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
             txn_manager.track_recent_committed_txn(Some(&txn_id), &additional_keys, 150);
@@ -603,7 +602,9 @@ mod tests {
         expected_recent_committed_txns_len: 1,
         expected_active_txns_len: 1, // Only the other transaction remains
     })]
-    fn test_track_recent_committed_txn_table_driven(#[case] test_case: TrackRecentCommittedTxnTestCase) {
+    fn test_track_recent_committed_txn_table_driven(
+        #[case] test_case: TrackRecentCommittedTxnTestCase,
+    ) {
         let db_rand = Arc::new(DbRand::new(0));
         let mut txn_manager = TransactionManager::new(db_rand);
 
@@ -612,7 +613,7 @@ mod tests {
 
         // Verify the results
         let inner = txn_manager.inner.read();
-        
+
         assert_eq!(
             inner.recent_committed_txns.len(),
             test_case.expected_recent_committed_txns_len,
@@ -640,41 +641,27 @@ mod tests {
 
             let actual_txn = &inner.recent_committed_txns[0];
             assert_eq!(
-                actual_txn.started_seq,
-                expected_txn.started_seq,
+                actual_txn.started_seq, expected_txn.started_seq,
                 "Test case '{}' failed: expected started_seq {}, got {}",
-                test_case.name,
-                expected_txn.started_seq,
-                actual_txn.started_seq
+                test_case.name, expected_txn.started_seq, actual_txn.started_seq
             );
             assert_eq!(
-                actual_txn.committed_seq,
-                expected_txn.committed_seq,
+                actual_txn.committed_seq, expected_txn.committed_seq,
                 "Test case '{}' failed: expected committed_seq {:?}, got {:?}",
-                test_case.name,
-                expected_txn.committed_seq,
-                actual_txn.committed_seq
+                test_case.name, expected_txn.committed_seq, actual_txn.committed_seq
             );
             assert_eq!(
-                actual_txn.write_keys,
-                expected_txn.write_keys,
+                actual_txn.write_keys, expected_txn.write_keys,
                 "Test case '{}' failed: expected write_keys {:?}, got {:?}",
-                test_case.name,
-                expected_txn.write_keys,
-                actual_txn.write_keys
+                test_case.name, expected_txn.write_keys, actual_txn.write_keys
             );
             assert_eq!(
-                actual_txn.read_only,
-                expected_txn.read_only,
+                actual_txn.read_only, expected_txn.read_only,
                 "Test case '{}' failed: expected read_only {}, got {}",
-                test_case.name,
-                expected_txn.read_only,
-                actual_txn.read_only
+                test_case.name, expected_txn.read_only, actual_txn.read_only
             );
         }
     }
-
-
 
     #[test]
     fn test_recycle_recent_committed_txns_filters_by_min_seq() {
@@ -953,15 +940,25 @@ mod tests {
     }
 
     // Property-based tests using proptest for invariant verification
-    use proptest::prelude::*;
     use proptest::collection::vec;
+    use proptest::prelude::*;
     use rand::Rng;
 
     #[derive(Debug, Clone)]
     enum TxnOperation {
-        Create { seq: u64, read_only: bool, txn_id: Uuid },
-        Drop { txn_id: Uuid },
-        Commit { txn_id: Option<Uuid>, keys: Vec<String>, committed_seq: u64 },
+        Create {
+            seq: u64,
+            read_only: bool,
+            txn_id: Uuid,
+        },
+        Drop {
+            txn_id: Uuid,
+        },
+        Commit {
+            txn_id: Option<Uuid>,
+            keys: Vec<String>,
+            committed_seq: u64,
+        },
     }
 
     // Generator for transaction operations
@@ -986,22 +983,32 @@ mod tests {
             (100u64..10000u64, any::<bool>()).prop_map(move |(seq, read_only)| {
                 let txn_id = Uuid::new_v4();
                 tracked_txn_ids.lock().push(txn_id);
-                TxnOperation::Create { seq, read_only, txn_id }
+                TxnOperation::Create {
+                    seq,
+                    read_only,
+                    txn_id,
+                }
             }),
-        
             // Drop transaction - sample from tracked_txn_ids_for_drop
             (0..1000u32).prop_map(move |_| {
-                 TxnOperation::Drop { txn_id: sample_txn_id(tracked_txn_ids_for_drop.clone()) }
+                TxnOperation::Drop {
+                    txn_id: sample_txn_id(tracked_txn_ids_for_drop.clone()),
+                }
             }),
-          
             // commit - can be with or without txn_id
             (
-                prop::option::of((0..100u32).prop_map(move |_| sample_txn_id(tracked_txn_ids_for_commit.clone()))),
+                prop::option::of(
+                    (0..100u32)
+                        .prop_map(move |_| sample_txn_id(tracked_txn_ids_for_commit.clone()))
+                ),
                 vec("key[0-9]+", 1..5),
                 1000u64..20000u64
-            ).prop_map(|(txn_id, keys, seq)| TxnOperation::Commit { 
-                txn_id, keys, committed_seq: seq 
-            })
+            )
+                .prop_map(|(txn_id, keys, seq)| TxnOperation::Commit {
+                    txn_id,
+                    keys,
+                    committed_seq: seq
+                })
         ]
     }
 
@@ -1018,23 +1025,32 @@ mod tests {
 
     impl ExecutionState {
         fn new() -> Self {
-            Self {
-                seq_counter: 100,
-            }
+            Self { seq_counter: 100 }
         }
 
         fn execute_operation(&mut self, manager: &TransactionManager, mut op: TxnOperation) {
             match &mut op {
-                TxnOperation::Create { seq, read_only, txn_id } => {
+                TxnOperation::Create {
+                    seq,
+                    read_only,
+                    txn_id,
+                } => {
                     *seq = self.seq_counter;
                     self.seq_counter += 10;
                     manager.new_txn(*seq, *read_only, Some(*txn_id));
-                },
+                }
                 TxnOperation::Drop { txn_id } => {
                     manager.drop_txn(txn_id);
-                },
-                TxnOperation::Commit { txn_id, keys, committed_seq } => {
-                    let key_set = keys.iter().map(|k: &String| Bytes::from(k.clone())).collect();
+                }
+                TxnOperation::Commit {
+                    txn_id,
+                    keys,
+                    committed_seq,
+                } => {
+                    let key_set = keys
+                        .iter()
+                        .map(|k: &String| Bytes::from(k.clone()))
+                        .collect();
                     match txn_id {
                         None => {
                             *committed_seq = self.seq_counter;
@@ -1044,7 +1060,11 @@ mod tests {
                         Some(txn_id) => {
                             // only record committed txn if there is no conflict
                             if manager.check_conflict(txn_id, &key_set) {
-                                manager.track_recent_committed_txn(Some(txn_id), &key_set, *committed_seq);
+                                manager.track_recent_committed_txn(
+                                    Some(txn_id),
+                                    &key_set,
+                                    *committed_seq,
+                                );
                             }
                         }
                     }
@@ -1059,21 +1079,21 @@ mod tests {
             let db_rand = Arc::new(DbRand::new(0));
             let txn_manager = TransactionManager::new(db_rand);
             let mut exec_state = ExecutionState::new();
-            
+
             for op in ops {
                 exec_state.execute_operation(&txn_manager, op);
-                
+
                 // Verify that active_txns.keys() and committed transaction IDs are disjoint
                 let inner = txn_manager.inner.read();
                 let active_ids: HashSet<Uuid> = inner.active_txns.keys().cloned().collect();
-                
+
                 for active_id in &active_ids {
                     // Each active transaction should not appear in recent_committed_txns
                     // Since we don't store the original ID in committed txns, this is automatically true
                     prop_assert!(inner.active_txns.contains_key(active_id),
                         "Active transaction {:?} should be in active_txns", active_id);
                 }
-                
+
                 // The real check: a transaction cannot be both active and committed simultaneously
                 // This is enforced by track_recent_committed_txn removing from active_txns
                 prop_assert!(
@@ -1088,7 +1108,7 @@ mod tests {
             let db_rand = Arc::new(DbRand::new(0));
             let txn_manager = TransactionManager::new(db_rand);
             let mut exec_state = ExecutionState::new();
-            
+
             for op in ops {
                 exec_state.execute_operation(&txn_manager, op);
 
@@ -1096,23 +1116,23 @@ mod tests {
                 // when there's no active non-readonly transactions, recent_committed_txns should be empty
                 if !inner.active_txns.values().any(|t| !t.read_only) {
                     prop_assert!(inner.recent_committed_txns.is_empty(), "If there's no active non-readonly transactions, recent_committed_txns should be empty");
-                } 
+                }
             }
         }
 
-        #[test] 
+        #[test]
         fn prop_inv_min_active_seq_correctness(ops in operation_sequence_strategy()) {
             let db_rand = Arc::new(DbRand::new(0));
             let txn_manager = TransactionManager::new(db_rand);
             let mut exec_state = ExecutionState::new();
-            
+
             for op in ops {
                 exec_state.execute_operation(&txn_manager, op);
-                
+
                 // Verify min_active_seq correctness
                 let min_active_seq = txn_manager.min_active_seq();
                 let inner = txn_manager.inner.read();
-                
+
                 if inner.active_txns.is_empty() {
                     prop_assert!(
                         min_active_seq.is_none(),
@@ -1122,9 +1142,9 @@ mod tests {
                     let expected_min = inner.active_txns.values()
                         .map(|txn| txn.started_seq)
                         .min();
-                    
+
                     prop_assert_eq!(
-                        min_active_seq, 
+                        min_active_seq,
                         expected_min,
                         "min_active_seq should equal the minimum started_seq of all active transactions"
                     );
@@ -1132,15 +1152,15 @@ mod tests {
             }
         }
 
-        #[test] 
+        #[test]
         fn prop_inv_garbage_collection_correctness(ops in operation_sequence_strategy()) {
             let db_rand = Arc::new(DbRand::new(0));
             let txn_manager = TransactionManager::new(db_rand);
             let mut exec_state = ExecutionState::new();
-            
+
             for op in ops {
                 exec_state.execute_operation(&txn_manager, op);
-                
+
                 // Garbage collection correctness invariant
                 // recent_committed_txns.is_empty() OR (there exists an active transaction in active_txns.values() that is not read-only)
                 let inner = txn_manager.inner.read();
