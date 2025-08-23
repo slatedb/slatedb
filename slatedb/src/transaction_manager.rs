@@ -235,6 +235,76 @@ mod tests {
     }
 
     #[test]
+    fn test_drop_txn_removes_active_transaction() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Create a transaction
+        let txn_id = txn_manager.new_txn(100, false);
+        
+        // Verify it exists in active transactions
+        {
+            let inner = txn_manager.inner.read();
+            assert!(inner.active_txns.contains_key(&txn_id));
+        }
+        
+        // Drop the transaction
+        txn_manager.drop_txn(&txn_id);
+        
+        // Verify it's removed
+        {
+            let inner = txn_manager.inner.read();
+            assert!(!inner.active_txns.contains_key(&txn_id));
+        }
+    }
+
+    #[test]
+    fn test_drop_txn_nonexistent_transaction_safe() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Try to drop a non-existent transaction - should not panic
+        let fake_id = Uuid::new_v4();
+        txn_manager.drop_txn(&fake_id);
+        
+        // Should still be able to create new transactions
+        let txn_id = txn_manager.new_txn(100, false);
+        {
+            let inner = txn_manager.inner.read();
+            assert!(inner.active_txns.contains_key(&txn_id));
+        }
+    }
+
+    #[test]
+    fn test_drop_txn_triggers_garbage_collection() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Create and commit a transaction to populate recent_committed_txns
+        let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(None, &keys, 50);
+        
+        // Create an active transaction
+        let txn_id = txn_manager.new_txn(100, false);
+        
+        // Verify recent_committed_txns has content
+        {
+            let inner = txn_manager.inner.read();
+            assert!(!inner.recent_committed_txns.is_empty());
+        }
+        
+        // Drop the active transaction (this should trigger garbage collection)
+        txn_manager.drop_txn(&txn_id);
+        
+        // Since there are no more active non-readonly transactions,
+        // recent_committed_txns should be cleared
+        {
+            let inner = txn_manager.inner.read();
+            assert!(inner.recent_committed_txns.is_empty());
+        }
+    }
+
+    #[test]
     fn test_check_conflict_table_driven() {
         let test_cases = vec![
             ConflictTestCase {
@@ -380,6 +450,304 @@ mod tests {
                 "Test case '{}' failed",
                 case.name
             );
+        }
+    }
+
+    #[test]
+    fn test_min_active_seq_no_transactions_returns_none() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        assert_eq!(txn_manager.min_active_seq(), None);
+    }
+
+    #[test]
+    fn test_min_active_seq_single_transaction() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        let _txn_id = txn_manager.new_txn(100, false);
+        assert_eq!(txn_manager.min_active_seq(), Some(100));
+    }
+
+    #[test]
+    fn test_min_active_seq_multiple_transactions_returns_minimum() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        let _txn_id1 = txn_manager.new_txn(200, false);
+        let _txn_id2 = txn_manager.new_txn(100, true);
+        let _txn_id3 = txn_manager.new_txn(150, false);
+        
+        assert_eq!(txn_manager.min_active_seq(), Some(100));
+    }
+
+    #[test]
+    fn test_min_active_seq_mixed_readonly_and_write_transactions() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        let _readonly_txn = txn_manager.new_txn(50, true);
+        let _write_txn = txn_manager.new_txn(100, false);
+        
+        // Both readonly and write transactions should be considered
+        assert_eq!(txn_manager.min_active_seq(), Some(50));
+    }
+
+    #[test]
+    fn test_track_recent_committed_txn_with_valid_id() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Create a transaction
+        let txn_id = txn_manager.new_txn(100, false);
+        
+        // Create another active transaction to ensure recent_committed_txns is tracked
+        let _other_txn = txn_manager.new_txn(200, false);
+        
+        // Track committed transaction
+        let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
+        
+        // Verify transaction was removed from active_txns and added to recent_committed_txns
+        {
+            let inner = txn_manager.inner.read();
+            assert!(!inner.active_txns.contains_key(&txn_id));
+            assert_eq!(inner.recent_committed_txns.len(), 1);
+            
+            let committed_txn = &inner.recent_committed_txns[0];
+            assert_eq!(committed_txn.started_seq, 100);
+            assert_eq!(committed_txn.committed_seq, Some(150));
+            assert_eq!(committed_txn.conflict_keys, keys);
+        }
+    }
+
+    #[test]
+    fn test_track_recent_committed_txn_nonexistent_id() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Create an active transaction to ensure recent_committed_txns would be tracked
+        let _active_txn = txn_manager.new_txn(100, false);
+        
+        // Try to track a non-existent transaction
+        let fake_id = Uuid::new_v4();
+        let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(Some(&fake_id), &keys, 150);
+        
+        // Should not add anything to recent_committed_txns
+        {
+            let inner = txn_manager.inner.read();
+            assert!(inner.recent_committed_txns.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_track_recent_committed_txn_no_tracking_when_only_readonly_active() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Create a transaction and a readonly transaction
+        let txn_id = txn_manager.new_txn(100, false);
+        let _readonly_txn = txn_manager.new_txn(200, true);
+        
+        // Drop the transaction first so that after removal, only readonly remains
+        txn_manager.drop_txn(&txn_id);
+        
+        // Now track committed transaction - this should not be tracked since no active writers
+        let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
+        
+        // Should not track since only readonly transactions remain active
+        {
+            let inner = txn_manager.inner.read();
+            assert!(inner.recent_committed_txns.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_track_recent_committed_txn_without_id_creates_record() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Track without transaction ID (non-transactional write)
+        let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(None, &keys, 100);
+        
+        // Should create a record in recent_committed_txns
+        {
+            let inner = txn_manager.inner.read();
+            assert_eq!(inner.recent_committed_txns.len(), 1);
+            
+            let committed_txn = &inner.recent_committed_txns[0];
+            assert_eq!(committed_txn.started_seq, 100);
+            assert_eq!(committed_txn.committed_seq, Some(100));
+            assert_eq!(committed_txn.conflict_keys, keys);
+            assert!(!committed_txn.read_only);
+        }
+    }
+
+    #[test]
+    fn test_track_recent_committed_txn_merges_conflict_keys() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Create a transaction with some conflict keys already tracked
+        let txn_id = txn_manager.new_txn(100, false);
+        
+        // Create another active transaction to ensure tracking happens
+        let _other_txn = txn_manager.new_txn(200, false);
+        
+        // Add some keys to the transaction's conflict_keys before committing
+        {
+            let mut inner = txn_manager.inner.write();
+            if let Some(txn_state) = inner.active_txns.get_mut(&txn_id) {
+                txn_state.track_conflict_keys(["existing_key"].into_iter().map(Bytes::from));
+            }
+        }
+        
+        // Track committed transaction with additional keys
+        let additional_keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(Some(&txn_id), &additional_keys, 150);
+        
+        // Verify all keys are merged
+        {
+            let inner = txn_manager.inner.read();
+            assert_eq!(inner.recent_committed_txns.len(), 1);
+            
+            let committed_txn = &inner.recent_committed_txns[0];
+            let expected_keys: HashSet<Bytes> = ["existing_key", "key1", "key2"]
+                .into_iter().map(Bytes::from).collect();
+            assert_eq!(committed_txn.conflict_keys, expected_keys);
+        }
+    }
+
+    #[test]
+    fn test_recycle_recent_committed_txns_filters_by_min_seq() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Create some committed transactions first
+        let keys1: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+        let keys2: HashSet<Bytes> = ["key2"].into_iter().map(Bytes::from).collect();
+        let keys3: HashSet<Bytes> = ["key3"].into_iter().map(Bytes::from).collect();
+        
+        // Add committed transactions with different committed_seq values
+        txn_manager.track_recent_committed_txn(None, &keys1, 50);  // committed_seq = 50
+        txn_manager.track_recent_committed_txn(None, &keys2, 100); // committed_seq = 100
+        txn_manager.track_recent_committed_txn(None, &keys3, 150); // committed_seq = 150
+        
+        // Create an active write transaction with started_seq = 120
+        let active_txn1 = txn_manager.new_txn(120, false);
+        
+        // Verify we have all 3 committed transactions
+        {
+            let inner = txn_manager.inner.read();
+            assert_eq!(inner.recent_committed_txns.len(), 3);
+        }
+        
+        // Trigger garbage collection by dropping the transaction
+        // Since there will be no active non-readonly transactions after dropping,
+        // all recent_committed_txns will be cleared
+        txn_manager.drop_txn(&active_txn1);
+        
+        // All should be cleared since no active non-readonly transactions remain
+        {
+            let inner = txn_manager.inner.read();
+            assert_eq!(inner.recent_committed_txns.len(), 0);
+        }
+    }
+
+    #[test]
+    fn test_recycle_recent_committed_txns_clears_all_when_no_active_writers() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Add some committed transactions
+        let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(None, &keys, 100);
+        txn_manager.track_recent_committed_txn(None, &keys, 200);
+        
+        // Verify they exist
+        {
+            let inner = txn_manager.inner.read();
+            assert_eq!(inner.recent_committed_txns.len(), 2);
+        }
+        
+        // Create and drop a write transaction (this triggers recycle)
+        let txn_id = txn_manager.new_txn(300, false);
+        txn_manager.drop_txn(&txn_id);
+        
+        // Since no active non-readonly transactions remain, should clear all
+        {
+            let inner = txn_manager.inner.read();
+            assert!(inner.recent_committed_txns.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_recycle_recent_committed_txns_boundary_condition_equal_seq() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Create committed transactions with seq values around the boundary
+        let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(None, &keys, 99);  // should be removed
+        txn_manager.track_recent_committed_txn(None, &keys, 100); // should be kept (equal)
+        txn_manager.track_recent_committed_txn(None, &keys, 101); // should be kept
+        
+        // Create active write transactions to control min_conflict_check_seq
+        let _active_txn1 = txn_manager.new_txn(100, false); // This sets min to 100
+        let active_txn2 = txn_manager.new_txn(200, false); // Remove this later
+        
+        // Trigger garbage collection - this will keep min_conflict_check_seq = 100
+        txn_manager.drop_txn(&active_txn2);
+        
+        // Should keep transactions with committed_seq >= 100
+        {
+            let inner = txn_manager.inner.read();
+            assert_eq!(inner.recent_committed_txns.len(), 2);
+            let committed_seqs: Vec<u64> = inner.recent_committed_txns
+                .iter()
+                .map(|txn| txn.committed_seq.unwrap())
+                .collect();
+            assert!(committed_seqs.contains(&100));
+            assert!(committed_seqs.contains(&101));
+        }
+    }
+
+    #[test]
+    fn test_recycle_recent_committed_txns_handles_none_committed_seq() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand);
+        
+        // Manually create a transaction state with None committed_seq (edge case)
+        {
+            let mut inner = txn_manager.inner.write();
+            inner.recent_committed_txns.push_back(TransactionState {
+                read_only: false,
+                started_seq: 50,
+                committed_seq: None, // This should not happen in practice but let's test
+                conflict_keys: HashSet::new(),
+            });
+        }
+        
+        // Add a normal committed transaction
+        let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_recent_committed_txn(None, &keys, 100);
+        
+        // Create active transactions and trigger garbage collection
+        let _active_txn1 = txn_manager.new_txn(150, false); // This sets min to 150
+        let active_txn2 = txn_manager.new_txn(200, false);
+        
+        txn_manager.drop_txn(&active_txn2);
+        
+        // The transaction with None committed_seq should be kept (safety)
+        // The transaction with committed_seq=100 should be removed since 100 < 150
+        {
+            let inner = txn_manager.inner.read();
+            assert_eq!(inner.recent_committed_txns.len(), 1);
+            assert_eq!(inner.recent_committed_txns[0].committed_seq, None);
         }
     }
 }
