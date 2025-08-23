@@ -988,14 +988,12 @@ mod tests {
     // Helper struct to track operation execution state
     #[derive(Debug)]
     struct ExecutionState {
-        active_txn_ids: Vec<Uuid>,
         seq_counter: u64,
     }
 
     impl ExecutionState {
         fn new() -> Self {
             Self {
-                active_txn_ids: Vec::new(),
                 seq_counter: 100,
             }
         }
@@ -1005,21 +1003,25 @@ mod tests {
                 TxnOperation::Create { seq, read_only } => {
                     *seq = self.seq_counter;
                     self.seq_counter += 10; // Ensure monotonic increase
-                    let txn_id = manager.new_txn(*seq, *read_only);
-                    self.active_txn_ids.push(txn_id);
+                    let _txn_id = manager.new_txn(*seq, *read_only);
                 },
                 TxnOperation::Drop { txn_id } => {
-                    if let Some(pos) = self.active_txn_ids.iter().position(|id| id == txn_id) {
-                        self.active_txn_ids.remove(pos);
+                    // Get active transaction IDs from the manager
+                    let active_ids: Vec<Uuid> = manager.inner.read().active_txns.keys().cloned().collect();
+                    
+                    if active_ids.contains(txn_id) {
                         manager.drop_txn(txn_id);
-                    } else if !self.active_txn_ids.is_empty() {
-                        let real_id = self.active_txn_ids.remove(0);
+                    } else if !active_ids.is_empty() {
+                        let real_id = active_ids[0];
                         manager.drop_txn(&real_id);
                     }
                     // If no active transactions, this is a no-op
                 },
                 TxnOperation::CheckConflict { txn_id, keys } => {
-                    if let Some(&real_id) = self.active_txn_ids.first() {
+                    // Get active transaction IDs from the manager
+                    let active_ids: Vec<Uuid> = manager.inner.read().active_txns.keys().cloned().collect();
+                    
+                    if let Some(&real_id) = active_ids.first() {
                         *txn_id = real_id;
                         let key_set: HashSet<Bytes> = keys.iter().map(|k| Bytes::from(k.clone())).collect();
                         manager.check_conflict(txn_id, &key_set);
@@ -1038,25 +1040,27 @@ mod tests {
                         if !manager.inner.read().active_txns.values().any(|txn| !txn.read_only) {
                             let dummy_seq = self.seq_counter;
                             self.seq_counter += 10;
-                            let dummy_txn = manager.new_txn(dummy_seq, false);
-                            self.active_txn_ids.push(dummy_txn);
+                            let _dummy_txn = manager.new_txn(dummy_seq, false);
                         }
                         manager.track_recent_committed_txn(None, &key_set, *committed_seq);
                         return;
                     }
                     
+                    // Get active transaction IDs from the manager
+                    let active_ids: Vec<Uuid> = manager.inner.read().active_txns.keys().cloned().collect();
+                    
                     // For transactional commits, we need at least one active transaction to commit
-                    if self.active_txn_ids.is_empty() {
+                    if active_ids.is_empty() {
                         return; // No transaction to commit
                     }
                     
-                    // Find a transaction to commit, but don't remove it from our tracking yet
+                    // Find a transaction to commit
                     let commit_id = if let Some(ref id) = txn_id {
-                        if let Some(_pos) = self.active_txn_ids.iter().position(|active_id| active_id == id) {
+                        if active_ids.contains(id) {
                             *id
                         } else {
                             // Use the first available transaction
-                            self.active_txn_ids[0]
+                            active_ids[0]
                         }
                     } else {
                         // This shouldn't happen as we handled None case above
@@ -1074,17 +1078,11 @@ mod tests {
                     if needs_dummy {
                         let dummy_seq = self.seq_counter;
                         self.seq_counter += 10;
-                        let dummy_txn = manager.new_txn(dummy_seq, false);
-                        self.active_txn_ids.push(dummy_txn);
+                        let _dummy_txn = manager.new_txn(dummy_seq, false);
                     }
                     
                     // Now commit the transaction - this will remove it from active_txns
                     manager.track_recent_committed_txn(Some(&commit_id), &key_set, *committed_seq);
-                    
-                    // Remove from our tracking after successful commit
-                    if let Some(pos) = self.active_txn_ids.iter().position(|active_id| *active_id == commit_id) {
-                        self.active_txn_ids.remove(pos);
-                    }
                 }
             }
         }
