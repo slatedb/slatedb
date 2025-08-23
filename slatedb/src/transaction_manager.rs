@@ -111,9 +111,10 @@ impl TransactionManager {
     /// Record the a recent write to `recent_commited_txns`. This method should be called after
     /// [`Self::has_conflict`] is checked as false.
     ///
-    /// Please note that it's not necessary to be a "transaction" to call this method. The normal
-    /// write operations in a WriteBatch should also be considered as a recent committed txn, and
-    /// it's a MUST to track them for conflict check. In this case, the `txn_id` is `None`.
+    /// Please note that it's not a requirement to be inside a Transaction for a write operation
+    /// to call this method. The normal write operations in a WriteBatch should also be considered
+    /// as a recent committed txn, and it's a MUST to track them for conflict check. In this case,
+    /// the `txn_id` is `None`.
     pub fn track_recent_committed_txn(
         &self,
         txn_id: Option<&Uuid>,
