@@ -1024,12 +1024,23 @@ mod tests {
         seq_counter: u64,
     }
 
+    #[derive(Debug)]
+    enum ExcutionEffect {
+        Nothing,
+        CommitSuccess,
+        CommitConflict,
+    }
+
     impl ExecutionState {
         fn new() -> Self {
             Self { seq_counter: 100 }
         }
 
-        fn execute_operation(&mut self, manager: &TransactionManager, mut op: TxnOperation) {
+        fn execute_operation(
+            &mut self,
+            manager: &TransactionManager,
+            mut op: TxnOperation,
+        ) -> ExcutionEffect {
             match &mut op {
                 TxnOperation::Create {
                     seq,
@@ -1039,9 +1050,11 @@ mod tests {
                     *seq = self.seq_counter;
                     self.seq_counter += 10;
                     manager.new_txn(*seq, *read_only, Some(*txn_id));
+                    ExcutionEffect::Nothing
                 }
                 TxnOperation::Drop { txn_id } => {
                     manager.drop_txn(txn_id);
+                    ExcutionEffect::Nothing
                 }
                 TxnOperation::Commit {
                     txn_id,
@@ -1057,6 +1070,7 @@ mod tests {
                             *committed_seq = self.seq_counter;
                             self.seq_counter += 10;
                             manager.track_recent_committed_txn(None, &key_set, *committed_seq);
+                            ExcutionEffect::CommitSuccess
                         }
                         Some(txn_id) => {
                             // only record committed txn if there is no conflict
@@ -1066,6 +1080,9 @@ mod tests {
                                     &key_set,
                                     *committed_seq,
                                 );
+                                ExcutionEffect::CommitSuccess
+                            } else {
+                                ExcutionEffect::CommitConflict
                             }
                         }
                     }
