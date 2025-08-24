@@ -268,8 +268,8 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                     self.handler.handle(message).await?;
                 },
                 // if no messages, check tickers (select_all barfs if ticker_futures is empty, so check)
-                (message, _, _) = async { select_all(ticker_futures).await }, if tickers_not_empty => {
-                    self.handler.handle(message?).await?;
+                (message, _idx, _remaining) = async { select_all(ticker_futures).await }, if tickers_not_empty => {
+                    self.handler.handle(message).await?;
                 },
             }
         }
@@ -362,13 +362,11 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// ## Returns
     ///
     /// A [Future] that resolves when the ticker ticks.
-    pub(crate) fn tick(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<T, SlateDBError>> + Send + '_>> {
+    pub(crate) fn tick(&mut self) -> Pin<Box<dyn Future<Output = T> + Send + '_>> {
         let message = (self.message_factory)();
         Box::pin(async move {
             self.inner.tick().await;
-            Ok(message)
+            message
         })
     }
 }
