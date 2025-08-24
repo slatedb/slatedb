@@ -268,7 +268,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                     self.handler.handle(message).await?;
                 },
                 // if no messages, check tickers (select_all barfs if ticker_futures is empty, so check)
-                (message, _idx, _remaining) = async { select_all(ticker_futures).await }, if tickers_not_empty => {
+                (message, _idx, _remaining) = select_all(ticker_futures), if tickers_not_empty => {
                     self.handler.handle(message).await?;
                 },
             }
