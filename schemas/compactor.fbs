@@ -14,21 +14,43 @@ enum CompactionStatus : byte {
     Failed,         // Failed with error
 }
 
-table CompactionJob {
-    // CompactorJob ID(Ulid)
-    job_id: Ulid;
+union CompactionJobSpec { LinearCompactionJob /*, ParallelCompactionJob */ }
 
-    // Reference to the compaction to which this job belongs
-    compaction_id: Ulid
-    
+table LinearCompactionJob {
+    // InputSSTables completed before the job started
+    completed_input_sst_ids:[CompactedSstId];
+
+    // InputSortedRuns completed before the job started
+    completed_input_sr_ids:[uint32];
+}
+
+/*
+table ParallelCompactionJob {
+    // Sub CompactionJob ID(Ulid)
+    sub_job_id: Ulid;
+
     // InputSSTables completed before the job started
     completed_input_sst_ids:[CompactedSstId];
 
     // InputSortedRuns completed before the job started
     completed_input_sr_ids:[uint32];
 
-    // Output SSTs to be persisted in destination SR  
-    output_sr:[SortedRun];
+     // Subset of InputSSTables to be compacted
+    input_sst_ids:[CompactedSstId];
+
+    // Subset of InputSortedRuns to be compacted
+    input_sr_ids:[uint32];
+}
+*/
+
+table CompactionJob {
+    // CompactionJob ID(Ulid)
+    job_id: Ulid;
+
+    // Reference to the compaction to which this job belongs
+    compaction_id: Ulid;
+
+    specs: [CompactionJobSpec];
 }
 
 table Compaction {
@@ -39,7 +61,7 @@ table Compaction {
     destination: u32 (required);
 
     // Destination Sorted Run
-    output_sorted_run: SortedRun
+    output_sorted_run: SortedRun;
 
     // input L0 SSTables
     ssts: [CompactedSsTable]; 
@@ -59,8 +81,8 @@ table Compaction {
     // List of CompactionJob Retries
     job_attempts:[CompactionJob];
 
-    // Creation Timestamp of Compaction
-    updated_ts: uint64
+    // Update Timestamp of Compaction
+    updated_ts: uint64;
 }
 
 
@@ -75,7 +97,7 @@ table CompactionState {
     recent_compactions: [Compaction];
 
     // Creation Timestamp of CompactionState
-    created_at: uint64
+    created_at: uint64;
 }
 
 root_type CompactionState;
