@@ -125,7 +125,7 @@ impl TransactionManager {
         let mut inner = self.inner.write();
 
         // if there's no active non-readonly transactions, we don't need to track the recent
-        // committed txn, since it's impossible to have any conflict.
+        // committed txn, since it's impossible to have a conflict with a read-only transaction.
         if !inner.has_non_readonly_active_txn() {
             return;
         }
