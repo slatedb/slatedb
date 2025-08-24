@@ -811,4 +811,70 @@ mod test {
         assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
         assert_eq!(log.lock().unwrap().len(), 7);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_dispatcher_supports_overlapping_tickers() {
+        let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
+        let cleanup_called = WatchableOnceCell::new();
+        let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone())
+            .add_ticker(Duration::from_millis(3), 3)
+            .add_ticker(Duration::from_millis(5), 5);
+        let clock = Arc::new(MockSystemClock::new());
+        let cancellation_token = CancellationToken::new();
+        let error_state = WatchableOnceCell::new();
+        let mut dispatcher = MessageDispatcher::new(
+            Box::new(handler),
+            rx,
+            clock.clone(),
+            cancellation_token.clone(),
+            error_state.clone(),
+        );
+        let join = tokio::spawn(async move { dispatcher.run().await });
+
+        // Step time to reach the overlap instant (LCM of 3 and 5 = 15ms)
+        assert_eq!(log.lock().unwrap().len(), 0);
+        clock.advance(Duration::from_millis(3)).await; // 3
+        wait_for_message_count(log.clone(), 1).await;
+        clock.advance(Duration::from_millis(2)).await; // 5
+        wait_for_message_count(log.clone(), 2).await;
+        clock.advance(Duration::from_millis(1)).await; // 6
+        wait_for_message_count(log.clone(), 3).await;
+        clock.advance(Duration::from_millis(3)).await; // 9
+        wait_for_message_count(log.clone(), 4).await;
+        clock.advance(Duration::from_millis(1)).await; // 10
+        wait_for_message_count(log.clone(), 5).await;
+        clock.advance(Duration::from_millis(2)).await; // 12
+        wait_for_message_count(log.clone(), 6).await;
+        clock.advance(Duration::from_millis(3)).await; // 15 (both should fire)
+        wait_for_message_count(log.clone(), 8).await; // expect two back-to-back ticks at 15
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec![
+                (Phase::Pre, TestMessage::Tick(3)), // 3
+                (Phase::Pre, TestMessage::Tick(5)), // 5
+                (Phase::Pre, TestMessage::Tick(3)), // 6
+                (Phase::Pre, TestMessage::Tick(3)), // 9
+                (Phase::Pre, TestMessage::Tick(5)), // 10
+                (Phase::Pre, TestMessage::Tick(3)), // 12
+                (Phase::Pre, TestMessage::Tick(3)), // 15
+                (Phase::Pre, TestMessage::Tick(5)), // 15
+            ]
+        );
+
+        // Shutdown cleanly
+        cancellation_token.cancel();
+        let _ = cleanup_called.reader().await_value().await;
+        let result = timeout(Duration::from_secs(30), join)
+            .await
+            .expect("dispatcher did not stop in time")
+            .expect("join failed");
+
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
+        assert!(matches!(
+            error_state.reader().read(),
+            Some(SlateDBError::BackgroundTaskShutdown)
+        ));
+        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+    }
 }
