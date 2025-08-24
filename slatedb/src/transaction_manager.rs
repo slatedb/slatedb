@@ -1,10 +1,10 @@
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
+use log::warn;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tracing::warn;
 use uuid::Uuid;
 
 pub(crate) struct TransactionState {
@@ -171,7 +171,7 @@ impl TransactionManager {
         if let Some(mut txn_state) = inner.active_txns.remove(txn_id) {
             // this should never happen, but having this check may let proptest easier to have.
             if txn_state.read_only {
-                panic!("attempted to commit a read-only transaction");
+                unreachable!("attempted to commit a read-only transaction");
             }
             txn_state.track_write_keys(keys.iter().cloned());
             txn_state.mark_as_committed(committed_seq);
