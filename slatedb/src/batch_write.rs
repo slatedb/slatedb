@@ -133,6 +133,7 @@ impl DbInner {
         Ok(durable_watcher)
     }
 
+    /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set.
     fn extract_row_entries(&self, batch: WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
         batch
             .ops

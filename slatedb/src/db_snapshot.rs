@@ -28,7 +28,7 @@ impl DbSnapshot {
         txn_manager: Arc<TransactionManager>,
         seq: u64,
     ) -> Arc<Self> {
-        let txn_id = txn_manager.new_txn(seq, true, None);
+        let txn_id = txn_manager.new_txn(seq, true);
 
         Arc::new(Self {
             txn_id,
