@@ -220,11 +220,13 @@ pub(crate) struct FenceableCompactionState {
 
 ### Persisting Internal Compactions
 
-1. Size_tiered_compaction compaction scheduler executes `maybe_schedule_compaction` and returns a list of compactions to be executed.
+1. Compactor fetches compactions from the compaction_state polled during this compactionEventLoop iteration with the compactionStatus as `submitted` and returns a list of compactions.
 
-2. Compactor executes the `submit_compaction` method on the list of compactions from Step(1). the method delegates the validation of the compactions to the compactor_state.rs.
+2. Size_tiered_compaction compaction scheduler executes `maybe_schedule_compaction` and appends to this list of compactions.
 
-3. For each compaction in the input list of compactions, The compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
+3. Compactor executes the `submit_compaction` method on the list of compactions from Step(1). The method delegates the validation of the compactions to the compactor_state.rs.
+
+4. For each compaction in the input list of compactions, The compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
 
     - Check If the count of runnning compactions is less than the threshold. If yes, continue
 
@@ -236,26 +238,27 @@ pub(crate) struct FenceableCompactionState {
 
     - The existing validations in `submit_compaction` method.
 
-4. When a compaction successfully validates, it is appended to the local copy of compactor_state `compactions` param and `new_compactions` list.
+5. When a compaction successfully validates, the status of the compaction is updated as `in_progress` in the compaction_state. When the validation is unsuccessful, the status of the compaction is updated as `failed` in the CompactionState.
 
-5. Try writing the compactor_state to the next sequential .compactor file.
+6. Try writing the compactor_state to the next sequential .compactor file.
 
     If file exists,
 
       - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
 
-      - If latest .compactor compactor_epoch == current compactor epoch, reconcile the compactor_state and pass `new_compactions` object to Step(3). This process would continue until successful .compactor file write or the `new_compaction` object is empty.
+      - If latest .compactor compactor_epoch == current compactor epoch, reconcile the compactor_state and retry.
+        [This would happen only when an external process like CLI has written a manual compaction request]
 
       - If latest .compactor compactor_epoch < current compactor epoch, panic
       ( Compactor_epoch going backwards)
 
     [When this step is successful, compaction is persisted in the .compactor file]
 
-6. Now, `start_compaction()` for each compaction in the `compactions` param if the count of running compactions is below threshold.
+7. Now, `start_compaction()` for each compaction in the `compactions` param if the count of running compactions is below threshold.
 
-7. A new `CompactionJob` is created using the last job_attempt or afresh if it the first CompactionJob. The `CompactionJob` is then handed to the CompactionExecutor for execution.
+8. A new `CompactionJob` is created using the last job_attempt or afresh if it the first CompactionJob. The `CompactionJob` is then handed to the CompactionExecutor for execution.
 
-8. We need to update CompactionExecutor code to support the following:
+9. We need to update CompactionExecutor code to support the following:
 
     - Resuming Partially executed compactions (covered separately in the section below)
 
@@ -268,7 +271,7 @@ The CompactionExecutor would persist the compaction_state in .compactor file by 
     - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the CompactionJob on the write. [Agreed]
 
 
-9. Once the compactionJob is completed, follow the steps mentioned in the State Managment protocol.    
+10. Once the compactionJob is completed, follow the steps mentioned in the State Managment protocol.    
 
 
 ### Persisting External Compactions
@@ -295,7 +298,7 @@ The idea is to leverage the existing compaction workflow. Need a mechanism to pl
 
   Note: Invalid compactions would be dropped from the list of compactions during validation.
 
-4. When a compaction successfully validates, it is appended to the local copy of compactor_state `compactions` param and `new_compactions` list.
+4. When a compaction successfully validates, the status of the compaction is updated as `submitted` in the compaction_state and added/updated in the `new_compactions` list.
 
 5. Try writing the compactor_state to the next sequential .compactor file.
 
@@ -304,12 +307,14 @@ The idea is to leverage the existing compaction workflow. Need a mechanism to pl
       - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
 
       - If latest .compactor compactor_epoch == current compactor epoch, reconcile the compactor_state and pass `new_compactions` object to Step(3). This process would continue until successful .compactor file write or the `new_compaction` object is empty.
+      [This would happen when the compactor has written a .compactor file]
 
       - If latest .compactor compactor_epoch < current compactor epoch, panic
       ( Compactor_epoch going backwards)
 
     [When this step is successful, compaction is persisted in the .compactor file]
 
+Note: The validations added in this protocol are best effort as the authority to validate a compaction lies with the compactor daemon thread. For more details refer(https://github.com/slatedb/slatedb/pull/695#discussion_r2289989866)
 
 ### Resuming Partial Compactions
 
