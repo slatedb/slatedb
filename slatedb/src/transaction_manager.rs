@@ -126,7 +126,7 @@ impl TransactionManager {
 
         // if there's no active non-readonly transactions, we don't need to track the recent
         // committed txn, since it's impossible to have any conflict.
-        if !inner.active_txns.values().any(|txn| !txn.read_only) {
+        if !inner.has_non_readonly_active_txn() {
             return;
         }
 
@@ -182,6 +182,10 @@ impl TransactionManagerInner {
             .filter(|state| !state.read_only)
             .map(|state| state.started_seq)
             .min()
+    }
+
+    fn has_non_readonly_active_txn(&self) -> bool {
+        self.active_txns.values().any(|state| !state.read_only)
     }
 
     fn recycle_recent_committed_txns(&mut self) {
@@ -1167,11 +1171,11 @@ mod tests {
                     // recent_committed_txns.is_empty() OR (there exists an active transaction in active_txns.values() that is not read-only)
                     let inner = txn_manager.inner.read();
 
-                    // if the recent_committed_txns queue is not empty, there must be at least one active write transaction
+                    // if the recent_committed_txns queue is not empty, there must be at least one non-readonly active transaction
                     if !inner.recent_committed_txns.is_empty() {
-                        let has_active_writer = inner.active_txns.values().any(|txn| !txn.read_only);
+                        let has_no_non_readonly_active_txn = inner.has_non_readonly_active_txn();
                         prop_assert!(
-                            has_active_writer,
+                            has_no_non_readonly_active_txn,
                             "invariant violation: recent_committed_txns is not empty but there are no active write transactions. \
                             Active transaction IDs: {:?}, Number of recent committed: {}",
                             inner.active_txns.keys().collect::<Vec<_>>(),
@@ -1180,7 +1184,7 @@ mod tests {
                     }
 
                     // when there's no active non-readonly transactions, recent_committed_txns should be empty
-                    if !inner.active_txns.values().any(|t| !t.read_only) {
+                    if !inner.has_non_readonly_active_txn() {
                         prop_assert!(inner.recent_committed_txns.is_empty(), "If there's no active non-readonly transactions, recent_committed_txns should be empty");
                     }
                 }
