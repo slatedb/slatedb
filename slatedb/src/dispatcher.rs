@@ -92,7 +92,10 @@ use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use fail_parallel::{fail_point, FailPointRegistry};
-use futures::{future::select_all, stream::BoxStream};
+use futures::{
+    stream::{BoxStream, FuturesUnordered},
+    StreamExt,
+};
 use log::warn;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -251,12 +254,12 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                 },
             }
         };
+        let mut ticker_futures: FuturesUnordered<_> =
+            tickers.iter_mut().map(|t| t.tick()).collect();
         loop {
             fail_point!(Arc::clone(&self.fp_registry), "dispatcher-run-loop", |_| {
                 Err(SlateDBError::Fenced)
             });
-            let ticker_futures = tickers.iter_mut().map(|t| t.tick()).collect::<Vec<_>>();
-            let tickers_not_empty = !ticker_futures.is_empty();
             tokio::select! {
                 biased;
                 // stop the loop if we're in an error state or cancelled
@@ -267,9 +270,10 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                 Some(message) = self.rx.recv() => {
                     self.handler.handle(message).await?;
                 },
-                // if no messages, check tickers (select_all barfs if ticker_futures is empty, so check)
-                (message, _idx, _remaining) = select_all(ticker_futures), if tickers_not_empty => {
+                // if no messages, check tickers
+                Some((message, ticker)) = ticker_futures.next() => {
                     self.handler.handle(message).await?;
+                    ticker_futures.push(ticker.tick());
                 },
             }
         }
@@ -362,11 +366,11 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// ## Returns
     ///
     /// A [Future] that resolves when the ticker ticks.
-    pub(crate) fn tick(&mut self) -> Pin<Box<dyn Future<Output = T> + Send + '_>> {
+    pub(crate) fn tick(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
         let message = (self.message_factory)();
         Box::pin(async move {
             self.inner.tick().await;
-            message
+            (message, self)
         })
     }
 }

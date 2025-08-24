@@ -95,6 +95,7 @@ impl<'a> SystemClockTicker<'a> {
     fn calc_duration(&self) -> TimeDelta {
         let zero = TimeDelta::milliseconds(0);
         let now_dt = self.clock.now();
+        eprintln!("now: {}", now_dt);
         let elapsed = now_dt.signed_duration_since(self.last_tick);
         assert!(elapsed >= zero, "elapsed time is negative");
         // If we've already passed the next tick, sleep for 0ms to tick immediately.
