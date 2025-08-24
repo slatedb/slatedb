@@ -108,7 +108,7 @@ impl TransactionManager {
         inner.has_conflict(keys, started_seq)
     }
 
-    /// Record the a recent write to `recent_commited_txns`. This method should be called after
+    /// Record a recent write to `recent_commited_txns`. This method should be called after
     /// [`Self::has_conflict`] is checked as false.
     ///
     /// Please note that it's not a requirement to be inside a Transaction for a write operation
