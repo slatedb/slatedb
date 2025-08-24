@@ -247,7 +247,9 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         let mut check_shutdown = async move || {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {},
-                _ = error_watcher.await_value() => {},
+                e = error_watcher.await_value() => {
+                    warn!("halting message loop because db is in error state [error={:#?}]", e);
+                },
             }
         };
         loop {
