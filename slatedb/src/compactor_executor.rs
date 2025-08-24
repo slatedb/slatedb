@@ -23,7 +23,7 @@ use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
-use crate::utils::{build_iters_concurrent, compute_max_parallel, spawn_bg_task, IdGenerator};
+use crate::utils::{build_concurrent, compute_max_parallel, spawn_bg_task, IdGenerator};
 use log::{debug, error};
 use tracing::instrument;
 use uuid::Uuid;
@@ -144,10 +144,9 @@ impl TokioCompactionExecutorInner {
             eager_spawn: true,
         };
 
-        // TODO: Need to decide on an upper bound for the number of parallel iterators.
-        let max_parallel = compute_max_parallel(compaction.ssts.len(), &compaction.sorted_runs, 8);
+        let max_parallel = compute_max_parallel(compaction.ssts.len(), &compaction.sorted_runs, 4);
         // L0 (borrowed)
-        let l0_iters_futures = build_iters_concurrent(compaction.ssts.iter(), max_parallel, |h| {
+        let l0_iters_futures = build_concurrent(compaction.ssts.iter(), max_parallel, |h| {
             SstIterator::new_borrowed(
                 .., // full range for compaction or your range
                 h,
@@ -158,7 +157,7 @@ impl TokioCompactionExecutorInner {
 
         // SR (borrowed)
         let sr_iters_futures =
-            build_iters_concurrent(compaction.sorted_runs.iter(), max_parallel, |sr| async {
+            build_concurrent(compaction.sorted_runs.iter(), max_parallel, |sr| async {
                 SortedRunIterator::new_borrowed(
                     .., // full range for compaction or your range
                     sr,
