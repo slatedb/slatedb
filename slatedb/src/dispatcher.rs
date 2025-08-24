@@ -108,9 +108,8 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 
 /// A dispatcher that invokes [MessageHandler] callbacks when events occur.
 ///
-/// [MessageDispatcher] receives a [MessageHandler] and optional
-/// [mpsc::UnboundedReceiver<T>]. Messages sent to the receiver are passed to the
-/// [MessageHandler] for processing.
+/// [MessageDispatcher] receives a [MessageHandler] and [mpsc::UnboundedReceiver<T>].
+/// Messages sent to the receiver are passed to the [MessageHandler] for processing.
 ///
 /// [MessageDispatcher::run] is the primary entry point for running the dispatcher;
 /// it is responsible for running the main event loop ([MessageDispatcher::run_loop])
@@ -120,8 +119,8 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 /// The function receives messages from the [mpsc::UnboundedReceiver<T>] and from any
 /// [MessageDispatcherTicker]s, and passes them to the [MessageHandler] for processing.
 /// It also shuts down when the either [crate::db_state::DbState::error] is set or the
-/// [tokio_util::sync::CancellationToken] is cancelled. See [MessageDispatcher::run_loop]
-/// for more details on its behavior.
+/// [CancellationToken] is cancelled. See [MessageDispatcher::run_loop] for more
+/// details on its behavior.
 ///
 /// [crate::dispatcher] contains a complete code example.
 pub(crate) struct MessageDispatcher<T: Send + std::fmt::Debug> {
@@ -134,8 +133,8 @@ pub(crate) struct MessageDispatcher<T: Send + std::fmt::Debug> {
 }
 
 impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
-    /// Creates a new [MessageDispatcher] without a channel. This is useful for
-    /// event handlers that only use tickers.
+    /// Creates a new [MessageDispatcher]. Messages sent to the channel are passed to
+    /// the [MessageHandler] for processing.
     ///
     /// ## Arguments
     ///
@@ -161,9 +160,9 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         )
     }
 
-    /// Creates a new [MessageDispatcher] with a channel. This is the primary way to
-    /// create a dispatcher. Messages sent to the channel are passed to the
-    /// [MessageHandler] for processing.
+    /// Creates a new [MessageDispatcher]. Messages sent to the channel are passed to
+    /// the [MessageHandler] for processing. A fail point registry is provided for
+    /// fail points.
     ///
     /// ## Arguments
     ///
