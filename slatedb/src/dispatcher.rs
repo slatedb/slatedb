@@ -515,9 +515,13 @@ mod test {
     }
 
     async fn wait_for_message_count(log: Arc<Mutex<Vec<(Phase, TestMessage)>>>, count: usize) {
-        while log.lock().unwrap().len() < count {
-            yield_now().await;
-        }
+        timeout(Duration::from_secs(30), async move {
+            while log.lock().unwrap().len() < count {
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("timeout waiting for message count");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -849,7 +853,7 @@ mod test {
         clock.advance(Duration::from_millis(3)).await; // 15 (both should fire)
         wait_for_message_count(log.clone(), 8).await; // expect two back-to-back ticks at 15
         assert_eq!(
-            log.lock().unwrap().clone(),
+            log.lock().unwrap().clone()[..6],
             vec![
                 (Phase::Pre, TestMessage::Tick(3)), // 3
                 (Phase::Pre, TestMessage::Tick(5)), // 5
@@ -857,8 +861,19 @@ mod test {
                 (Phase::Pre, TestMessage::Tick(3)), // 9
                 (Phase::Pre, TestMessage::Tick(5)), // 10
                 (Phase::Pre, TestMessage::Tick(3)), // 12
-                (Phase::Pre, TestMessage::Tick(3)), // 15
-                (Phase::Pre, TestMessage::Tick(5)), // 15
+            ]
+        );
+        // expect two back-to-back ticks at 15
+        let mut last_two_ticks = log.lock().unwrap().clone()[6..].to_vec();
+        last_two_ticks.sort_by(|a, b| match (a.1.clone(), b.1.clone()) {
+            (TestMessage::Tick(a), TestMessage::Tick(b)) => a.cmp(&b),
+            _ => panic!("expected ticks"),
+        });
+        assert_eq!(
+            last_two_ticks,
+            vec![
+                (Phase::Pre, TestMessage::Tick(3)),
+                (Phase::Pre, TestMessage::Tick(5))
             ]
         );
 
@@ -869,7 +884,6 @@ mod test {
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
-
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
         assert!(matches!(
             error_state.reader().read(),
