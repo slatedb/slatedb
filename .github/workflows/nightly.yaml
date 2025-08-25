@@ -104,6 +104,7 @@ jobs:
           AWS_REGION: auto
           AWS_ENDPOINT: https://t3.storage.dev
           SLATEDB_BENCH_CLEAN: true
+          RUST_LOG: info
         run: |
           aws s3 rm --endpoint-url $AWS_ENDPOINT s3://${{ secrets.TIGRIS_AWS_BUCKET_BENCHER }} --recursive
           ./slatedb-bencher/benchmark-db.sh

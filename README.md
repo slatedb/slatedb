@@ -139,6 +139,7 @@ See who's using SlateDB.
 - [Embucket](https://www.embucket.com)
 - [Merklemap](https://merklemap.com)
 - [Responsive](https://responsive.dev)
+- [SQLync](https://sqlync.com)
 - [Tensorlake](https://www.tensorlake.ai)
 
 ## Talks
