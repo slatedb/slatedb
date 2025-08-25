@@ -805,16 +805,20 @@ mod test {
             .add_clock_schedule(1); // 21ms
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
-        let mut dispatcher = MessageDispatcher::new(
+        let fp_registry = Arc::new(FailPointRegistry::default());
+        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
             error_state.clone(),
+            fp_registry.clone(),
         );
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         let join = tokio::spawn(async move { dispatcher.run().await });
+        assert_eq!(log.lock().unwrap().len(), 0);
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
 
-        assert_eq!(log.lock().unwrap().clone(), vec![]);
         wait_for_message_count(log.clone(), 9).await;
         assert_eq!(
             log.lock().unwrap().clone(),
@@ -894,8 +898,10 @@ mod test {
             error_state.clone(),
             fp_registry.clone(),
         );
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         let join = tokio::spawn(async move { dispatcher.run().await });
         assert_eq!(log.lock().unwrap().len(), 0);
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
 
         wait_for_message_count(log.clone(), 10).await;
         assert_eq!(
@@ -976,8 +982,10 @@ mod test {
             error_state.clone(),
             fp_registry.clone(),
         );
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         let join = tokio::spawn(async move { dispatcher.run().await });
         assert_eq!(log.lock().unwrap().len(), 0);
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
 
         wait_for_message_count(log.clone(), 16).await;
         assert_eq!(
