@@ -765,7 +765,6 @@ mod test {
         );
     }
 
-
     // This test simulates the following timeline:
     // immediate tick(3) (tickers always return first ticks immediately)
     // immediate tick(5)
