@@ -621,6 +621,7 @@ mod test {
             error_state.clone(),
             fp_registry.clone(),
         );
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         let join = tokio::spawn(async move { dispatcher.run().await });
 
         // Stop before cleanup so we can send a message and ensure it is drained
@@ -628,10 +629,12 @@ mod test {
 
         // Send a regular message successfully
         tx.send(TestMessage::Channel(42)).unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->pause").unwrap();
         wait_for_message_count(log.clone(), 1).await;
 
         // Force a return by setting an error message
         error_state.write(SlateDBError::Fenced);
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
 
         // Send another message after error state is set
         tx.send(TestMessage::Channel(77)).unwrap();
