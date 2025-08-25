@@ -133,12 +133,6 @@ pub(crate) fn is_not_expired(entry: &RowEntry, now: i64) -> bool {
     }
 }
 
-pub(crate) fn bg_task_result_into_err(result: &Result<(), SlateDBError>) -> SlateDBError {
-    match result {
-        Ok(_) => SlateDBError::BackgroundTaskShutdown,
-        Err(err) => err.clone(),
-    }
-}
 
 /// Merge two options using the provided function.
 pub(crate) fn merge_options<T>(

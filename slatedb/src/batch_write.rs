@@ -185,19 +185,17 @@ impl DbInner {
         Some(spawn_bg_task(
             tokio_handle,
             move |result| {
-                let err = match result {
+                match result {
                     Ok(()) => {
                         info!("write task shutdown complete");
-                        SlateDBError::BackgroundTaskShutdown
                     }
                     Err(err) => {
                         warn!("write task exited [error={}]", err);
-                        err.clone()
+                        // notify any waiters about the failure
+                        let mut state = this.state.write();
+                        state.record_fatal_error(err.clone());
                     }
-                };
-                // notify any waiters about the failure
-                let mut state = this.state.write();
-                state.record_fatal_error(err.clone());
+                }
             },
             fut,
         ))

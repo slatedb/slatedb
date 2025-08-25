@@ -107,8 +107,6 @@ pub(crate) enum SlateDBError {
     // we need to wrap the panic args in a mutex so that SlateDbError is Sync
     BackgroundTaskPanic(Arc<Mutex<Box<dyn Any + Send>>>),
 
-    #[error("background task shutdown")]
-    BackgroundTaskShutdown,
 
     #[error("merge operator error")]
     MergeOperatorError(#[from] MergeOperatorError),
@@ -190,6 +188,9 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid object store URL. url=`{0}`")]
     InvalidObjectStoreURL(String, #[source] url::ParseError),
+
+    #[error("operation cancelled due to shutdown")]
+    Shutdown,
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -370,7 +371,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::BackgroundTaskPanic(err) => {
                 Error::system(msg).with_source(Box::new(PanicError(err)))
             }
-            SlateDBError::BackgroundTaskShutdown => Error::system(msg),
             SlateDBError::MergeOperatorError(err) => {
                 Error::operation(msg).with_source(Box::new(err))
             }
@@ -410,6 +410,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidObjectStoreURL(_, err) => {
                 Error::configuration(msg).with_source(Box::new(err))
             }
+            SlateDBError::Shutdown => Error::system(msg),
         }
     }
 }
