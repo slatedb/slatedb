@@ -35,11 +35,14 @@ table ParallelCompactionJob {
     // InputSortedRuns completed before the job started
     completed_input_sr_ids:[uint32];
 
-     // Subset of InputSSTables to be compacted
-    input_sst_ids:[CompactedSstId];
+    // Subset of InputSSTables to be compacted
+    input_sst:[CompactedSsTable];
 
     // Subset of InputSortedRuns to be compacted
-    input_sr_ids:[uint32];
+    input_sr:[SortedRun];
+
+    // Output SR of the subset Input SSTs and SortedRuns
+    output_sr:SortedRun;
 }
 */
 
