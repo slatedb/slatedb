@@ -1,6 +1,6 @@
-use std::ptr;
-use slatedb::{Db, WriteBatch};
 use slatedb::DbIterator;
+use slatedb::{Db, WriteBatch};
+use std::ptr;
 use tokio::runtime::Runtime;
 
 /// Internal struct that owns a Tokio runtime and a SlateDB instance.
@@ -31,8 +31,11 @@ impl CSdbHandle {
         self.0.is_null()
     }
 
-    /// Safety: caller must ensure the pointer is valid.
-    pub unsafe fn as_inner(&self) -> &mut SlateDbFFI {
+    /// # Safety
+    ///
+    /// Caller must ensure the pointer is valid and properly aligned.
+    /// The returned mutable reference must not outlive the pointer's validity.
+    pub unsafe fn as_inner(&mut self) -> &mut SlateDbFFI {
         &mut *self.0
     }
 }
@@ -91,24 +94,24 @@ pub struct CSdbReadOptions {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CSdbScanOptions {
-    pub durability_filter: i32,    // 0 = Remote (default), 1 = Memory
-    pub dirty: bool,               // Include uncommitted writes (default: false)
-    pub read_ahead_bytes: u64,     // Buffer size for read-ahead (default: 1)
-    pub cache_blocks: bool,        // Whether to cache fetched blocks (default: false)
+    pub durability_filter: i32, // 0 = Remote (default), 1 = Memory
+    pub dirty: bool,            // Include uncommitted writes (default: false)
+    pub read_ahead_bytes: u64,  // Buffer size for read-ahead (default: 1)
+    pub cache_blocks: bool,     // Whether to cache fetched blocks (default: false)
 }
 
 /// Internal struct for managing database iterators in FFI
 /// Contains the iterator and a reference to the database to ensure proper lifetime management
 pub struct CSdbIterator {
-    pub db_ptr: *mut SlateDbFFI,           // Keep DB alive via pointer reference
-    pub iter: DbIterator<'static>,         // Iterator with transmuted lifetime
+    pub db_ptr: *mut SlateDbFFI,   // Keep DB alive via pointer reference
+    pub iter: DbIterator<'static>, // Iterator with transmuted lifetime
 }
 
 impl CSdbIterator {
     /// Create a new iterator FFI wrapper
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// This function uses unsafe transmute to extend the iterator's lifetime to 'static.
     /// This is ONLY safe because:
     /// 1. Most iterator data (SST files) is owned by the iterator, not borrowed
@@ -118,7 +121,7 @@ impl CSdbIterator {
     pub fn new(db_ptr: *mut SlateDbFFI, iter: DbIterator<'_>) -> Box<Self> {
         // SAFETY: See safety comment above - this transmute is only safe with user contract
         let static_iter: DbIterator<'static> = unsafe { std::mem::transmute(iter) };
-        
+
         Box::new(CSdbIterator {
             db_ptr,
             iter: static_iter,
@@ -129,5 +132,5 @@ impl CSdbIterator {
 /// Internal struct for managing WriteBatch operations in FFI
 /// Contains the WriteBatch that can be moved out when writing to the database
 pub struct CSdbWriteBatch {
-    pub batch: Option<WriteBatch>,  // Can be moved out on write
+    pub batch: Option<WriteBatch>, // Can be moved out on write
 }

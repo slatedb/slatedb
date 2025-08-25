@@ -1,12 +1,18 @@
-use crate::error::{create_error_result, create_success_result, slate_error_to_code, CSdbError, CSdbResult};
+use crate::error::{
+    create_error_result, create_success_result, slate_error_to_code, CSdbError, CSdbResult,
+};
 use crate::types::{CSdbIterator, CSdbKeyValue};
 
 // ============================================================================
 // Iterator Functions
 // ============================================================================
 
+/// # Safety
+///
+/// - `iter` must be a valid pointer to a CSdbIterator
+/// - `kv_out` must be a valid pointer to a location where a key-value pair can be stored
 #[no_mangle]
-pub extern "C" fn slatedb_iterator_next(
+pub unsafe extern "C" fn slatedb_iterator_next(
     iter: *mut CSdbIterator,
     kv_out: *mut CSdbKeyValue,
 ) -> CSdbResult {
@@ -60,8 +66,12 @@ pub extern "C" fn slatedb_iterator_next(
     }
 }
 
+/// # Safety
+///
+/// - `iter` must be a valid pointer to a CSdbIterator
+/// - `key` must point to valid memory of at least `key_len` bytes
 #[no_mangle]
-pub extern "C" fn slatedb_iterator_seek(
+pub unsafe extern "C" fn slatedb_iterator_seek(
     iter: *mut CSdbIterator,
     key: *const u8,
     key_len: usize,
@@ -71,7 +81,10 @@ pub extern "C" fn slatedb_iterator_seek(
     }
 
     if key.is_null() || key_len == 0 {
-        return create_error_result(CSdbError::InvalidArgument, "Seek key cannot be null or empty");
+        return create_error_result(
+            CSdbError::InvalidArgument,
+            "Seek key cannot be null or empty",
+        );
     }
 
     let iter_ffi = unsafe { &mut *iter };
@@ -93,16 +106,17 @@ pub extern "C" fn slatedb_iterator_seek(
     }
 }
 
+/// # Safety
+///
+/// - `iter` must be a valid pointer to a CSdbIterator that was previously allocated
 #[no_mangle]
-pub extern "C" fn slatedb_iterator_close(
-    iter: *mut CSdbIterator,
-) -> CSdbResult {
+pub unsafe extern "C" fn slatedb_iterator_close(iter: *mut CSdbIterator) -> CSdbResult {
     if iter.is_null() {
         return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
     }
 
     // Simply drop the iterator - this frees all resources
-    unsafe { 
+    unsafe {
         let _ = Box::from_raw(iter); // Explicitly drop the Box
     }
 

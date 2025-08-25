@@ -1,16 +1,22 @@
 use std::os::raw::c_char;
 use std::ptr;
 
-use slatedb::DbReader;
-use slatedb::config::DbReaderOptions;
 use slatedb::admin::load_object_store_from_env;
+use slatedb::config::DbReaderOptions;
+use slatedb::DbReader;
 use tokio::runtime::{Builder, Runtime};
 use uuid::Uuid;
 
 // Import our shared modules
-use crate::config::{parse_store_config, create_object_store, convert_read_options, convert_scan_options, convert_range_bounds, convert_reader_options};
-use crate::error::{create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError, CSdbResult};
-use crate::types::{CSdbValue, CSdbReadOptions, CSdbScanOptions, CSdbIterator, SlateDbFFI};
+use crate::config::{
+    convert_range_bounds, convert_read_options, convert_reader_options, convert_scan_options,
+    create_object_store, parse_store_config,
+};
+use crate::error::{
+    create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
+    CSdbResult,
+};
+use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue, SlateDbFFI};
 
 /// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
 /// Similar to SlateDbFFI but for read-only operations.
@@ -40,8 +46,11 @@ impl CSdbReaderHandle {
         self.0.is_null()
     }
 
-    /// Safety: caller must ensure the pointer is valid.
-    pub unsafe fn as_inner(&self) -> &mut DbReaderFFI {
+    /// # Safety
+    ///
+    /// Caller must ensure the pointer is valid and properly aligned.
+    /// The returned mutable reference must not outlive the pointer's validity.
+    pub unsafe fn as_inner(&mut self) -> &mut DbReaderFFI {
         &mut *self.0
     }
 }
@@ -70,13 +79,11 @@ impl Default for CSdbReaderOptions {
     }
 }
 
-
-
 #[no_mangle]
 pub extern "C" fn slatedb_reader_open(
     path: *const c_char,
     store_config_json: *const c_char,
-    checkpoint_id: *const c_char,  // Nullable - use null for latest
+    checkpoint_id: *const c_char, // Nullable - use null for latest
     reader_options: *const CSdbReaderOptions,
 ) -> CSdbReaderHandle {
     let path_str = match safe_str_from_ptr(path) {
@@ -110,14 +117,13 @@ pub extern "C" fn slatedb_reader_open(
     let object_store = {
         let store_result = safe_str_from_ptr(store_config_json)
             .and_then(|json_str| {
-                parse_store_config(json_str)
-                    .map_err(|_| CSdbError::InvalidArgument)
+                parse_store_config(json_str).map_err(|_| CSdbError::InvalidArgument)
             })
             .and_then(|config| {
                 rt.block_on(create_object_store(&config))
                     .map_err(|_| CSdbError::InvalidArgument)
             });
-            
+
         match store_result {
             Ok(store) => store,
             Err(_) => {
@@ -131,9 +137,8 @@ pub extern "C" fn slatedb_reader_open(
     };
 
     // Open DbReader
-    match rt.block_on(async {
-        DbReader::open(path_str, object_store, checkpoint_uuid, opts).await
-    }) {
+    match rt.block_on(async { DbReader::open(path_str, object_store, checkpoint_uuid, opts).await })
+    {
         Ok(reader) => {
             let ffi = Box::new(DbReaderFFI { rt, reader });
             CSdbReaderHandle(Box::into_raw(ffi))
@@ -142,9 +147,15 @@ pub extern "C" fn slatedb_reader_open(
     }
 }
 
+/// # Safety
+///
+/// - `handle` must contain a valid reader handle pointer
+/// - `key` must point to valid memory of at least `key_len` bytes
+/// - `read_options` must be a valid pointer to CSdbReadOptions or null
+/// - `result` must be a valid pointer to a location where a value can be stored
 #[no_mangle]
-pub extern "C" fn slatedb_reader_get_with_options(
-    handle: CSdbReaderHandle,
+pub unsafe extern "C" fn slatedb_reader_get_with_options(
+    mut handle: CSdbReaderHandle,
     key: *const u8,
     key_len: usize,
     read_options: *const CSdbReadOptions,
@@ -161,15 +172,15 @@ pub extern "C" fn slatedb_reader_get_with_options(
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
     let rust_read_opts = convert_read_options(read_options);
 
-    let inner = unsafe { handle.as_inner() };
+    let inner = handle.as_inner();
     match inner.block_on(inner.reader.get_with_options(key_slice, &rust_read_opts)) {
         Ok(Some(bytes)) => {
             let data = bytes.as_ptr() as *mut u8;
             let len = bytes.len();
-            
+
             // Leak the bytes so they remain valid for C caller
             std::mem::forget(bytes);
-            
+
             unsafe {
                 *result = CSdbValue { data, len };
             }
@@ -177,7 +188,10 @@ pub extern "C" fn slatedb_reader_get_with_options(
         }
         Ok(None) => {
             unsafe {
-                *result = CSdbValue { data: ptr::null_mut(), len: 0 };
+                *result = CSdbValue {
+                    data: ptr::null_mut(),
+                    len: 0,
+                };
             }
             create_success_result()
         }
@@ -188,9 +202,16 @@ pub extern "C" fn slatedb_reader_get_with_options(
     }
 }
 
+/// # Safety
+///
+/// - `handle` must contain a valid reader handle pointer
+/// - `start_key` must point to valid memory of at least `start_key_len` bytes (if not null)
+/// - `end_key` must point to valid memory of at least `end_key_len` bytes (if not null)
+/// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+/// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
 #[no_mangle]
-pub extern "C" fn slatedb_reader_scan_with_options(
-    handle: CSdbReaderHandle,
+pub unsafe extern "C" fn slatedb_reader_scan_with_options(
+    mut handle: CSdbReaderHandle,
     start_key: *const u8,
     start_key_len: usize,
     end_key: *const u8,
@@ -207,19 +228,18 @@ pub extern "C" fn slatedb_reader_scan_with_options(
     }
 
     // Convert range bounds
-    let range = convert_range_bounds(
-        start_key, start_key_len, 
-        end_key, end_key_len
-    );
-    
+    let range = convert_range_bounds(start_key, start_key_len, end_key, end_key_len);
+
     let rust_scan_opts = convert_scan_options(scan_options);
 
-    let inner = unsafe { handle.as_inner() };
+    // Extract raw pointer before borrowing handle
+    let handle_ptr = handle.0 as *mut SlateDbFFI;
+    let inner = handle.as_inner();
     match inner.block_on(inner.reader.scan_with_options(range, &rust_scan_opts)) {
         Ok(iter) => {
             // Create iterator FFI wrapper - we'll use a dummy SlateDbFFI pointer since
             // CSdbIterator was designed for DB, but DbReader iterators work similarly
-            let iter_box = CSdbIterator::new(handle.0 as *mut SlateDbFFI, iter);
+            let iter_box = CSdbIterator::new(handle_ptr, iter);
             unsafe {
                 *iterator_ptr = Box::into_raw(iter_box);
             }
@@ -239,7 +259,7 @@ pub extern "C" fn slatedb_reader_close(handle: CSdbReaderHandle) -> CSdbResult {
     }
 
     let inner = unsafe { Box::from_raw(handle.0) };
-    
+
     // Close the reader
     match inner.block_on(inner.reader.close()) {
         Ok(_) => create_success_result(),

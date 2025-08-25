@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use slatedb::object_store::{ObjectStore, memory::InMemory};
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
+use slatedb::object_store::{memory::InMemory, ObjectStore};
 
 use object_store::client::ClientOptions;
 
 use crate::config::AwsConfigJson;
-use crate::error::{CSdbError, CSdbResult, create_error_result};
+use crate::error::{create_error_result, CSdbError, CSdbResult};
 
 // Helper function to create in-memory object store
 pub fn create_inmemory_store() -> Result<Arc<dyn ObjectStore>, CSdbResult> {
@@ -15,26 +15,28 @@ pub fn create_inmemory_store() -> Result<Arc<dyn ObjectStore>, CSdbResult> {
 }
 
 // Helper function to create AWS S3 object store
-pub async fn create_aws_store(aws_config: &AwsConfigJson) -> Result<Arc<dyn ObjectStore>, CSdbResult> {
+pub async fn create_aws_store(
+    aws_config: &AwsConfigJson,
+) -> Result<Arc<dyn ObjectStore>, CSdbResult> {
     let bucket_str = if let Some(bucket) = aws_config.bucket.clone() {
         bucket
     } else if let Ok(bucket) = std::env::var("AWS_BUCKET") {
         bucket
     } else {
         return Err(create_error_result(
-            CSdbError::InvalidArgument, 
-            "AWS bucket must be specified in config or AWS_BUCKET environment variable"
+            CSdbError::InvalidArgument,
+            "AWS bucket must be specified in config or AWS_BUCKET environment variable",
         ));
     };
-    
+
     let region_str = if let Some(region) = aws_config.region.clone() {
         region
     } else if let Ok(region) = std::env::var("AWS_REGION") {
         region
     } else {
         return Err(create_error_result(
-            CSdbError::InvalidArgument, 
-            "AWS region must be specified in config or AWS_REGION environment variable"
+            CSdbError::InvalidArgument,
+            "AWS region must be specified in config or AWS_REGION environment variable",
         ));
     };
 
@@ -45,7 +47,7 @@ pub async fn create_aws_store(aws_config: &AwsConfigJson) -> Result<Arc<dyn Obje
 
     // Configure client options with timeout settings
     let mut client_options = ClientOptions::new();
-    
+
     // Apply request timeout setting from AWS config if provided
     if let Some(timeout_ns) = aws_config.request_timeout {
         if timeout_ns > 0 {
@@ -61,7 +63,11 @@ pub async fn create_aws_store(aws_config: &AwsConfigJson) -> Result<Arc<dyn Obje
         .with_client_options(client_options);
 
     // Handle optional endpoint for S3-compatible storage
-    if let Some(endpoint_str) = aws_config.endpoint.clone().or_else(|| std::env::var("AWS_ENDPOINT").ok()) {
+    if let Some(endpoint_str) = aws_config
+        .endpoint
+        .clone()
+        .or_else(|| std::env::var("AWS_ENDPOINT").ok())
+    {
         builder = builder.with_endpoint(endpoint_str);
     }
 
@@ -85,5 +91,3 @@ pub async fn create_aws_store(aws_config: &AwsConfigJson) -> Result<Arc<dyn Obje
         }
     }
 }
-
-

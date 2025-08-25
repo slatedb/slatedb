@@ -1,6 +1,6 @@
+use slatedb::Error as SlateError;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use slatedb::Error as SlateError;
 
 // Error codes that will be exposed to C/Go
 #[repr(C)]
@@ -25,7 +25,8 @@ pub struct CSdbResult {
 
 // Helper functions for error handling
 pub fn create_error_result(error: CSdbError, message: &str) -> CSdbResult {
-    let c_message = CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
+    let c_message =
+        CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
     CSdbResult {
         error,
         message: c_message.into_raw(),
@@ -43,7 +44,7 @@ pub fn safe_str_from_ptr(ptr: *const c_char) -> Result<&'static str, CSdbError> 
     if ptr.is_null() {
         return Err(CSdbError::NullPointer);
     }
-    
+
     unsafe {
         CStr::from_ptr(ptr)
             .to_str()

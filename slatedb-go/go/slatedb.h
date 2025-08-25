@@ -44,22 +44,41 @@ typedef struct CSdbResult {
     char *message;
 } CSdbResult;
 
+typedef struct CSdbPutOptions {
+    // TTL type: 0=Default, 1=NoExpiry, 2=ExpireAfter
+    uint32_t ttl_type;
+    // TTL value in milliseconds (only used when ttl_type=2)
+    uint64_t ttl_value;
+} CSdbPutOptions;
+
+// Type-safe wrapper around a pointer to SlateDbFFI.
+// This provides better type safety than raw u64 handles.
+typedef struct CSdbHandle {
+    struct SlateDbFFI *_0;
+} CSdbHandle;
+
+typedef struct CSdbWriteOptions {
+    bool await_durable;
+} CSdbWriteOptions;
+
+typedef struct CSdbReadOptions {
+    // Durability filter: 0=Remote, 1=Memory
+    uint32_t durability_filter;
+    // Whether to include dirty/uncommitted data
+    bool dirty;
+} CSdbReadOptions;
+
 typedef struct CSdbValue {
     uint8_t *data;
     uintptr_t len;
 } CSdbValue;
 
-typedef struct CSdbKeyValue {
-    struct CSdbValue key;
-    struct CSdbValue value;
-} CSdbKeyValue;
-
-typedef struct CSdbScanResult {
-    struct CSdbKeyValue *items;
-    uintptr_t count;
-    bool has_more;
-    struct CSdbValue next_key;
-} CSdbScanResult;
+typedef struct CSdbScanOptions {
+    int32_t durability_filter;
+    bool dirty;
+    uint64_t read_ahead_bytes;
+    bool cache_blocks;
+} CSdbScanOptions;
 
 // Type-safe wrapper around a pointer to DbReaderFFI.
 // This provides better type safety than raw pointers.
@@ -78,36 +97,17 @@ typedef struct CSdbReaderOptions {
     uint64_t max_memtable_bytes;
 } CSdbReaderOptions;
 
-typedef struct CSdbReadOptions {
-    // Durability filter: 0=Remote, 1=Memory
-    uint32_t durability_filter;
-    // Whether to include dirty/uncommitted data
-    bool dirty;
-} CSdbReadOptions;
+typedef struct CSdbKeyValue {
+    struct CSdbValue key;
+    struct CSdbValue value;
+} CSdbKeyValue;
 
-typedef struct CSdbScanOptions {
-    int32_t durability_filter;
-    bool dirty;
-    uint64_t read_ahead_bytes;
-    bool cache_blocks;
-} CSdbScanOptions;
-
-// Type-safe wrapper around a pointer to SlateDbFFI.
-// This provides better type safety than raw u64 handles.
-typedef struct CSdbHandle {
-    struct SlateDbFFI *_0;
-} CSdbHandle;
-
-typedef struct CSdbPutOptions {
-    // TTL type: 0=Default, 1=NoExpiry, 2=ExpireAfter
-    uint32_t ttl_type;
-    // TTL value in milliseconds (only used when ttl_type=2)
-    uint64_t ttl_value;
-} CSdbPutOptions;
-
-typedef struct CSdbWriteOptions {
-    bool await_durable;
-} CSdbWriteOptions;
+typedef struct CSdbScanResult {
+    struct CSdbKeyValue *items;
+    uintptr_t count;
+    bool has_more;
+    struct CSdbValue next_key;
+} CSdbScanResult;
 
 #define SsTableInfo_VT_FIRST_KEY 4
 
@@ -193,37 +193,68 @@ typedef struct CSdbWriteOptions {
 
 #define Checkpoint_VT_METADATA 14
 
-void slatedb_free_result(struct CSdbResult result);
+// # Safety
+//
+// - `batch_out` must be a valid pointer to a location where a batch pointer can be stored
+struct CSdbResult slatedb_write_batch_new(struct CSdbWriteBatch **batch_out);
 
-void slatedb_free_value(struct CSdbValue value);
+// # Safety
+//
+// - `batch` must be a valid pointer to a WriteBatch
+// - `key` must point to valid memory of at least `key_len` bytes
+// - `value` must point to valid memory of at least `value_len` bytes
+struct CSdbResult slatedb_write_batch_put(struct CSdbWriteBatch *batch,
+                                          const uint8_t *key,
+                                          uintptr_t key_len,
+                                          const uint8_t *value,
+                                          uintptr_t value_len);
 
-void slatedb_free_scan_result(struct CSdbScanResult result);
+// # Safety
+//
+// - `batch` must be a valid pointer to a WriteBatch
+// - `key` must point to valid memory of at least `key_len` bytes
+// - `value` must point to valid memory of at least `value_len` bytes
+// - `options` must be a valid pointer to CSdbPutOptions or null
+struct CSdbResult slatedb_write_batch_put_with_options(struct CSdbWriteBatch *batch,
+                                                       const uint8_t *key,
+                                                       uintptr_t key_len,
+                                                       const uint8_t *value,
+                                                       uintptr_t value_len,
+                                                       const struct CSdbPutOptions *options);
 
-struct CSdbReaderHandle slatedb_reader_open(const char *path,
-                                            const char *store_config_json,
-                                            const char *checkpoint_id,
-                                            const struct CSdbReaderOptions *reader_options);
+// # Safety
+//
+// - `batch` must be a valid pointer to a WriteBatch
+// - `key` must point to valid memory of at least `key_len` bytes
+struct CSdbResult slatedb_write_batch_delete(struct CSdbWriteBatch *batch,
+                                             const uint8_t *key,
+                                             uintptr_t key_len);
 
-struct CSdbResult slatedb_reader_get_with_options(struct CSdbReaderHandle handle,
-                                                  const uint8_t *key,
-                                                  uintptr_t key_len,
-                                                  const struct CSdbReadOptions *read_options,
-                                                  struct CSdbValue *result);
+// # Safety
+//
+// - `handle` must contain a valid database handle pointer
+// - `batch` must be a valid pointer to a WriteBatch
+// - `options` must be a valid pointer to CSdbWriteOptions or null
+struct CSdbResult slatedb_write_batch_write(struct CSdbHandle handle,
+                                            struct CSdbWriteBatch *batch,
+                                            const struct CSdbWriteOptions *options);
 
-struct CSdbResult slatedb_reader_scan_with_options(struct CSdbReaderHandle handle,
-                                                   const uint8_t *start_key,
-                                                   uintptr_t start_key_len,
-                                                   const uint8_t *end_key,
-                                                   uintptr_t end_key_len,
-                                                   const struct CSdbScanOptions *scan_options,
-                                                   struct CSdbIterator **iterator_ptr);
-
-struct CSdbResult slatedb_reader_close(struct CSdbReaderHandle handle);
+// # Safety
+//
+// - `batch` must be a valid pointer to a WriteBatch that was previously allocated
+struct CSdbResult slatedb_write_batch_close(struct CSdbWriteBatch *batch);
 
 struct CSdbHandle slatedb_open(const char *path,
                                const char *store_config_json,
                                const char *options_json);
 
+// # Safety
+//
+// - `handle` must contain a valid database handle pointer
+// - `key` must point to valid memory of at least `key_len` bytes
+// - `value` must point to valid memory of at least `value_len` bytes
+// - `put_options` must be a valid pointer to CSdbPutOptions or null
+// - `write_options` must be a valid pointer to CSdbWriteOptions or null
 struct CSdbResult slatedb_put_with_options(struct CSdbHandle handle,
                                            const uint8_t *key,
                                            uintptr_t key_len,
@@ -232,11 +263,22 @@ struct CSdbResult slatedb_put_with_options(struct CSdbHandle handle,
                                            const struct CSdbPutOptions *put_options,
                                            const struct CSdbWriteOptions *write_options);
 
+// # Safety
+//
+// - `handle` must contain a valid database handle pointer
+// - `key` must point to valid memory of at least `key_len` bytes
+// - `write_options` must be a valid pointer to CSdbWriteOptions or null
 struct CSdbResult slatedb_delete_with_options(struct CSdbHandle handle,
                                               const uint8_t *key,
                                               uintptr_t key_len,
                                               const struct CSdbWriteOptions *write_options);
 
+// # Safety
+//
+// - `handle` must contain a valid database handle pointer
+// - `key` must point to valid memory of at least `key_len` bytes
+// - `read_options` must be a valid pointer to CSdbReadOptions or null
+// - `value_out` must be a valid pointer to a location where a value can be stored
 struct CSdbResult slatedb_get_with_options(struct CSdbHandle handle,
                                            const uint8_t *key,
                                            uintptr_t key_len,
@@ -247,6 +289,13 @@ struct CSdbResult slatedb_flush(struct CSdbHandle handle);
 
 struct CSdbResult slatedb_close(struct CSdbHandle handle);
 
+// # Safety
+//
+// - `handle` must contain a valid database handle pointer
+// - `start` must point to valid memory of at least `start_len` bytes (if not null)
+// - `end` must point to valid memory of at least `end_len` bytes (if not null)
+// - `options` must be a valid pointer to CSdbScanOptions or null
+// - `iter_out` must be a valid pointer to a location where an iterator pointer can be stored
 struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
                                             const uint8_t *start,
                                             uintptr_t start_len,
@@ -255,37 +304,63 @@ struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
                                             const struct CSdbScanOptions *options,
                                             struct CSdbIterator **iter_out);
 
+struct CSdbReaderHandle slatedb_reader_open(const char *path,
+                                            const char *store_config_json,
+                                            const char *checkpoint_id,
+                                            const struct CSdbReaderOptions *reader_options);
+
+// # Safety
+//
+// - `handle` must contain a valid reader handle pointer
+// - `key` must point to valid memory of at least `key_len` bytes
+// - `read_options` must be a valid pointer to CSdbReadOptions or null
+// - `result` must be a valid pointer to a location where a value can be stored
+struct CSdbResult slatedb_reader_get_with_options(struct CSdbReaderHandle handle,
+                                                  const uint8_t *key,
+                                                  uintptr_t key_len,
+                                                  const struct CSdbReadOptions *read_options,
+                                                  struct CSdbValue *result);
+
+// # Safety
+//
+// - `handle` must contain a valid reader handle pointer
+// - `start_key` must point to valid memory of at least `start_key_len` bytes (if not null)
+// - `end_key` must point to valid memory of at least `end_key_len` bytes (if not null)
+// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
+struct CSdbResult slatedb_reader_scan_with_options(struct CSdbReaderHandle handle,
+                                                   const uint8_t *start_key,
+                                                   uintptr_t start_key_len,
+                                                   const uint8_t *end_key,
+                                                   uintptr_t end_key_len,
+                                                   const struct CSdbScanOptions *scan_options,
+                                                   struct CSdbIterator **iterator_ptr);
+
+struct CSdbResult slatedb_reader_close(struct CSdbReaderHandle handle);
+
+// # Safety
+//
+// - `iter` must be a valid pointer to a CSdbIterator
+// - `kv_out` must be a valid pointer to a location where a key-value pair can be stored
 struct CSdbResult slatedb_iterator_next(struct CSdbIterator *iter, struct CSdbKeyValue *kv_out);
 
+// # Safety
+//
+// - `iter` must be a valid pointer to a CSdbIterator
+// - `key` must point to valid memory of at least `key_len` bytes
 struct CSdbResult slatedb_iterator_seek(struct CSdbIterator *iter,
                                         const uint8_t *key,
                                         uintptr_t key_len);
 
+// # Safety
+//
+// - `iter` must be a valid pointer to a CSdbIterator that was previously allocated
 struct CSdbResult slatedb_iterator_close(struct CSdbIterator *iter);
 
-struct CSdbResult slatedb_write_batch_new(struct CSdbWriteBatch **batch_out);
+void slatedb_free_result(struct CSdbResult result);
 
-struct CSdbResult slatedb_write_batch_put(struct CSdbWriteBatch *batch,
-                                          const uint8_t *key,
-                                          uintptr_t key_len,
-                                          const uint8_t *value,
-                                          uintptr_t value_len);
+void slatedb_free_value(struct CSdbValue value);
 
-struct CSdbResult slatedb_write_batch_put_with_options(struct CSdbWriteBatch *batch,
-                                                       const uint8_t *key,
-                                                       uintptr_t key_len,
-                                                       const uint8_t *value,
-                                                       uintptr_t value_len,
-                                                       const struct CSdbPutOptions *options);
-
-struct CSdbResult slatedb_write_batch_delete(struct CSdbWriteBatch *batch,
-                                             const uint8_t *key,
-                                             uintptr_t key_len);
-
-struct CSdbResult slatedb_write_batch_write(struct CSdbHandle handle,
-                                            struct CSdbWriteBatch *batch,
-                                            const struct CSdbWriteOptions *options);
-
-struct CSdbResult slatedb_write_batch_close(struct CSdbWriteBatch *batch);
+void slatedb_free_scan_result(struct CSdbScanResult result);
 
 #endif  /* SLATEDB_GO_H */

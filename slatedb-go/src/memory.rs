@@ -1,7 +1,7 @@
 use std::ffi::CString;
 
 use crate::error::CSdbResult;
-use crate::types::{CSdbValue, CSdbScanResult};
+use crate::types::{CSdbScanResult, CSdbValue};
 
 // Memory management functions
 #[no_mangle]
@@ -27,8 +27,9 @@ pub extern "C" fn slatedb_free_scan_result(result: CSdbScanResult) {
     if !result.items.is_null() && result.count > 0 {
         unsafe {
             // Convert back to Box to free properly
-            let items_boxed = Box::from_raw(std::slice::from_raw_parts_mut(result.items, result.count));
-            
+            let items_boxed =
+                Box::from_raw(std::slice::from_raw_parts_mut(result.items, result.count));
+
             // Free each individual key/value
             for item in items_boxed.iter() {
                 slatedb_free_value(item.key);
@@ -37,7 +38,7 @@ pub extern "C" fn slatedb_free_scan_result(result: CSdbScanResult) {
             // items_boxed is automatically dropped here
         }
     }
-    
+
     // Free the next_key if it's set
     if !result.next_key.data.is_null() && result.next_key.len > 0 {
         slatedb_free_value(result.next_key);
