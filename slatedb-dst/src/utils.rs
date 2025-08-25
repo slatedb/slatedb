@@ -18,7 +18,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
-use tracing::{error, info};
+use log::{error, warn};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
@@ -168,7 +168,7 @@ pub async fn run_simulation(
     dst_opts: DstOptions,
 ) -> Result<(), Error> {
     let seed = rand.seed();
-    info!("running simulation [seed={}]", seed);
+    warn!("running simulation [seed={}]", seed);
     let mut dst = build_dst(
         object_store,
         system_clock.clone(),
