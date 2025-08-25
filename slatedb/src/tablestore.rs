@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::error::Error;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
@@ -9,8 +10,10 @@ use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
+use object_store::{Error as ObjectStoreError, ObjectStore, PutMode, PutOptions};
 use tokio::io::AsyncWriteExt;
+use tokio_retry2::strategy::{jitter, ExponentialFactorBackoff};
+use tokio_retry2::{Retry, RetryError};
 use ulid::Ulid;
 
 use crate::db_cache::{CachedEntry, DbCache};
@@ -198,23 +201,7 @@ impl TableStore {
         let object_store = self.object_stores.store_for(id);
         let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
-        object_store
-            .put_opts(
-                &path,
-                PutPayload::from_bytes(data),
-                PutOptions::from(PutMode::Create),
-            )
-            .await
-            .map_err(|e| match e {
-                object_store::Error::AlreadyExists { path: _, source: _ } => match id {
-                    SsTableId::Wal(_) => {
-                        debug!("path already exists [path={}]", path);
-                        SlateDBError::Fenced
-                    }
-                    SsTableId::Compacted(_) => SlateDBError::from(e),
-                },
-                _ => SlateDBError::from(e),
-            })?;
+        write_sst_with_retry(object_store, id, &data, &path).await?;
 
         if let Some(ref cache) = self.cache {
             if write_cache {
@@ -516,6 +503,48 @@ impl TableStore {
     }
 }
 
+async fn write_sst_with_retry(
+    object_store: Arc<dyn ObjectStore>,
+    id: &SsTableId,
+    data: &Bytes,
+    path: &Path,
+) -> Result<(), SlateDBError> {
+    let retry_strategy = ExponentialFactorBackoff::from_millis(10, 2.0)
+        .map(jitter)
+        .take(3);
+
+    Retry::spawn(retry_strategy, || async {
+        object_store
+            .put_opts(path, data.clone().into(), PutOptions::from(PutMode::Create))
+            .await
+            .map_err(|e| match e {
+                ObjectStoreError::AlreadyExists { .. } => match id {
+                    SsTableId::Wal(_) => {
+                        debug!("path already exists [path={}]", path);
+                        RetryError::permanent(SlateDBError::Fenced)
+                    }
+                    SsTableId::Compacted(_) => RetryError::permanent(e.into()),
+                },
+                e if is_timeout(&e) => RetryError::transient(e.into()),
+                _ => RetryError::permanent(e.into()),
+            })
+    })
+    .await?;
+
+    Ok(())
+}
+
+fn is_timeout(e: &ObjectStoreError) -> bool {
+    let mut source = e.source();
+    while let Some(e) = source {
+        if let Some(e) = e.downcast_ref::<std::io::Error>() {
+            return e.kind() == std::io::ErrorKind::TimedOut;
+        }
+        source = e.source();
+    }
+    false
+}
+
 pub(crate) struct EncodedSsTableWriter<'a> {
     id: SsTableId,
     builder: EncodedSsTableBuilder<'a>,
@@ -596,12 +625,13 @@ mod tests {
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
-    use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
     use crate::types::{RowEntry, ValueDeletable};
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
+
+    use super::*;
 
     const ROOT: &str = "/root";
 
