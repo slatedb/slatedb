@@ -1,5 +1,6 @@
 //! This module contains helper functions to simplify deterministic simulation (DST).
 
+use log::{error, warn};
 use rand::Rng;
 use slatedb::clock::LogicalClock;
 use slatedb::clock::SystemClock;
@@ -18,7 +19,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
-use log::{error, warn};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
