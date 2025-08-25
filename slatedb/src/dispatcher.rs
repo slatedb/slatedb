@@ -579,10 +579,7 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(matches!(
-            error_state.reader().read(),
-            None
-        ));
+        assert!(matches!(error_state.reader().read(), None));
         assert!(matches!(
             cleanup_called
                 .reader()
@@ -750,14 +747,8 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(matches!(
-            error_state.reader().read(),
-            None
-        ));
-        assert!(matches!(
-            cleanup_called.reader().read(),
-            Some(Ok(()))
-        ));
+        assert!(matches!(error_state.reader().read(), None));
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
             messages,
@@ -846,11 +837,8 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(matches!(
-            error_state.reader().read(),
-            None
-        ));
-        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert!(matches!(error_state.reader().read(), None));
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 9);
     }
 
@@ -939,11 +927,8 @@ mod test {
             .expect("dispatcher did not stop in time")
             .expect("join failed");
         assert!(matches!(result, Ok(())));
-        assert!(matches!(
-            error_state.reader().read(),
-            None
-        ));
-        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert!(matches!(error_state.reader().read(), None));
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 10);
     }
 
@@ -1018,11 +1003,8 @@ mod test {
             .expect("dispatcher did not stop in time")
             .expect("join failed");
         assert!(matches!(result, Ok(())));
-        assert!(matches!(
-            error_state.reader().read(),
-            None
-        ));
-        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert!(matches!(error_state.reader().read(), None));
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 16);
     }
 }

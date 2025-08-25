@@ -133,7 +133,6 @@ pub(crate) fn is_not_expired(entry: &RowEntry, now: i64) -> bool {
     }
 }
 
-
 /// Merge two options using the provided function.
 pub(crate) fn merge_options<T>(
     current: Option<T>,

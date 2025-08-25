@@ -289,26 +289,24 @@ impl DbInner {
         let this = Arc::clone(self);
         Some(spawn_bg_task(
             tokio_handle,
-            move |result| {
-                match result {
-                    Ok(()) => {
-                        info!("memtable flush task exited cleanly");
-                    }
-                    Err(err) => {
-                        warn!("memtable flush task exited with error [error={}]", err);
-                        let mut state = this.state.write();
-                        state.record_fatal_error(err.clone());
-                        info!("notifying in-memory memtable of error");
-                        state.memtable().table().notify_durable(Err(err.clone()));
-                        for imm_table in state.state().imm_memtable.iter() {
-                            info!(
-                                "notifying imm memtable of error [last_wal_id={}, error={}]",
-                                imm_table.recent_flushed_wal_id(),
-                                err,
-                            );
-                            imm_table.notify_flush_to_l0(Err(err.clone()));
-                            imm_table.table().notify_durable(Err(err.clone()));
-                        }
+            move |result| match result {
+                Ok(()) => {
+                    info!("memtable flush task exited cleanly");
+                }
+                Err(err) => {
+                    warn!("memtable flush task exited with error [error={}]", err);
+                    let mut state = this.state.write();
+                    state.record_fatal_error(err.clone());
+                    info!("notifying in-memory memtable of error");
+                    state.memtable().table().notify_durable(Err(err.clone()));
+                    for imm_table in state.state().imm_memtable.iter() {
+                        info!(
+                            "notifying imm memtable of error [last_wal_id={}, error={}]",
+                            imm_table.recent_flushed_wal_id(),
+                            err,
+                        );
+                        imm_table.notify_flush_to_l0(Err(err.clone()));
+                        imm_table.table().notify_durable(Err(err.clone()));
                     }
                 }
             },

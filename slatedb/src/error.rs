@@ -107,7 +107,6 @@ pub(crate) enum SlateDBError {
     // we need to wrap the panic args in a mutex so that SlateDbError is Sync
     BackgroundTaskPanic(Arc<Mutex<Box<dyn Any + Send>>>),
 
-
     #[error("merge operator error")]
     MergeOperatorError(#[from] MergeOperatorError),
 
