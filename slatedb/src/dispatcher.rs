@@ -937,4 +937,81 @@ mod test {
         assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
         assert_eq!(log.lock().unwrap().len(), 10);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_dispatcher_supports_identical_tickers() {
+        let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
+        let cleanup_called = WatchableOnceCell::new();
+        let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
+        let clock = Arc::new(MockSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+            .add_ticker(Duration::from_millis(3), 1)
+            .add_ticker(Duration::from_millis(3), 2)
+            .add_clock_schedule(0) // 0 (initial two ticks are immediate, so don't advance clock until second tick)
+            .add_clock_schedule(3) // 3
+            .add_clock_schedule(0) // 3 (process second)
+            .add_clock_schedule(3) // 6
+            .add_clock_schedule(0) // 6 (process second)
+            .add_clock_schedule(3) // 9
+            .add_clock_schedule(0) // 9 (process second)
+            .add_clock_schedule(3) // 12
+            .add_clock_schedule(0) // 12 (process second)
+            .add_clock_schedule(3) // 15
+            .add_clock_schedule(0) // 15 (process second)
+            .add_clock_schedule(3) // 18
+            .add_clock_schedule(0) // 18 (process second)
+            .add_clock_schedule(3) // 21
+            .add_clock_schedule(0); // 21 (process second)
+        let cancellation_token = CancellationToken::new();
+        let error_state = WatchableOnceCell::new();
+        let fp_registry = Arc::new(FailPointRegistry::default());
+        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
+            Box::new(handler),
+            rx,
+            clock.clone(),
+            cancellation_token.clone(),
+            error_state.clone(),
+            fp_registry.clone(),
+        );
+        let join = tokio::spawn(async move { dispatcher.run().await });
+        assert_eq!(log.lock().unwrap().len(), 0);
+
+        wait_for_message_count(log.clone(), 16).await;
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec![
+                (Phase::Pre, TestMessage::Tick(1)), // immediate tick
+                (Phase::Pre, TestMessage::Tick(2)), // immediate tick
+                (Phase::Pre, TestMessage::Tick(1)), // 3
+                (Phase::Pre, TestMessage::Tick(2)), // 3
+                (Phase::Pre, TestMessage::Tick(1)), // 6
+                (Phase::Pre, TestMessage::Tick(2)), // 6
+                (Phase::Pre, TestMessage::Tick(1)), // 9
+                (Phase::Pre, TestMessage::Tick(2)), // 9
+                (Phase::Pre, TestMessage::Tick(1)), // 12
+                (Phase::Pre, TestMessage::Tick(2)), // 12
+                (Phase::Pre, TestMessage::Tick(1)), // 15
+                (Phase::Pre, TestMessage::Tick(2)), // 15
+                (Phase::Pre, TestMessage::Tick(1)), // 18
+                (Phase::Pre, TestMessage::Tick(2)), // 18
+                (Phase::Pre, TestMessage::Tick(1)), // 21
+                (Phase::Pre, TestMessage::Tick(2)), // 21
+            ]
+        );
+
+        // Shutdown cleanly
+        cancellation_token.cancel();
+        let _ = cleanup_called.reader().await_value().await;
+        let result = timeout(Duration::from_secs(30), join)
+            .await
+            .expect("dispatcher did not stop in time")
+            .expect("join failed");
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
+        assert!(matches!(
+            error_state.reader().read(),
+            Some(SlateDBError::BackgroundTaskShutdown)
+        ));
+        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert_eq!(log.lock().unwrap().len(), 16);
+    }
 }
