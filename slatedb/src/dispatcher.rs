@@ -443,6 +443,7 @@ mod test {
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
     use futures::StreamExt;
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -467,22 +468,34 @@ mod test {
         log: Arc<Mutex<Vec<(Phase, TestMessage)>>>,
         cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
         tickers: Vec<(Duration, u8)>,
+        clock: Arc<dyn SystemClock>,
+        clock_schedule: VecDeque<Duration>,
     }
 
     impl TestHandler {
         fn new(
             log: Arc<Mutex<Vec<(Phase, TestMessage)>>>,
             cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
+            clock: Arc<dyn SystemClock>,
         ) -> Self {
             Self {
                 log,
                 cleanup_called,
                 tickers: vec![],
+                clock,
+                clock_schedule: VecDeque::new(),
             }
         }
 
         fn add_ticker(mut self, d: Duration, id: u8) -> Self {
             self.tickers.push((d, id));
+            self
+        }
+
+        /// Add a clock schedule to the handler. The clock will pop the first duration from the
+        /// schedule and advance the clock by that duration after each message is processed.
+        fn add_clock_schedule(mut self, ts: u64) -> Self {
+            self.clock_schedule.push_back(Duration::from_millis(ts));
             self
         }
     }
@@ -500,6 +513,9 @@ mod test {
 
         async fn handle(&mut self, message: TestMessage) -> Result<(), SlateDBError> {
             self.log.lock().unwrap().push((Phase::Pre, message));
+            if let Some(advance_duration) = self.clock_schedule.pop_front() {
+                self.clock.advance(advance_duration).await;
+            }
             Ok(())
         }
 
@@ -531,9 +547,10 @@ mod test {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let (tx, rx) = mpsc::unbounded_channel();
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone())
-            .add_ticker(Duration::from_millis(5), 1);
         let clock = Arc::new(MockSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+            .add_ticker(Duration::from_millis(5), 1)
+            .add_clock_schedule(5); // Advance clock by 5ms after first message
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         let mut dispatcher = MessageDispatcher::new(
@@ -547,7 +564,6 @@ mod test {
 
         // Send a message successfully, then trigger a tick before processing the next message
         tx.send(TestMessage::Channel(10)).unwrap();
-        clock.advance(Duration::from_millis(5)).await;
         wait_for_message_count(log.clone(), 2).await;
         tx.send(TestMessage::Channel(20)).unwrap();
         wait_for_message_count(log.clone(), 3).await;
@@ -592,8 +608,8 @@ mod test {
         let cleanup_called = WatchableOnceCell::new();
         let mut cleanup_reader = cleanup_called.reader();
         let (tx, rx) = mpsc::unbounded_channel();
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone());
         let clock = Arc::new(MockSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
@@ -659,8 +675,8 @@ mod test {
         let cleanup_called = WatchableOnceCell::new();
         let mut cleanup_reader = cleanup_called.reader();
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone());
         let clock = Arc::new(DefaultSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         // Pre-set error state to simulate prior failure
@@ -699,9 +715,9 @@ mod test {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let (tx, rx) = mpsc::unbounded_channel();
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone())
-            .add_ticker(Duration::from_millis(5), 1);
         let clock = Arc::new(MockSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+            .add_ticker(Duration::from_millis(5), 1);
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
@@ -713,14 +729,14 @@ mod test {
             error_state.clone(),
             fp_registry.clone(),
         );
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         let join = tokio::spawn(async move { dispatcher.run().await });
 
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
-        tx.send(TestMessage::Channel(99)).unwrap();
+        // Trigger a tick and a message
         clock.advance(Duration::from_millis(5)).await;
-        tx.send(TestMessage::Channel(100)).unwrap();
+        tx.send(TestMessage::Channel(99)).unwrap();
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
-        wait_for_message_count(log.clone(), 3).await;
+        wait_for_message_count(log.clone(), 2).await;
 
         // Shutdown cleanly
         cancellation_token.cancel();
@@ -744,22 +760,47 @@ mod test {
             messages,
             vec![
                 (Phase::Pre, TestMessage::Channel(99)),
-                (Phase::Pre, TestMessage::Channel(100)),
                 (Phase::Pre, TestMessage::Tick(1)),
             ]
         );
     }
 
+
+    // This test simulates the following timeline:
+    // immediate tick(3) (tickers always return first ticks immediately)
+    // immediate tick(5)
+    // advance clock to 5ms
+    // tick(5)
+    // advance clock to 7ms
+    // tick(7)
+    // advance clock to 10ms
+    // tick(5)
+    // advance clock to 14ms
+    // tick(7)
+    // advance clock to 15ms
+    // tick(5)
+    // advance clock to 20ms
+    // tick(5)
+    // advance clock to 21ms
+    // tick(7)
     #[cfg(feature = "test-util")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_multiple_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone())
-            .add_ticker(Duration::from_millis(5), 1)
-            .add_ticker(Duration::from_millis(7), 2);
         let clock = Arc::new(MockSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+            .add_ticker(Duration::from_millis(5), 1)
+            .add_ticker(Duration::from_millis(7), 2)
+            .add_clock_schedule(0) // 0ms (initial two ticks are immediate, so don't advance clock until second tick)
+            .add_clock_schedule(5) // 5ms
+            .add_clock_schedule(2) // 7ms
+            .add_clock_schedule(3) // 10ms
+            .add_clock_schedule(4) // 14ms
+            .add_clock_schedule(1) // 15ms
+            .add_clock_schedule(5) // 20ms
+            .add_clock_schedule(1); // 21ms
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         let mut dispatcher = MessageDispatcher::new(
@@ -772,23 +813,12 @@ mod test {
         let join = tokio::spawn(async move { dispatcher.run().await });
 
         assert_eq!(log.lock().unwrap().clone(), vec![]);
-        clock.advance(Duration::from_millis(5)).await;
-        wait_for_message_count(log.clone(), 1).await;
-        clock.advance(Duration::from_millis(2)).await; // 7
-        wait_for_message_count(log.clone(), 2).await;
-        clock.advance(Duration::from_millis(3)).await; // 10
-        wait_for_message_count(log.clone(), 3).await;
-        clock.advance(Duration::from_millis(4)).await; // 14
-        wait_for_message_count(log.clone(), 4).await;
-        clock.advance(Duration::from_millis(1)).await; // 15
-        wait_for_message_count(log.clone(), 5).await;
-        clock.advance(Duration::from_millis(5)).await; // 20
-        wait_for_message_count(log.clone(), 6).await;
-        clock.advance(Duration::from_millis(1)).await; // 21
-        wait_for_message_count(log.clone(), 7).await;
+        wait_for_message_count(log.clone(), 9).await;
         assert_eq!(
             log.lock().unwrap().clone(),
             vec![
+                (Phase::Pre, TestMessage::Tick(1)), // immediate tick
+                (Phase::Pre, TestMessage::Tick(2)), // immediate tick
                 (Phase::Pre, TestMessage::Tick(1)), // 5
                 (Phase::Pre, TestMessage::Tick(2)), // 7
                 (Phase::Pre, TestMessage::Tick(1)), // 10
@@ -815,48 +845,62 @@ mod test {
             Some(SlateDBError::BackgroundTaskShutdown)
         ));
         assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
-        assert_eq!(log.lock().unwrap().len(), 7);
+        assert_eq!(log.lock().unwrap().len(), 9);
     }
 
+    // This test simulates the following timeline:
+    // immediate tick(3) (tickers always return first ticks immediately)
+    // immediate tick(5)
+    // advance clock to 3ms
+    // tick(3)
+    // advance clock to 5ms
+    // tick(5)
+    // advance clock to 6ms
+    // tick(3)
+    // advance clock to 9ms
+    // tick(3)
+    // advance clock to 10ms
+    // tick(5)
+    // advance clock to 12ms
+    // tick(3)
+    // clock = 15ms: tick(3), tick(5)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_overlapping_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone())
-            .add_ticker(Duration::from_millis(3), 3)
-            .add_ticker(Duration::from_millis(5), 5);
         let clock = Arc::new(MockSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+            .add_ticker(Duration::from_millis(3), 3)
+            .add_ticker(Duration::from_millis(5), 5)
+            .add_clock_schedule(0) // 0 (initial two ticks are immediate, so don't advance clock until second tick)
+            .add_clock_schedule(3) // 3
+            .add_clock_schedule(2) // 5
+            .add_clock_schedule(1) // 6
+            .add_clock_schedule(3) // 9
+            .add_clock_schedule(1) // 10
+            .add_clock_schedule(2) // 12
+            .add_clock_schedule(3); // 15
         let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
-        let mut dispatcher = MessageDispatcher::new(
+        let fp_registry = Arc::new(FailPointRegistry::default());
+        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
             error_state.clone(),
+            fp_registry.clone(),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
-
-        // Step time to reach the overlap instant (LCM of 3 and 5 = 15ms)
         assert_eq!(log.lock().unwrap().len(), 0);
-        clock.advance(Duration::from_millis(3)).await; // 3
-        wait_for_message_count(log.clone(), 1).await;
-        clock.advance(Duration::from_millis(2)).await; // 5
-        wait_for_message_count(log.clone(), 2).await;
-        clock.advance(Duration::from_millis(1)).await; // 6
-        wait_for_message_count(log.clone(), 3).await;
-        clock.advance(Duration::from_millis(3)).await; // 9
-        wait_for_message_count(log.clone(), 4).await;
-        clock.advance(Duration::from_millis(1)).await; // 10
-        wait_for_message_count(log.clone(), 5).await;
-        clock.advance(Duration::from_millis(2)).await; // 12
-        wait_for_message_count(log.clone(), 6).await;
-        clock.advance(Duration::from_millis(3)).await; // 15 (both should fire)
-        wait_for_message_count(log.clone(), 8).await; // expect two back-to-back ticks at 15
+
+        wait_for_message_count(log.clone(), 10).await;
         assert_eq!(
-            log.lock().unwrap().clone()[..6],
+            log.lock().unwrap().clone()[..8],
             vec![
+                (Phase::Pre, TestMessage::Tick(3)), // immediate tick
+                (Phase::Pre, TestMessage::Tick(5)), // immediate tick
                 (Phase::Pre, TestMessage::Tick(3)), // 3
                 (Phase::Pre, TestMessage::Tick(5)), // 5
                 (Phase::Pre, TestMessage::Tick(3)), // 6
@@ -866,7 +910,7 @@ mod test {
             ]
         );
         // expect two back-to-back ticks at 15
-        let mut last_two_ticks = log.lock().unwrap().clone()[6..].to_vec();
+        let mut last_two_ticks = log.lock().unwrap().clone()[8..].to_vec();
         last_two_ticks.sort_by(|a, b| match (a.1.clone(), b.1.clone()) {
             (TestMessage::Tick(a), TestMessage::Tick(b)) => a.cmp(&b),
             _ => panic!("expected ticks"),
@@ -892,5 +936,6 @@ mod test {
             Some(SlateDBError::BackgroundTaskShutdown)
         ));
         assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert_eq!(log.lock().unwrap().len(), 10);
     }
 }
