@@ -12,6 +12,8 @@ use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
 use crate::error::SlateDBError;
 use log::warn;
 
+use crate::utils::build_concurrent;
+
 #[derive(Debug, Clone)]
 pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
@@ -87,17 +89,20 @@ impl CachedObjectStore {
 
         // Second pass: load the selected files in bouded parallelism and cache them.
         let degree_of_parallelism = 5;
-        let _result = stream::iter(files_to_load.into_iter())
-            .map(|path| async move {
-                // Load the file into cache
-                if let Ok(get_result) = self.cached_get_opts(&path, GetOptions::default()).await {
-                    // Consume the result to trigger caching
-                    let _ = get_result.bytes().await;
+        let _result = build_concurrent(files_to_load.into_iter(), degree_of_parallelism, |path| {
+            let this = self.clone();
+            async move {
+                match this.cached_get_opts(&path, GetOptions::default()).await {
+                    Ok(result) => {
+                        // trigger caching
+                        let _ = result.bytes().await;
+                        Ok(Some(())) // success → Some
+                    }
+                    Err(_) => Ok(None), // best-effort: skip errors
                 }
-            })
-            .buffer_unordered(degree_of_parallelism)
-            .collect::<Vec<_>>()
-            .await;
+            }
+        })
+        .await;
 
         Ok(())
     }

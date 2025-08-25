@@ -14,10 +14,12 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
+use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::utils::{get_now_for_read, is_not_expired};
 use crate::{error::SlateDBError, filter, DbIterator};
+
 use bytes::Bytes;
-use futures::future::BoxFuture;
+use futures::future::{join, BoxFuture};
 use futures::FutureExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -139,31 +141,38 @@ impl Reader {
             eager_spawn: true,
         };
 
-        let mut l0_iters = VecDeque::new();
-        for sst in &db_state.core().l0 {
-            if let Some(iter) = SstIterator::new_owned(
-                range.clone(),
-                sst.clone(),
-                self.table_store.clone(),
-                sst_iter_options,
-            )
-            .await?
-            {
-                l0_iters.push_back(iter);
-            }
-        }
+        let max_parallel =
+            compute_max_parallel(db_state.core().l0.len(), &db_state.core().compacted, 4);
 
-        let mut sr_iters = VecDeque::new();
-        for sr in &db_state.core().compacted {
-            let iter = SortedRunIterator::new_owned(
-                range.clone(),
-                sr.clone(),
-                self.table_store.clone(),
-                sst_iter_options,
-            )
-            .await?;
-            sr_iters.push_back(iter);
-        }
+        let l0_iters_futures =
+            build_concurrent(db_state.core().l0.iter().cloned(), max_parallel, |sst| {
+                SstIterator::new_owned(
+                    range.clone(),
+                    sst,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+            });
+
+        // SR (owned)
+        let sr_iters_futures = build_concurrent(
+            db_state.core().compacted.iter().cloned(),
+            max_parallel,
+            |sr| async {
+                SortedRunIterator::new_owned(
+                    range.clone(),
+                    sr,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                )
+                .await
+                .map(Some)
+            },
+        );
+
+        let (l0_iters_res, sr_iters_res) = join(l0_iters_futures, sr_iters_futures).await;
+        let l0_iters = l0_iters_res?;
+        let sr_iters = sr_iters_res?;
 
         DbIterator::new(range, memtable_iters, l0_iters, sr_iters, max_seq).await
     }
