@@ -190,7 +190,7 @@ pub(crate) enum SlateDBError {
 
     #[error("operation cancelled due to shutdown")]
     Shutdown,
-  
+
     #[error("transaction conflict")]
     TransactionConflict,
 }
