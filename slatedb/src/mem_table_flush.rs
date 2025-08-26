@@ -302,11 +302,14 @@ impl DbInner {
                         err.clone()
                     }
                 };
-                
+
                 // Always notify watchers about task termination
                 let state = this.state.read();
                 info!("notifying in-memory memtable of task termination");
-                state.memtable().table().notify_durable(Err(termination_reason.clone()));
+                state
+                    .memtable()
+                    .table()
+                    .notify_durable(Err(termination_reason.clone()));
                 for imm_table in state.state().imm_memtable.iter() {
                     info!(
                         "notifying imm memtable of task termination [last_wal_id={}, reason={}]",
@@ -314,7 +317,9 @@ impl DbInner {
                         termination_reason,
                     );
                     imm_table.notify_flush_to_l0(Err(termination_reason.clone()));
-                    imm_table.table().notify_durable(Err(termination_reason.clone()));
+                    imm_table
+                        .table()
+                        .notify_durable(Err(termination_reason.clone()));
                 }
             },
             fut,

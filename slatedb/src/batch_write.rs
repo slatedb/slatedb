@@ -204,12 +204,16 @@ impl DbInner {
                     }
                 }
                 Ok(())
-            }.await;
+            }
+            .await;
 
             // Respond to any pending messages before exit
-            let pending_error = loop_result.as_ref().err().unwrap_or(&SlateDBError::Shutdown);
+            let pending_error = loop_result
+                .as_ref()
+                .err()
+                .unwrap_or(&SlateDBError::Shutdown);
             Self::drain_write_messages(&mut rx, pending_error).await;
-            
+
             loop_result
         };
 
@@ -233,16 +237,19 @@ impl DbInner {
         ))
     }
 
-    async fn drain_write_messages(rx: &mut tokio::sync::mpsc::UnboundedReceiver<WriteBatchMsg>, error: &SlateDBError) {
+    async fn drain_write_messages(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<WriteBatchMsg>,
+        error: &SlateDBError,
+    ) {
         rx.close();
         while !rx.is_empty() {
             let msg = rx.recv().await.expect("channel unexpectedly closed");
-            match msg {
-                WriteBatchMsg::WriteBatch(write_batch_request, _options) => {
-                    let WriteBatchRequest { batch: _batch, done } = write_batch_request;
-                    let _ = done.send(Err(error.clone()));
-                },
-                _ => (),
+            if let WriteBatchMsg::WriteBatch(write_batch_request, _options) = msg {
+                let WriteBatchRequest {
+                    batch: _batch,
+                    done,
+                } = write_batch_request;
+                let _ = done.send(Err(error.clone()));
             }
         }
     }
