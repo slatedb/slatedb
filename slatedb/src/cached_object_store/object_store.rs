@@ -98,7 +98,13 @@ impl CachedObjectStore {
                         let _ = result.bytes().await;
                         Ok(Some(())) // success → Some
                     }
-                    Err(_) => Ok(None), // best-effort: skip errors
+                    Err(e) => {
+                        warn!(
+                            "Failed to prefetch file into cache [path={}, error={:?}]",
+                            path, e
+                        );
+                        Ok(None) // best-effort: skip errors
+                    }
                 }
             }
         })
