@@ -6,6 +6,7 @@
 
 use crate::config::PutOptions;
 use bytes::Bytes;
+use uuid::Uuid;
 
 /// A batch of write operations (puts and/or deletes). All operations in the
 /// batch are applied atomically to the database. If multiple operations appear
@@ -40,6 +41,7 @@ use bytes::Bytes;
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
     pub(crate) ops: Vec<WriteOp>,
+    pub(crate) txn_id: Option<Uuid>,
 }
 
 impl Default for WriteBatch {
@@ -85,7 +87,10 @@ impl std::fmt::Debug for WriteOp {
 
 impl WriteBatch {
     pub fn new() -> Self {
-        WriteBatch { ops: Vec::new() }
+        WriteBatch {
+            ops: Vec::new(),
+            txn_id: None,
+        }
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.

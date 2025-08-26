@@ -190,6 +190,9 @@ pub(crate) enum SlateDBError {
 
     #[error("operation cancelled due to shutdown")]
     Shutdown,
+  
+    #[error("transaction conflict")]
+    TransactionConflict,
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -410,6 +413,7 @@ impl From<SlateDBError> for Error {
                 Error::configuration(msg).with_source(Box::new(err))
             }
             SlateDBError::Shutdown => Error::system(msg),
+            SlateDBError::TransactionConflict => Error::operation(msg),
         }
     }
 }
