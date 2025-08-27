@@ -215,7 +215,7 @@ The Compaction Scheduler tells the Compaction Executor what compactions to execu
 Let’s look at some examples of valid/invalid compactions. I’ll use string IDs for SSTs here instead of ULIDs. Suppose our manifest looks like:
 
 ```
-l0: [SST-1, SST-2, SST-3, SST-4]
+l0: [SST-4, SST-3, SST-2, SST-1]
 compacted: [100, 50, 3, 1, 0]
 ```
 
