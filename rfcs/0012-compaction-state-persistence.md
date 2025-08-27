@@ -245,7 +245,7 @@ pub(crate) struct FenceableCompactionState {
       - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
 
       - If latest .compactor compactor_epoch == current compactor epoch, reconcile the compactor_state and retry.
-        [This would happen only when an external process like CLI has written a manual compaction request]
+        (This would happen only when an external process like CLI has written a manual compaction request.)
 
       - If latest .compactor compactor_epoch < current compactor epoch, panic
       ( Compactor_epoch going backwards)
