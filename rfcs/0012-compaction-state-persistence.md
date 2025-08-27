@@ -533,7 +533,7 @@ At T = 1, Compactor A (compactor_epoch = 1), updates by creating a sequential .c
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
 .compactor file : [SR4(merged), SR3, SR2, SR1, SR0]
 
-At T = 3, Compactor B starts(compactor_epoch = 2), updates by creating a sequential .compactor file (Comapactor A is fenced)
+At T = 3, Compactor B starts(compactor_epoch = 2), updates by creating a sequential .compactor file (Compactor A is fenced)
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
 .compactor file : [SR4(merged), SR3, SR2, SR1, SR0] 
 
@@ -564,7 +564,7 @@ At T = 1, Compactor A (compactor_epoch = 1), updates by creating a sequential .c
 
 At T = 3, Compactor B starts(compactor_epoch = 2), 
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
-.compactor file : [SR4(merged), SR3, SR2, SR1, SR0] (Comapactor A is fenced)
+.compactor file : [SR4(merged), SR3, SR2, SR1, SR0] (Compactor A is fenced)
 
 At T = 4, Compactor B updates (compactor_epoch = 2), updates .compactor file 
 .manifest file: [SR7, SR6, SR5, SR4, SR3, SR2, SR1, SR0], 
