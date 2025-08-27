@@ -15,8 +15,8 @@
   - [Proposal](#proposal)
     - [Core Strategy: Iterator-Based Persistence](#core-strategy-iterator-based-persistence)
   - [Workflow](#workflow)
-    - [Compaction Workflow](#compaction-workflow)
-    - [CompactionState Structure](#compactionstate-structure)
+    - [Current Compaction Workflow](#current-compaction-workflow)
+    - [Proposed CompactionState Structure](#proposed-compactionstate-structure)
     - [Persisting Internal Compactions](#persisting-internal-compactions)
     - [Persisting External Compactions](#persisting-external-compactions)
     - [Resuming Partial Compactions](#resuming-partial-compactions)
@@ -63,7 +63,7 @@ Authors:
 
 Compaction currently happens for the following:
 - L0 SSTs
-- Various level Sorted Runs(Range partitioned SST across the complete keyspace)
+- Various level Sorted Runs(range partitioned SST across the complete keyspace)
 
 This RFC proposes the goals & design for compaction state persistence along with ways to improve current compaction mechanism by adding retries and tracking.
 
@@ -71,22 +71,22 @@ This RFC proposes the goals & design for compaction state persistence along with
 
 - Provide a mechanism to track progress of a `CompactionJob`
 - Allow retrying compactions based on the state of the `CompactionJob`
-- Improve observability around Compactions
-- Separate out compaction related details from `Manifest` into a separate `CompactionManifest`
-- Coordination between `Manifest` and `CompactionManifest`
+- Improve observability around compactions
+- Separate out compaction related details from `Manifest` into a separate `CompactionState`
+- Coordination between `Manifest` and `CompactionState`
 - Coordination mechanism between externally triggered compactions and the main compaction process.
 - Refactor Manifest store so that it can be used to store both ,manifest and .compactor files.
 
 ## Non-Goals
 
-- Distributed Compaction: SlateDb is a single writer and currently a single-compactor based database. With distributed compaction, we plan to further parallelise SSTs compaction across different compaction processes. This topic is out of scope of the RFC.
+- Distributed compaction: SlateDb is a single writer and currently a single-compactor based database. With distributed compaction, we plan to further parallelise SST compaction across different compaction processes. This topic is out of scope of the RFC.
 - Resuming partial compaction under MVCC depends on the sorted-run layout: with multi-versioned keys, how do we partition the keyspace into non-overlapping SSTs within a single SR?
 
 ## Constraints
 
 - Changes should be backward compatible and extend the existing compaction structs
 - State updates should be cost efficient
-- Manifest can be eventually consistent with the latest view after comapaction
+- Manifest can be eventually consistent with the latest view after compaction
 
 ## References
 
@@ -97,12 +97,11 @@ This RFC proposes the goals & design for compaction state persistence along with
 
 This RFC extends discussions in the below github issue. It also addresses several other sub-issues.
 
-
 [Issue #673](https://github.com/slatedb/slatedb/issues/673):
 
 ### **Core Architecture Issues**
 1. **1:1 Compaction:Job Cardinality**: Cannot retry failed compactions - entire compaction fails if job fails
-2. **No Progress Tracking**: CompactionJob state isn't persisted, making progress invisible
+2. **No Progress Tracking**: `CompactionJob` state isn't persisted, making progress invisible
 3. **No State Persistence**: All compaction state is lost on restart
 
 ### **Operational Limitations** 
@@ -115,7 +114,6 @@ This RFC extends discussions in the below github issue. It also addresses severa
 - **Engineering overhead** for debugging and manually restarting failed compactions  
 - **Customer impact** from extended recovery times during outages
 - **Resource waste** from repeated processing of the same data
-
 
 ## Proposal
 
@@ -158,7 +156,7 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 13. GC clears the orphaned states and SSTs during it's run.
 
-#### **CompactionState Structure**
+### **Proposed CompactionState Structure**
 The persistent state contains the complete view of all compaction activity:
 
 ```rust
@@ -222,7 +220,7 @@ pub(crate) struct FenceableCompactionState {
 
 1. Compactor fetches compactions from the compaction_state polled during this compactionEventLoop iteration with the compactionStatus as `submitted` and returns a list of compactions.
 
-2. Size_tiered_compaction compaction scheduler executes `maybe_schedule_compaction` and appends to this list of compactions.
+2. SizeTieredCompactionScheduler executes `maybe_schedule_compaction` and appends to this list of compactions.
 
 3. Compactor executes the `submit_compaction` method on the list of compactions from Step(1). The method delegates the validation of the compactions to the compactor_state.rs.
 
