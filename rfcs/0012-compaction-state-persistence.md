@@ -226,7 +226,7 @@ pub(crate) struct FenceableCompactionState {
 
 4. For each compaction in the input list of compactions, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
 
-    - Check If the count of runnning compactions is less than the threshold. If yes, continue
+    - Check if the count of runnning compactions is less than the threshold. If yes, continue
 
     - Check if the source L0 SSTs and SRs are not part of any other compaction. If yes, continue.
 
@@ -248,13 +248,13 @@ pub(crate) struct FenceableCompactionState {
         (This would happen only when an external process like CLI has written a manual compaction request.)
 
       - If latest .compactor compactor_epoch < current compactor epoch, panic
-      ( Compactor_epoch going backwards)
+      (`compactor_epoch` went backwards).
 
-    [When this step is successful, compaction is persisted in the .compactor file]
+    (When this step is successful, compaction is persisted in the .compactor file.)
 
 7. Now, `start_compaction()` for each compaction in the `compactions` param if the count of running compactions is below threshold.
 
-8. A new `CompactionJob` is created using the last job_attempt or afresh if it the first CompactionJob. The `CompactionJob` is then handed to the CompactionExecutor for execution.
+8. A new `CompactionJob` is created using the last job_attempt or a fresh if it is the first CompactionJob. The `CompactionJob` is then handed to the CompactionExecutor for execution.
 
 9. We need to update CompactionExecutor code to support the following:
 
@@ -266,23 +266,24 @@ pub(crate) struct FenceableCompactionState {
 
       - Each compactionExecutor Job tries writing to the .compactor file.
 
-      - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the CompactionJob on the write. [Agreed]
+      - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the CompactionJob on the write.
+      
+We have agreed on the second approach (channel-based updates via the compaction event handler).
 
 
 10. Once the compactionJob is completed, follow the steps mentioned in the State Managment protocol.    
 
-
 ### Persisting External Compactions
 
-The idea is to leverage the existing compaction workflow. Need a mechanism to plugin the external requests so that it can be picked and executed by the compaction worflow. The steps are outlined here:
+We need a mechanism to plug in the external requests so that they can be picked up and executed by the compaction worflow. The idea is to leverage the existing compaction workflow. The steps are outlined here:
 
-1. Client provides the list of source_ssts and source_srs to be compacted by calling the method `submit_manual_compaction`.
+1. Client provides the list of source_ssts and source_srs to be compacted through a `submit_manual_compaction` method in `Admin` (see the _Administrative Commands_ section below).
 
 2. Use the `pick_next_compaction` to transform the request into a list of compactions.
 
-3. For each compaction in the input list of compactions, The compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
+3. For each compaction in the input list of compactions, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
 
-    - Check If the count of runnning compactions is less than the threshold. If yes, continue
+    - Check if the count of runnning compactions is less than the threshold. If yes, continue
 
     - Check if the source L0 SSTs and SRs are not part of any other compaction. If yes, continue.
 
@@ -305,35 +306,34 @@ The idea is to leverage the existing compaction workflow. Need a mechanism to pl
       - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
 
       - If latest .compactor compactor_epoch == current compactor epoch, reconcile the compactor_state and pass `new_compactions` object to Step(3). This process would continue until successful .compactor file write or the `new_compaction` object is empty.
-      [This would happen when the compactor has written a .compactor file]
+      (This would happen when the compactor has written a .compactor file.)
 
       - If latest .compactor compactor_epoch < current compactor epoch, panic
-      ( Compactor_epoch going backwards)
+      (Compactor_epoch going backwards).
 
-    [When this step is successful, compaction is persisted in the .compactor file]
+    (When this step is successful, compaction is persisted in the .compactor file.)
 
-Note: The validations added in this protocol are best effort as the authority to validate a compaction lies with the compactor daemon thread. For more details refer(https://github.com/slatedb/slatedb/pull/695#discussion_r2289989866)
+Note: The validations added in this protocol are best effort. The authority to validate a compaction lies with the compactor daemon thread. For more details refer to https://github.com/slatedb/slatedb/pull/695#discussion_r2289989866
 
 ### Resuming Partial Compactions
 
-1. When the output SSTs(part of the partially completed destination SR) are fetched, pick the lastEntry(the lastEntry in lexicographic order) from the last SST of the SR. Possible Approaches:
-    - Add a lastKey in the metadata block of SST as suggested here:https://github.com/slatedb/slatedb/pull/695/files#r2243447106 similar to first key and fetch it from the metadata block 
+1. When the output SSTs (part of the partially completed destination SR) are fetched, pick the lastEntry (the lastEntry in lexicographic order) from the last SST of the SR. Possible Approaches:
+    - Add a lastKey in the metadata block of SST as suggested here: https://github.com/slatedb/slatedb/pull/695/files#r2243447106 similar to first key and fetch it from the metadata block 
 
-    - Once on the relevant SST, go to the last block by iterating the indexes. Iterate to the lastKey of the last block of the SST.[Agreed]
+    - Once on the relevant SST, go to the last block by iterating the indexes. Iterate to the lastKey of the last block of the SST. (This is the accepted approach we'll implement.)
 
 2. Ignore completed L0 SSTs and move the iterator on each SR to a key >= lastKey on SST partition
 
 3. This is done by doing a binary search on a SR to find the right SST partition and then iterating the blocks of the SST till we find the Entry. 
     [Note: A corner case: With monotonically overlapping SST ranges(specifically the last key), a key might be present across a contiguous range of SST in a SR]
 
-4. These {key, seq_number, sst_iterator} tuple is then added to a min_heap to decide the right order across a group of SRs( can be thought of as a way to get a sorted list from all the sorted SR SSTs).
+4. Each {key, seq_number, sst_iterator} tuple is then added to a min_heap to decide the right order across a group of SRs (this is a way to get a sorted list from all the sorted SR SSTs).
 
-5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each and persist it to the .compactor file by updating the compaction in `compactions`. ( This is the CompactionJob progress section in State Management Protocol) 
+5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each and persists them to the .compactor file by updating the compaction in `compactions`. (This is the `CompactionJob` progress section in _State Management Protocol_.)
 
 Note:
  - Step (3) and (4) are already implemented in the `seek()` in merge_iterator. It should handle Tombstones, TTL/Expiration
  - Ensure the CLI requests are executed on the active Compactor process
-
 
 ### **Key Design Decisions**
 
@@ -370,7 +370,7 @@ The compaction state is persisted to the object store following the same CAS pat
 /000000003.compactor  # Current state
 ```
 
-The section below is under discussion here: https://github.com/slatedb/slatedb/pull/695/files#r2239561471
+_NOTE: The section below is discussed in detail [here](https://github.com/slatedb/slatedb/pull/695/files#r2239561471)._
 
 ### Protocol for State Management of Manifest and CompactionState
 
@@ -382,8 +382,8 @@ This a proposal for Statement Management of Manifest and CompactionState. The pr
 
 With this view, the entire .compactor file is a single implementation for our built-in (non-distributed) compactor. In fact, for distributed compaction, it need not matter at all. The core of our compaction protocol is simply: the owner of the compactor_epoch may manipulate the SRs and L0s in the manifest.
 
-The .compactor file would serve as an interface over which clients can build their custom distributed compactions say based on etcd(k8s), chitchat, object_store, etc. 
-They can have separate files for any approach specific state persistence.
+The .compactor file would serve as an interface over which clients can build their custom distributed compactions say based on etcd (Kubernetes), [chitchat](https://github.com/quickwit-oss/chitchat), `object_store`, etc. 
+They can have separate files for any approach specific to their state persistence needs.
 
 #### On startup...
 
@@ -393,7 +393,7 @@ They can have separate files for any approach specific state persistence.
 
 3. Compactor increments `compactor_epoch` and writes the dirty CompactionState to the next sequential .compactor position.(00006.compactor).
 
-    File version check (in-memory and remote object store), If 00006.compactor exists, 
+    File version check (in-memory and remote object store): if 00006.compactor exists, 
 
       - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
 
@@ -402,50 +402,50 @@ They can have separate files for any approach specific state persistence.
       - If latest .compactor compactor_epoch < current compactor epoch, increment the .compactor file ID by 1 and retry. This process would continue until successful compactor write.
       ( The current active compactor Job would have updated the .compactor file)
 
-4. If compactor_epoch in in-memory manifest(00005.manifest) >= `compactor_epoch`, the compactor is fenced.
+4. If compactor_epoch in in-memory manifest (00005.manifest) >= `compactor_epoch`, older compactors are fenced now.
 
 5. Try writing the above `compaction_epoch` to the .manifest file (00006.manifest)
 
-    File version check (in-memory and remote object store), If 00006.manifest exists, 
+    File version check (in-memory and remote object store): if 00006.manifest exists, 
 
       - If latest .manifest compactor_epoch > current compactor epoch, die (fenced)
 
       - If latest .manifest compactor_epoch == current compactor epoch, panic
 
       - If latest .manifest compactor_epoch < current compactor epoch, increment the .manifest file ID by 1 and retry. This process would continue until successful compactor write.
-      ( The current active compactor Job would have updated the .manifest file)
+      (The current active compactor has updated the .manifest file)
 
-At this point, the compactor has been successfully initialised. Any updates to write a new .compactor(00006.compactor) or .manifest file(00006.manifest) by stale compactors would fence them.
+At this point, the compactor has been successfully initialised. Any updates to write a new .compactor (00006.compactor) or .manifest file (00006.manifest) by stale compactors would fence them.
 
-#### On compaction initiation...
+#### On compaction job creation...
 
 (Manifest is polled periodically to get the list of L0 SSTs created. The scheduler would create a list of new compactions for these L0 SSTs as well)
 
-1. Compactor Fetches the latest .manifest file during the manifest poll.(00006.manifest)
+1. Compactor Fetches the latest .manifest file during the manifest poll. (00006.manifest)
 
 2. Compactor writes to the next .compactor file the list of scheduled compactions with the empty JobAttempts (00007.compactor in our example).
 
-    If the file(00007.compactor) exists, 
+    If the file (00007.compactor) exists, 
 
       - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
 
       - If latest .compactor compactor_epoch == current compactor epoch, reconcile the compactor state and go to step (2)
 
       - If latest .compactor compactor_epoch < current compactor epoch, panic
-        (compactor_epoch going backwards)
+        (`compactor_epoch` went backwards)
 
 #### On compaction job progress...
 
-1. Compactor writes to the next .compactor file the compactionState(persist when an SST is added to SR) with the latest progress (00008.compactor in our example).
+1. Compactor writes to the next .compactor file the compactionState (persist when an SST is added to SR) with the latest progress (00008.compactor in our example).
 
-    If the file(00008.compactor) exists, 
+    If the file (00008.compactor) exists, 
 
       - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
 
       - If latest .compactor compactor_epoch == current compactor epoch, reconcile the compactor state and go to step (2)
 
       - If latest .compactor compactor_epoch < current compactor epoch, panic
-        (compactor_epoch going backwards)
+        (`compactor_epoch` went backwards)
 
 #### On compaction job complete...
 
@@ -453,7 +453,7 @@ At this point, the compactor has been successfully initialised. Any updates to w
 
 2. Update in-memory .manifest state (fetched in compaction initiation phase) with the compaction state to reflect the latest SRs/SSTs that were created (and remove old SRs/SSTs).
 
-3. Write the in-memory .manifest state to the next sequential .manifest file. If the file(00007.manifest) exists, it could be due to two possibilities:
+3. Write the in-memory .manifest state to the next sequential .manifest file. If the file (00007.manifest) exists, it could be due to three possibilities:
 
     - Writer has written a new manifest.
 
@@ -461,44 +461,44 @@ At this point, the compactor has been successfully initialised. Any updates to w
 
     - Compactor has written a new manifest.
 
-    In both the cases, 
+    In any case, 
 
       - If latest .manifest compactor_epoch > current manifest epoch, die (fenced)
 
       - If latest .manifest compactor_epoch == current manifest epoch, reconcile with the latest manifest and write to the next sequential(00008.manifest) .manifest file
 
-      (Writer would have flushed L0 SSTs or updated checkpoint to the manifest)
+      (Writer could have flushed L0 SSTs or updated checkpoint to the manifest)
 
       - If latest .manifest compactor_epoch < current manifest epoch, panic
-        (compactor_epoch going backwards)
+        (`compactor_epoch` went backwards)
 
 ### Summarised Protocol
 
 ```
-1. Compactor A fetches the latest .manifest file(00001.manifest)
+1. Compactor A fetches the latest .manifest file (00001.manifest)
 
-2. Compactor A fetches the latest .compactor file(00001.compactor)
+2. Compactor A fetches the latest .compactor file (00001.compactor)
 
-3. Compactor A writes .compactor file(00002.compactor) with compactor_epoch(compactor_epoch = 1)
+3. Compactor A writes .compactor file (00002.compactor) with compactor_epoch (compactor_epoch = 1)
 
-4. If compactor_epoch in .manifest file(00001.manifest) >= compactor_epoch(compactor_epoch = 1), fenced
+4. If compactor_epoch in .manifest file (00001.manifest) >= compactor_epoch (compactor_epoch = 1), fenced
 
-5. Compactor A writes .manifest file(00002.manifest) with compactor_epoch(compactor_epoch = 1)
+5. Compactor A writes .manifest file (00002.manifest) with compactor_epoch (compactor_epoch = 1)
 
 (Compactions are scheduled based on the latest manifest poll and CompactionJob updates the .compactor file with the in progress SR state) 
 
 After compactionJob completion...,
 
-6. Update in-memory .manifest(00002.manifest) state to reflect the latest SRs/SSTs that were created (and remove old SRs/SSTs) from the latest .compactor file.
+6. Update in-memory .manifest (00002.manifest) state to reflect the latest SRs/SSTs that were created (and remove old SRs/SSTs) from the latest .compactor file.
 
 7. Write the in-memory .manifest state to the next sequential .manifest file.
 
-8. If the file(00007.manifest) exists, it could be due to two possibilities:
+8. If the file (00007.manifest) exists, it could be due to three possibilities:
      - Writer has written a new manifest.
      - Reader has written a new manifest.
      - Compactor has written a new manifest.
 
- In both cases, compare the `compactor_epoch` in both .manifest file and the local manifest file and write manifest to next sequential file if the compactor is not fenced.
+In any case, compare the `compactor_epoch` in both .manifest file and the local manifest file and write manifest to next sequential file if the compactor is not fenced.
 ```
 
 ### Race conditions handled in the protocol 
