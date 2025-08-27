@@ -224,7 +224,7 @@ pub(crate) struct FenceableCompactionState {
 
 3. Compactor executes the `submit_compaction` method on the list of compactions from Step(1). The method delegates the validation of the compactions to the compactor_state.rs.
 
-4. For each compaction in the input list of compactions, The compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
+4. For each compaction in the input list of compactions, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
 
     - Check If the count of runnning compactions is less than the threshold. If yes, continue
 
