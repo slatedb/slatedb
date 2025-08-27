@@ -612,12 +612,6 @@ pub async fn get_compaction_info(
     id: CompactionId
 ) -> Result<CompactionInfo, Error>           // ← Returns public struct directly
 
-// API method returns vector of public struct
-pub async fn list_compactions(
-    &self,
-    status_filter: Option<CompactionRequestStatus>  // ← Public enum
-) -> Result<Vec<CompactionInfo>, Error> 
-
 /// Status of a compaction job to be shown to the customer
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompactionStatusResponse {
@@ -650,7 +644,7 @@ pub struct CompactionInfo {
     /// Unique identifier for the compaction
     pub id: CompactionId,
     /// Current status
-    pub status: CompactionRequestStatus,
+    pub status: CompactionStatusResponse,
     /// Source SSTs being compacted
     pub source_ssts: Vec<String>,
     /// Source SRs being compacted
@@ -658,7 +652,7 @@ pub struct CompactionInfo {
     /// Target Destination of compaction
     pub target: String,
     /// Current progress (if running)
-    pub progress: Option<CompactionRequestProgress>,
+    pub progress: Option<CompactionProgressResponse>,
     /// When the compaction was created
     pub created_at: DateTime<Utc>,
     /// When the compaction started (if applicable)
