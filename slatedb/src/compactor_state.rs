@@ -86,6 +86,7 @@ impl Compaction {
         }
     }
 }
+
 pub struct CompactorState {
     manifest: DirtyManifest,
     compactions: HashMap<Uuid, Compaction>,
