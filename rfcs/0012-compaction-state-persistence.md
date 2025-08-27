@@ -593,7 +593,7 @@ Note: The above protocol enables us to use the existing compaction logic for mer
 ### **External Process Integration**
 
 **Administrative Commands**:
-- `slatedb compaction submit --sources SR1,SR2 --priority high` - Submit manual compaction
+- `slatedb compaction submit --sources SR1,SR2` - Submit manual compaction
 - `slatedb compaction status --id <compaction-id>` - Status of a compaction
 
 We leverage `admin.rs` to expose methods that would be triggered during manual compactions requests from external process / CLI
@@ -609,7 +609,7 @@ pub async fn submit_manual_compaction(
 
 pub async fn get_compaction_info(
     &self,
-    id: CompactionId
+    id: String
 ) -> Result<CompactionInfo, Error>           // ← Returns public struct directly
 
 /// Status of a compaction job to be shown to the customer
@@ -642,7 +642,7 @@ pub struct CompactionProgressResponse {
 #[derive(Debug, Clone)]
 pub struct CompactionInfo {
     /// Unique identifier for the compaction
-    pub id: CompactionId,
+    pub id: String,
     /// Current status
     pub status: CompactionStatusResponse,
     /// Source SSTs being compacted
