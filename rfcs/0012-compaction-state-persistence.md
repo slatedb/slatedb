@@ -140,7 +140,7 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 5. `CompactorEventHandler` iterates over the list of compactions and calls `submitCompaction()` if the count of running compaction is below the threshold.
 
-6. The submitted compaction is validated that it is not being executed( by checking in the local `CompactorState`) and if true, is added to the `CompactorState` struct.
+6. The submitted compaction is validated that it is not being executed (by checking in the local `CompactorState`) and if true, is added to the `CompactorState` struct.
 
 7. Once the `CompactorEventHandler` receives an affirmation, it calls the `startCompaction()` to start the compaction.
 
