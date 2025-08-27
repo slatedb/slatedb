@@ -262,11 +262,11 @@ pub(crate) struct FenceableCompactionState {
 
     - Writing compaction_state updates to the .compactor file
 
-The CompactionExecutor would persist the compaction_state in .compactor file by updating the `compactions` param (refer state management protocol). Two possible options:
+    The CompactionExecutor would persist the compaction_state in .compactor file by updating the `compactions` param (refer state management protocol). Two possible options:
 
-    - Each compactionExecutor Job tries writing to the .compactor file.
+      - Each compactionExecutor Job tries writing to the .compactor file.
 
-    - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the CompactionJob on the write. [Agreed]
+      - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the CompactionJob on the write. [Agreed]
 
 
 10. Once the compactionJob is completed, follow the steps mentioned in the State Managment protocol.    
