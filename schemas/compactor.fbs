@@ -26,6 +26,10 @@ table LinearCompactionJob {
 
 /*
 table ParallelCompactionJob {
+    shards: [SubCompactionJob]
+}
+
+table SubCompactionJob {
     // Sub CompactionJob ID(Ulid)
     sub_job_id: Ulid;
 
@@ -53,7 +57,17 @@ table CompactionJob {
     // Reference to the compaction to which this job belongs
     compaction_id: Ulid;
 
-    specs: [CompactionJobSpec];
+    spec: CompactionJobSpec;
+}
+
+union CompactionSpec { SortedRunCompaction }
+
+table SortedRunCompaction {
+    // input L0 SSTables
+    ssts: [CompactedSsTable]; 
+
+    // input Sorted Runs
+    sorted_runs: [SortedRun];
 }
 
 table Compaction {
@@ -66,12 +80,6 @@ table Compaction {
     // Destination Sorted Run
     output_sorted_run: SortedRun;
 
-    // input L0 SSTables
-    ssts: [CompactedSsTable]; 
-
-    // input Sorted Runs
-    sorted_runs: [SortedRun];
-
     // Identifier to reference a Compaction(Ulid)
     // Ulid can be used get the human readable timestamp:
     // https://docs.rs/ulid/latest/ulid/struct.Ulid.html#method.timestamp_ms
@@ -83,6 +91,8 @@ table Compaction {
 
     // List of CompactionJob Retries
     job_attempts:[CompactionJob];
+
+    spec: CompactionSpec
 
     // Update Timestamp of Compaction
     updated_ts: uint64;
