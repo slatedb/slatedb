@@ -232,7 +232,7 @@ pub(crate) struct FenceableCompactionState {
 
     - Check if the destination SR is not part of any other compaction. If yes, continue.
 
-    - Add compaction validations to verify correct group of sources and destinations are selected. Reference: https://github.com/slatedb/slatedb/blob/main/rfcs/0002-compaction.md#compactions.
+    - Add compaction validations to verify correct group of sources and destinations are selected. (Reference [here](https://github.com/slatedb/slatedb/blob/main/rfcs/0002-compaction.md#compactions).)
 
     - The existing validations in `submit_compaction` method.
 
