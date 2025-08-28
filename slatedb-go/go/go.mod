@@ -1,4 +1,4 @@
-module github.com/slatedb/slatedb-go
+module slatedb.io/slatedb-go
 
 go 1.24.5
 

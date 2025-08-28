@@ -90,7 +90,7 @@ export LD_LIBRARY_PATH="$(pwd)/target/release"    # Linux
 ```go
 import (
     "io"
-    "github.com/slatedb/slatedb-go"
+    "slatedb.io/slatedb-go"
 )
 
 // Local storage (development)
