@@ -289,8 +289,6 @@ We need a mechanism to plug in the external requests so that they can be picked 
 
     - Check if the destination SR is not part of any other compaction. If yes, continue.
 
-    - Check if creating new SR(as part of L0 compaction) would it form a tiered SR group and get compacted. If yes, do not create the SR.
-
     - Add compaction validations to verify correct group of sources and destinations are selected. Reference: https://github.com/slatedb/slatedb/blob/main/rfcs/0002-compaction.md#compactions.
 
     - The existing validations in `submit_compaction` method.
