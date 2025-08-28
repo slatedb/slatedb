@@ -5,10 +5,10 @@ build:
     python: '3.11'
 
 sphinx:
-  configuration: docs/conf.py
+  configuration: slatedb-py/docs/conf.py
 
 python:
   install:
-    - path: ./
+    - path: slatedb-py
       extra_requirements:
         - docs
