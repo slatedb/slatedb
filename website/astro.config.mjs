@@ -49,14 +49,6 @@ export default defineConfig({
 					tag: 'meta',
 					attrs: { property: 'og:image:alt', content: ogImageAlt },
 				},
-				{
-					tag: 'meta',
-					attrs: { name: 'go-import', content: 'slatedb.io/slatedb-go git https://github.com/slatedb/slatedb slatedb-go/go' },
-				},
-				{
-					tag: 'meta',
-					attrs: { name: 'go-source', content: 'slatedb.io/slatedb-go https://github.com/slatedb/slatedb https://github.com/slatedb/slatedb/tree/main/slatedb-go/go{/dir} https://github.com/slatedb/slatedb/blob/main/slatedb-go/go{/dir}/{file}#L{line}' },
-				},
 			],
 			plugins: [
 				starlightLinksValidator(),
