@@ -123,6 +123,8 @@ impl CompactorState {
     ) -> Result<Uuid, SlateDBError> {
         self.validate_compaction(&compaction)?;
 
+        self.validate_compaction(&compaction)?;
+
         if self
             .compactions
             .values()
@@ -315,11 +317,11 @@ impl CompactorState {
         } else {
             // L0-only: must create new SR with id > highest_existing
             let highest_id = self
-            .db_state()
-            .compacted
-            .first()
-            .map(|sr| sr.id)
-            .unwrap_or(0);
+                .db_state()
+                .compacted
+                .first()
+                .map(|sr| sr.id)
+                .unwrap_or(0);
             if compaction.destination > highest_id {
                 warn!(
                     "next id does not match the expected L0-only next destination: {:?} {:?}",
