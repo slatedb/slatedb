@@ -315,14 +315,13 @@ impl CompactorState {
         } else {
             // L0-only: must create new SR with id > highest_existing
             let highest_id = self
-            .db_state()
-            .compacted
-            .first()
-            .map(|sr| sr.id)
-            .unwrap_or(0);
+                .db_state()
+                .compacted
+                .first()
+                .map_or(0, |sr| sr.id + 1);
             if compaction.destination > highest_id {
                 warn!(
-                    "next id does not match the expected L0-only next destination: {:?} {:?}",
+                    "highest_id lesser than the expected L0-only next destination: {:?} {:?}",
                     compaction.destination, highest_id
                 );
                 return Err(SlateDBError::InvalidCompaction);
