@@ -263,11 +263,18 @@ impl CompactorState {
 
     fn validate_compaction(&mut self, compaction: &Compaction) -> Result<(), SlateDBError> {
         // Logical order of sources: [L0 (newest → oldest), then SRs (highest id → 0)]
-        let sources_logical_order: Vec<SourceId> = self.db_state()
-        .l0.iter()
-        .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
-        .chain(self.db_state().compacted.iter().map(|sr| SourceId::SortedRun(sr.id)))
-        .collect();
+        let sources_logical_order: Vec<SourceId> = self
+            .db_state()
+            .l0
+            .iter()
+            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .chain(
+                self.db_state()
+                    .compacted
+                    .iter()
+                    .map(|sr| SourceId::SortedRun(sr.id)),
+            )
+            .collect();
 
         // Validate compaction sources exist
         if compaction.sources.is_empty() {
@@ -276,17 +283,19 @@ impl CompactorState {
         }
 
         // Validate if the compaction sources are strictly consecutive elements in the db_state sources
-        if !sources_logical_order.windows(compaction.sources.len())
-        .any(|w| w == compaction.sources.as_slice()){
+        if !sources_logical_order
+            .windows(compaction.sources.len())
+            .any(|w| w == compaction.sources.as_slice())
+        {
             warn!("submitted compaction is not a consecutive series of sources from db state: {:?} {:?}",
             compaction.sources, sources_logical_order);
             return Err(SlateDBError::InvalidCompaction);
         }
 
         let has_sr = compaction
-        .sources
-        .iter()
-        .any(|s| matches!(s, SourceId::SortedRun(_)));
+            .sources
+            .iter()
+            .any(|s| matches!(s, SourceId::SortedRun(_)));
 
         if has_sr {
             // Must merge into the lowest-id SR among sources
@@ -297,20 +306,20 @@ impl CompactorState {
                 .min()
                 .expect("at least one SR in sources");
             if compaction.destination != min_sr {
-                warn!("destination does not match lowest-id SR among sources: {:?} {:?}",
-                compaction.destination, min_sr);
+                warn!(
+                    "destination does not match lowest-id SR among sources: {:?} {:?}",
+                    compaction.destination, min_sr
+                );
                 return Err(SlateDBError::InvalidCompaction);
             }
         } else {
             // L0-only: must create new SR with id = highest_existing + 1
-            let next_id = self
-                .db_state()
-                .compacted
-                .first()
-                .map_or(0, |sr| sr.id + 1);
+            let next_id = self.db_state().compacted.first().map_or(0, |sr| sr.id + 1);
             if compaction.destination != next_id {
-                warn!("next id does not match the expected L0-only next destination: {:?} {:?}",
-                compaction.destination, next_id);
+                warn!(
+                    "next id does not match the expected L0-only next destination: {:?} {:?}",
+                    compaction.destination, next_id
+                );
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
@@ -663,15 +672,18 @@ mod tests {
         let (_os, mut _sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        let result = state.submit_compaction(uuid::Uuid::new_v4(), Compaction::new(
-            original_l0s
-                .iter()
-                .enumerate()
-                .filter(|(i, _e)| i > &2usize)
-                .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
-                .collect::<Vec<SourceId>>(),
-            0,
-        ));
+        let result = state.submit_compaction(
+            uuid::Uuid::new_v4(),
+            Compaction::new(
+                original_l0s
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _e)| i > &2usize)
+                    .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
+                    .collect::<Vec<SourceId>>(),
+                0,
+            ),
+        );
 
         // then:
         assert!(result.is_ok());
@@ -686,15 +698,15 @@ mod tests {
         let original_srs = &state.db_state().clone().compacted;
         // L0: from 4th onward (index > 2)
         let l0_sources = original_l0s
-        .iter()
-        .skip(3)
-        .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()));
+            .iter()
+            .skip(3)
+            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()));
 
         // SRs: first 3 (index < 3)
         let sr_sources = original_srs
-        .iter()
-        .take(3)
-        .map(|sr| SourceId::SortedRun(sr.id));
+            .iter()
+            .take(3)
+            .map(|sr| SourceId::SortedRun(sr.id));
 
         // If you need both:
         let sources: Vec<SourceId> = l0_sources.chain(sr_sources).collect();
