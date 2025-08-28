@@ -19,6 +19,11 @@ test = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25.0",
 ]
+docs = [
+    "sphinx>=7.4",
+    "sphinx-rtd-theme>=3.0",
+    "sphinx-autoapi>=3.0",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
