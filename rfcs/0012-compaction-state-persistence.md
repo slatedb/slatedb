@@ -395,7 +395,7 @@ They can have separate files for any approach specific to their state persistenc
 
       - If latest .manifest compactor_epoch > current compactor epoch, die (fenced)
 
-      - If latest .manifest compactor_epoch == current compactor epoch, panic
+      - If latest .manifest compactor_epoch == current compactor epoch, die (fenced)
 
       - If latest .manifest compactor_epoch < current compactor epoch, increment the .manifest file ID by 1 and retry. This process would continue until successful compactor write.
       (The current active compactor has updated the .manifest file)
@@ -406,7 +406,7 @@ They can have separate files for any approach specific to their state persistenc
 
       - If latest .compactor compactor_epoch > current compactor epoch, die (fenced)
 
-      - If latest .compactor compactor_epoch == current compactor epoch, die (fenced)
+      - If latest .compactor compactor_epoch == current compactor epoch, panic
 
       - If latest .compactor compactor_epoch < current compactor epoch, increment the .compactor file ID by 1 and retry. This process would continue until successful compactor write.
       ( The current active compactor Job would have updated the .compactor file)
