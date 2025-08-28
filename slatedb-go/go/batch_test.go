@@ -6,7 +6,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/slatedb/slatedb-go"
+	"slatedb.io/slatedb-go"
 )
 
 var _ = Describe("WriteBatch", func() {
