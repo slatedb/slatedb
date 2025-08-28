@@ -385,11 +385,22 @@ They can have separate files for any approach specific to their state persistenc
 
 #### On startup...
 
-1. Compactor fetches the latest .compactor file (00005.compactor). 
+1. Compactor fetches the latest .manifest file (00005.manifest).
 
-2. Compactor fetches the latest .manifest file (00005.manifest).
+2. Compactor fetches the latest .compactor file (00005.compactor). 
 
-3. Compactor increments `compactor_epoch` and writes the dirty CompactionState to the next sequential .compactor position.(00006.compactor).
+3. Manifest increments `compactor_epoch` and Try writing the  `compaction_epoch` to the .manifest file (00006.manifest)
+
+    File version check (in-memory and remote object store): if 00006.manifest exists, 
+
+      - If latest .manifest compactor_epoch > current compactor epoch, die (fenced)
+
+      - If latest .manifest compactor_epoch == current compactor epoch, panic
+
+      - If latest .manifest compactor_epoch < current compactor epoch, increment the .manifest file ID by 1 and retry. This process would continue until successful compactor write.
+      (The current active compactor has updated the .manifest file)
+
+3. Try writing above `compactor_epoch` to the dirty CompactionState to the next sequential .compactor position.(00006.compactor).
 
     File version check (in-memory and remote object store): if 00006.compactor exists, 
 
@@ -401,17 +412,6 @@ They can have separate files for any approach specific to their state persistenc
       ( The current active compactor Job would have updated the .compactor file)
 
 4. If compactor_epoch in in-memory manifest (00005.manifest) >= `compactor_epoch`, older compactors are fenced now.
-
-5. Try writing the above `compaction_epoch` to the .manifest file (00006.manifest)
-
-    File version check (in-memory and remote object store): if 00006.manifest exists, 
-
-      - If latest .manifest compactor_epoch > current compactor epoch, die (fenced)
-
-      - If latest .manifest compactor_epoch == current compactor epoch, panic
-
-      - If latest .manifest compactor_epoch < current compactor epoch, increment the .manifest file ID by 1 and retry. This process would continue until successful compactor write.
-      (The current active compactor has updated the .manifest file)
 
 At this point, the compactor has been successfully initialised. Any updates to write a new .compactor (00006.compactor) or .manifest file (00006.manifest) by stale compactors would fence them.
 
@@ -573,16 +573,16 @@ At T = 5, Compactor A updates .manifest file [Compactor is fenced but can still 
 At T = 6, Compactor B updates .manifest file
 ```
 
-#### Gaps in compactor_epoch in .manifest file
+#### Gaps in compactor_epoch in .compactor file
 
 ```text
-Compactor 1 reads latest .compactor file (00005.compactor, compactor_epoch = 1)
 Compactor 1 reads latest .manifest file (00005.manifest, compactor_epoch = 1)
-Compactor 1 writes .compactor file (00006.compactor, compactor_epoch = 2)
-Compactor 2 reads latest .compactor file (00006.compactor, compactor_epoch = 2)
-Compactor 2 reads latest .manifest file (00005.manifest, compactor_epoch = 1)
-Compactor 2 writes .compactor file (00007.compactor, compactor_epoch = 3)
-Compactor 2 writes .manifest file (00006.manifest, compactor_epoch = 3)
+Compactor 1 reads latest .compactor file (00005.compactor, compactor_epoch = 1)
+Compactor 1 writes .manifest file (00006.manifest, compactor_epoch = 2)
+Compactor 2 reads latest .manifest file (00006.manifest, compactor_epoch = 2)
+Compactor 2 reads latest .compactor file (00005.compactor, compactor_epoch = 1)
+Compactor 2 writes .manifest file (00007.manifest, compactor_epoch = 3)
+Compactor 2 writes .compactor file (00006.compactor, compactor_epoch = 3)
 Compactor 1 writes .manifest file (00006.manifest, compactor_epoch = 2) (fenced)
 ```
 
