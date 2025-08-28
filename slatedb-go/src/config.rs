@@ -250,8 +250,8 @@ pub fn convert_scan_options(c_opts: *const CSdbScanOptions) -> ScanOptions {
 
     let opts = unsafe { &*c_opts };
     let durability = match opts.durability_filter {
-        1 => DurabilityLevel::Memory,
-        _ => DurabilityLevel::Remote,
+        1 => DurabilityLevel::Remote,
+        _ => DurabilityLevel::Memory,
     };
 
     ScanOptions::new()
@@ -259,6 +259,7 @@ pub fn convert_scan_options(c_opts: *const CSdbScanOptions) -> ScanOptions {
         .with_dirty(opts.dirty)
         .with_read_ahead_bytes(opts.read_ahead_bytes as usize)
         .with_cache_blocks(opts.cache_blocks)
+        .with_max_fetch_tasks(opts.max_fetch_tasks as usize)
 }
 
 // Convert C write options to Rust WriteOptions
@@ -300,8 +301,8 @@ pub fn convert_read_options(c_opts: *const CSdbReadOptions) -> ReadOptions {
 
     let opts = unsafe { &*c_opts };
     let durability_filter = match opts.durability_filter {
-        0 => DurabilityLevel::Remote,
-        1 => DurabilityLevel::Memory,
+        0 => DurabilityLevel::Memory,
+        1 => DurabilityLevel::Remote,
         _ => DurabilityLevel::Memory, // fallback
     };
 
@@ -343,10 +344,30 @@ pub fn convert_reader_options(c_opts: *const CSdbReaderOptions) -> DbReaderOptio
     }
 
     let opts = unsafe { &*c_opts };
+    let defaults = DbReaderOptions::default();
+
+    let manifest_poll_interval = if opts.manifest_poll_interval_ms == 0 {
+        defaults.manifest_poll_interval
+    } else {
+        Duration::from_millis(opts.manifest_poll_interval_ms)
+    };
+
+    let checkpoint_lifetime = if opts.checkpoint_lifetime_ms == 0 {
+        defaults.checkpoint_lifetime
+    } else {
+        Duration::from_millis(opts.checkpoint_lifetime_ms)
+    };
+
+    let max_memtable_bytes = if opts.max_memtable_bytes == 0 {
+        defaults.max_memtable_bytes
+    } else {
+        opts.max_memtable_bytes
+    };
+
     DbReaderOptions {
-        manifest_poll_interval: Duration::from_millis(opts.manifest_poll_interval_ms),
-        checkpoint_lifetime: Duration::from_millis(opts.checkpoint_lifetime_ms),
-        max_memtable_bytes: opts.max_memtable_bytes,
-        block_cache: DbReaderOptions::default().block_cache, // Use default
+        manifest_poll_interval,
+        checkpoint_lifetime,
+        max_memtable_bytes,
+        block_cache: defaults.block_cache,
     }
 }

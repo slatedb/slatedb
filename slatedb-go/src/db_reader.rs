@@ -55,8 +55,7 @@ impl CSdbReaderHandle {
     }
 }
 
-/// Simplified DbReader options for FFI
-/// Complex fields like block_cache are handled on the Rust side with defaults
+/// DbReader options for FFI
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CSdbReaderOptions {
@@ -88,7 +87,10 @@ pub extern "C" fn slatedb_reader_open(
 ) -> CSdbReaderHandle {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s,
-        Err(_) => return CSdbReaderHandle::null(),
+        Err(e) => {
+            log::error!("slatedb_reader_open: Invalid path parameter: {:?}", e);
+            return CSdbReaderHandle::null();
+        }
     };
 
     // Parse checkpoint ID if provided
@@ -98,9 +100,22 @@ pub extern "C" fn slatedb_reader_open(
         match safe_str_from_ptr(checkpoint_id) {
             Ok(id_str) => match Uuid::parse_str(id_str) {
                 Ok(uuid) => Some(uuid),
-                Err(_) => return CSdbReaderHandle::null(),
+                Err(e) => {
+                    log::error!(
+                        "slatedb_reader_open: Invalid checkpoint ID format '{}': {}",
+                        id_str,
+                        e
+                    );
+                    return CSdbReaderHandle::null();
+                }
             },
-            Err(_) => return CSdbReaderHandle::null(),
+            Err(e) => {
+                log::error!(
+                    "slatedb_reader_open: Invalid checkpoint_id parameter: {:?}",
+                    e
+                );
+                return CSdbReaderHandle::null();
+            }
         }
     };
 
@@ -110,7 +125,10 @@ pub extern "C" fn slatedb_reader_open(
     // Create a dedicated runtime for this DbReader instance
     let rt = match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
-        Err(_) => return CSdbReaderHandle::null(),
+        Err(e) => {
+            log::error!("slatedb_reader_open: Failed to create tokio runtime: {}", e);
+            return CSdbReaderHandle::null();
+        }
     };
 
     // Create object store: try config first, fall back to environment on any failure
@@ -126,11 +144,18 @@ pub extern "C" fn slatedb_reader_open(
 
         match store_result {
             Ok(store) => store,
-            Err(_) => {
+            Err(config_error) => {
+                log::warn!("slatedb_reader_open: Store config failed, trying environment fallback. Config error: {:?}", config_error);
                 // Config failed, try environment fallback
                 match load_object_store_from_env(None) {
-                    Ok(store) => store,
-                    Err(_) => return CSdbReaderHandle::null(),
+                    Ok(store) => {
+                        log::info!("slatedb_reader_open: Successfully created object store from environment");
+                        store
+                    }
+                    Err(env_error) => {
+                        log::error!("slatedb_reader_open: Both store config and environment fallback failed. Config error: {:?}, Env error: {}", config_error, env_error);
+                        return CSdbReaderHandle::null();
+                    }
                 }
             }
         }
@@ -140,10 +165,21 @@ pub extern "C" fn slatedb_reader_open(
     match rt.block_on(async { DbReader::open(path_str, object_store, checkpoint_uuid, opts).await })
     {
         Ok(reader) => {
+            log::info!(
+                "slatedb_reader_open: Successfully opened DbReader for path '{}'",
+                path_str
+            );
             let ffi = Box::new(DbReaderFFI { rt, reader });
             CSdbReaderHandle(Box::into_raw(ffi))
         }
-        Err(_) => CSdbReaderHandle::null(),
+        Err(e) => {
+            log::error!(
+                "slatedb_reader_open: Failed to open DbReader for path '{}': {}",
+                path_str,
+                e
+            );
+            CSdbReaderHandle::null()
+        }
     }
 }
 

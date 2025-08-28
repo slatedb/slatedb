@@ -62,7 +62,7 @@ typedef struct CSdbWriteOptions {
 } CSdbWriteOptions;
 
 typedef struct CSdbReadOptions {
-    // Durability filter: 0=Remote, 1=Memory
+    // Durability filter: 0=Memory, 1=Remote
     uint32_t durability_filter;
     // Whether to include dirty/uncommitted data
     bool dirty;
@@ -78,6 +78,7 @@ typedef struct CSdbScanOptions {
     bool dirty;
     uint64_t read_ahead_bytes;
     bool cache_blocks;
+    uint64_t max_fetch_tasks;
 } CSdbScanOptions;
 
 // Type-safe wrapper around a pointer to DbReaderFFI.
@@ -86,8 +87,7 @@ typedef struct CSdbReaderHandle {
     struct DbReaderFFI *_0;
 } CSdbReaderHandle;
 
-// Simplified DbReader options for FFI
-// Complex fields like block_cache are handled on the Rust side with defaults
+// DbReader options for FFI
 typedef struct CSdbReaderOptions {
     // How often to poll for manifest updates (in milliseconds)
     uint64_t manifest_poll_interval_ms;
@@ -192,6 +192,14 @@ typedef struct CSdbScanResult {
 #define Checkpoint_VT_METADATA_TYPE 12
 
 #define Checkpoint_VT_METADATA 14
+
+// Initialize logging for SlateDB Go bindings
+// This should be called once before using any other SlateDB functions
+//
+// # Safety
+//
+// - `level` must be a valid C string pointer or null for default level
+struct CSdbResult slatedb_init_logging(const char *level);
 
 // # Safety
 //

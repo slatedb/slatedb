@@ -19,6 +19,53 @@ pub use types::{
     CSdbValue, CSdbWriteOptions,
 };
 
+use std::os::raw::c_char;
+use std::sync::Once;
+
+static INIT_LOGGER: Once = Once::new();
+
+/// Initialize logging for SlateDB Go bindings
+/// This should be called once before using any other SlateDB functions
+///
+/// # Safety
+///
+/// - `level` must be a valid C string pointer or null for default level
+#[no_mangle]
+pub extern "C" fn slatedb_init_logging(level: *const c_char) -> error::CSdbResult {
+    let log_level = if level.is_null() {
+        log::LevelFilter::Info
+    } else {
+        match error::safe_str_from_ptr(level) {
+            Ok(level_str) => match level_str.to_lowercase().as_str() {
+                "trace" => log::LevelFilter::Trace,
+                "debug" => log::LevelFilter::Debug,
+                "info" => log::LevelFilter::Info,
+                "warn" => log::LevelFilter::Warn,
+                "error" => log::LevelFilter::Error,
+                _ => {
+                    eprintln!("Invalid log level '{}', using Info", level_str);
+                    log::LevelFilter::Info
+                }
+            },
+            Err(_) => {
+                eprintln!("Invalid log level parameter, using Info");
+                log::LevelFilter::Info
+            }
+        }
+    };
+
+    INIT_LOGGER.call_once(|| {
+        env_logger::Builder::from_default_env()
+            .filter_level(log_level)
+            .format_timestamp_secs()
+            .init();
+
+        log::info!("SlateDB logging initialized with level: {}", log_level);
+    });
+
+    error::create_success_result()
+}
+
 // Re-export all FFI functions so they're available at the crate level
 // This ensures the C header generation still works correctly
 
