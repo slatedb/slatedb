@@ -27,6 +27,7 @@ lto = true
 anyhow = "1.0.99"
 async-trait = "0.1.82"
 atomic = "0.6.1"
+backon = "1.5.2"
 bitflags = "2.9.1"
 bytemuck = "1.23.2"
 bytes = "1.7.1"

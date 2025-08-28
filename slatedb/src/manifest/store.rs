@@ -14,6 +14,7 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::utils;
+use backon::{ExponentialBuilder, Retryable};
 use chrono::Utc;
 use futures::StreamExt;
 use log::{debug, warn};
@@ -578,8 +579,22 @@ impl ManifestStore {
     async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
 
+        (|| async {
+            self.write_manifest_in_object_store(manifest_path, manifest)
+                .await
+        })
+        .retry(ExponentialBuilder::default())
+        .when(utils::object_store_timedout)
+        .await
+    }
+
+    async fn write_manifest_in_object_store(
+        &self,
+        path: &Path,
+        manifest: &Manifest,
+    ) -> Result<(), SlateDBError> {
         self.object_store
-            .put_if_not_exists(manifest_path, self.codec.encode(manifest))
+            .put_if_not_exists(path, self.codec.encode(manifest))
             .await
             .map_err(|err| {
                 if let AlreadyExists { path: _, source: _ } = err {
@@ -588,7 +603,6 @@ impl ManifestStore {
                     SlateDBError::from(err)
                 }
             })?;
-
         Ok(())
     }
 
