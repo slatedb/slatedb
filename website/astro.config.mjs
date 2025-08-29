@@ -90,11 +90,6 @@ export default defineConfig({
 						{
 							label: 'Checkpoint & Restore',
 							link: '/docs/tutorials/checkpoint/',
-						},
-						{
-							label: 'API Documentation',
-							link: 'https://docs.rs/slatedb',
-							attrs: { target: '_blank' }
 						}
 					]
 				},
@@ -110,7 +105,28 @@ export default defineConfig({
 							link: '/docs/tutorials/s3/',
 						}
 					]
-				}
+				},
+				{
+					label: 'API Reference',
+					items: [
+						{
+							label: 'Go',
+							link: 'https://pkg.go.dev/slatedb.io/slatedb-go',
+							attrs: { target: '_blank' }
+						},
+						{
+							label: 'Python',
+							link: 'https://slatedb.readthedocs.io/',
+							attrs: { target: '_blank' }
+						},
+						{
+							label: 'Rust',
+							link: 'https://docs.rs/slatedb',
+							attrs: { target: '_blank' }
+						}
+					]
+				},
+
 			]
 		}),
 	],
