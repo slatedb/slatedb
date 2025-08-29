@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
+use backon::{ExponentialBuilder, Retryable};
 use bytes::Bytes;
 use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
@@ -9,7 +10,7 @@ use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
+use object_store::{ObjectStore, PutMode, PutOptions};
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
@@ -22,6 +23,7 @@ use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::types::RowEntry;
+use crate::utils;
 use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub struct TableStore {
@@ -198,23 +200,10 @@ impl TableStore {
         let object_store = self.object_stores.store_for(id);
         let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
-        object_store
-            .put_opts(
-                &path,
-                PutPayload::from_bytes(data),
-                PutOptions::from(PutMode::Create),
-            )
-            .await
-            .map_err(|e| match e {
-                object_store::Error::AlreadyExists { path: _, source: _ } => match id {
-                    SsTableId::Wal(_) => {
-                        debug!("path already exists [path={}]", path);
-                        SlateDBError::Fenced
-                    }
-                    SsTableId::Compacted(_) => SlateDBError::from(e),
-                },
-                _ => SlateDBError::from(e),
-            })?;
+        (|| async { write_sst_in_object_store(object_store.clone(), id, &path, &data).await })
+            .retry(ExponentialBuilder::default())
+            .when(utils::object_store_timedout)
+            .await?;
 
         if let Some(ref cache) = self.cache {
             if write_cache {
@@ -514,6 +503,28 @@ impl TableStore {
         self.sst_format
             .estimate_encoded_size(entry_num, entries_size)
     }
+}
+
+async fn write_sst_in_object_store(
+    object_store: Arc<dyn ObjectStore>,
+    id: &SsTableId,
+    path: &Path,
+    data: &Bytes,
+) -> Result<(), SlateDBError> {
+    object_store
+        .put_opts(path, data.clone().into(), PutOptions::from(PutMode::Create))
+        .await
+        .map_err(|e| match e {
+            object_store::Error::AlreadyExists { path: _, source: _ } => match id {
+                SsTableId::Wal(_) => {
+                    debug!("path already exists [path={}]", path);
+                    SlateDBError::Fenced
+                }
+                SsTableId::Compacted(_) => SlateDBError::from(e),
+            },
+            _ => SlateDBError::from(e),
+        })?;
+    Ok(())
 }
 
 pub(crate) struct EncodedSsTableWriter<'a> {

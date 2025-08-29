@@ -12,6 +12,7 @@ homepage.workspace = true
 anyhow = { workspace = true, optional = true }
 async-trait = { workspace = true }
 atomic = { workspace = true }
+backon = { workspace = true }
 bitflags = { workspace = true }
 bytemuck = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
