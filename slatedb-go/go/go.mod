@@ -1,6 +1,6 @@
 module slatedb.io/slatedb-go
 
-go 1.24.5
+go 1.25.0
 
 require (
 	github.com/onsi/ginkgo/v2 v2.25.1
