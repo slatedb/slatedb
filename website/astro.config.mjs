@@ -108,6 +108,7 @@ export default defineConfig({
 				},
 				{
 					label: 'API Reference',
+					collapsed: true,
 					items: [
 						{
 							label: 'Go',
