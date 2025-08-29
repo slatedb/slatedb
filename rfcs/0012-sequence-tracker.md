@@ -233,7 +233,7 @@ Here is a table of reasonable defaults for confiruation:
 | 300                          | 8192     | 184.9          |
 
 In the interest of simplicity, we will not make the retention period configurable,
-and instead choose a reporting interval of 60s with a acapacity of 8192 entries.
+and instead choose a reporting interval of 60s with a capacity of 8192 entries.
 
 ## Rejected Alternatives
 
