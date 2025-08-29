@@ -1,4 +1,4 @@
-name: Deploy documentation
+name: Deploy website
 
 on:
   # `workflow_dispatch` allows to update the website with minor changes between releases.
