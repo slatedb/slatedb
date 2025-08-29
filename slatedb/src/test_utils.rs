@@ -16,6 +16,11 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Once};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+use futures::stream::BoxStream;
+use object_store::path::Path;
+use object_store::{GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutOptions as OS_PutOptions, PutPayload, PutResult};
+use std::fmt;
+use std::sync::atomic::AtomicUsize;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -349,4 +354,123 @@ fn init_tracing() {
             .with_test_writer()
             .init();
     });
+}
+
+/// An ObjectStore wrapper that injects a transient timeout on the first N `put_opts` calls
+/// to exercise retry logic. All operations delegate to the inner store otherwise.
+#[derive(Debug)]
+pub(crate) struct FlakyObjectStore {
+    inner: Arc<dyn ObjectStore>,
+    fail_first_put_opts: AtomicUsize,
+    put_opts_attempts: AtomicUsize,
+}
+
+impl FlakyObjectStore {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>, fail_first_put_opts: usize) -> Self {
+        Self {
+            inner,
+            fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
+            put_opts_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn put_attempts(&self) -> usize {
+        self.put_opts_attempts.load(Ordering::SeqCst)
+    }
+}
+
+impl fmt::Display for FlakyObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FlakyObjectStore({})", self.inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for FlakyObjectStore {
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        self.inner.head(location).await
+    }
+
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: OS_PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.put_opts_attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_first_put_opts
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| if v > 0 { Some(v - 1) } else { None })
+            .is_ok()
+        {
+            // Inject a timeout error wrapped in object_store::Error so retry logic triggers
+            return Err(object_store::Error::Generic {
+                store: "flaky",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "injected timeout",
+                )),
+            });
+        }
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart(
+        &self,
+        location: &Path,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart(location).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn delete(&self, location: &Path) -> object_store::Result<()> {
+        self.inner.delete(location).await
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&Path>,
+        offset: &Path,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.rename(from, to).await
+    }
+
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
+    }
+
+    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.rename_if_not_exists(from, to).await
+    }
 }

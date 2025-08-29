@@ -788,6 +788,7 @@ mod tests {
     use object_store::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
+    use crate::test_utils::FlakyObjectStore;
 
     const ROOT: &str = "/root/path";
 
@@ -1028,6 +1029,25 @@ mod tests {
 
         // Then:
         assert_eq!(1, manifest.core.checkpoints.len());
+    }
+
+    #[tokio::test]
+    async fn test_retry_write_manifest_on_timeout() {
+        // Given a flaky store that times out on the first write
+        let base = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), flaky.clone()));
+
+        // When creating a new DB (initial manifest write under retry)
+        let core = CoreDbState::new();
+        let _sm = StoredManifest::create_new_db(ms.clone(), core.clone())
+            .await
+            .unwrap();
+
+        // Then: a retry happened and the manifest matches input
+        assert!(flaky.put_attempts() >= 2);
+        let written = ms.try_read_manifest(1).await.unwrap().unwrap();
+        assert_eq!(written, super::super::Manifest::initial(core));
     }
 
     #[tokio::test]
