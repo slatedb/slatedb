@@ -167,6 +167,15 @@ use crate::error::SlateDBError;
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
+/// Enum representing different levels of cache preloading on startup
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum PreloadLevel {
+    /// Preload only L0 SSTs (most recently written files)
+    L0Sst,
+    /// Preload all SSTs (both L0 and compacted levels)
+    AllSst,
+}
+
 /// Enum representing valid SST block sizes
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Default)]
 pub enum SstBlockSize {
@@ -211,20 +220,20 @@ impl SstBlockSize {
 /// that the data is currently stored in. Currently this is used to define a
 /// durability filter for data served by a read.
 #[non_exhaustive]
-#[derive(Clone, Default, Debug, Copy)]
+#[derive(Clone, Default, Debug, Copy, PartialEq)]
 pub enum DurabilityLevel {
     /// Includes only data currently stored durably in object storage.
-    #[default]
     Remote,
 
     /// Includes data with level Remote and data currently only stored in-memory awaiting flush
     /// to object storage.
+    #[default]
     Memory,
 }
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -233,15 +242,6 @@ pub struct ReadOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
-}
-
-impl Default for ReadOptions {
-    fn default() -> Self {
-        Self {
-            durability_filter: DurabilityLevel::Memory,
-            dirty: false,
-        }
-    }
 }
 
 impl ReadOptions {
@@ -281,7 +281,7 @@ impl Default for ScanOptions {
     /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Remote`].
     fn default() -> Self {
         Self {
-            durability_filter: DurabilityLevel::Remote,
+            durability_filter: DurabilityLevel::default(),
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
@@ -1020,6 +1020,15 @@ pub struct ObjectStoreCacheOptions {
     /// its default value is 4mb.
     pub part_size_bytes: usize,
 
+    /// Whether to cache PUT operations to disk. When enabled, data written via PUT operations
+    /// will be cached locally for faster subsequent reads. Default is false.
+    pub cache_puts: bool,
+
+    /// Whether to preload SST files into cache during database startup. When enabled,
+    /// the database will load SST files into the cache up to the cache size limit
+    /// to warm up the cache for faster access. Default is None (no preloading).
+    pub preload_disk_cache_on_startup: Option<PreloadLevel>,
+
     /// Interval to scan the cache directory to rebuild the in-memory map for evictor.
     /// The default value is 1 hour. If set to None, the cache directory will be only
     /// scanned once on start up.
@@ -1040,6 +1049,8 @@ impl Default for ObjectStoreCacheOptions {
             #[cfg(not(target_pointer_width = "32"))]
             max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
             part_size_bytes: 4 * 1024 * 1024,
+            cache_puts: false,
+            preload_disk_cache_on_startup: None,
             scan_interval: Some(Duration::from_secs(3600)),
         }
     }
@@ -1113,7 +1124,7 @@ mod tests {
     "flush_interval": "1s",
     "object_store_cache_options": {
         "root_folder": "/tmp/slatedb-root"
-    } 
+    }
 }
 "#,
             )
@@ -1200,5 +1211,18 @@ object_store_cache_options:
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_default_read_options() {
+        let options = ReadOptions::default();
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+
+        let options = ScanOptions::default();
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+        assert_eq!(options.read_ahead_bytes, 1);
+        assert!(!options.cache_blocks);
     }
 }

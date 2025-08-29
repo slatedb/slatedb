@@ -1,6 +1,7 @@
 use crate::clock::{MonotonicClock, SystemClock};
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
+use crate::db_state::SortedRun;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
@@ -16,6 +17,9 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
+
+use futures::StreamExt;
+use std::collections::VecDeque;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -443,6 +447,68 @@ pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
     ((val << shift) as i32) >> shift
 }
 
+/// Compute a bounded concurrency for iterator construction.
+///
+/// Arguments:
+/// - `l0_count`: number of L0 SSTables to scan
+/// - `srs`: slice of sorted runs to scan; each run’s SST count is summed
+/// - `cap`: hard ceiling for concurrency (minimum effective value is 1)
+///
+/// Returns:
+/// - The effective max parallelism.
+pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usize) -> usize {
+    let total_ssts = l0_count + srs.iter().map(|sr| sr.ssts.len()).sum::<usize>();
+    total_ssts.min(cap).max(1)
+}
+
+/// Concurrently build items with a bounded level of parallelism.
+///
+/// This function maps each input to an async task using the provided factory `f`,
+/// runs up to `max_parallel` tasks at once, and collects all successful results.
+/// If any task returns `Err`, the first error is returned.
+///
+/// Arguments:
+/// - `inputs`: the items to process
+/// - `max_parallel`: maximum number of in-flight tasks (values <= 0 are clamped to 1)
+/// - `f`: per-item async factory that returns `Result<Option<T>, SlateDBError>`
+///
+/// Returns:
+/// - `Ok(VecDeque<T>)` containing all successfully built items (in completion order)
+/// - `Err(SlateDBError)` if any task fails (short-circuits on the first error observed)
+///
+/// Concurrency & ordering:
+/// - Tasks are polled concurrently up to `max_parallel` using `buffer_unordered`.
+/// - Completion order is not guaranteed; results are pushed as tasks finish.
+#[allow(clippy::redundant_closure)]
+pub(crate) async fn build_concurrent<I, T, F, Fut>(
+    inputs: I,
+    max_parallel: usize,
+    f: F,
+) -> Result<VecDeque<T>, SlateDBError>
+where
+    I: IntoIterator,
+    I::Item: Send,
+    T: Send,
+    F: Fn(I::Item) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<Option<T>, SlateDBError>> + Send,
+{
+    let mut out = VecDeque::new();
+
+    let results = futures::stream::iter(inputs.into_iter().map(move |it| f(it)))
+        .buffer_unordered(max_parallel.max(1))
+        .collect::<Vec<_>>()
+        .await;
+
+    for r in results {
+        match r {
+            Ok(Some(t)) => out.push_back(t),
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -451,12 +517,14 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
     use crate::utils::{
-        bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key, spawn_bg_task,
-        BitReader, BitWriter, WatchableOnceCell,
+        build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
+        compute_max_parallel, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
+    use std::collections::VecDeque;
     use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -903,5 +971,89 @@ mod tests {
         assert_eq!(reader.read_bit(), None);
         assert_eq!(reader.read32(1), None);
         assert_eq!(reader.read64(1), None);
+    }
+
+    #[test]
+    fn test_compute_max_parallel_min_and_cap() {
+        // No SRs; total = l0_count
+        assert_eq!(compute_max_parallel(5, &[], 8), 5);
+        // Cap applies
+        assert_eq!(compute_max_parallel(10, &[], 8), 8);
+        // Clamp to at least 1 even when cap = 0
+        assert_eq!(compute_max_parallel(0, &[], 0), 1);
+    }
+
+    // Filters out None; collects only Some(T)
+    #[tokio::test]
+    async fn test_build_iters_concurrent_option_filters_none() {
+        let inputs = 0..10usize;
+        let out: VecDeque<usize> = build_concurrent(inputs, 4, |x| async move {
+            // Keep evens, drop odds
+            if x % 2 == 0 {
+                Ok(Some(x * 3))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+        .expect("should succeed");
+
+        // Expect evens only (0,2,4,6,8) multiplied by 3
+        let mut got: Vec<_> = out.into_iter().collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![0, 6, 12, 18, 24]);
+    }
+
+    // Propagates first error
+    #[tokio::test]
+    async fn test_build_iters_concurrent_option_error() {
+        let inputs = 0..10usize;
+
+        let res: Result<VecDeque<usize>, SlateDBError> =
+            build_concurrent(inputs, 3, |x| async move {
+                if x == 5 {
+                    Err(SlateDBError::Unsupported("boom".into()))
+                } else {
+                    Ok(Some(x))
+                }
+            })
+            .await;
+
+        assert!(res.is_err());
+    }
+
+    // Respects max_parallel bound
+    #[tokio::test]
+    async fn test_build_iters_concurrent_option_respects_max_parallel() {
+        let inputs = 0..16usize;
+        let max_parallel = 4;
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let res: Result<VecDeque<()>, SlateDBError> = build_concurrent(inputs, max_parallel, {
+            let in_flight = in_flight.clone();
+            let peak = peak.clone();
+            move |_x| {
+                let in_flight = in_flight.clone();
+                let peak = peak.clone();
+                async move {
+                    let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(cur, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    Ok(Some(()))
+                }
+            }
+        })
+        .await;
+
+        assert!(res.is_ok());
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert!(
+            observed_peak <= max_parallel,
+            "observed peak {} exceeds max_parallel {}",
+            observed_peak,
+            max_parallel
+        );
     }
 }
