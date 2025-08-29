@@ -82,6 +82,9 @@ pub(crate) enum CliCommands {
 }
 ```
 
+The output of the CLI will include both the timestamp and the sequence number
+in order to indicate whether rounding happened. 
+
 ### Manifest
 
 ```fbs
@@ -117,7 +120,7 @@ To reduce stored data we use two tactics:
 Physically, the sequence tracker is serialized as two Gorilla-encoded arrays of
 equal length (one for sequence numbers and one for timestamps). The arrays are
 broken up logically (though not physically) into tiers, and within a tier the
-timestamps expected to be evenly spaced (though this assumption is not
+timestamps are expected to be evenly spaced (though this assumption is not
 enforced).
 
 The Gorilla encoding scheme means sequence numbers and timestamps will take up
@@ -156,14 +159,81 @@ When the sequence tracker is initialized, it will be configured with a fixed
 number of mappings to store (measured in key-value pairs). Once that number is
 reached, the sequence tracker will downsample by removing every other entry. To
 avoid aggressive downsampling, the sequence tracker will only track a timestamp
-mapping no more than every 30 seconds.
+mapping on a fixed interval.
 
 The downsampling strategy will cause exponentially decreasing granularity over
-time. For example, if the sequence tracker is configured with 1024 mappings, the
-first time it fills up the data will represent a timeframe of `1024 * 30 seconds
-= 512 minutes`. When downsampling kicks in, this time window will cover the
-first 512 entries. The next time the sequence tracker fills up, this same data
-will be covered by the first 256 entries (and so on).
+time. For example, if the sequence tracker is configured with 1024 mappings and a
+30s reporting interval, the first time it fills up the data will represent a timeframe of
+`1024 * 30 seconds = 512 minutes`. When downsampling kicks in, this time window 
+will cover the first 512 entries. The next time the sequence tracker fills up, this 
+same data will be covered by the first 256 entries (and so on).
+
+#### Concrete Example
+
+Consider a sequence tracker with 8 entries recording timestamps every 30 seconds:
+
+**Initial state (8 entries, full):**
+```
+12:00:00, 12:00:30, 12:01:00, 12:01:30, 12:02:00, 12:02:30, 12:03:00, 12:03:30
+|   .   |     .    |     .   |    .   |     .    |   .     |     .    |   .   |
+└──30s──┴────30s───┴───30s───┴────30s─┴────30s───┴───30s───┴────30s───┴──30s──┘
+```
+
+**After first downsampling (keep every other entry, 4 entries):**
+```
+12:00:00, 12:01:00, 12:02:00, 12:03:00
+|   .   |     .    |     .   |    .   |
+└──1m───┴────1m────┴───1m────┴───1m───┘
+```
+
+**After filling up again (8 entries):**
+```
+12:00:00, 12:01:00, 12:02:00, 12:03:00, 12:04:00, 12:04:30, 12:05:00, 12:05:30
+|   .   |     .    |     .   |    .   |     .    |    .    |   .     |   .   |
+└──1m───┴────1m────┴───1m────┴───1m───┴────30s───┴───30s───┴───30s───┴──30s──┘
+```
+
+**After second downsampling (4 entries):**
+```
+12:00:00, 12:02:00, 12:04:00, 12:05:00
+|   .   |     .    |     .   |    .   |
+└──2m───┴────2m────┴───1m────┴───1m───┘
+```
+
+#### Understanding Horizon Coverage
+
+This pattern continues, with older entries becoming progressively sparser while 
+maintaining coverage across the entire time range. Note that there's an implicit
+"cutoff" when the buffer fills up that will downsample old entries so aggressively
+that there is no longer any retentition beyond a certain time.
+
+To understand how much time a sampling reasonably covers you can reference the formula:
+
+```
+H ≈ (C * Δ / 2) * log2(C)
+```
+
+Where:
+- H = horizon covered
+- C = capacity (entries)
+- Δ = base interval (30s in your case)
+
+Here is a table of reasonable defaults for confiruation:
+
+| Reporting Interval (Seconds) | Capacity | Horizon (Days) |
+|------------------------------|----------|----------------|
+| 30                           | 2048     | 3.9            |
+| 30                           | 4096     | 8.5            |
+| 30                           | 8192     | 18.5           |
+| 60                           | 2048     | 7.8            |
+| 60                           | 4096     | 17.1           |
+| 60                           | 8192     | 37.0           |
+| 300                          | 2048     | 39.1           |
+| 300                          | 4096     | 85.3           |
+| 300                          | 8192     | 184.9          |
+
+In the interest of simplicity, we will not make the retention period configurable,
+and instead choose a reporting interval of 60s with a acapacity of 8192 entries.
 
 ## Rejected Alternatives
 
