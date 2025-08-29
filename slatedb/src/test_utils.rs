@@ -8,19 +8,22 @@ use crate::row_codec::SstRowCodecV0;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
+use futures::stream::BoxStream;
+use object_store::path::Path;
+use object_store::{
+    GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutOptions as OS_PutOptions,
+    PutPayload, PutResult,
+};
 use rand::{Rng, RngCore};
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Once};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
-use futures::stream::BoxStream;
-use object_store::path::Path;
-use object_store::{GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutOptions as OS_PutOptions, PutPayload, PutResult};
-use std::fmt;
-use std::sync::atomic::AtomicUsize;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -408,7 +411,13 @@ impl ObjectStore for FlakyObjectStore {
         self.put_opts_attempts.fetch_add(1, Ordering::SeqCst);
         if self
             .fail_first_put_opts
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| if v > 0 { Some(v - 1) } else { None })
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            })
             .is_ok()
         {
             // Inject a timeout error wrapped in object_store::Error so retry logic triggers

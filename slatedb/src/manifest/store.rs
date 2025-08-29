@@ -783,12 +783,12 @@ mod tests {
     use crate::error;
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::test_utils::FlakyObjectStore;
     use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
-    use crate::test_utils::FlakyObjectStore;
 
     const ROOT: &str = "/root/path";
 
