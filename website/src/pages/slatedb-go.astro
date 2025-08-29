@@ -14,3 +14,15 @@
     </p>
   </main>
 </html>
+
+{/*
+  This page is required to make `go get` work with SlateDB's Go binding.
+  The module is in `slatedb-go/go`, which means a normal import path would be
+  `github.com/slatedb/slatedb/slatedb-go/go`. This is a bit ugly, so we use
+  `slatedb.io/slatedb-go` instead. See https://go.dev/ref/mod#vcs-find for
+  details.
+
+  NOTE: We are using the `subdir` field in `go-import`, which is a new feature
+  in Go 1.25.0. This means SlateDB's Go binding requires Go 1.25.0 or higher.
+  See https://go.dev/doc/go1.25#go-command for details.
+*/}
