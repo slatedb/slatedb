@@ -16,19 +16,25 @@ pub(crate) struct Oracle {
     /// The sequence number of the most recent write that has been fully durable
     /// flushed to the remote storage.
     pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
+    /// The next WAL ID to be assigned. This value is used to uniquely identify
+    /// each WAL SST file, and incremented in the following scenarios:
+    /// 1. when a new WAL SST is prepared in the WAL buffer as part of normal write
+    ///    operations.
+    /// 2. during start up, after a WAL SST has been successfully replayed.
+    /// 3. during start up, after an empty WAL file is created for fencing writes on
+    ///    WAL.
+    pub(crate) next_wal_id: Arc<MonotonicSeq>,
 }
 
 impl Oracle {
-    /// Create a new Oracle with the last committed sequence number. for the read only
-    /// db instance (DbReader), only the last committed sequence number is needed to be
-    /// tracked, and last_seq and last_remote_persisted_seq are considered to be
-    /// the same as last_committed_seq.
-    pub(crate) fn new(last_committed_seq: MonotonicSeq) -> Self {
+    /// Create a new Oracle with the last committed sequence number and the next wal id.
+    pub(crate) fn new(last_committed_seq: MonotonicSeq, next_wal_id: MonotonicSeq) -> Self {
         let last_committed_seq = Arc::new(last_committed_seq);
         Self {
             last_seq: last_committed_seq.clone(),
             last_committed_seq: last_committed_seq.clone(),
             last_remote_persisted_seq: last_committed_seq,
+            next_wal_id: Arc::new(next_wal_id),
         }
     }
 

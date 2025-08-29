@@ -279,7 +279,7 @@ async fn copy_wal_ssts(
     let clone_path_resolver = PathResolver::new(clone_path.clone());
 
     let mut wal_id = parent_checkpoint_state.replay_after_wal_id + 1;
-    while wal_id < parent_checkpoint_state.next_wal_sst_id {
+    while wal_id < parent_checkpoint_state.last_seen_wal_id {
         fail_point!(fp_registry.clone(), "copy-wal-ssts-io-error", |_| Err(
             SlateDBError::from(std::io::Error::other("oops"))
         ));
@@ -330,7 +330,7 @@ mod tests {
         test_utils::seed_database(&parent_db, &table, false)
             .await
             .unwrap();
-        parent_db.flush().await.unwrap();
+        parent_db.inner.flush_memtables().await.unwrap();
         parent_db.close().await.unwrap();
 
         create_clone(
@@ -619,21 +619,18 @@ mod tests {
         test_utils::seed_database(&parent_db, &sample::table(&mut rng, 100, 10), false)
             .await
             .unwrap();
-        parent_db.flush().await.unwrap();
+        parent_db.inner.flush_memtables().await.unwrap();
 
         test_utils::seed_database(&parent_db, &sample::table(&mut rng, 100, 10), false)
             .await
             .unwrap();
-        parent_db.flush().await.unwrap();
+        parent_db.inner.flush_memtables().await.unwrap();
         parent_db.close().await.unwrap();
 
-        fail_parallel::cfg(
-            Arc::clone(&fp_registry),
-            "copy-wal-ssts-io-error",
-            "1*off->return",
-        )
-        .unwrap();
+        fail_parallel::cfg(Arc::clone(&fp_registry), "copy-wal-ssts-io-error", "return").unwrap();
 
+        // TODO(flaneur2020): If it's better to find last_seen_wal_id by listing in clone, this test case may need
+        // some consideration.
         let err = create_clone(
             clone_path.clone(),
             parent_path.clone(),

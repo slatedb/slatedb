@@ -177,7 +177,7 @@ impl CompactorState {
             l0_last_compacted: my_db_state.l0_last_compacted,
             l0: merged_l0s,
             compacted: my_db_state.compacted.clone(),
-            next_wal_sst_id: remote_manifest.core.next_wal_sst_id,
+            last_seen_wal_id: remote_manifest.core.last_seen_wal_id,
             replay_after_wal_id: remote_manifest.core.replay_after_wal_id,
             last_l0_clock_tick: remote_manifest.core.last_l0_clock_tick,
             last_l0_seq: remote_manifest.core.last_l0_seq,
@@ -469,7 +469,10 @@ mod tests {
             db_state.replay_after_wal_id,
             sm.manifest().core.replay_after_wal_id
         );
-        assert_eq!(db_state.next_wal_sst_id, sm.manifest().core.next_wal_sst_id);
+        assert_eq!(
+            db_state.last_seen_wal_id,
+            sm.manifest().core.last_seen_wal_id
+        );
     }
 
     #[test]

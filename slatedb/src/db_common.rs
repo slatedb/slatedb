@@ -59,7 +59,7 @@ impl DbInner {
         self.freeze_memtable(&mut guard, recent_flushed_wal_id)?;
 
         let last_wal = replayed_memtable.last_wal_id;
-        guard.modify(|modifier| modifier.state.manifest.core.next_wal_sst_id = last_wal + 1);
+        self.oracle.next_wal_id.store(last_wal + 1);
 
         // update seqs and clock
         self.oracle.last_seq.store(replayed_memtable.last_seq);
