@@ -56,7 +56,7 @@ export default defineConfig({
 			],
 			sidebar: [
 				{
-					label: 'Start Here',
+					label: 'Getting Started',
 					items: [
 						{
 							label: 'Introduction',
@@ -67,8 +67,12 @@ export default defineConfig({
 							link: '/docs/quickstart/',
 						},
 						{
-							label: 'Frequently Asked Questions',
+							label: 'FAQ',
 							link: '/docs/faq/',
+						},
+						{
+							label: 'Benchmarks',
+							link: '/docs/benchmarks/',
 						}
 					]
 				},
@@ -84,6 +88,10 @@ export default defineConfig({
 							link: '/docs/design/files/',
 						},
 						{
+							label: 'Manifest',
+							link: '/docs/design/manifest/',
+						},
+						{
 							label: 'Writes',
 							link: '/docs/design/writes/',
 						},
@@ -92,12 +100,32 @@ export default defineConfig({
 							link: '/docs/design/reads/',
 						},
 						{
+							label: 'Caching',
+							link: '/docs/design/caching/',
+						},
+						{
 							label: 'Compaction',
 							link: '/docs/design/compaction/',
 						},
 						{
 							label: 'Checkpoints',
 							link: '/docs/design/checkpoints/',
+						},
+						{
+							label: 'Compression',
+							link: '/docs/design/compression/',
+						},
+						{
+							label: 'Clones',
+							link: '/docs/design/clones/',
+						},
+						{
+							label: 'Time',
+							link: '/docs/design/time/',
+						},
+						{
+							label: 'Merge',
+							link: '/docs/design/merge/',
 						}
 					]
 				},
@@ -113,8 +141,16 @@ export default defineConfig({
 							link: '/docs/operations/cli/',
 						},
 						{
+							label: 'Compatibility',
+							link: '/docs/operations/compatibility/',
+						},
+						{
 							label: 'Configuration',
 							link: '/docs/operations/configuration/',
+						},
+						{
+							label: 'Errors',
+							link: '/docs/operations/errors/',
 						},
 						{
 							label: 'Logging',
