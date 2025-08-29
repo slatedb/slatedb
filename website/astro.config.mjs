@@ -73,28 +73,66 @@ export default defineConfig({
 					]
 				},
 				{
-					label: 'Reference',
+					label: 'Design',
 					items: [
 						{
-							label: 'Architecture',
-							link: '/docs/architecture/',
+							label: 'Overview',
+							link: '/docs/design/overview/',
 						},
 						{
-							label: 'Performance',
-							link: '/docs/performance/',
+							label: 'Files',
+							link: '/docs/design/files/',
+						},
+						{
+							label: 'Writes',
+							link: '/docs/design/writes/',
+						},
+						{
+							label: 'Reads',
+							link: '/docs/design/reads/',
+						},
+						{
+							label: 'Compaction',
+							link: '/docs/design/compaction/',
+						},
+						{
+							label: 'Checkpoints',
+							link: '/docs/design/checkpoints/',
+						}
+					]
+				},
+				{
+					label: 'Operations',
+					items: [
+						{
+							label: 'Admin CLI',
+							link: '/docs/operations/admin-cli/',
+						},
+						{
+							label: 'CLI',
+							link: '/docs/operations/cli/',
+						},
+						{
+							label: 'Configuration',
+							link: '/docs/operations/configuration/',
 						},
 						{
 							label: 'Logging',
 							link: '/docs/operations/logging/',
 						},
 						{
-							label: 'Checkpoint & Restore',
-							link: '/docs/tutorials/checkpoint/',
+							label: 'Metrics',
+							link: '/docs/operations/metrics/',
+						},
+						{
+							label: 'Performance',
+							link: '/docs/operations/performance/',
 						}
 					]
 				},
 				{
 					label: 'Tutorials',
+					collapsed: true,
 					items: [
 						{
 							label: 'Connect to Azure Blob Storage',
@@ -103,6 +141,10 @@ export default defineConfig({
 						{
 							label: 'Connect to S3',
 							link: '/docs/tutorials/s3/',
+						},
+						{
+							label: 'Checkpoint & Restore',
+							link: '/docs/tutorials/checkpoint/',
 						}
 					]
 				},
@@ -127,7 +169,26 @@ export default defineConfig({
 						}
 					]
 				},
-
+				{
+					label: 'Community',
+					items: [
+						{
+							label: 'Discord',
+							link: 'https://discord.gg/mHYmGy5MgA',
+							attrs: { target: '_blank' }
+						},
+						{
+							label: 'Dosu',
+							link: 'https://app.dosu.dev/d8f2da6d-6c4e-43a9-b5f2-b03db801b4d1/ask',
+							attrs: { target: '_blank' }
+						},
+						{
+							label: 'GitHub',
+							link: 'https://github.com/slatedb/slatedb',
+							attrs: { target: '_blank' }
+						}
+					]
+				},
 			]
 		}),
 	],
