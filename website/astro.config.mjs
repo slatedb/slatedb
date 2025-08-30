@@ -6,6 +6,7 @@ import starlightLlmsTxt from 'starlight-llms-txt';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generateRfcWrappers } from './scripts/generate-rfcs.js';
+import mermaid from 'astro-mermaid';
 
 const site = 'https://slatedb.io';
 const ogUrl = new URL('/img/slatedb-opengraph.jpg', site).href;
@@ -15,6 +16,7 @@ const ogImageAlt = 'SlateDB - An embedded database built on object storage';
 export default defineConfig({
 	site,
 	integrations: [
+		mermaid(),
 		starlight({
 			title: 'SlateDB',
 			description: 'An embedded database built on object storage',

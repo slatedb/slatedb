@@ -12,12 +12,12 @@ The write path in SlateDB begins when a client issues a `put`. The key-value pai
 ```mermaid
 flowchart TD
     A[Client PUT] --> B[In-memory WAL]
-    B -->|Flush interval| C[Immutable WAL]
+    B -->|Flush interval| C[Immutable in-memory WAL]
     C -->|Async write| D[Object Storage WAL]
-    D --> E[Memtable]
-    E -->|Size threshold| F[Immutable Memtable]
-    F -->|Flush| G[L0 SSTable (Object Storage)]
-    G -->|Compaction| H[Sorted Runs (L1, L2, ...)]
+    A --> E[In-memory MemTable]
+    E -->|Size threshold| F[Immutable in-memory MemTable]
+    F -->|Flush| G["L0 SSTable (Object Storage)"]
+    G -->|Compaction| H["Sorted Runs (L1, L2, ...)"]
 ```
 
 Reads in SlateDB follow a predictable path. A `get` first checks the mutable memtable for the requested key. If not found, the search continues through any immutable memtables, then scans the L0 SSTables in object storage, starting from the newest. Bloom filters accelerate this process, quickly ruling out files that cannot possibly contain the key. If the key remains elusive, the search proceeds to the sorted runs—compacted SSTables organized by key range and recency. This layered approach ensures that the most recent data is always checked first, while older, less frequently accessed data remains available but incurs the higher latency of object storage. Caching at each layer further reduces the cost of repeated reads.
@@ -26,8 +26,8 @@ Reads in SlateDB follow a predictable path. A `get` first checks the mutable mem
 flowchart TD
     A[Client GET] --> B[Mutable Memtable]
     B -->|Miss| C[Immutable Memtables]
-    C -->|Miss| D[L0 SSTables (Object Storage)]
-    D -->|Miss| E[Sorted Runs (Compacted SSTables)]
+    C -->|Miss| D["L0 SSTables (Object Storage)"]
+    D -->|Miss| E["Sorted Runs (Compacted SSTables)"]
     E -->|Miss| F[Not Found]
     B -->|Hit| G[Return Value]
     C -->|Hit| G
