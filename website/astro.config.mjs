@@ -3,6 +3,9 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightLinksValidator from 'starlight-links-validator';
 import starlightLlmsTxt from 'starlight-llms-txt';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { generateRfcWrappers } from './scripts/generate-rfcs.js';
 
 const site = 'https://slatedb.io';
 const ogUrl = new URL('/img/slatedb-opengraph.jpg', site).href;
@@ -202,6 +205,11 @@ export default defineConfig({
 					]
 				},
 				{
+					label: 'RFCs',
+					collapsed: true,
+					autogenerate: { directory: 'rfcs' },
+				},
+				{
 					label: 'Community',
 					items: [
 						{
@@ -226,5 +234,31 @@ export default defineConfig({
 	],
 	vite: {
 		assetsInclude: ['**/*.riv'],
+		plugins: [
+			{
+				name: 'slatedb-rfcs-generator',
+				async buildStart() {
+					await generateRfcWrappers();
+				},
+				configureServer(server) {
+					// Initial generation at dev server start.
+					generateRfcWrappers();
+					// Watch rfcs in the repo.
+					const repoRfcsGlob = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'rfcs/**/*.md');
+					server.watcher.add(repoRfcsGlob);
+					const onChange = (file) => {
+						if (file.endsWith('.md') && file.includes(`${path.sep}rfcs${path.sep}`)) {
+							generateRfcWrappers();
+						}
+					};
+					server.watcher.on('add', onChange);
+					server.watcher.on('change', onChange);
+					server.watcher.on('unlink', onChange);
+				},
+			},
+		],
+		server: {
+			// No special FS allowances needed; wrappers embed content.
+		},
 	},
 });

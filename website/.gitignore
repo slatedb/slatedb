@@ -19,3 +19,7 @@ pnpm-debug.log*
 
 # macOS-specific files
 .DS_Store
+
+# Generated RFC wrappers
+src/content/docs/rfcs/*.mdx
+src/content/docs/rfcs-pages/*.mdx

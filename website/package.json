@@ -6,6 +6,8 @@
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
+    "prebuild": "node ./scripts/generate-rfcs.js",
+    "gen:rfcs": "node ./scripts/generate-rfcs.js",
     "preview": "astro preview",
     "astro": "astro"
   },
