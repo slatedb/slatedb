@@ -99,12 +99,16 @@ export default defineConfig({
 							link: '/docs/design/reads/',
 						},
 						{
-							label: 'Caching',
-							link: '/docs/design/caching/',
-						},
-						{
 							label: 'Compaction',
 							link: '/docs/design/compaction/',
+						},
+						{
+							label: 'Garbage Collection',
+							link: '/docs/design/gc/',
+						},
+						{
+							label: 'Caching',
+							link: '/docs/design/caching/',
 						},
 						{
 							label: 'Checkpoints',
