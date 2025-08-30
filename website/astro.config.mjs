@@ -246,6 +246,7 @@ export default defineConfig({
 					// Watch rfcs in the repo.
 					const repoRfcsGlob = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'rfcs/**/*.md');
 					server.watcher.add(repoRfcsGlob);
+					/** @param {string} file */
 					const onChange = (file) => {
 						if (file.endsWith('.md') && file.includes(`${path.sep}rfcs${path.sep}`)) {
 							generateRfcWrappers();
