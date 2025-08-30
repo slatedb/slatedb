@@ -20,7 +20,7 @@ SlateDB's write latency is dominated by object store PUT operations. The followi
 Read latency dominated by the database's working set size and read pattern:
 
 1. Working sets that fit in local (memorya and disk) caches will respond very quickly (< 1ms).
-2. Read patterns that do sequential reads will respond very quickly (<1ms) since SST blocks are pre-fetched sequentially and cached locally.
+2. Read patterns that do sequential reads will respond very quickly (&lt;1ms) since SST blocks are pre-fetched sequentially and cached locally.
 3. Read patterns that access keys that are (lexicographically) close to each other will respond very quickly (< 1ms) since blocks are cached locally after the first read.
 4. Reads that access data across the keyspace, and whose dataset is larger than a single machine's memory or disk will, are more likely to see latency spikes similar to object storage latency levels (50-100ms for S3 standard). Such workloads can still work well, but require more tuning, partitioning, and so on.
 

@@ -14,7 +14,6 @@ This directory contains example programs demonstrating how to use [SlateDB](http
     ```
 3. Add any required dependencies to the `Cargo.toml file.
 
-
 ## Running the examples
 
 1. **Build and Run an example:**

@@ -122,16 +122,16 @@ export default defineConfig({
 						{
 							label: 'Time',
 							link: '/docs/design/time/',
+						},
+						{
+							label: 'Consistency',
+							link: '/docs/design/consistency/',
 						}
 					]
 				},
 				{
 					label: 'Operations',
 					items: [
-						{
-							label: 'Admin CLI',
-							link: '/docs/operations/admin-cli/',
-						},
 						{
 							label: 'CLI',
 							link: '/docs/operations/cli/',

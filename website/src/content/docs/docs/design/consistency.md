@@ -1,11 +1,7 @@
 ---
-title: Database Snapshots
-description: Learn how to create and use database snapshots in SlateDB
+title: Consistency
+description: Learn about SlateDB's consistency model
 ---
-
-import { Code } from '@astrojs/starlight/components';
-import createSnapshot from '/../examples/src/create_snapshot.rs?raw';
-import scanSnapshot from '/../examples/src/scan_snapshot.rs?raw';
 
 Snapshots provide consistent read-only views over the entire state of the key-value store.
 
