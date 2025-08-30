@@ -17,13 +17,13 @@ LSM trees are an in-memory and on-disk data structure used to store key-value (K
 
 ## LSM tree design
 
-LSM trees are made up of a _write-ahead log (WAL)_, a mutable in-memory map called a _MemTable_, and _sorted strings tables (SSTables)_ on disk. We will explore each of these components in detail.
+LSM trees are made up of a _write-ahead log (WAL)_, a mutable in-memory map called a _MemTable_, _sorted strings tables (SSTables)_, and a _manifest_. We will discuss each of these components in detail.
 
 ### Write-ahead log (WAL)
 
 A put() call writes its data to a write-ahead log (WAL). A WAL is an append-only persistent log. WALs are used to recover data in the event of a crash. When the database restarts, it can replay the WAL to recover its state. WALs are not great for serving reads, though; they're not optimized for random access. Every write is simply an appended to the end of the log. A get() operation must scan the WAL from the last write to the first write until it finds the key-value pair (or until it reaches the beginning of the WAL).
 
-### MemTable
+### MemTables
 
 LSM trees avoid this linear scan by storing their data in an additional data structure called a MemTable. After a put() call writes its data to the WAL, it inserts its data into a mutable in-memory map called a MemTable. MemTabls typically use a sorted map such as a [SkipList](https://en.wikipedia.org/wiki/Skip_list) map so that `scan()` operations work as well.
 
@@ -50,7 +50,7 @@ sequenceDiagram
   MT-->>C: key-value pair
 ```
 
-### SSTable
+### SSTables
 
 But an in-memory MemTable will only allow us to have a database that fits in memory. We must persist our data on disk. We've already seen that the WAL is an inappropriate format for serving reads. LSM trees introduce a third data structure here: a sorted strings table (SSTable). SSTables are files that contain a sequence of key-value pairs sorted by key:
 
@@ -174,7 +174,15 @@ sequenceDiagram
   SR-->>C: key-value pair (if found)
 ```
 
-We've now built a basic LSM tree. We've glossed over many details (deletion tombstones, consistency, WAL replay, etc). Still, this basic implementation will work. If you're interested in experimenting more with LSMs, we highly recommend checking out [Mini-LSM](https://skyzh.github.io/mini-lsm/).
+### Manifests
+
+Another issue remains: upon restart, the database has no easy way to know what SSTables it should load. We might try to list all SSTs and read each file's metadata, but this doesn't work. RocksDB's [MANIFEST page](https://github.com/facebook/rocksdb/wiki/MANIFEST) explains why:
+
+> File system operations are not atomic, and are susceptible to inconsistencies in the event of system failure. Even with journaling turned on, file systems do not guarantee consistency on unclean restart. POSIX file system does not support atomic batching of operations either. Hence, it is not possible to rely on metadata embedded in RocksDB datastore files to reconstruct the last consistent state of the RocksDB on restart.
+
+LSM tree implementations store their state in a manifest. The manifest is a file (or log of files) that stores the database's state; this includes the location of all SSTables, the WAL recovery starting point, and many other details. The LSM tree reads the manifest on startup to reconstruct its in-memory state. As state changes, the LSM tree writes manifest changes atomically to ensure consistency.
+
+We've now built a basic LSM tree. There are many, many details to be explored (deletion tombstones, consistency, WAL replay, and more). Still, this basic implementation will work. If you're interested in experimenting more with LSMs, we highly recommend checking out [Mini-LSM](https://skyzh.github.io/mini-lsm/).
 
 ## Tradeoffs
 
