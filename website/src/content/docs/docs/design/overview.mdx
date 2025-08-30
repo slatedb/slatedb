@@ -70,7 +70,7 @@ sequenceDiagram
     participant MT as MemTable (mutable)
   end
   box Disk
-    participant SST as SSTable (immutable)
+    participant SST as SSTable
   end
 
   C->>MT: put()
@@ -89,7 +89,7 @@ sequenceDiagram
     participant IMT as MemTable (immutable)
   end
   box Disk
-    participant SST as SSTable (immutable)
+    participant SST as SSTable
   end
 
   C->>MT: put()
@@ -108,7 +108,7 @@ sequenceDiagram
     participant IMT as MemTable (immutable)
   end
   box Disk
-    participant SST as SSTable (immutable)
+    participant SST as SSTable
   end
 
   C->>SST: get()
@@ -153,6 +153,12 @@ SSTable 2:
 
 Now a read for `key56` will only need to search the first SSTable. Readers need only check the key range of each SSTable (stored in memory) to determine if it might contain the key. The unpartitioned tables, are called _level 0 (L0)_ SSTables. The partitioned tables are called _sorted runs (SRs)_. L0 SSTables are part of the write path, as we saw above. Sorted runs are generated through a background compaction process.
 
+::: note
+
+Sorted runs are a logical construct. The files written to disk are the sorted run's SSTables. The manifest (which we'll see in a moment) contains the mapping from a sorted run ID to its SSTables.
+
+:::
+
 A `get()` will traverse the MemTables, L0 SSTables, and SRs to find the key-value pair.
 
 ```mermaid
@@ -192,6 +198,29 @@ LSM trees are elegant, simple data structures. However, they are not without tra
 * Read amplification: The number of extra bytes read from storage per byte of result data returned.
 * Space amplification: The total on-disk byte size relative to the total live logical byte size.
 
-LSM trees tend to have higher write throughput but worse read locality, more read and space amplification, more background compaction CPU, and higher tail latencies than B-trees. LSM trees are an active area research and there are now many strategies to balance these tradeoffs.
+LSM trees tend to have higher write throughput but worse read locality, more read and space amplification, more background compaction CPU, and higher tail latencies than B-trees. This subject is an active area of research and there are now many strategies to balance these tradeoffs.
 
 ## SlateDB's LSM design
+
+SlateDB's LSM design diverges very little from the basic LSM tree design we've seen above. SlateDB has a WAL, MemTables, SSTables, sorted runs, and a manifest. The only difference is that all of SlateDB's data is written to object storage instead of a local disk or filesystem:
+
+```mermaid
+sequenceDiagram
+  box Memory
+    participant C as Client
+    participant MT as MemTable (mutable)
+    participant IMT as MemTable (immutable)
+  end
+  box Object Storage
+    participant SST as SSTable
+    participant SR as Sorted Run
+  end
+
+  C->>MT: put()
+  MT-->>C: update OK
+  MT-->>IMT: freeze
+  IMT-->>SST: write
+  SST-->>SR: compact
+```
+
+In the next section, we'll look at SlateDB's object store directory structure.
