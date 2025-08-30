@@ -1,3 +1,35 @@
 ---
 title: Files
 ---
+
+SlateDB persists data in object storage under three main directories:
+
+* `manifest`: Contains manifest files representing the database state.
+* `wal`: Contains immutable write-ahead log segments as SSTables.
+* `compacted`: Contains SSTables for each sorted run, representing durable, readable data.
+
+The directory structure looks like:
+
+```
+some-dir/
+├─ manifest/
+│  ├─ 00000000000000000001.manifest
+│  ├─ 00000000000000000002.manifest
+│  └─ ...
+├─ wal/
+│  ├─ 00000000000000000001.sst
+│  ├─ 00000000000000000002.sst
+│  └─ ...
+└─ compacted/
+   ├─ 01K3XYV1W2WR4FDVB7A9S319YS.sst
+   ├─ 01K3XYV9JFPSZ5BW3Y1DVMKDFS.sst
+   └─ ...
+```
+
+All three folders reside in the same object store bucket and path prefix by default. The WAL can be configured to point to a separate bucket. See the [Writes](/docs/design/writes) page for details.
+
+:::note
+
+SlateDB does not write to local disk at all. Users can configure disk config disk-backed block, index, filter, and object store file caches. See [Caching](/docs/design/caching) for details.
+
+:::
