@@ -1,3 +1,5 @@
+# SlateDB Error API
+
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
 - [SlateDB Error API](#slatedb-error-api)
@@ -7,8 +9,6 @@
    * [Public API](#public-api)
 
 <!-- TOC end -->
-
-# SlateDB Error API
 
 Status: Accepted
 
