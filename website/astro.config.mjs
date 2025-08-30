@@ -60,19 +60,19 @@ export default defineConfig({
 					items: [
 						{
 							label: 'Introduction',
-							link: '/docs/introduction/',
+							link: '/docs/get-started/introduction/',
 						},
 						{
 							label: 'Quick Start',
-							link: '/docs/quickstart/',
+							link: '/docs/get-started/quickstart/',
 						},
 						{
 							label: 'FAQ',
-							link: '/docs/faq/',
+							link: '/docs/get-started/faq/',
 						},
 						{
 							label: 'Benchmarks',
-							link: '/docs/benchmarks/',
+							link: '/docs/get-started/benchmarks/',
 						}
 					]
 				},
