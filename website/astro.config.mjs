@@ -89,10 +89,6 @@ export default defineConfig({
 							link: '/docs/design/files/',
 						},
 						{
-							label: 'Manifest',
-							link: '/docs/design/manifest/',
-						},
-						{
 							label: 'Writes',
 							link: '/docs/design/writes/',
 						},
