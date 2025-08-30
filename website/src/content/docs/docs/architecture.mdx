@@ -12,20 +12,6 @@ This page contains a high-level overview of SlateDB's architecture, read/write p
 
 ## Overview
 
-The following diagram shows the architecture of SlateDB:
-
-![Architecture diagram](/img/architecture.png)
-
-At a high level, SlateDB consists of the following components:
-
-* **Write-ahead log (WAL)**: A mutable WAL that stores recent writes that have not yet been written to object storage.
-* **Immutable WAL**: A WAL that has been frozen and is in the process of being written to object storage in the `wal` directory.
-* **Memtable**: An in-memory data structure that stores recent writes that have been written to the object store's WAL directory, but not yet written to L0.
-* **Frozen memtable**: An immutable memtable that is in the process of being written to object storage in the `compacted` directory.
-* **`wal` SSTs**: SSTables that store recent WAL entries on object storage.
-* **`L0` SSTs**: SSTables that store recent memtables on object storage.
-* **Sorted runs (SRs)**: A sequence of compacted, range partitioned SSTables that are treated as a single logical table.
-
 ## Writes
 
 ![Write diagram](/img/architecture-write.png)
