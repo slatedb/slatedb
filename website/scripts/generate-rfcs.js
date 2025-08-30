@@ -25,6 +25,18 @@ function computeOrder(filename) {
   return m ? Number.parseInt(m[1], 10) : undefined;
 }
 
+// Remove any Markdown Table of Contents block delimited by
+// `<!-- TOC start ... -->` and `<!-- TOC end -->`.
+// Also removes an optional preceding `Table of Contents:` label.
+function stripToc(content) {
+  const withoutToc = content.replace(
+    /(^[ \t]*Table of Contents:\s*\r?\n)?[ \t]*<!--\s*TOC start[\s\S]*?<!--\s*TOC end\s*-->\s*/gim,
+    ''
+  );
+  // Collapse excessive blank lines left behind by removal.
+  return withoutToc.replace(/\n{3,}/g, '\n\n');
+}
+
 // Escape HTML character entities and raw HTML so Markdown renders them as text.
 function escapeHtmlEntities(str) {
   return str
@@ -62,14 +74,14 @@ export async function generateRfcWrappers() {
     for (const name of rfcFiles) {
       const sourcePath = path.join(repoRfcsDir, name);
       const raw = await fs.readFile(sourcePath, 'utf8');
-      const title = extractTitle(raw) || name.replace(/\.md$/, '');
+      const titleRaw = extractTitle(raw) || name.replace(/\.md$/, '');
       const order = computeOrder(name);
-      const short = title.replace(/^SlateDB\s+/i, '');
-      const label = order ? `RFC ${String(order).padStart(4, '0')}: ${short}` : title;
+      const displayTitle = titleRaw.replace(/^SlateDB\s+/i, '');
+      const label = order ? `RFC ${String(order).padStart(4, '0')}: ${displayTitle}` : displayTitle;
 
       const frontmatter = [
         '---',
-        `title: ${yamlEscape(title)}`,
+        `title: ${yamlEscape(displayTitle)}`,
         'sidebar:',
         order ? `  order: ${order}` : undefined,
         `  label: ${yamlEscape(label)}`,
@@ -80,9 +92,10 @@ export async function generateRfcWrappers() {
         .filter(Boolean)
         .join('\n');
 
-      // Trim the first H1 and escape HTML entities, then write content directly as MDX markdown.
+      // Trim the first H1, strip any generated TOC, escape HTML entities, then write content as MDX.
       const contentWithoutH1 = raw.replace(/^\s*#\s+.+?(\r?\n)+/, '');
-      const safeContent = escapeHtmlEntities(contentWithoutH1);
+      const withoutToc = stripToc(contentWithoutH1);
+      const safeContent = escapeHtmlEntities(withoutToc);
 
       const body = `${frontmatter}\n${safeContent}\n`;
 
