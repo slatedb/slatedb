@@ -122,10 +122,6 @@ export default defineConfig({
 						{
 							label: 'Time',
 							link: '/docs/design/time/',
-						},
-						{
-							label: 'Merge',
-							link: '/docs/design/merge/',
 						}
 					]
 				},
