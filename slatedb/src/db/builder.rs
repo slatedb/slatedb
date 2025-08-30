@@ -142,7 +142,6 @@ use crate::rand::DbRand;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::bg_task_result_into_err;
 use crate::utils::spawn_bg_task;
 
 /// A builder for creating a new Db instance.
@@ -515,11 +514,15 @@ impl<P: Into<Path>> DbBuilder<P> {
             let compactor_task = spawn_bg_task(
                 // Spawn the main event loop on the main tokio runtime
                 &tokio_handle,
-                move |result: &Result<(), SlateDBError>| {
-                    let err = bg_task_result_into_err(result);
-                    warn!("compactor thread exited [error={}]", err);
-                    let mut state = cleanup_inner.state.write();
-                    state.record_fatal_error(err.clone())
+                move |result: &Result<(), SlateDBError>| match result {
+                    Ok(()) => {
+                        info!("compactor thread exited cleanly");
+                    }
+                    Err(err) => {
+                        warn!("compactor thread exited [error={}]", err);
+                        let mut state = cleanup_inner.state.write();
+                        state.record_fatal_error(err.clone())
+                    }
                 },
                 // Spawn the compactor on the compaction runtime
                 async move { compactor.run_async_task(compaction_handle).await },
@@ -546,11 +549,15 @@ impl<P: Into<Path>> DbBuilder<P> {
                 );
                 let garbage_collector_task = spawn_bg_task(
                     &gc_handle,
-                    move |result| {
-                        let err = bg_task_result_into_err(result);
-                        warn!("GC thread exited [error={}]", err);
-                        let mut state = cleanup_inner.state.write();
-                        state.record_fatal_error(err.clone())
+                    move |result| match result {
+                        Ok(()) => {
+                            info!("GC thread exited cleanly");
+                        }
+                        Err(err) => {
+                            warn!("GC thread exited [error={}]", err);
+                            let mut state = cleanup_inner.state.write();
+                            state.record_fatal_error(err.clone())
+                        }
                     },
                     async move { gc.run_async_task().await },
                 );

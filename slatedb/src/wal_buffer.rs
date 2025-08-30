@@ -239,7 +239,7 @@ impl WalBufferManager {
                         debug!("wal flush channel is full, skipping flush work");
                         Ok(())
                     }
-                    TrySendError::Closed(_) => Err(SlateDBError::BackgroundTaskShutdown),
+                    TrySendError::Closed(_) => Err(SlateDBError::Shutdown),
                 })?;
         }
 
@@ -286,7 +286,7 @@ impl WalBufferManager {
                 result_tx: Some(result_tx),
             })
             .await
-            .map_err(|_| SlateDBError::BackgroundTaskShutdown)?;
+            .map_err(|_| SlateDBError::Shutdown)?;
         let mut quit_rx = self.quit_once.reader();
         // TODO: it's good to have a timeout here.
         select! {
@@ -295,7 +295,7 @@ impl WalBufferManager {
             }
             result = quit_rx.await_value() => {
                 match result {
-                    Ok(_) => Err(SlateDBError::BackgroundTaskShutdown),
+                    Ok(_) => Err(SlateDBError::Shutdown),
                     Err(e) => Err(e)
                 }
             },
@@ -374,7 +374,7 @@ impl WalBufferManager {
         }
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
         // tables finally get notified.
-        let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::BackgroundTaskShutdown);
+        let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::Shutdown);
         let flushing_wals = self.flushing_wals();
         for (_, wal) in flushing_wals.iter() {
             wal.notify_durable(Err(fatal_or_shutdown.clone()));

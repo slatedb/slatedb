@@ -180,48 +180,77 @@ impl DbInner {
 
         let this = Arc::clone(self);
         let fut = async move {
-            while !(is_stopped && rx.is_empty()) {
-                match rx.recv().await.expect("unexpected channel close") {
-                    WriteBatchMsg::WriteBatch(write_batch_request, options) => {
-                        let WriteBatchRequest { batch, done } = write_batch_request;
-                        let result = this.write_batch(batch).await;
-                        if is_first_write && !this.wal_enabled && options.await_durable {
-                            is_first_write = false;
-                            let monitor_first_write = monitor_first_write.clone();
-                            let durable_watcher = result.clone()?;
-                            tokio::spawn(async move {
-                                monitor_first_write(durable_watcher).await;
-                            });
+            // write loop - process messages until shutdown
+            let loop_result = async {
+                while !(is_stopped && rx.is_empty()) {
+                    match rx.recv().await.expect("unexpected channel close") {
+                        WriteBatchMsg::WriteBatch(write_batch_request, options) => {
+                            let WriteBatchRequest { batch, done } = write_batch_request;
+                            let write_result = this.write_batch(batch).await;
+                            if is_first_write && !this.wal_enabled && options.await_durable {
+                                is_first_write = false;
+                                let monitor_first_write = monitor_first_write.clone();
+                                if let Ok(durable_watcher) = write_result.clone() {
+                                    tokio::spawn(async move {
+                                        monitor_first_write(durable_watcher).await;
+                                    });
+                                }
+                            }
+                            _ = done.send(write_result);
                         }
-                        _ = done.send(result);
-                    }
-                    WriteBatchMsg::Shutdown => {
-                        is_stopped = true;
+                        WriteBatchMsg::Shutdown => {
+                            is_stopped = true;
+                        }
                     }
                 }
+                Ok(())
             }
-            Ok(())
+            .await;
+
+            // Respond to any pending messages before exit
+            let pending_error = loop_result
+                .as_ref()
+                .err()
+                .unwrap_or(&SlateDBError::Shutdown);
+            Self::drain_write_messages(&mut rx, pending_error).await;
+
+            loop_result
         };
 
         let this = Arc::clone(self);
         Some(spawn_bg_task(
             tokio_handle,
             move |result| {
-                let err = match result {
+                match result {
                     Ok(()) => {
                         info!("write task shutdown complete");
-                        SlateDBError::BackgroundTaskShutdown
                     }
                     Err(err) => {
                         warn!("write task exited [error={}]", err);
-                        err.clone()
+                        // notify any waiters about the failure
+                        let mut state = this.state.write();
+                        state.record_fatal_error(err.clone());
                     }
-                };
-                // notify any waiters about the failure
-                let mut state = this.state.write();
-                state.record_fatal_error(err.clone());
+                }
             },
             fut,
         ))
+    }
+
+    async fn drain_write_messages(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<WriteBatchMsg>,
+        error: &SlateDBError,
+    ) {
+        rx.close();
+        while !rx.is_empty() {
+            let msg = rx.recv().await.expect("channel unexpectedly closed");
+            if let WriteBatchMsg::WriteBatch(write_batch_request, _options) = msg {
+                let WriteBatchRequest {
+                    batch: _batch,
+                    done,
+                } = write_batch_request;
+                let _ = done.send(Err(error.clone()));
+            }
+        }
     }
 }

@@ -57,7 +57,7 @@
 //!         result: Result<(), SlateDBError>,
 //!     ) -> Result<(), SlateDBError> {
 //!         match result {
-//!             Ok(_) | Err(SlateDBError::BackgroundTaskShutdown) => {
+//!             Ok(_) => {
 //!                 messages.for_each(|m| self.handle(m)).await;
 //!             },
 //!             // skipping drain messages on unclean shutdown
@@ -225,16 +225,16 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// flow:
     ///
     /// 1. Break immediately if we're in an error state or cancelled, and return
-    ///    [SlateDBError::BackgroundTaskShutdown].
+    ///    `Ok(())`.
     /// 2. Else, if there is a message, read it and invoke [MessageHandler::handle].
     /// 3. Else, if there is a ticker event, read it and invoke [MessageHandler::handle].
     ///
     /// If there is an uncaught error at any point, the error is returned immediately (in
-    /// lieu of [SlateDBError::BackgroundTaskShutdown] on a clean shutdown).
+    /// lieu of `Ok(())` on a clean shutdown).
     ///
     /// ## Returns
     ///
-    /// A [Result] containing [SlateDBError::BackgroundTaskShutdown] on clean shutdown,
+    /// A [Result] containing `Ok(())` on clean shutdown,
     /// or an uncaught error.
     async fn run_loop(&mut self) -> Result<(), SlateDBError> {
         let cancellation_token = self.cancellation_token.clone();
@@ -277,7 +277,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                 },
             }
         }
-        Err(SlateDBError::BackgroundTaskShutdown)
+        Ok(())
     }
 
     /// Handles the result of [MessageDispatcher::run_loop] using the following logic:
@@ -312,7 +312,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `maybe_error`: An optional error to pass to the handler. Setting this argument
     ///   signals to the [MessageHandler] that the database is in an error state during
     ///   shutdown. An option is used instead of `Result`` because we convert
-    ///   [SlateDBError::BackgroundTaskShutdown] to None, so handlers handle messages
+    ///   `Ok(())` to None, so handlers handle messages
     ///   cleanly during shutdown when the database is not in an error state.
     ///
     /// ## Returns
@@ -578,17 +578,14 @@ mod test {
             .expect("join failed");
 
         // Verify final state
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
+        assert!(matches!(result, Ok(())));
+        assert!(matches!(error_state.reader().read(), None));
         assert!(matches!(
             cleanup_called
                 .reader()
                 .read()
                 .expect("cleanup result not set"),
-            Err(SlateDBError::BackgroundTaskShutdown)
+            Ok(())
         ));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
@@ -749,15 +746,9 @@ mod test {
             .expect("join failed");
 
         // Verify final state
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
-        assert!(matches!(
-            cleanup_called.reader().read(),
-            Some(Err(SlateDBError::BackgroundTaskShutdown))
-        ));
+        assert!(matches!(result, Ok(())));
+        assert!(matches!(error_state.reader().read(), None));
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
             messages,
@@ -845,12 +836,9 @@ mod test {
             .expect("join failed");
 
         // Verify final state
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
-        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert!(matches!(result, Ok(())));
+        assert!(matches!(error_state.reader().read(), None));
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 9);
     }
 
@@ -938,12 +926,9 @@ mod test {
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
-        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert!(matches!(result, Ok(())));
+        assert!(matches!(error_state.reader().read(), None));
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 10);
     }
 
@@ -1017,12 +1002,9 @@ mod test {
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
-        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert!(matches!(result, Ok(())));
+        assert!(matches!(error_state.reader().read(), None));
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 16);
     }
 }

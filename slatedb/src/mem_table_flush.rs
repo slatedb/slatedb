@@ -3,9 +3,8 @@ use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::BackgroundTaskShutdown;
 use crate::manifest::store::FenceableManifest;
-use crate::utils::{bg_task_result_into_err, spawn_bg_task, IdGenerator};
+use crate::utils::{spawn_bg_task, IdGenerator};
 use log::{debug, error, info, warn};
 use std::cmp;
 use std::sync::Arc;
@@ -276,7 +275,7 @@ impl DbInner {
             }
 
             // respond to any pending msgs
-            let pending_error = result.clone().err().unwrap_or(BackgroundTaskShutdown);
+            let pending_error = result.clone().err().unwrap_or(SlateDBError::Shutdown);
             Self::drain_messages(&mut flush_rx, &pending_error).await;
 
             if let Err(err) = flusher.write_manifest_safely().await {
@@ -291,20 +290,36 @@ impl DbInner {
         Some(spawn_bg_task(
             tokio_handle,
             move |result| {
-                let err = bg_task_result_into_err(result);
-                warn!("memtable flush task exited with error [error={}]", err);
-                let mut state = this.state.write();
-                state.record_fatal_error(err.clone());
-                info!("notifying in-memory memtable of error");
-                state.memtable().table().notify_durable(Err(err.clone()));
+                let termination_reason = match result {
+                    Ok(()) => {
+                        info!("memtable flush task exited cleanly");
+                        SlateDBError::Shutdown
+                    }
+                    Err(err) => {
+                        warn!("memtable flush task exited with error [error={}]", err);
+                        let mut state = this.state.write();
+                        state.record_fatal_error(err.clone());
+                        err.clone()
+                    }
+                };
+
+                // Always notify watchers about task termination
+                let state = this.state.read();
+                info!("notifying in-memory memtable of task termination");
+                state
+                    .memtable()
+                    .table()
+                    .notify_durable(Err(termination_reason.clone()));
                 for imm_table in state.state().imm_memtable.iter() {
                     info!(
-                        "notifying imm memtable of error [last_wal_id={}, error={}]",
+                        "notifying imm memtable of task termination [last_wal_id={}, reason={}]",
                         imm_table.recent_flushed_wal_id(),
-                        err,
+                        termination_reason,
                     );
-                    imm_table.notify_flush_to_l0(Err(err.clone()));
-                    imm_table.table().notify_durable(Err(err.clone()));
+                    imm_table.notify_flush_to_l0(Err(termination_reason.clone()));
+                    imm_table
+                        .table()
+                        .notify_durable(Err(termination_reason.clone()));
                 }
             },
             fut,
