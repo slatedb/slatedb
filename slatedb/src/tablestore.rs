@@ -608,6 +608,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
+    use crate::test_utils::FlakyObjectStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
     use crate::types::{RowEntry, ValueDeletable};
     use crate::{
@@ -1202,6 +1203,41 @@ mod tests {
         } else {
             assert_eq!(count_ssts_in(&main_store).await, 3);
         }
+    }
+
+    #[tokio::test]
+    async fn test_retry_write_sst_on_timeout_and_verify_bytes() {
+        // Given a flaky store that times out on the first put_opts
+        let base: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
+
+        let format = SsTableFormat {
+            block_size: 64,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(flaky.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        ));
+
+        // Build an SST and compute expected bytes
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst = build_test_sst(&format, 3);
+        let expected_bytes = sst.remaining_as_bytes();
+
+        // When writing via TableStore (should retry once)
+        ts.write_sst(&id, sst, false).await.unwrap();
+
+        // Then: a retry happened
+        assert!(flaky.put_attempts() >= 2);
+
+        // And: the stored file bytes match exactly
+        let path = ts.path(&id);
+        let actual = base.get(&path).await.unwrap().bytes().await.unwrap();
+        assert_eq!(actual, expected_bytes);
     }
 
     #[rstest]
