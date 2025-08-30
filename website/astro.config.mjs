@@ -72,10 +72,6 @@ export default defineConfig({
 						{
 							label: 'FAQ',
 							link: '/docs/get-started/faq/',
-						},
-						{
-							label: 'Benchmarks',
-							link: '/docs/get-started/benchmarks/',
 						}
 					]
 				},
@@ -160,8 +156,12 @@ export default defineConfig({
 							link: '/docs/operations/metrics/',
 						},
 						{
-							label: 'Performance',
-							link: '/docs/operations/performance/',
+							label: 'Tuning',
+							link: '/docs/operations/tuning/',
+						},
+						{
+							label: 'Benchmarks',
+							link: '/docs/operations/benchmarks/',
 						}
 					]
 				},
