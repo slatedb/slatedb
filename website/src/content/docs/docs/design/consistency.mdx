@@ -3,6 +3,10 @@ title: Consistency
 description: Learn about SlateDB's consistency model
 ---
 
+import { Code } from '@astrojs/starlight/components';
+import createSnapshot from '/../examples/src/create_snapshot.rs?raw';
+import scanSnapshot from '/../examples/src/scan_snapshot.rs?raw';
+
 Snapshots provide consistent read-only views over the entire state of the key-value store.
 
 Once created, it supports all read operations—`get` or `scan`—giving you a stable, consistent view of the data as it existed at the instant the snapshot was taken.
