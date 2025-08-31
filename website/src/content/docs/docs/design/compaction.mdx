@@ -1,3 +1,15 @@
 ---
 title: Compaction
 ---
+
+![Compaction diagram](/img/architecture-compaction.png)
+
+L0 SSTs are written to the `compacted` directory in the object store when `l0_sst_size_bytes` is exceeded. SlateDB's compactor is responsible for merging SSTs from L0 into lower levels (L1, L2, and so on). These lower levels are referred to as _sorted runs_ in SlateDB. Each SST in a sorted run contains a distinct subset of the keyspace.
+
+SlateDB's compactor has the following components:
+
+* **Orchestrator**: Runs the compactor's event loop. Calls out to the scheduler to see if there are any compaction tasks to run. Updates the manifest with the results of compaction.
+* **Scheduler**: Schedules compaction tasks. The scheduler is responsible for determining which SSTs to compact and when to compact them. Though pluggable, the current implementation is a size-tiered compaction strategy.
+* **Executor**: Executes compaction tasks. The executor is responsible for reading SSTs from the object store, merging them, and writing the results back to the object store.
+
+For more details, see [RFC-0002](/rfcs/0002-compaction).
