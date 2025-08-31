@@ -88,6 +88,8 @@ jobs:
       - name: Create Go module tag
         run: |
           TAG="slatedb-go/go/v${{ github.event.inputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git ls-remote --tags origin "${TAG}" | grep -q "refs/tags/${TAG}$"; then
             echo "✔ ${TAG} already exists, skipping"
           else
