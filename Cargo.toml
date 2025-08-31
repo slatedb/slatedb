@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 repository = "https://github.com/slatedb/slatedb"
 license = "Apache-2.0"
@@ -63,7 +63,7 @@ rand_xoshiro = "0.7.0"
 serde = "1.0"
 serde_json = "1.0.142"
 siphasher = "1"
-slatedb = { path = "slatedb", version = "0.7.0" }
+slatedb = { path = "slatedb", version = "0.8.0" }
 snap = "1.1.1"
 sysinfo = "0.35.2"
 thiserror = "1.0.63"
