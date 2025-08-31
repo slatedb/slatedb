@@ -2,3 +2,32 @@
 title: Garbage Collection
 description: Learn about SlateDB's garbage collection strategy
 ---
+
+SlateDB's garbage collector runs as a background task in the client process, periodically checking for obsolete files in the database storage.
+
+The garbage collector has a configurable minimum age and interval for each file type (WAL SSTs, compacted SSTs, and manifests). Garbage collection for a file type can be disabled by setting its options to `None`. The collector runs every `interval` seconds and will delete files older than `min_age` that are not referenced by any active manifest or checkpoint.
+
+Below is a diagram illustrating the high-level flow of garbage collection in SlateDB:
+
+```mermaid
+flowchart TD
+
+    A["Start GC Cycle (interval timer)"] --> B[Remove Expired Checkpoints from Manifests]
+
+    B --> C[Run WAL SST GC Task]
+    C --> C1[List WAL SSTs older than last compacted ID]
+    C1 --> C2[Filter by min_age and active references]
+    C2 --> C3[Delete eligible WAL SSTs]
+
+    B --> D[Run Compacted SST GC Task]
+    D --> D1[List all compacted and L0 SSTs]
+    D1 --> D2[Gather active SST IDs from manifests]
+    D2 --> D3[Delete SSTs not referenced and older than min_age]
+
+    B --> E[Run Manifest GC Task]
+    E --> E1["List all manifests (exclude latest)"]
+    E1 --> E2[Gather active manifest IDs from checkpoints]
+    E2 --> E3[Delete manifests not referenced and older than min_age]
+
+    C3 & D3 & E3 --> G[Wait for Next Interval or Shutdown]
+```
