@@ -1,0 +1,47 @@
+---
+title: Files
+---
+
+A SlateDB object store bucket contains three main directories:
+
+```
+path/to/db/
+├─ manifest/
+│  ├─ 00000000000000000001.manifest
+│  ├─ 00000000000000000002.manifest
+│  └─ ...
+├─ wal/
+│  ├─ 00000000000000000001.sst
+│  ├─ 00000000000000000002.sst
+│  └─ ...
+└─ compacted/
+   ├─ 01K3XYV1W2WR4FDVB7A9S319YS.sst
+   ├─ 01K3XYV9JFPSZ5BW3Y1DVMKDFS.sst
+   └─ ...
+```
+
+The directories names are self-explanatory. Let's look at each file type:
+
+## Manifest
+
+The manifest directory contains an ordered list of manifest files in the format `<manifest_id>.manifest`. `<manifest_id>` is a zero-padded, 20 digit unsigned integer. Each manifest file is a complete snapshot of the database state at the time it was written. A manifest file can be updated by the following processes:
+
+- **Writer**: When a new WAL SSTable is created, the manifest is updated to include the new SSTable.
+- **Reader**: When a new checkpoint is created, deleted, or refreshed, the manifest is updated to include the new checkpoint.
+- **Compactor**: When a new sorted run is created, the manifest is updated to include the new sorted run.
+
+Each manifest is encoded as a [FlatBuffer](https://flatbuffers.dev). The schema is located in [schemas/manifest.fbs](https://github.com/slatedb/slatedb/blob/main/schemas/manifest.fbs).
+
+See [RFC-0001](/rfcs/0001-manifest) for details on the manifest update protocol.
+
+:::note
+
+Users often ask why SlateDB has a WAL. Since SlateDB batches WAL writes, its WAL looks a lot like level 0 in a standard LSM tree. We address this question in the [FAQ](/docs/get-started/faq#why-does-slatedb-have-a-write-ahead-log).
+
+:::
+
+## SSTable
+
+`.sst` files in the `wal` and `compacted` directory share the same file format. Files in the `wal` directory are named `<wal_id>.sst`. `<wal_id>` is a zero-padded, 20 digit unsigned integer. Files in the `compacted` directory are named `<ulid>.sst`, where `<ulid>` is a [ULID](https://github.com/ulid/spec).
+
+The `compacted` directory contains both L0 (non-partitioned) SSTables and SRs (partitioned SSTables). As the compactor runs, it will drop compacted SSTables from the manifest. Such files will be left in the `compacted` directory until the [garbage collector](/docs/design/gc) runs.

@@ -1,0 +1,30 @@
+---
+title: Compaction
+---
+
+The compactor is responsible for taking groups of sorted runs (this doc uses the term
+sorted run to refer to both sorted runs and l0 ssts) and compacting them together to
+reduce space amplification (by removing old versions of rows that have been updated/deleted)
+and read amplification (by reducing the number of sorted runs that need to be searched on
+a read). It's made up of a few different components:
+
+- [`Compactor`]: The main event loop that orchestrates the compaction process.
+- [`CompactorEventHandler`]: The event handler that handles events from the compactor.
+- [`CompactionScheduler`]: The scheduler that discovers compactions that should be performed.
+- [`CompactionExecutor`]: The executor that runs the compaction tasks.
+
+The main event loop listens on the manifest poll ticker to react to manifest poll ticks, the
+executor worker channel to react to updates about running compactions, and the shutdown
+channel to discover when it should terminate. It doesn't actually implement the logic for
+reacting to these events. This is implemented by [`CompactorEventHandler`].
+
+The Scheduler is responsible for deciding what sorted runs should be compacted together.
+It implements the [`CompactionScheduler`] trait. The implementation is specified by providing
+an implementation of [`CompactionSchedulerSupplier`] so different scheduling
+policies can be plugged into slatedb. Currently, the only implemented policy is the size-tiered
+scheduler supplied by [`SizeTieredCompactionSchedulerSupplier`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/size_tiered_compaction.rs).
+
+The Executor does the actual work of compacting sorted runs by sort-merging them into a new
+sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
+is the [`TokioCompactionExecutor`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/compactor_executor.rs),
+which runs compaction on a local tokio runtime.
