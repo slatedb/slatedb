@@ -79,6 +79,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Design',
+					collapsed: true,
 					items: [
 						{
 							label: 'Overview',
@@ -132,6 +133,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Operations',
+					collapsed: true,
 					items: [
 						{
 							label: 'CLI',
