@@ -4,7 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "slatedb"
+description = "A cloud native embedded storage engine built on object storage."
 version = "0.8.0"
+readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",
