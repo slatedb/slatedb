@@ -2,80 +2,29 @@
 title: Compaction
 ---
 
-Compaction is a background process in SlateDB that merges and reorganizes SSTables (Sorted String Tables) to reduce space amplification, improve read performance, and reclaim storage by removing obsolete or deleted data.
+The compactor is responsible for taking groups of sorted runs (this doc uses the term
+sorted run to refer to both sorted runs and l0 ssts) and compacting them together to
+reduce space amplification (by removing old versions of rows that have been updated/deleted)
+and read amplification (by reducing the number of sorted runs that need to be searched on
+a read). It's made up of a few different components:
 
-1. **The Compactor event loop runs in the background.**
+- [`Compactor`]: The main event loop that orchestrates the compaction process.
+- [`CompactorEventHandler`]: The event handler that handles events from the compactor.
+- [`CompactionScheduler`]: The scheduler that discovers compactions that should be performed.
+- [`CompactionExecutor`]: The executor that runs the compaction tasks.
 
-   The compactor is responsible for orchestrating compaction. It listens for events such as manifest poll ticks, worker messages from compaction executors, and shutdown signals. The event loop is asynchronous and does not block the main runtime [[source]](https://github.com/slatedb/slatedb/blob/7e7af43a46c56696301a61a7a9b0a076090a2171/slatedb/src/compactor.rs).
+The main event loop listens on the manifest poll ticker to react to manifest poll ticks, the
+executor worker channel to react to updates about running compactions, and the shutdown
+channel to discover when it should terminate. It doesn't actually implement the logic for
+reacting to these events. This is implemented by [`CompactorEventHandler`].
 
-2. **The CompactionScheduler determines what to compact.**
+The Scheduler is responsible for deciding what sorted runs should be compacted together.
+It implements the [`CompactionScheduler`] trait. The implementation is specified by providing
+an implementation of [`CompactionSchedulerSupplier`] so different scheduling
+policies can be plugged into slatedb. Currently, the only implemented policy is the size-tiered
+scheduler supplied by [`SizeTieredCompactionSchedulerSupplier`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/size_tiered_compaction.rs).
 
-   The scheduler (currently a size-tiered scheduler) analyzes the current database state to select compaction candidates. It chooses either a minimum number of L0 SSTables (recently flushed, uncompacted files) or a series of sorted runs with similar sizes. The scheduler enforces conflict checks (to avoid overlapping compactions) and backpressure checks (to avoid compacting small SSTs too quickly), and limits the number of concurrent compactions (default: 4) [[source]](https://github.com/slatedb/slatedb/blob/7e7af43a46c56696301a61a7a9b0a076090a2171/slatedb/src/size_tiered_compaction.rs).
-
-3. **A CompactionJob is created and submitted.**
-
-   Each compaction job is assigned a unique UUID and includes the source SSTables and sorted runs to compact, the destination sorted run ID, and a retention sequence number (for snapshot/version retention). The CompactorState validates that no conflicting compactions are running for the same destination [[source]](https://github.com/slatedb/slatedb/blob/7e7af43a46c56696301a61a7a9b0a076090a2171/slatedb/src/compactor_state.rs).
-
-4. **The CompactionExecutor runs the job asynchronously.**
-
-   The executor (TokioCompactionExecutor) spawns a background task for each job. It loads iterators over all source SSTables and sorted runs in parallel, using bounded concurrency (typically up to 4). This parallelism maximizes throughput and minimizes latency [[source]](https://github.com/slatedb/slatedb/pull/815).
-
-5. **Iterators are merged and retention filtering is applied.**
-
-   The executor merges the iterators from L0 SSTables and sorted runs into a single merged iterator (with deduplication disabled). It applies retention filtering using the retention_min_seq, ensuring that only the correct versions of each key are retained, and that data referenced by active snapshots is not prematurely dropped [[source]](https://github.com/slatedb/slatedb/pull/638), [[source]](https://github.com/slatedb/slatedb/pull/768).
-
-6. **Merged entries are written to new SSTables.**
-
-   As the merged iterator yields key-value entries, the executor writes them into new SST files. When the bytes written exceed the configured max SSTable size, the current writer is closed and a new one is created, producing multiple output SSTs per compaction. The executor tracks the actual bytes written (including compression) for accurate metrics [[source]](https://github.com/slatedb/slatedb/pull/676).
-
-7. **Cache is updated in parallel with object storage writes.**
-
-   When compacted SST files are written, the compactor notifies the local disk cache to delete obsolete SSTs and make the new SST partitions available. This prevents cache misses on subsequent reads and is performed in parallel with uploading to object storage. Caching is best-effort; failures to cache do not block compaction and are logged as warnings [[source]](https://github.com/slatedb/slatedb/issues/703), [[source]](https://github.com/slatedb/slatedb/pull/815).
-
-8. **Compaction progress is tracked and reported.**
-
-   The CompactionProgressTracker estimates bytes processed and total bytes for each job, reporting progress periodically via a worker channel. This enables observability and supports future extensions like subcompactions [[source]](https://github.com/slatedb/slatedb/blob/7e7af43a46c56696301a61a7a9b0a076090a2171/slatedb/src/compactor.rs).
-
-9. **Manifest and checkpoints are updated after compaction.**
-
-   After compaction completes, the compactor writes a checkpoint and updates the manifest to reflect the new database state, removing compacted SSTables and inserting the new sorted run. The manifest update is performed safely and may be retried if there are version conflicts. The compactor ensures that the new SST files are present before finalizing the manifest update [[source]](https://github.com/slatedb/slatedb/issues/604#issuecomment-2974666619).
-
-
-Compaction is transparent to clients and runs entirely in the background. It does not block reads or writes, and its progress and concurrency are managed to ensure system stability and performance.
-
-Below is a diagram illustrating the high-level flow of a compaction in SlateDB:
-
-```mermaid
-sequenceDiagram
-    A[Compactor Event Loop] --> B[CompactionScheduler: Select Compaction Candidates]
-
-    B --> C[Validate and Submit CompactionJob]
-
-    C --> D[CompactionExecutor: Spawn Async Task]
-
-    D --> E["Create Iterators for L0 SSTables and Sorted Runs (concurrent)"]
-
-    E --> F[Merge Iterators and Apply Retention Filtering]
-
-    F --> G["Write Merged Entries to New SSTables (split if needed)"]
-
-    G --> H["Update Cache and Upload to Object Storage (parallel)"]
-
-    H --> I[Track and Report Compaction Progress]
-
-    I --> J[Update Manifest and Write Checkpoint]
-
-    J --> K[Remove Obsolete SSTs and Update State]
-
-```
-
-Notes:
-
-- Compaction scheduling is pluggable and currently uses a size-tiered policy.
-- Iterator creation and cache updates are parallelized for performance.
-- Compaction jobs are executed asynchronously and tracked for progress.
-- Retention logic ensures snapshot safety and prevents premature data deletion.
-- Manifest and checkpoint updates are performed safely to avoid race conditions with garbage collection.
-- Compaction is transparent to clients and does not block reads or writes.
-
-For more details, see the [compactor implementation](https://github.com/slatedb/slatedb/blob/7e7af43a46c56696301a61a7a9b0a076090a2171/slatedb/src/compactor.rs), [compactor state management](https://github.com/slatedb/slatedb/blob/7e7af43a46c56696301a61a7a9b0a076090a2171/slatedb/src/compactor_state.rs), [compaction executor](https://github.com/slatedb/slatedb/blob/7e7af43a46c56696301a61a7a9b0a076090a2171/slatedb/src/compactor_executor.rs), and [size-tiered scheduler](https://github.com/slatedb/slatedb/blob/7e7af43a46c56696301a61a7a9b0a076090a2171/slatedb/src/size_tiered_compaction.rs).
+The Executor does the actual work of compacting sorted runs by sort-merging them into a new
+sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
+is the [`TokioCompactionExecutor`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/compactor_executor.rs),
+which runs compaction on a local tokio runtime.
