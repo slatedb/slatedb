@@ -44,4 +44,4 @@ Users often ask why SlateDB has a WAL. Since SlateDB batches WAL writes, its WAL
 
 `.sst` files in the `wal` and `compacted` directory share the same file format. Files in the `wal` directory are named `<wal_id>.sst`. `<wal_id>` is a zero-padded, 20 digit unsigned integer. Files in the `compacted` directory are named `<ulid>.sst`, where `<ulid>` is a [ULID](https://github.com/ulid/spec).
 
-The `compacted` directory contains both L0 (non-partitioned) SSTables and SRs (partitioned SSTables). As the compactor runs, it will drop compacted SSTables from the manifest. Such files will be left in the `compacted` directory until the [garbage collector](/docs/gc) runs.
+The `compacted` directory contains both L0 (non-partitioned) SSTables and SRs (partitioned SSTables). As the compactor runs, it will drop compacted SSTables from the manifest. Such files will be left in the `compacted` directory until the [garbage collector](/docs/design/gc) runs.
