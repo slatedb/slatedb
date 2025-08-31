@@ -1,3 +1,31 @@
 ---
 title: Writes
 ---
+
+1. A `put()`, `write()`, or `delete()` call is made on the client.
+2. The key/value pair is written to the mutable, in-memory WAL table.
+3. The key/value pair is written to the mutable, in-memory MemTable.
+
+The WAL flusher periodically checks if the WAL table is full. If it is, it freezes the mutable WAL table and triggers an asynchronous write to object storage. A notification is then sent to clients that wrote with `await_durable` set to `true`.
+
+The MemTable flusher periodically checks if the MemTable is full. If it is, it freezes the mutable MemTable and triggers an asynchronous write to object storage. A notification is then sent to clients that wrote with `await_durable` set to `true` and `wal_enabled` set to `false`.
+
+Below is a diagram illustrating the high-level flow of a write in SlateDB:
+
+```mermaid
+flowchart TD
+    A[API Call: put/delete/write] --> B[Create WriteBatch]
+    B --> C["Send to Write Task (channel)"]
+    C --> D[Assign Sequence Number]
+    D --> E{WAL Enabled?}
+    E -- Yes --> F[Append to WAL Buffer]
+    E -- No --> G[Insert into Memtable]
+    F --> G[Insert into Memtable]
+    G --> H{Memtable Full?}
+    H -- Yes --> I[Freeze Memtable]
+    I --> J[Flush Immutable Memtable to SSTable]
+    F --> K{WAL Buffer Full or Flush Interval?}
+    K -- Yes --> L[Flush WAL to SSTable]
+    J & L --> M[Write SSTable to Object Storage]
+    M --> N[Send Durability Notification]
+```
