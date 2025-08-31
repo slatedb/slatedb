@@ -104,7 +104,7 @@ export default defineConfig({
 						{
 							label: 'Garbage Collection',
 							link: '/docs/design/gc/',
-						},
+						}/*,
 						{
 							label: 'Caching',
 							link: '/docs/design/caching/',
@@ -129,6 +129,7 @@ export default defineConfig({
 							label: 'Consistency',
 							link: '/docs/design/consistency/',
 						}
+						*/
 					]
 				},
 				{
@@ -139,6 +140,7 @@ export default defineConfig({
 							label: 'CLI',
 							link: '/docs/operations/cli/',
 						},
+						/*
 						{
 							label: 'Compatibility',
 							link: '/docs/operations/compatibility/',
@@ -147,18 +149,28 @@ export default defineConfig({
 							label: 'Configuration',
 							link: '/docs/operations/configuration/',
 						},
+						*/
+						{
+							label: 'Configuration',
+							link: 'https://docs.rs/slatedb/latest/slatedb/config',
+							attrs: { target: '_blank' }
+						},
+						/*
 						{
 							label: 'Errors',
 							link: '/docs/operations/errors/',
 						},
+						*/
 						{
 							label: 'Logging',
 							link: '/docs/operations/logging/',
 						},
+						/*
 						{
 							label: 'Metrics',
 							link: '/docs/operations/metrics/',
 						},
+						*/
 						{
 							label: 'Tuning',
 							link: '/docs/operations/tuning/',

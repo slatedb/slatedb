@@ -1,3 +1,33 @@
 ---
 title: CLI
 ---
+
+The SlateDB Admin CLI provides an interface for managing and maintaining SlateDB databases. It enables direct interaction with SlateDB manifests, checkpoints, and garbage collector.
+
+## Installation
+
+You can install the SlateDB CLI using Cargo. Run:
+
+```
+cargo install --locked slatedb-cli
+```
+
+Alternatively, build from source by cloning the repository and compiling the CLI:
+
+```
+git clone https://github.com/slatedb/slatedb.git
+cd slatedb
+cargo build --release -p slatedb-cli
+```
+
+The resulting binary will be available at `target/release/slatedb`.
+
+## Setup
+
+The CLI requires environment variables to configure access to your object store. You can set these variables in your shell environment or provide them via a `.env` file using the `--env-file` option. The required variables depend on your object store provider. See [admin.rs](https://github.com/slatedb/slatedb/blob/main/slatedb/src/admin.rs) for details.
+
+Every command requires the `--path` option, which specifies the root directory in your object store.
+
+## Usage
+
+Run the CLI with `slatedb --help` to see a list of available commands and options.
