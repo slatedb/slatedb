@@ -49,9 +49,9 @@ jobs:
       - name: cargo fmt
         run: cargo fmt -- --check
 
-  typos:
+  text-lints:
     runs-on: ubuntu-latest
-    name: typos
+    name: text-lints
     steps:
       - uses: actions/checkout@v4
       - name: Check spelling
@@ -60,6 +60,18 @@ jobs:
           files: |
             rfcs
             website
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'website/package-lock.json'
+      - name: Install dependencies
+        working-directory: ./website
+        run: npm install
+      - name: Lint Markdown (MD + MDX)
+        working-directory: ./website
+        run: npm run lint:md
 
   flatbuffers:
     runs-on: ubuntu-latest
