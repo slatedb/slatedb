@@ -542,7 +542,6 @@ impl<P: Into<Path>> DbBuilder<P> {
                     gc_options,
                     inner.stat_registry.clone(),
                     system_clock.clone(),
-                    self.cancellation_token.clone(),
                 );
                 // Garbage collector only uses tickers, so pass in a dummy rx channel
                 let (_, rx) = mpsc::unbounded_channel();
@@ -636,7 +635,6 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     options: GarbageCollectorOptions,
     stat_registry: Arc<StatRegistry>,
-    cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
 }
 
@@ -648,7 +646,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             wal_object_store: None,
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
-            cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
         }
     }
@@ -669,12 +666,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Sets the system clock to use for the garbage collector.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
-        self
-    }
-
-    /// Sets the cancellation token to use for the garbage collector.
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = cancellation_token;
         self
     }
 
@@ -704,7 +695,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.options,
             self.stat_registry,
             self.system_clock,
-            self.cancellation_token,
         )
     }
 }

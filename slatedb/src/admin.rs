@@ -134,7 +134,6 @@ impl Admin {
         .with_system_clock(self.system_clock.clone())
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
-        .with_cancellation_token(cancellation_token.clone())
         .build();
 
         let (_, rx) = mpsc::unbounded_channel();
@@ -142,7 +141,7 @@ impl Admin {
             Box::new(gc),
             rx,
             self.system_clock.clone(),
-            cancellation_token.clone(),
+            cancellation_token,
             WatchableOnceCell::new(),
         );
 

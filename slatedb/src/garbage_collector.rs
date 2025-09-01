@@ -13,7 +13,7 @@
 
 use crate::checkpoint::Checkpoint;
 use crate::clock::SystemClock;
-use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
+use crate::config::GarbageCollectorOptions;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
@@ -29,7 +29,6 @@ use manifest_gc::ManifestGcTask;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use wal_gc::WalGcTask;
 
@@ -43,7 +42,6 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
 
 trait GcTask {
     fn resource(&self) -> &str;
-    fn interval(&self) -> Duration;
     async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
 }
 
@@ -78,34 +76,32 @@ pub struct GarbageCollector {
     options: GarbageCollectorOptions,
     stats: Arc<GcStats>,
     system_clock: Arc<dyn SystemClock>,
-    cancellation_token: CancellationToken,
 }
 
 #[async_trait]
 impl MessageHandler<GcMessage> for GarbageCollector {
     fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<GcMessage>>)> {
-        let mut tickers = Vec::new();
-        // adds a ticker if gc options are enabled and the interval is set
-        let mut maybe_add_ticker =
-            |options: Option<GarbageCollectorDirectoryOptions>,
-             factory: Box<MessageFactory<GcMessage>>| {
-                if let Some(options) = options {
-                    if let Some(interval) = options.interval {
-                        tickers.push((interval, factory));
-                    }
-                }
-            };
-        maybe_add_ticker(
-            self.options.manifest_options,
-            Box::new(|| GcMessage::GcManifest),
-        );
-        maybe_add_ticker(self.options.wal_options, Box::new(|| GcMessage::GcWal));
-        maybe_add_ticker(
-            self.options.compacted_options,
-            Box::new(|| GcMessage::GcCompacted),
-        );
-        tickers.push((Duration::from_secs(60), Box::new(|| GcMessage::LogStats)));
-        tickers
+        let compacted_interval = self
+            .options
+            .compacted_options
+            .and_then(|o| o.interval)
+            .unwrap_or(DEFAULT_INTERVAL);
+        let manifest_interval = self
+            .options
+            .manifest_options
+            .and_then(|o| o.interval)
+            .unwrap_or(DEFAULT_INTERVAL);
+        let wal_interval = self
+            .options
+            .wal_options
+            .and_then(|o| o.interval)
+            .unwrap_or(DEFAULT_INTERVAL);
+        vec![
+            (manifest_interval, Box::new(|| GcMessage::GcManifest)),
+            (wal_interval, Box::new(|| GcMessage::GcWal)),
+            (compacted_interval, Box::new(|| GcMessage::GcCompacted)),
+            (Duration::from_secs(60), Box::new(|| GcMessage::LogStats)),
+        ]
     }
 
     async fn handle(&mut self, message: GcMessage) -> Result<(), SlateDBError> {
@@ -150,7 +146,6 @@ impl GarbageCollector {
         options: GarbageCollectorOptions,
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
-        cancellation_token: CancellationToken,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
         Self {
@@ -159,7 +154,6 @@ impl GarbageCollector {
             options,
             stats,
             system_clock,
-            cancellation_token,
         }
     }
 
@@ -264,6 +258,7 @@ mod tests {
     use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
     use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
@@ -1056,7 +1051,6 @@ mod tests {
             gc_opts,
             stats.clone(),
             Arc::new(DefaultSystemClock::default()),
-            CancellationToken::new(),
         );
 
         gc.run_gc_once().await;
@@ -1093,7 +1087,6 @@ mod tests {
             gc_opts,
             stats.clone(),
             Arc::new(DefaultSystemClock::default()),
-            cancellation_token.clone(),
         );
         let (_, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(DefaultSystemClock::default());
