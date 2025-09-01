@@ -48,7 +48,7 @@ trait GcTask {
 }
 
 #[derive(Debug)]
-enum GcMessage {
+pub(crate) enum GcMessage {
     GcWal,
     GcCompacted,
     GcManifest,

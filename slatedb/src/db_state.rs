@@ -445,7 +445,7 @@ impl DbState {
         self.error.write(error);
     }
 
-    pub fn error(&self) -> WatchableOnceCell<SlateDBError> {
+    pub(crate) fn error(&self) -> WatchableOnceCell<SlateDBError> {
         self.error.clone()
     }
 
