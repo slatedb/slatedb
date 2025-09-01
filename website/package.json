@@ -9,9 +9,7 @@
     "prebuild": "node ./scripts/generate-rfcs.js",
     "gen:rfcs": "node ./scripts/generate-rfcs.js",
     "preview": "astro preview",
-    "astro": "astro",
-    "lint:md": "remark --quiet --frail --ignore-path .gitignore ../rfcs ./ --ext md,mdx",
-    "lint:md:fix": "remark --quiet --frail --fix --ignore-path .gitignore ../rfcs ./ --ext md,mdx"
+    "astro": "astro"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.35.2",
@@ -23,23 +21,5 @@
     "sharp": "^0.34.2",
     "starlight-links-validator": "^0.17.0",
     "starlight-llms-txt": "^0.5.1"
-  },
-  "devDependencies": {
-    "remark-cli": "^12.0.1",
-    "remark-frontmatter": "^5.0.0",
-    "remark-gfm": "^4.0.0",
-    "remark-lint": "^9.1.2",
-    "remark-mdx": "^3.0.0",
-    "remark-preset-lint-consistent": "^5.1.2",
-    "remark-preset-lint-recommended": "^6.1.2"
-  },
-  "remarkConfig": {
-    "plugins": [
-      "remark-gfm",
-      "remark-frontmatter",
-      "remark-mdx",
-      ["remark-preset-lint-consistent"],
-      ["remark-preset-lint-recommended"]
-    ]
   }
 }
