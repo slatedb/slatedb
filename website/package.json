@@ -11,7 +11,7 @@
     "preview": "astro preview",
     "astro": "astro",
     "lint:md": "remark --quiet --frail --ignore-path .gitignore ../rfcs ./ --ext md,mdx",
-    "lint:md:fix": "remark --quiet --frail --output --ignore-path .gitignore ../rfcs ./ --ext md,mdx"
+    "lint:md:fix": "remark --quiet --frail --fix --ignore-path .gitignore ../rfcs ./ --ext md,mdx"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.35.2",
