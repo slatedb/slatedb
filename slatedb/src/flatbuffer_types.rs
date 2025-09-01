@@ -34,6 +34,7 @@ use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::utils::clamp_allocated_size_bytes;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
+pub(crate) const SLATEDB_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
 #[derive(PartialEq, Eq, Clone)]
@@ -253,6 +254,7 @@ impl FlatBufferManifestCodec {
             core,
             writer_epoch: manifest.writer_epoch(),
             compactor_epoch: manifest.compactor_epoch(),
+            slatedb_version: manifest.slatedb_version().map(|s| s.to_string()),
         }
     }
 
@@ -472,10 +474,18 @@ impl<'b> DbFlatBufferBuilder<'b> {
             .as_ref()
             .map(|uri| self.builder.create_string(uri));
 
+        let default_version = SLATEDB_VERSION.to_string();
+        let slatedb_version = manifest.slatedb_version
+            .as_ref()
+            .unwrap_or(&default_version)
+            .as_str();
+        let slatedb_version = Some(self.builder.create_string(slatedb_version));
+        
         let manifest = ManifestV1::create(
             &mut self.builder,
             &ManifestV1Args {
                 manifest_id: 0, // todo: get rid of me
+                slatedb_version,
                 external_dbs,
                 initialized: core.initialized,
                 writer_epoch: manifest.writer_epoch,
@@ -707,6 +717,7 @@ mod tests {
             &mut fbb,
             &manifest_generated::ManifestV1Args {
                 manifest_id: 0,
+                slatedb_version: None,
                 external_dbs: None,
                 initialized: false,
                 writer_epoch: 0,

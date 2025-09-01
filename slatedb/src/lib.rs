@@ -116,6 +116,7 @@ mod transaction_manager;
 mod transactional_object_store;
 mod types;
 mod utils;
+mod version;
 mod wal_buffer;
 mod wal_id;
 mod wal_replay;

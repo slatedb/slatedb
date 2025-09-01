@@ -124,6 +124,15 @@ pub(crate) enum SlateDBError {
         actual_version: u16,
     },
 
+    #[error(
+        "SlateDB library version mismatch. expected_version=`{expected_version}`, actual_version=`{actual_version}`, role=`{role}`"
+    )]
+    SlateDBVersionMismatch {
+        expected_version: String,
+        actual_version: String,
+        role: String,
+    },
+
     #[error("foyer cache reading error")]
     #[cfg(feature = "foyer")]
     FoyerCacheReadingError(#[from] Arc<anyhow::Error>),
@@ -379,6 +388,7 @@ impl From<SlateDBError> for Error {
             }
             SlateDBError::CheckpointMissing(_) => Error::persistent_state(msg),
             SlateDBError::InvalidVersion { .. } => Error::persistent_state(msg),
+            SlateDBError::SlateDBVersionMismatch { .. } => Error::operation(msg),
             #[cfg(feature = "foyer")]
             SlateDBError::FoyerCacheReadingError(err) => {
                 Error::persistent_state(msg).with_source(Box::new(AnyhowError(err)))

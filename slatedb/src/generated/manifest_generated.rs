@@ -1193,20 +1193,21 @@ impl<'a> flatbuffers::Follow<'a> for ManifestV1<'a> {
 
 impl<'a> ManifestV1<'a> {
   pub const VT_MANIFEST_ID: flatbuffers::VOffsetT = 4;
-  pub const VT_EXTERNAL_DBS: flatbuffers::VOffsetT = 6;
-  pub const VT_INITIALIZED: flatbuffers::VOffsetT = 8;
-  pub const VT_WRITER_EPOCH: flatbuffers::VOffsetT = 10;
-  pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 12;
-  pub const VT_REPLAY_AFTER_WAL_ID: flatbuffers::VOffsetT = 14;
-  pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 16;
-  pub const VT_L0_LAST_COMPACTED: flatbuffers::VOffsetT = 18;
-  pub const VT_L0: flatbuffers::VOffsetT = 20;
-  pub const VT_COMPACTED: flatbuffers::VOffsetT = 22;
-  pub const VT_LAST_L0_CLOCK_TICK: flatbuffers::VOffsetT = 24;
-  pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 26;
-  pub const VT_LAST_L0_SEQ: flatbuffers::VOffsetT = 28;
-  pub const VT_WAL_OBJECT_STORE_URI: flatbuffers::VOffsetT = 30;
-  pub const VT_RECENT_SNAPSHOT_MIN_SEQ: flatbuffers::VOffsetT = 32;
+  pub const VT_SLATEDB_VERSION: flatbuffers::VOffsetT = 6;
+  pub const VT_EXTERNAL_DBS: flatbuffers::VOffsetT = 8;
+  pub const VT_INITIALIZED: flatbuffers::VOffsetT = 10;
+  pub const VT_WRITER_EPOCH: flatbuffers::VOffsetT = 12;
+  pub const VT_COMPACTOR_EPOCH: flatbuffers::VOffsetT = 14;
+  pub const VT_REPLAY_AFTER_WAL_ID: flatbuffers::VOffsetT = 16;
+  pub const VT_WAL_ID_LAST_SEEN: flatbuffers::VOffsetT = 18;
+  pub const VT_L0_LAST_COMPACTED: flatbuffers::VOffsetT = 20;
+  pub const VT_L0: flatbuffers::VOffsetT = 22;
+  pub const VT_COMPACTED: flatbuffers::VOffsetT = 24;
+  pub const VT_LAST_L0_CLOCK_TICK: flatbuffers::VOffsetT = 26;
+  pub const VT_CHECKPOINTS: flatbuffers::VOffsetT = 28;
+  pub const VT_LAST_L0_SEQ: flatbuffers::VOffsetT = 30;
+  pub const VT_WAL_OBJECT_STORE_URI: flatbuffers::VOffsetT = 32;
+  pub const VT_RECENT_SNAPSHOT_MIN_SEQ: flatbuffers::VOffsetT = 34;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1226,6 +1227,7 @@ impl<'a> ManifestV1<'a> {
     builder.add_compactor_epoch(args.compactor_epoch);
     builder.add_writer_epoch(args.writer_epoch);
     builder.add_manifest_id(args.manifest_id);
+    if let Some(x) = args.slatedb_version { builder.add_slatedb_version(x); }
     if let Some(x) = args.wal_object_store_uri { builder.add_wal_object_store_uri(x); }
     if let Some(x) = args.checkpoints { builder.add_checkpoints(x); }
     if let Some(x) = args.compacted { builder.add_compacted(x); }
@@ -1243,6 +1245,13 @@ impl<'a> ManifestV1<'a> {
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(ManifestV1::VT_MANIFEST_ID, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn slatedb_version(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(ManifestV1::VT_SLATEDB_VERSION, None)}
   }
   #[inline]
   pub fn external_dbs(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<ExternalDb<'a>>>> {
@@ -1372,6 +1381,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
 }
 pub struct ManifestV1Args<'a> {
     pub manifest_id: u64,
+    pub slatedb_version: Option<flatbuffers::WIPOffset<&'a str>>,
     pub external_dbs: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<ExternalDb<'a>>>>>,
     pub initialized: bool,
     pub writer_epoch: u64,
@@ -1392,6 +1402,7 @@ impl<'a> Default for ManifestV1Args<'a> {
   fn default() -> Self {
     ManifestV1Args {
       manifest_id: 0,
+      slatedb_version: None,
       external_dbs: None,
       initialized: false,
       writer_epoch: 0,
@@ -1418,6 +1429,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
   #[inline]
   pub fn add_manifest_id(&mut self, manifest_id: u64) {
     self.fbb_.push_slot::<u64>(ManifestV1::VT_MANIFEST_ID, manifest_id, 0);
+  }
+  #[inline]
+  pub fn add_slatedb_version(&mut self, slatedb_version: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_SLATEDB_VERSION, slatedb_version);
   }
   #[inline]
   pub fn add_external_dbs(&mut self, external_dbs: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<ExternalDb<'b >>>>) {

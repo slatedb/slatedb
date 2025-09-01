@@ -195,7 +195,7 @@ impl Admin {
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         let checkpoint_id = self.rand.rng().gen_uuid();
         let checkpoint = stored_manifest
-            .write_checkpoint(checkpoint_id, options)
+            .write_checkpoint_with_role(checkpoint_id, options, crate::version::ManifestWriterRole::Cli)
             .await?;
         Ok(CheckpointCreateResult {
             id: checkpoint.id,
@@ -218,7 +218,7 @@ impl Admin {
         ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
+            .maybe_apply_manifest_update_with_role(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty();
                 let expire_time = lifetime.map(|l| self.system_clock.now() + l);
                 let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
@@ -231,7 +231,7 @@ impl Admin {
                     return Err(SlateDBError::InvalidDBState);
                 };
                 Ok(Some(dirty))
-            })
+            }, crate::version::ManifestWriterRole::Cli)
             .await
             .map_err(Into::into)
     }
@@ -244,7 +244,7 @@ impl Admin {
         ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
+            .maybe_apply_manifest_update_with_role(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty();
                 let checkpoints: Vec<Checkpoint> = dirty
                     .core
@@ -255,7 +255,7 @@ impl Admin {
                     .collect();
                 dirty.core.checkpoints = checkpoints;
                 Ok(Some(dirty))
-            })
+            }, crate::version::ManifestWriterRole::Cli)
             .await
             .map_err(Into::into)
     }

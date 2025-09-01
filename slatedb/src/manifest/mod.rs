@@ -22,6 +22,7 @@ pub(crate) struct Manifest {
     pub(crate) core: CoreDbState,
     pub(crate) writer_epoch: u64,
     pub(crate) compactor_epoch: u64,
+    pub(crate) slatedb_version: Option<String>,
 }
 
 impl Manifest {
@@ -31,6 +32,7 @@ impl Manifest {
             core,
             writer_epoch: 0,
             compactor_epoch: 0,
+            slatedb_version: Some(crate::flatbuffer_types::SLATEDB_VERSION.to_string()),
         }
     }
 
@@ -77,6 +79,7 @@ impl Manifest {
             core: parent_manifest.core.init_clone_db(),
             writer_epoch: parent_manifest.writer_epoch,
             compactor_epoch: parent_manifest.compactor_epoch,
+            slatedb_version: Some(crate::flatbuffer_types::SLATEDB_VERSION.to_string()),
         }
     }
 
@@ -169,6 +172,7 @@ impl Manifest {
                 core,
                 writer_epoch: 0,
                 compactor_epoch: 0,
+                slatedb_version: Some(crate::flatbuffer_types::SLATEDB_VERSION.to_string()),
             }
         }
     }

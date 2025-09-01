@@ -45,6 +45,7 @@ impl From<DirtyManifest> for Manifest {
             core: manifest.core,
             writer_epoch: manifest.writer_epoch,
             compactor_epoch: manifest.compactor_epoch,
+            slatedb_version: Some(crate::flatbuffer_types::SLATEDB_VERSION.to_string()),
         }
     }
 }
@@ -165,7 +166,25 @@ impl FenceableManifest {
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
         self.check_epoch()?;
-        self.stored_manifest.update_manifest(manifest).await
+        let role = self.get_writer_role();
+        self.stored_manifest.update_manifest_with_role(manifest, role).await
+    }
+
+    fn get_writer_role(&self) -> crate::version::ManifestWriterRole {
+        // Determine role based on which epoch function is used
+        // Writer uses writer_epoch, compactor uses compactor_epoch
+        let test_manifest = crate::manifest::Manifest::initial(crate::db_state::CoreDbState::new());
+        let writer_epoch = test_manifest.writer_epoch;
+        let compactor_epoch = test_manifest.compactor_epoch;
+        
+        if (self.stored_epoch)(&test_manifest) == writer_epoch {
+            crate::version::ManifestWriterRole::DbWriter
+        } else if (self.stored_epoch)(&test_manifest) == compactor_epoch {
+            crate::version::ManifestWriterRole::Compactor
+        } else {
+            // Default to admin for unknown cases
+            crate::version::ManifestWriterRole::Admin
+        }
     }
 
     pub(crate) fn new_checkpoint(
@@ -389,11 +408,21 @@ impl StoredManifest {
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        self.maybe_apply_manifest_update(|stored_manifest| {
+        self.write_checkpoint_with_role(checkpoint_id, options, crate::version::ManifestWriterRole::DbWriter).await
+    }
+
+    /// Write a checkpoint with a specific writer role (for admin/CLI operations)
+    pub(crate) async fn write_checkpoint_with_role(
+        &mut self,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+        writer_role: crate::version::ManifestWriterRole,
+    ) -> Result<Checkpoint, SlateDBError> {
+        self.maybe_apply_manifest_update_with_role(|stored_manifest| {
             stored_manifest
                 .apply_new_checkpoint_to_db_state(checkpoint_id, options)
                 .map(Some)
-        })
+        }, writer_role)
         .await?;
         Ok(self
             .db_state()
@@ -483,9 +512,25 @@ impl StoredManifest {
         &mut self,
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
+        // Default to DbWriter role for backwards compatibility
+        self.update_manifest_with_role(manifest, crate::version::ManifestWriterRole::DbWriter).await
+    }
+
+    pub(crate) async fn update_manifest_with_role(
+        &mut self,
+        manifest: DirtyManifest,
+        writer_role: crate::version::ManifestWriterRole,
+    ) -> Result<(), SlateDBError> {
         if manifest.id() != self.id {
             return Err(ManifestVersionExists);
         }
+        
+        // Check version compatibility before writing
+        crate::version::check_manifest_version_compatibility(
+            self.manifest.slatedb_version.as_deref(),
+            writer_role,
+        )?;
+        
         let next_id = self.next_id();
         let manifest = manifest.into();
         self.manifest_store
@@ -509,12 +554,24 @@ impl StoredManifest {
     where
         F: Fn(&StoredManifest) -> Result<Option<DirtyManifest>, SlateDBError>,
     {
+        self.maybe_apply_manifest_update_with_role(mutator, crate::version::ManifestWriterRole::DbWriter).await
+    }
+
+    /// Apply an update to a stored manifest with a specific writer role
+    pub(crate) async fn maybe_apply_manifest_update_with_role<F>(
+        &mut self,
+        mutator: F,
+        writer_role: crate::version::ManifestWriterRole,
+    ) -> Result<(), SlateDBError>
+    where
+        F: Fn(&StoredManifest) -> Result<Option<DirtyManifest>, SlateDBError>,
+    {
         loop {
             let Some(dirty) = mutator(self)? else {
                 return Ok(());
             };
 
-            return match self.update_manifest(dirty).await {
+            return match self.update_manifest_with_role(dirty, writer_role.clone()).await {
                 Err(SlateDBError::ManifestVersionExists) => {
                     self.refresh().await?;
                     continue;
@@ -776,6 +833,7 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::checkpoint::Checkpoint;
     use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::config::CheckpointOptions;
@@ -791,6 +849,150 @@ mod tests {
     use std::time::Duration;
 
     const ROOT: &str = "/root/path";
+
+    /// Test for issue #779: Disallow writes to the .manifest from mismatched slatedb lib versions
+    /// This test reproduces the scenario described in the issue:
+    /// 1. A DB writer creates a manifest with the current version
+    /// 2. A CLI from an older version tries to create a checkpoint
+    /// 3. The CLI should be blocked from writing due to version mismatch
+    #[tokio::test]
+    async fn test_version_mismatch_blocks_cli_writes() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        
+        // DB writer creates initial manifest (with current version)
+        let mut db_writer = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+
+        // Manually create a manifest that simulates an older version
+        let mut old_version_manifest = db_writer.manifest.clone();
+        old_version_manifest.slatedb_version = Some("0.7.0".to_string());
+        
+        // Write the old version manifest
+        ms.write_manifest(2, &old_version_manifest).await.unwrap();
+        
+        // Create a new StoredManifest that loads the old version
+        let mut cli_manifest = StoredManifest::load(ms.clone()).await.unwrap();
+        
+        // CLI tries to create a checkpoint - this should fail due to version mismatch
+        let checkpoint_id = uuid::Uuid::new_v4();
+        let result = cli_manifest
+            .write_checkpoint_with_role(
+                checkpoint_id, 
+                &CheckpointOptions::default(),
+                crate::version::ManifestWriterRole::Cli
+            )
+            .await;
+
+        // Should fail with version mismatch error
+        assert!(result.is_err());
+        if let Err(SlateDBError::SlateDBVersionMismatch { expected_version, actual_version, role }) = result {
+            assert_eq!(expected_version, "0.7.0");
+            assert_eq!(actual_version, crate::flatbuffer_types::SLATEDB_VERSION);
+            assert_eq!(role, "CLI");
+        } else {
+            panic!("Expected SlateDBVersionMismatch error, got {:?}", result);
+        }
+    }
+
+    /// Test that DB writers can upgrade/rollback versions
+    #[tokio::test]
+    async fn test_db_writer_can_upgrade_versions() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        
+        // Create a manifest with an older version
+        let mut manifest = crate::manifest::Manifest::initial(state.clone());
+        manifest.slatedb_version = Some("0.7.0".to_string());
+        ms.write_manifest(1, &manifest).await.unwrap();
+        
+        // DB writer loads the old manifest
+        let mut db_writer = StoredManifest::load(ms.clone()).await.unwrap();
+        
+        // DB writer should be able to update it (upgrade)
+        let mut dirty = db_writer.prepare_dirty();
+        dirty.core.next_wal_sst_id = 123;
+        let result = db_writer.update_manifest_with_role(dirty, crate::version::ManifestWriterRole::DbWriter).await;
+        
+        // Should succeed
+        assert!(result.is_ok());
+        
+        // Verify the manifest was updated with the new version
+        let (_, updated_manifest) = ms.read_latest_manifest().await.unwrap();
+        assert_eq!(updated_manifest.slatedb_version, Some(crate::flatbuffer_types::SLATEDB_VERSION.to_string()));
+        assert_eq!(updated_manifest.core.next_wal_sst_id, 123);
+    }
+
+    /// Test that compactors are blocked from version mismatches
+    #[tokio::test]
+    async fn test_compactor_blocked_by_version_mismatch() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        
+        // Create a manifest with an older version
+        let mut manifest = crate::manifest::Manifest::initial(state.clone());
+        manifest.slatedb_version = Some("0.7.0".to_string());
+        ms.write_manifest(1, &manifest).await.unwrap();
+        
+        // Compactor loads the old manifest
+        let stored_manifest = StoredManifest::load(ms.clone()).await.unwrap();
+        let timeout = Duration::from_secs(300);
+        let mut compactor = FenceableManifest::init_compactor(
+            stored_manifest, 
+            timeout, 
+            Arc::new(DefaultSystemClock::new())
+        ).await.unwrap();
+        
+        // Compactor tries to update manifest - should fail
+        let dirty = compactor.stored_manifest.prepare_dirty();
+        let result = compactor.update_manifest(dirty).await;
+        
+        // Should fail with version mismatch error
+        assert!(result.is_err());
+        if let Err(SlateDBError::SlateDBVersionMismatch { expected_version, actual_version, role }) = result {
+            assert_eq!(expected_version, "0.7.0");
+            assert_eq!(actual_version, crate::flatbuffer_types::SLATEDB_VERSION);
+            assert_eq!(role, "Compactor");
+        } else {
+            panic!("Expected SlateDBVersionMismatch error, got {:?}", result);
+        }
+    }
+
+    /// Test that same versions work for all roles
+    #[tokio::test]
+    async fn test_same_version_works_for_all_roles() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        
+        // Create manifest with current version
+        let mut db_writer = StoredManifest::create_new_db(ms.clone(), state.clone())
+            .await
+            .unwrap();
+            
+        // CLI with same version should work
+        let checkpoint_id = uuid::Uuid::new_v4();
+        let result = db_writer
+            .write_checkpoint_with_role(
+                checkpoint_id, 
+                &CheckpointOptions::default(),
+                crate::version::ManifestWriterRole::Cli
+            )
+            .await;
+        assert!(result.is_ok());
+        
+        // Compactor with same version should work
+        let timeout = Duration::from_secs(300);
+        let mut compactor = FenceableManifest::init_compactor(
+            db_writer, 
+            timeout, 
+            Arc::new(DefaultSystemClock::new())
+        ).await.unwrap();
+        
+        let dirty = compactor.stored_manifest.prepare_dirty();
+        let result = compactor.update_manifest(dirty).await;
+        assert!(result.is_ok());
+    }
 
     #[tokio::test]
     async fn test_should_fail_write_on_version_conflict() {

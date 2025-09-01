@@ -45,6 +45,9 @@ table ManifestV1 {
     // Id of manifest. Manifest file name will be derived from this id.
     manifest_id: ulong;
 
+    // Version of the SlateDB library that wrote this manifest.
+    slatedb_version: string;
+
     // List of external databases referenced by this manifest.
     external_dbs: [ExternalDb];
 
