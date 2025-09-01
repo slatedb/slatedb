@@ -129,7 +129,7 @@ impl TransactionManager {
         inner.has_conflict(keys, started_seq)
     }
 
-    /// Record a recent write to `recent_commited_txns`. This method should be called after
+    /// Record a recent write to `recent_committed_txns`. This method should be called after
     /// [`Self::has_conflict`] is checked as false.
     ///
     /// Please note that it's not a requirement to be inside a Transaction for a write operation
@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq)]
-    enum ExcutionEffect {
+    enum ExecutionEffect {
         Nothing,
         CommitSuccess,
         CommitConflict,
@@ -1062,15 +1062,15 @@ mod tests {
             &mut self,
             manager: &TransactionManager,
             op: &TxnOperation,
-        ) -> ExcutionEffect {
+        ) -> ExecutionEffect {
             match op {
                 TxnOperation::Create { read_only, txn_id } => {
                     manager.new_txn_with_id(self.seq_counter, *read_only, *txn_id);
-                    ExcutionEffect::Nothing
+                    ExecutionEffect::Nothing
                 }
                 TxnOperation::Drop { txn_id } => {
                     manager.drop_txn(txn_id);
-                    ExcutionEffect::Nothing
+                    ExecutionEffect::Nothing
                 }
                 TxnOperation::Commit { txn_id, keys } => {
                     let key_set = keys
@@ -1081,7 +1081,7 @@ mod tests {
                     match txn_id {
                         None => {
                             manager.track_recent_committed_txn(None, &key_set, self.seq_counter);
-                            ExcutionEffect::CommitSuccess
+                            ExecutionEffect::CommitSuccess
                         }
                         Some(txn_id) => {
                             {
@@ -1093,7 +1093,7 @@ mod tests {
                                     .map(|txn| txn.read_only)
                                     .unwrap_or(false)
                                 {
-                                    return ExcutionEffect::Nothing;
+                                    return ExecutionEffect::Nothing;
                                 }
                             }
 
@@ -1104,16 +1104,16 @@ mod tests {
                                     &key_set,
                                     self.seq_counter,
                                 );
-                                ExcutionEffect::CommitSuccess
+                                ExecutionEffect::CommitSuccess
                             } else {
-                                ExcutionEffect::CommitConflict
+                                ExecutionEffect::CommitConflict
                             }
                         }
                     }
                 }
                 TxnOperation::Recycle => {
                     manager.inner.write().recycle_recent_committed_txns();
-                    ExcutionEffect::Recycled
+                    ExecutionEffect::Recycled
                 }
             }
         }
@@ -1159,7 +1159,7 @@ mod tests {
                 let effect = exec_state.execute_operation(&txn_manager, &op);
 
                 if let TxnOperation::Commit { txn_id: None, keys: _, } = &op {
-                    prop_assert!(effect == ExcutionEffect::CommitSuccess, "If the commit is successful, the transaction should have conflict");
+                    prop_assert!(effect == ExecutionEffect::CommitSuccess, "If the commit is successful, the transaction should have conflict");
                 }
             }
         }
@@ -1204,7 +1204,7 @@ mod tests {
 
             for op in ops {
                 let effect = exec_state.execute_operation(&txn_manager, &op);
-                if effect == ExcutionEffect::Recycled {
+                if effect == ExecutionEffect::Recycled {
                     // Garbage collection correctness invariant
                     // recent_committed_txns.is_empty() OR (there exists an active transaction in active_txns.values() that is not read-only)
                     let inner = txn_manager.inner.read();

@@ -445,7 +445,7 @@ impl WalBufferManager {
     }
 
     /// Track the last applied sequence number. It's called when some WAL entries are applied to the memtable.
-    /// This infomation of the last applied seq is used to determine if the immutable wals can be recycled.
+    /// This information of the last applied seq is used to determine if the immutable wals can be recycled.
     ///
     /// It's the caller's duty to ensure the seq is monotonically increasing.
     pub async fn track_last_applied_seq(&self, seq: u64) {

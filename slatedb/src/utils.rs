@@ -374,7 +374,7 @@ impl BitWriter {
         self.n = 0;
     }
 
-    /// Extrat the finalized buffer from the writer
+    /// Extract the finalized buffer from the writer
     pub(crate) fn finish(mut self) -> Vec<u8> {
         if self.n > 0 {
             self.buf.push(self.cur);
