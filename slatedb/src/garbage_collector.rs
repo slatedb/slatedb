@@ -47,6 +47,7 @@ trait GcTask {
     async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
 }
 
+#[derive(Debug)]
 enum GcMessage {
     GcWal,
     GcCompacted,
@@ -162,54 +163,6 @@ impl GarbageCollector {
         }
     }
 
-    /// Starts the garbage collector. This method performs the actual garbage collection.
-    /// The garbage collector runs until the cancellation token is cancelled.
-    pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
-        let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
-        let mut compacted_ticker = self.system_clock.ticker(compacted_gc_task.interval());
-        let mut wal_ticker = self.system_clock.ticker(wal_gc_task.interval());
-        let mut manifest_ticker = self.system_clock.ticker(manifest_gc_task.interval());
-        let mut log_ticker = self.system_clock.ticker(Duration::from_secs(60));
-
-        info!(
-            "Starting Garbage Collector with [manifest: {:#?}], [wal: {:#?}], [compacted: {:#?}]",
-            manifest_gc_task.interval(),
-            wal_gc_task.interval(),
-            compacted_gc_task.interval()
-        );
-
-        loop {
-            tokio::select! {
-                biased;
-                // check the cancellation token first to avoid starting new GC tasks when the runtime is shutting down
-                _ = self.cancellation_token.cancelled() => {
-                    info!("Garbage collector received shutdown signal... shutting down");
-                    break;
-                },
-                _ = manifest_ticker.tick() => { self.run_gc_task(&mut manifest_gc_task).await; },
-                _ = wal_ticker.tick() => { self.run_gc_task(&mut wal_gc_task).await; },
-                _ = compacted_ticker.tick() => { self.run_gc_task(&mut compacted_gc_task).await; },
-                _ = log_ticker.tick() => {
-                    debug!("GC has collected {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
-                         self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
-                         self.stats.gc_wal_count.value.load(Ordering::SeqCst),
-                         self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
-                     );
-                 }
-            }
-            self.stats.gc_count.inc();
-        }
-
-        info!(
-            "GC shutdown after collecting {} Manifests, {} WAL SSTs and {} Compacted SSTs.",
-            self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
-            self.stats.gc_wal_count.value.load(Ordering::SeqCst),
-            self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
-        );
-
-        Ok(())
-    }
-
     /// Run the garbage collector once.
     ///
     /// This method runs all three garbage collection tasks:
@@ -310,17 +263,18 @@ mod tests {
 
     use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
-    use tokio::runtime::Handle;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
     use crate::clock::DefaultSystemClock;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
+    use crate::dispatcher::MessageDispatcher;
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
-    use crate::utils::spawn_bg_task;
+    use crate::utils::WatchableOnceCell;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         manifest::store::{ManifestStore, StoredManifest},
@@ -1141,9 +1095,17 @@ mod tests {
             Arc::new(DefaultSystemClock::default()),
             cancellation_token.clone(),
         );
-
-        let fut = async move { gc.run_async_task().await };
-        let jh = spawn_bg_task(&Handle::current(), |result| assert!(result.is_ok()), fut);
+        let (_, rx) = mpsc::unbounded_channel();
+        let clock = Arc::new(DefaultSystemClock::default());
+        let error_state = WatchableOnceCell::new();
+        let mut dispatcher = MessageDispatcher::new(
+            Box::new(gc),
+            rx,
+            clock,
+            cancellation_token.clone(),
+            error_state,
+        );
+        let jh = tokio::spawn(async move { dispatcher.run().await });
         cancellation_token.cancel();
         let result = jh.await.unwrap();
         assert!(result.is_ok(), "result: {:#?}", result);
