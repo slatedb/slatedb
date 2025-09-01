@@ -13,14 +13,17 @@
 
 use crate::checkpoint::Checkpoint;
 use crate::clock::SystemClock;
-use crate::config::GarbageCollectorOptions;
+use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
+use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
+use futures::stream::BoxStream;
 use log::{debug, error, info};
 use manifest_gc::ManifestGcTask;
 use std::sync::atomic::Ordering;
@@ -42,6 +45,13 @@ trait GcTask {
     fn resource(&self) -> &str;
     fn interval(&self) -> Duration;
     async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
+}
+
+enum GcMessage {
+    GcWal,
+    GcCompacted,
+    GcManifest,
+    LogStats,
 }
 
 /// SlateDB's garbage collector.
@@ -68,6 +78,53 @@ pub struct GarbageCollector {
     stats: Arc<GcStats>,
     system_clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
+}
+
+#[async_trait]
+impl MessageHandler<GcMessage> for GarbageCollector {
+    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<GcMessage>>)> {
+        let mut tickers = Vec::new();
+        // adds a ticker if gc options are enabled and the interval is set
+        let mut maybe_add_ticker =
+            |options: Option<GarbageCollectorDirectoryOptions>,
+             factory: Box<MessageFactory<GcMessage>>| {
+                if let Some(options) = options {
+                    if let Some(interval) = options.interval {
+                        tickers.push((interval, factory));
+                    }
+                }
+            };
+        maybe_add_ticker(
+            self.options.manifest_options,
+            Box::new(|| GcMessage::GcManifest),
+        );
+        maybe_add_ticker(self.options.wal_options, Box::new(|| GcMessage::GcWal));
+        maybe_add_ticker(
+            self.options.compacted_options,
+            Box::new(|| GcMessage::GcCompacted),
+        );
+        tickers
+    }
+
+    async fn handle(&mut self, message: GcMessage) -> Result<(), SlateDBError> {
+        match message {
+            GcMessage::GcManifest => self.run_gc_once().await,
+            GcMessage::GcWal => self.run_gc_once().await,
+            GcMessage::GcCompacted => self.run_gc_once().await,
+            GcMessage::LogStats => self.log_stats(),
+        }
+        Ok(())
+    }
+
+    async fn cleanup(
+        &mut self,
+        _messages: BoxStream<'async_trait, GcMessage>,
+        _result: Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        info!("garbage collector shutdown");
+        self.log_stats();
+        Ok(())
+    }
 }
 
 impl GarbageCollector {
@@ -231,6 +288,15 @@ impl GarbageCollector {
             None
         };
         Ok(maybe_dirty)
+    }
+
+    fn log_stats(&self) {
+        debug!(
+            "garbage collector stats [manifest_count={}, wals_count={}, compacted_count={}]",
+            self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
+            self.stats.gc_wal_count.value.load(Ordering::SeqCst),
+            self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
+        );
     }
 }
 
