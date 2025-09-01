@@ -110,6 +110,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::admin::Admin;
@@ -133,6 +134,7 @@ use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::CoreDbState;
+use crate::dispatcher::MessageDispatcher;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -534,8 +536,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         let garbage_collector_task =
             if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
                 let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
-                let gc_handle = self.gc_runtime.unwrap_or_else(|| tokio_handle.clone());
-                let cleanup_inner = inner.clone();
                 let gc = GarbageCollector::new(
                     manifest_store.clone(),
                     uncached_table_store.clone(),
@@ -544,16 +544,16 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                     self.cancellation_token.clone(),
                 );
-                let garbage_collector_task = spawn_bg_task(
-                    &gc_handle,
-                    move |result| {
-                        let err = bg_task_result_into_err(result);
-                        warn!("GC thread exited [error={}]", err);
-                        let mut state = cleanup_inner.state.write();
-                        state.record_fatal_error(err.clone())
-                    },
-                    async move { gc.run_async_task().await },
+                // Garbage collector only uses tickers, so pass in a dummy rx channel
+                let (_, rx) = mpsc::unbounded_channel();
+                let mut gc_dispatcher = MessageDispatcher::new(
+                    Box::new(gc),
+                    rx,
+                    system_clock.clone(),
+                    self.cancellation_token.clone(),
+                    inner.clone().state.read().error(),
                 );
+                let garbage_collector_task = tokio::spawn(async move { gc_dispatcher.run().await });
                 Some(garbage_collector_task)
             } else {
                 None

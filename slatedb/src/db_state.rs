@@ -445,6 +445,10 @@ impl DbState {
         self.error.write(error);
     }
 
+    pub fn error(&self) -> WatchableOnceCell<SlateDBError> {
+        self.error.clone()
+    }
+
     pub fn memtable(&self) -> &WritableKVTable {
         &self.memtable
     }
