@@ -14,7 +14,7 @@
 use crate::checkpoint::Checkpoint;
 use crate::clock::SystemClock;
 use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
-use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
+use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
@@ -103,6 +103,7 @@ impl MessageHandler<GcMessage> for GarbageCollector {
             self.options.compacted_options,
             Box::new(|| GcMessage::GcCompacted),
         );
+        tickers.push((Duration::from_secs(60), Box::new(|| GcMessage::LogStats)));
         tickers
     }
 
