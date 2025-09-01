@@ -833,7 +833,6 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::checkpoint::Checkpoint;
     use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::config::CheckpointOptions;
@@ -861,7 +860,7 @@ mod tests {
         let state = CoreDbState::new();
         
         // DB writer creates initial manifest (with current version)
-        let mut db_writer = StoredManifest::create_new_db(ms.clone(), state.clone())
+        let db_writer = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
 
@@ -924,9 +923,9 @@ mod tests {
         assert_eq!(updated_manifest.core.next_wal_sst_id, 123);
     }
 
-    /// Test that compactors are blocked from version mismatches
+    /// Test that compactors can upgrade versions (they are epoch owners)
     #[tokio::test]
-    async fn test_compactor_blocked_by_version_mismatch() {
+    async fn test_compactor_can_upgrade_versions() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         
@@ -935,7 +934,7 @@ mod tests {
         manifest.slatedb_version = Some("0.7.0".to_string());
         ms.write_manifest(1, &manifest).await.unwrap();
         
-        // Compactor loads the old manifest
+        // Compactor loads the old manifest and initializes (bumps epoch)
         let stored_manifest = StoredManifest::load(ms.clone()).await.unwrap();
         let timeout = Duration::from_secs(300);
         let mut compactor = FenceableManifest::init_compactor(
@@ -944,19 +943,16 @@ mod tests {
             Arc::new(DefaultSystemClock::new())
         ).await.unwrap();
         
-        // Compactor tries to update manifest - should fail
+        // Compactor should be able to update manifest (upgrade)
         let dirty = compactor.stored_manifest.prepare_dirty();
         let result = compactor.update_manifest(dirty).await;
         
-        // Should fail with version mismatch error
-        assert!(result.is_err());
-        if let Err(SlateDBError::SlateDBVersionMismatch { expected_version, actual_version, role }) = result {
-            assert_eq!(expected_version, "0.7.0");
-            assert_eq!(actual_version, crate::flatbuffer_types::SLATEDB_VERSION);
-            assert_eq!(role, "Compactor");
-        } else {
-            panic!("Expected SlateDBVersionMismatch error, got {:?}", result);
-        }
+        // Should succeed because compactors are epoch owners
+        assert!(result.is_ok());
+        
+        // Verify the manifest was updated with the new version
+        let (_, updated_manifest) = ms.read_latest_manifest().await.unwrap();
+        assert_eq!(updated_manifest.slatedb_version, Some(crate::flatbuffer_types::SLATEDB_VERSION.to_string()));
     }
 
     /// Test that same versions work for all roles

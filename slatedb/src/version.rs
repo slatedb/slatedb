@@ -61,6 +61,16 @@ pub(crate) fn check_manifest_version_compatibility(
                     );
                     Ok(())
                 }
+                ManifestWriterRole::Compactor => {
+                    // Compactors (compactor epoch owners) can also upgrade or rollback versions
+                    // This allows for controlled upgrades when running separate compactor processes
+                    log::warn!(
+                        "Compactor updating manifest from version {} to version {}. \
+                         This may be an upgrade or rollback operation.",
+                        stored, current_version
+                    );
+                    Ok(())
+                }
                 _ => {
                     // Non-owners must match the version exactly to prevent data loss
                     Err(SlateDBError::SlateDBVersionMismatch {
@@ -106,20 +116,24 @@ mod tests {
     }
 
     #[test]
+    fn test_compactor_can_upgrade_rollback() {
+        // Compactors should also be allowed to change versions (upgrade/rollback)
+        assert!(check_manifest_version_compatibility(Some("0.7.0"), ManifestWriterRole::Compactor).is_ok());
+        assert!(check_manifest_version_compatibility(Some("0.9.0"), ManifestWriterRole::Compactor).is_ok());
+    }
+
+    #[test]
     fn test_non_owners_must_match_version() {
-        // Non-owners should not be allowed to change versions
-        let result = check_manifest_version_compatibility(Some("0.7.0"), ManifestWriterRole::Compactor);
+        // Non-owners (CLI and Admin tools) should not be allowed to change versions
+        let result = check_manifest_version_compatibility(Some("0.7.0"), ManifestWriterRole::Cli);
         assert!(result.is_err());
         if let Err(SlateDBError::SlateDBVersionMismatch { expected_version, actual_version, role }) = result {
             assert_eq!(expected_version, "0.7.0");
             assert_eq!(actual_version, SLATEDB_VERSION);
-            assert_eq!(role, "Compactor");
+            assert_eq!(role, "CLI");
         } else {
             panic!("Expected SlateDBVersionMismatch error");
         }
-
-        let result = check_manifest_version_compatibility(Some("0.7.0"), ManifestWriterRole::Cli);
-        assert!(result.is_err());
 
         let result = check_manifest_version_compatibility(Some("0.7.0"), ManifestWriterRole::Admin);
         assert!(result.is_err());
