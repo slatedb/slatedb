@@ -8,7 +8,9 @@ use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
 use slatedb::config::GarbageCollectorDirectoryOptions;
 use slatedb::config::GarbageCollectorOptions;
+use slatedb::config::SizeTieredCompactionSchedulerOptions;
 use slatedb::object_store::ObjectStore;
+use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use slatedb::Db;
 use slatedb::DbBuilder;
 use slatedb::DbRand;
@@ -76,11 +78,14 @@ pub async fn build_db(
     logical_clock: Arc<dyn LogicalClock>,
     rand: &DbRand,
 ) -> Db {
+    let settings = build_settings(rand).await;
+    let compaction_scheduler_supplier = build_compaction_scheduler_supplier(rand, &settings).await;
     let mut builder = DbBuilder::new("test_db", object_store);
-    builder = builder.with_settings(build_settings(rand).await);
+    builder = builder.with_settings(settings);
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
     builder = builder.with_system_clock(system_clock.clone());
     builder = builder.with_logical_clock(logical_clock.clone());
+    builder = builder.with_compaction_scheduler_supplier(compaction_scheduler_supplier);
     builder.build().await.unwrap()
 }
 
@@ -133,6 +138,22 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
     }
+}
+
+/// Builds a CompactorOptions instance with random values.
+///
+/// All arguments are expected to be deterministic.
+pub async fn build_compaction_scheduler_supplier(
+    rand: &DbRand,
+    settings: &Settings,
+) -> Arc<SizeTieredCompactionSchedulerSupplier> {
+    let options = SizeTieredCompactionSchedulerOptions {
+        // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
+        // Otherwise, the compactor never runs and writers get blocked permanently.
+        min_compaction_sources: rand.rng().random_range(1..10).max(settings.l0_max_ssts),
+        ..Default::default()
+    };
+    Arc::new(SizeTieredCompactionSchedulerSupplier::new(options))
 }
 
 /// Tokio's default Runtime is non-deterministic even if a single thread is used.
