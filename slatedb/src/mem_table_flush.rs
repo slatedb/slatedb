@@ -190,7 +190,7 @@ impl DbInner {
     ) -> Result<(), SlateDBError> {
         let result = flusher.flush_imm_memtables_to_l0().await;
         if let Err(err) = &result {
-            error!("error from memtable flush [error={}]", err);
+            error!("error from memtable flush [error={:?}]", err);
         } else {
             self.db_stats.immutable_memtable_flushes.inc();
         }
