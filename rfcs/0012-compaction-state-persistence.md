@@ -148,7 +148,7 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 9. The task loads all the iterators in a `MergeIterator` struct and runs compactions on it. It discards older expired versions and continues to write to a SST. Once the SST reaches it's threshold size, the SST is written to the active destination SR. Periodically the task also provides stats on task progress. 
 
-10. When a task completes compaction execution, the task returns the {destinationId, outputSSTs} to the worker channel to act upon the compaction terminal state
+10. When a task completes compaction execution, the task returns the `{destinationId, outputSSTs}` to the worker channel to act upon the compaction terminal state
 
 11. The worker task executes the `finishCompaction()` upon successful `CompactionCompletion` and updates the manifests and trigger scheduling of next compactions by calling `maybeScheduleCompaction()`
 
@@ -325,7 +325,7 @@ Note: The validations added in this protocol are best effort. The authority to v
 3. This is done by doing a binary search on a SR to find the right SST partition and then iterating the blocks of the SST till we find the Entry. 
     [Note: A corner case: With monotonically overlapping SST ranges(specifically the last key), a key might be present across a contiguous range of SST in a SR]
 
-4. Each {key, seq_number, sst_iterator} tuple is then added to a min_heap to decide the right order across a group of SRs (this is a way to get a sorted list from all the sorted SR SSTs).
+4. Each `{key, seq_number, sst_iterator}` tuple is then added to a min_heap to decide the right order across a group of SRs (this is a way to get a sorted list from all the sorted SR SSTs).
 
 5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each and persists them to the .compactor file by updating the compaction in `compactions`. (This is the `CompactionJob` progress section in _State Management Protocol_.)
 
