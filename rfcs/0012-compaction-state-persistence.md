@@ -226,7 +226,7 @@ pub(crate) struct FenceableCompactionState {
 
 4. For each compaction in the input list of compactions, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
 
-    - Check if the count of runnning compactions is less than the threshold. If yes, continue
+    - Check if the count of running compactions is less than the threshold. If yes, continue
 
     - Check if the source L0 SSTs and SRs are not part of any other compaction. If yes, continue.
 
@@ -271,11 +271,11 @@ pub(crate) struct FenceableCompactionState {
 We have agreed on the second approach (channel-based updates via the compaction event handler).
 
 
-10. Once the compactionJob is completed, follow the steps mentioned in the State Managment protocol.    
+10. Once the compactionJob is completed, follow the steps mentioned in the State Management protocol.    
 
 ### Persisting External Compactions
 
-We need a mechanism to plug in the external requests so that they can be picked up and executed by the compaction worflow. The idea is to leverage the existing compaction workflow. The steps are outlined here:
+We need a mechanism to plug in the external requests so that they can be picked up and executed by the compaction workflow. The idea is to leverage the existing compaction workflow. The steps are outlined here:
 
 1. Client provides the list of source_ssts and source_srs to be compacted through a `submit_manual_compaction` method in `Admin` (see the _Administrative Commands_ section below).
 
@@ -283,7 +283,7 @@ We need a mechanism to plug in the external requests so that they can be picked 
 
 3. For each compaction in the input list of compactions, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
 
-    - Check if the count of runnning compactions is less than the threshold. If yes, continue
+    - Check if the count of running compactions is less than the threshold. If yes, continue
 
     - Check if the source L0 SSTs and SRs are not part of any other compaction. If yes, continue.
 
