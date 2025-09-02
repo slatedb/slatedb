@@ -317,7 +317,7 @@ impl CompactorState {
             let highest_id = self.db_state().compacted.first().map_or(0, |sr| sr.id + 1);
             if compaction.destination < highest_id {
                 warn!(
-                    "highest_id lesser than the expected L0-only next destination: {:?} {:?}",
+                    "compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
                     compaction.destination, highest_id
                 );
                 return Err(SlateDBError::InvalidCompaction);
