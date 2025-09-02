@@ -315,7 +315,7 @@ impl CompactorState {
         } else {
             // L0-only: must create new SR with id > highest_existing
             let highest_id = self.db_state().compacted.first().map_or(0, |sr| sr.id + 1);
-            if compaction.destination > highest_id {
+            if compaction.destination < highest_id {
                 warn!(
                     "highest_id lesser than the expected L0-only next destination: {:?} {:?}",
                     compaction.destination, highest_id
