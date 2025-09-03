@@ -13,12 +13,6 @@ use object_store::{
 };
 use slatedb::clock::SystemClock;
 
-#[derive(Debug, Clone)]
-struct FileTimes {
-    created: DateTime<Utc>,
-    modified: DateTime<Utc>,
-}
-
 /// ObjectStore wrapper that overrides metadata times using a provided SystemClock.
 /// - Records timestamps for mutating operations (put, copy, rename, delete).
 /// - Uses recorded timestamps for `last_modified` in ObjectMeta returned by `head` and `list`.
@@ -26,7 +20,7 @@ struct FileTimes {
 pub struct ClockedObjectStore {
     inner: Arc<dyn ObjectStore>,
     clock: Arc<dyn SystemClock>,
-    times: Arc<RwLock<HashMap<Path, FileTimes>>>,
+    times: Arc<RwLock<HashMap<Path, DateTime<Utc>>>>,
 }
 
 impl ClockedObjectStore {
@@ -48,11 +42,8 @@ impl ClockedObjectStore {
             .expect("ClockedObjectStore.times poisoned");
         guard
             .entry(path.clone())
-            .and_modify(|t| t.modified = now)
-            .or_insert_with(|| FileTimes {
-                created: now,
-                modified: now,
-            });
+            .and_modify(|t| *t = now)
+            .or_insert_with(|| now);
         now
     }
 
@@ -76,7 +67,7 @@ impl ClockedObjectStore {
         if let Ok(guard) = self.times.read() {
             if let Some(t) = guard.get(&meta.location) {
                 return ObjectMeta {
-                    last_modified: t.modified,
+                    last_modified: *t,
                     ..meta
                 };
             }
@@ -156,7 +147,7 @@ impl ObjectStore for ClockedObjectStore {
                     if let Ok(guard) = times.read() {
                         if let Some(t) = guard.get(&meta.location) {
                             return Ok(ObjectMeta {
-                                last_modified: t.modified,
+                                last_modified: *t,
                                 ..meta
                             });
                         }
@@ -181,7 +172,7 @@ impl ObjectStore for ClockedObjectStore {
                     if let Ok(guard) = times.read() {
                         if let Some(t) = guard.get(&meta.location) {
                             return Ok(ObjectMeta {
-                                last_modified: t.modified,
+                                last_modified: *t,
                                 ..meta
                             });
                         }
@@ -206,7 +197,7 @@ impl ObjectStore for ClockedObjectStore {
             .map(|meta| {
                 if let Some(t) = guard.get(&meta.location) {
                     ObjectMeta {
-                        last_modified: t.modified,
+                        last_modified: *t,
                         ..meta
                     }
                 } else {
