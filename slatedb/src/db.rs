@@ -2598,7 +2598,7 @@ mod tests {
             .get();
         assert!(final_flush_count > initial_flush_count);
 
-        // Verify tha the WAL has not been flushed
+        // Verify that the WAL has not been flushed
         let recent_flushed_wal_id = kv_store.inner.wal_buffer.recent_flushed_wal_id();
         assert_eq!(recent_flushed_wal_id, 0);
 
@@ -4014,7 +4014,7 @@ mod tests {
         use crate::config::CompressionCodec;
         use std::str::FromStr;
 
-        // Create and load inital database
+        // Create and load initial database
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let compress = CompressionCodec::from_str("zstd").unwrap();
         let db_builder = Db::builder("/tmp/test_kv_store", os.clone()).with_settings(Settings {

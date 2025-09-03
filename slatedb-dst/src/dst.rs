@@ -527,11 +527,10 @@ impl Dst {
         while dst_duration.should_run(step_count, actual_start_time) {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
-                "run_simulation [simulated_time={}, state={:?}, step_count={}, step_action={}]",
+                "run_simulation [simulated_time={}, step_count={}, step_action={}]",
                 self.system_clock
                     .now()
                     .signed_duration_since(simulated_time),
-                &self.state,
                 step_count,
                 step_action,
             );

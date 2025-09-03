@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::utils::MonotonicSeq;
 
-/// Oracle is a struct that centralizes the generation & maintainance of various
+/// Oracle is a struct that centralizes the generation & maintenance of various
 /// sequence numbers. These sequence numbers are mostly related to the lifecycle
 /// of a transaction commit.
 pub(crate) struct Oracle {
