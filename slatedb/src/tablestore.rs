@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
+use std::time::Duration;
 
 use backon::{ExponentialBuilder, Retryable};
 use bytes::Bytes;
@@ -201,7 +202,7 @@ impl TableStore {
         let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
         (|| async { write_sst_in_object_store(object_store.clone(), id, &path, &data).await })
-            .retry(ExponentialBuilder::default().with_max_times(10)) // ~5 minutes w/default settings
+            .retry(ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300))))
             .when(utils::should_retry_object_store_operation)
             .await?;
 
