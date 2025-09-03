@@ -34,12 +34,12 @@
 //! use slatedb::Db;
 //! use slatedb::db_cache::CachedEntry;
 //! use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
-//! use slatedb::object_store::local::LocalFileSystem;
+//! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[::tokio::main]
 //! async fn main() {
-//!     let object_store = Arc::new(LocalFileSystem::new());
+//!     let object_store = Arc::new(InMemory::new());
 //!     let cache = HybridCacheBuilder::new()
 //!             .with_name("hybrid_cache")
 //!             .memory(1024)

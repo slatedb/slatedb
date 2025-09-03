@@ -50,7 +50,7 @@ pub const DEFAULT_META_CACHE_CAPACITY: u64 = 128 * 1024 * 1024;
 /// use async_trait::async_trait;
 /// use slatedb::{Db, Error};
 /// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey};
-/// use slatedb::object_store::local::LocalFileSystem;
+/// use slatedb::object_store::memory::InMemory;
 /// use std::collections::HashMap;
 /// use std::sync::{Arc, Mutex};
 ///
@@ -118,7 +118,7 @@ pub const DEFAULT_META_CACHE_CAPACITY: u64 = 128 * 1024 * 1024;
 ///
 /// #[::tokio::main]
 /// async fn main() {
-///     let object_store = Arc::new(LocalFileSystem::new());
+///     let object_store = Arc::new(InMemory::new());
 ///     let cache = Arc::new(MyCache::new(128u64 * 1024 * 1024));
 ///     let db = Db::builder("/path/to/db", object_store)
 ///         .with_memory_cache(cache)
