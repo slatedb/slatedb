@@ -523,14 +523,12 @@ where
 pub(crate) fn should_retry_object_store_operation(error: &SlateDBError) -> bool {
     match error {
         SlateDBError::Fenced | SlateDBError::ManifestVersionExists => return false,
-        SlateDBError::ObjectStoreError(e) => {
-            match e.as_ref() {
-                object_store::Error::AlreadyExists { .. }
-                | object_store::Error::Precondition { .. }
-                | object_store::Error::NotImplemented => return false,
-                _ => {}
-            }
-        }
+        SlateDBError::ObjectStoreError(e) => match e.as_ref() {
+            object_store::Error::AlreadyExists { .. }
+            | object_store::Error::Precondition { .. }
+            | object_store::Error::NotImplemented => return false,
+            _ => {}
+        },
         _ => {}
     }
     true
