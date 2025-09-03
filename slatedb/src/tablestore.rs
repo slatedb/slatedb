@@ -202,7 +202,7 @@ impl TableStore {
         let path = self.path(id);
         (|| async { write_sst_in_object_store(object_store.clone(), id, &path, &data).await })
             .retry(ExponentialBuilder::default())
-            .when(utils::object_store_timedout)
+            .when(utils::should_retry_object_store_operation)
             .await?;
 
         if let Some(ref cache) = self.cache {

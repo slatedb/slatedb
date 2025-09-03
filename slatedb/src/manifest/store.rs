@@ -584,7 +584,7 @@ impl ManifestStore {
                 .await
         })
         .retry(ExponentialBuilder::default())
-        .when(utils::object_store_timedout)
+        .when(utils::should_retry_object_store_operation)
         .await
     }
 
