@@ -122,7 +122,6 @@ impl CompactorState {
         compaction: Compaction,
     ) -> Result<Uuid, SlateDBError> {
         self.validate_compaction(&compaction)?;
-
         if self
             .compactions
             .values()
