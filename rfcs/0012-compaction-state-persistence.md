@@ -148,7 +148,7 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 9. The task loads all the iterators in a `MergeIterator` struct and runs compactions on it. It discards older expired versions and continues to write to a SST. Once the SST reaches it's threshold size, the SST is written to the active destination SR. Periodically the task also provides stats on task progress. 
 
-10. When a task completes compaction execution, the task returns the {destinationId, outputSSTs} to the worker channel to act upon the compaction terminal state
+10. When a task completes compaction execution, the task returns the `{destinationId, outputSSTs}` to the worker channel to act upon the compaction terminal state
 
 11. The worker task executes the `finishCompaction()` upon successful `CompactionCompletion` and updates the manifests and trigger scheduling of next compactions by calling `maybeScheduleCompaction()`
 
@@ -226,7 +226,7 @@ pub(crate) struct FenceableCompactionState {
 
 4. For each compaction in the input list of compactions, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
 
-    - Check if the count of runnning compactions is less than the threshold. If yes, continue
+    - Check if the count of running compactions is less than the threshold. If yes, continue
 
     - Check if the source L0 SSTs and SRs are not part of any other compaction. If yes, continue.
 
@@ -271,11 +271,11 @@ pub(crate) struct FenceableCompactionState {
 We have agreed on the second approach (channel-based updates via the compaction event handler).
 
 
-10. Once the compactionJob is completed, follow the steps mentioned in the State Managment protocol.    
+10. Once the compactionJob is completed, follow the steps mentioned in the State Management protocol.    
 
 ### Persisting External Compactions
 
-We need a mechanism to plug in the external requests so that they can be picked up and executed by the compaction worflow. The idea is to leverage the existing compaction workflow. The steps are outlined here:
+We need a mechanism to plug in the external requests so that they can be picked up and executed by the compaction workflow. The idea is to leverage the existing compaction workflow. The steps are outlined here:
 
 1. Client provides the list of source_ssts and source_srs to be compacted through a `submit_manual_compaction` method in `Admin` (see the _Administrative Commands_ section below).
 
@@ -283,7 +283,7 @@ We need a mechanism to plug in the external requests so that they can be picked 
 
 3. For each compaction in the input list of compactions, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
 
-    - Check if the count of runnning compactions is less than the threshold. If yes, continue
+    - Check if the count of running compactions is less than the threshold. If yes, continue
 
     - Check if the source L0 SSTs and SRs are not part of any other compaction. If yes, continue.
 
@@ -325,7 +325,7 @@ Note: The validations added in this protocol are best effort. The authority to v
 3. This is done by doing a binary search on a SR to find the right SST partition and then iterating the blocks of the SST till we find the Entry. 
     [Note: A corner case: With monotonically overlapping SST ranges(specifically the last key), a key might be present across a contiguous range of SST in a SR]
 
-4. Each {key, seq_number, sst_iterator} tuple is then added to a min_heap to decide the right order across a group of SRs (this is a way to get a sorted list from all the sorted SR SSTs).
+4. Each `{key, seq_number, sst_iterator}` tuple is then added to a min_heap to decide the right order across a group of SRs (this is a way to get a sorted list from all the sorted SR SSTs).
 
 5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each and persists them to the .compactor file by updating the compaction in `compactions`. (This is the `CompactionJob` progress section in _State Management Protocol_.)
 

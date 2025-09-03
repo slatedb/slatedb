@@ -78,7 +78,7 @@ impl SsTableHandle {
             );
             effective_range = effective_range
                 .intersect(visible_range)
-                .expect("An interesction of visible and physical range must be non-empty.")
+                .expect("An intersection of visible and physical range must be non-empty.")
         }
         SsTableHandle {
             id,
