@@ -25,7 +25,7 @@ A put() call writes its data to a write-ahead log (WAL). A WAL is an append-only
 
 ### MemTables
 
-LSM trees avoid this linear scan by storing their data in an additional data structure called a MemTable. After a put() call writes its data to the WAL, it inserts its data into a mutable in-memory map called a MemTable. MemTabls typically use a sorted map such as a [SkipList](https://en.wikipedia.org/wiki/Skip_list) map so that `scan()` operations work as well.
+LSM trees avoid this linear scan by storing their data in an additional data structure called a MemTable. After a put() call writes its data to the WAL, it inserts its data into a mutable in-memory map called a MemTable. MemTables typically use a sorted map such as a [SkipList](https://en.wikipedia.org/wiki/Skip_list) map so that `scan()` operations work as well.
 
 ```mermaid
 sequenceDiagram

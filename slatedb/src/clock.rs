@@ -106,7 +106,7 @@ impl<'a> SystemClockTicker<'a> {
 /// Utc::now() is used to track the initial timestamp (ms since Unix epoch). This DateTime
 /// is used to convert the tokio::time::Instant to a DateTime when now() is called.
 ///
-/// Note that, becasue we're using tokio::time::Instant, manipulating tokio's clock with
+/// Note that, because we're using tokio::time::Instant, manipulating tokio's clock with
 /// tokio::time::pause(), tokio::time::advance(), and so on will affect the
 /// DefaultSystemClock's time as well.
 #[derive(Debug)]
