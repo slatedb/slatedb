@@ -8,7 +8,6 @@ use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use rand::{Rng, RngCore};
-use std::error::Error;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
@@ -528,7 +527,7 @@ pub(crate) fn should_retry_object_store_operation(error: &SlateDBError) -> bool 
             match e.as_ref() {
                 object_store::Error::AlreadyExists { .. }
                 | object_store::Error::Precondition { .. }
-                | object_store::Error::NotImplemented { .. } => return false,
+                | object_store::Error::NotImplemented => return false,
                 _ => {}
             }
         }
