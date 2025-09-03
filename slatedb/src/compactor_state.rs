@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
-use log::info;
+use log::{info, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -121,8 +121,7 @@ impl CompactorState {
         id: Uuid,
         compaction: Compaction,
     ) -> Result<Uuid, SlateDBError> {
-        // todo: validate the compaction here
-        //       https://github.com/slatedb/slatedb/issues/96
+        self.validate_compaction(&compaction)?;
         if self
             .compactions
             .values()
@@ -259,6 +258,72 @@ impl CompactorState {
             assert!(sr.id < last_sr_id);
             last_sr_id = sr.id;
         }
+    }
+
+    fn validate_compaction(&mut self, compaction: &Compaction) -> Result<(), SlateDBError> {
+        // Logical order of sources: [L0 (newest → oldest), then SRs (highest id → 0)]
+        let sources_logical_order: Vec<SourceId> = self
+            .db_state()
+            .l0
+            .iter()
+            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+            .chain(
+                self.db_state()
+                    .compacted
+                    .iter()
+                    .map(|sr| SourceId::SortedRun(sr.id)),
+            )
+            .collect();
+
+        // Validate compaction sources exist
+        if compaction.sources.is_empty() {
+            warn!("submitted compaction is empty: {:?}", compaction.sources);
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+        // Validate if the compaction sources are strictly consecutive elements in the db_state sources
+        if !sources_logical_order
+            .windows(compaction.sources.len())
+            .any(|w| w == compaction.sources.as_slice())
+        {
+            warn!("submitted compaction is not a consecutive series of sources from db state: {:?} {:?}",
+            compaction.sources, sources_logical_order);
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+        let has_sr = compaction
+            .sources
+            .iter()
+            .any(|s| matches!(s, SourceId::SortedRun(_)));
+
+        if has_sr {
+            // Must merge into the lowest-id SR among sources
+            let min_sr = compaction
+                .sources
+                .iter()
+                .filter_map(|s| s.maybe_unwrap_sorted_run())
+                .min()
+                .expect("at least one SR in sources");
+            if compaction.destination != min_sr {
+                warn!(
+                    "destination does not match lowest-id SR among sources: {:?} {:?}",
+                    compaction.destination, min_sr
+                );
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        } else {
+            // L0-only: must create new SR with id > highest_existing
+            let highest_id = self.db_state().compacted.first().map_or(0, |sr| sr.id + 1);
+            if compaction.destination < highest_id {
+                warn!(
+                    "compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
+                    compaction.destination, highest_id
+                );
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -547,6 +612,107 @@ mod tests {
 
         // then:
         assert_eq!(vec![checkpoint], state.db_state().checkpoints);
+    }
+
+    #[test]
+    fn test_should_submit_invalid_compaction_wrong_order() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state) = build_test_state(rt.handle());
+
+        let l0_sst = &mut state.db_state().l0.clone();
+        let last_sst = l0_sst.pop_back();
+        l0_sst.push_front(last_sst.unwrap());
+        // when:
+        let compaction = build_l0_compaction(l0_sst, 0);
+        let result = state.submit_compaction(uuid::Uuid::new_v4(), compaction);
+
+        // then:
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    #[test]
+    fn test_should_submit_invalid_compaction_skipped_sst() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state) = build_test_state(rt.handle());
+
+        let l0_sst = &mut state.db_state().l0.clone();
+        let last_sst = l0_sst.pop_back().unwrap();
+        l0_sst.push_front(last_sst);
+        l0_sst.pop_back();
+        // when:
+        let compaction = build_l0_compaction(l0_sst, 0);
+        let result = state.submit_compaction(uuid::Uuid::new_v4(), compaction);
+
+        // then:
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    #[test]
+    fn test_should_submit_invalid_compaction_with_sr() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state) = build_test_state(rt.handle());
+
+        let mut compaction = build_l0_compaction(&state.db_state().l0, 0);
+        compaction.sources.push(SourceId::SortedRun(5));
+        // when:
+        let result = state.submit_compaction(uuid::Uuid::new_v4(), compaction);
+
+        // then:
+        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+    }
+
+    #[test]
+    fn test_should_submit_correct_compaction() {
+        // given:
+        let rt = build_runtime();
+        let (_os, mut _sm, mut state) = build_test_state(rt.handle());
+        // compact the last sst
+        let original_l0s = &state.db_state().clone().l0;
+        let result = state.submit_compaction(
+            uuid::Uuid::new_v4(),
+            Compaction::new(
+                original_l0s
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _e)| i > &2usize)
+                    .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
+                    .collect::<Vec<SourceId>>(),
+                0,
+            ),
+        );
+
+        // then:
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_source_boundary_compaction() {
+        // given:
+        let rt = build_runtime();
+        let (_os, mut _sm, mut state) = build_test_state(rt.handle());
+        let original_l0s = &state.db_state().clone().l0;
+        let original_srs = &state.db_state().clone().compacted;
+        // L0: from 4th onward (index > 2)
+        let l0_sources = original_l0s
+            .iter()
+            .skip(3)
+            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()));
+
+        // SRs: first 3 (index < 3)
+        let sr_sources = original_srs
+            .iter()
+            .take(3)
+            .map(|sr| SourceId::SortedRun(sr.id));
+
+        // If you need both:
+        let sources: Vec<SourceId> = l0_sources.chain(sr_sources).collect();
+        let result = state.submit_compaction(uuid::Uuid::new_v4(), Compaction::new(sources, 0));
+
+        // or simply:
+        assert!(result.is_ok());
     }
 
     // test helpers
