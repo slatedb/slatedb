@@ -90,7 +90,8 @@ impl CompactionProgressTracker {
         for entry in self.processed_bytes.iter() {
             let id = entry.key();
             let (processed_bytes, total_bytes) = entry.value();
-            let percentage = (processed_bytes * 100 / total_bytes) as u32;
+            // max() to avoid division by zero
+            let percentage = (processed_bytes * 100 / (total_bytes.max(&1))) as u32;
             debug!(
                 "compaction progress [id={}, current_percentage={}%, processed_bytes={}, estimated_total_bytes={}]",
                 id,

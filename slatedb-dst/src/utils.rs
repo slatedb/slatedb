@@ -1,6 +1,6 @@
 //! This module contains helper functions to simplify deterministic simulation (DST).
 
-use log::{error, warn};
+use log::{info, error};
 use rand::Rng;
 use slatedb::clock::LogicalClock;
 use slatedb::clock::SystemClock;
@@ -189,7 +189,7 @@ pub async fn run_simulation(
     dst_opts: DstOptions,
 ) -> Result<(), Error> {
     let seed = rand.seed();
-    warn!("running simulation [seed={}]", seed);
+    info!("running simulation [seed={}]", seed);
     let mut dst = build_dst(
         object_store,
         system_clock.clone(),
