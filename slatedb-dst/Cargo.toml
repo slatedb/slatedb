@@ -16,6 +16,7 @@ publish = false
 bench = false
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { workspace = true }
 ctor = { workspace = true }
 futures = { workspace = true }

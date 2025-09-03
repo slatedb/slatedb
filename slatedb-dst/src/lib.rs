@@ -4,6 +4,7 @@ mod dst;
 mod error;
 mod state;
 pub mod utils;
+pub mod object_store;
 
 #[allow(unused_imports)]
 pub use dst::{

@@ -3325,6 +3325,7 @@ dependencies = [
 name = "slatedb-dst"
 version = "0.8.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "ctor",
  "futures",
