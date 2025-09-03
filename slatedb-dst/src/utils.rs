@@ -150,7 +150,7 @@ pub async fn build_compaction_scheduler_supplier(
     let options = SizeTieredCompactionSchedulerOptions {
         // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
         // Otherwise, the compactor never runs and writers get blocked permanently.
-        min_compaction_sources: rand.rng().random_range(1..10).max(settings.l0_max_ssts),
+        min_compaction_sources: rand.rng().random_range(1..10).min(settings.l0_max_ssts),
         ..Default::default()
     };
     Arc::new(SizeTieredCompactionSchedulerSupplier::new(options))
