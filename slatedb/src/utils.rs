@@ -534,9 +534,9 @@ pub(crate) fn should_retry_object_store_operation(error: &SlateDBError) -> bool 
         _ => {}
     }
     if !retry {
-        warn!("not retrying object store operation [error={}]", error);
+        warn!("not retrying object store operation [error={:?}]", error);
     } else {
-        info!("retrying object store operation [error={}]", error);
+        info!("retrying object store operation [error={:?}]", error);
     }
     retry
 }
