@@ -8,9 +8,8 @@ use chrono::{DateTime, Utc};
 use log::error;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
-use super::{GcStats, GcTask, DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
+use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
 
 pub(crate) struct WalGcTask {
     manifest_store: Arc<ManifestStore>,
@@ -106,12 +105,6 @@ impl GcTask for WalGcTask {
         }
 
         Ok(())
-    }
-
-    fn interval(&self) -> Duration {
-        self.wal_options
-            .and_then(|opts| opts.interval)
-            .unwrap_or(DEFAULT_INTERVAL)
     }
 
     fn resource(&self) -> &str {
