@@ -583,8 +583,8 @@ impl ManifestStore {
             self.write_manifest_in_object_store(manifest_path, manifest)
                 .await
         })
-        .retry(ExponentialBuilder::default())
-        .when(utils::object_store_timedout)
+        .retry(ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300))))
+        .when(utils::should_retry_object_store_operation)
         .await
     }
 
