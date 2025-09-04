@@ -1059,6 +1059,72 @@ mod tests {
         assert_no_dangling_references(manifest_store, table_store).await;
     }
 
+    #[tokio::test]
+    async fn test_handle_should_only_run_one_task_per_message() {
+        use crate::dispatcher::MessageHandler;
+
+        let (manifest_store, table_store, local_object_store) = build_objects();
+
+        // Create two manifests where the first is old enough to GC
+        let mut stored_manifest =
+            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
+                .await
+                .unwrap();
+        stored_manifest
+            .update_manifest(stored_manifest.prepare_dirty())
+            .await
+            .unwrap();
+
+        // Make manifest 1 eligible for deletion
+        set_modified(
+            local_object_store.clone(),
+            &Path::from(format!("manifest/{:020}.{}", 1, "manifest")),
+            86400,
+        );
+
+        // Sanity check initial manifests
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(manifests.len(), 2);
+
+        // Build a GC with standard options (1h min_age)
+        let stats = Arc::new(StatRegistry::new());
+        let gc_opts = GarbageCollectorOptions {
+            manifest_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: std::time::Duration::from_secs(3600),
+                interval: None,
+            }),
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: std::time::Duration::from_secs(3600),
+                interval: None,
+            }),
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: std::time::Duration::from_secs(3600),
+                interval: None,
+            }),
+        };
+
+        let mut gc = GarbageCollector::new(
+            manifest_store.clone(),
+            table_store.clone(),
+            gc_opts,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::default()),
+        );
+
+        // Send a WAL GC message. Correct behavior: only WAL GC runs.
+        // Current bug: handle() calls run_gc_once(), running all tasks (including Manifest GC).
+        gc.handle(GcMessage::GcWal).await.unwrap();
+
+        // Assert that manifests were not collected (should still be 2).
+        // With the bug, Manifest GC will have deleted the first manifest and this will fail.
+        let manifests = manifest_store.list_manifests(..).await.unwrap();
+        assert_eq!(
+            manifests.len(),
+            2,
+            "manifest GC should not run on WAL message"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_gc_shutdown() {
         let (manifest_store, table_store, _) = build_objects();
