@@ -69,13 +69,14 @@ pub(crate) enum GcMessage {
 /// The garbage collector uses configurable intervals and minimum age thresholds for each
 /// type of data to ensure that recently created data isn't immediately deleted, which
 /// helps prevent removing files that might still be referenced by in-flight operations.
-#[derive(Clone)]
 pub struct GarbageCollector {
     manifest_store: Arc<ManifestStore>,
-    table_store: Arc<TableStore>,
     options: GarbageCollectorOptions,
     stats: Arc<GcStats>,
     system_clock: Arc<dyn SystemClock>,
+    manifest_gc_task: ManifestGcTask,
+    wal_gc_task: WalGcTask,
+    compacted_gc_task: CompactedGcTask,
 }
 
 #[async_trait]
@@ -106,9 +107,9 @@ impl MessageHandler<GcMessage> for GarbageCollector {
 
     async fn handle(&mut self, message: GcMessage) -> Result<(), SlateDBError> {
         match message {
-            GcMessage::GcManifest => self.run_gc_once().await,
-            GcMessage::GcWal => self.run_gc_once().await,
-            GcMessage::GcCompacted => self.run_gc_once().await,
+            GcMessage::GcManifest => self.run_gc_task(&self.manifest_gc_task).await,
+            GcMessage::GcWal => self.run_gc_task(&self.wal_gc_task).await,
+            GcMessage::GcCompacted => self.run_gc_task(&self.compacted_gc_task).await,
             GcMessage::LogStats => self.log_stats(),
         }
         Ok(())
@@ -148,12 +149,31 @@ impl GarbageCollector {
         system_clock: Arc<dyn SystemClock>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(stat_registry));
+        let wal_gc_task = WalGcTask::new(
+            manifest_store.clone(),
+            table_store.clone(),
+            stats.clone(),
+            options.wal_options,
+        );
+        let compacted_gc_task = CompactedGcTask::new(
+            manifest_store.clone(),
+            table_store.clone(),
+            stats.clone(),
+            options.compacted_options,
+        );
+        let manifest_gc_task = ManifestGcTask::new(
+            manifest_store.clone(),
+            stats.clone(),
+            options.manifest_options,
+        );
         Self {
             manifest_store,
-            table_store,
             options,
             stats,
             system_clock,
+            manifest_gc_task,
+            wal_gc_task,
+            compacted_gc_task,
         }
     }
 
@@ -165,38 +185,15 @@ impl GarbageCollector {
     /// - Compacted SST garbage collection
     /// - Manifest garbage collection
     pub async fn run_gc_once(&self) {
-        let (mut wal_gc_task, mut compacted_gc_task, mut manifest_gc_task) = self.gc_tasks();
-
-        self.run_gc_task(&mut manifest_gc_task).await;
-        self.run_gc_task(&mut wal_gc_task).await;
-        self.run_gc_task(&mut compacted_gc_task).await;
+        self.run_gc_task(&self.manifest_gc_task).await;
+        self.run_gc_task(&self.wal_gc_task).await;
+        self.run_gc_task(&self.compacted_gc_task).await;
 
         self.stats.gc_count.inc();
     }
 
-    fn gc_tasks(&self) -> (WalGcTask, CompactedGcTask, ManifestGcTask) {
-        let wal_gc_task = WalGcTask::new(
-            self.manifest_store.clone(),
-            self.table_store.clone(),
-            self.stats.clone(),
-            self.options.wal_options,
-        );
-        let compacted_gc_task = CompactedGcTask::new(
-            self.manifest_store.clone(),
-            self.table_store.clone(),
-            self.stats.clone(),
-            self.options.compacted_options,
-        );
-        let manifest_gc_task = ManifestGcTask::new(
-            self.manifest_store.clone(),
-            self.stats.clone(),
-            self.options.manifest_options,
-        );
-        (wal_gc_task, compacted_gc_task, manifest_gc_task)
-    }
-
     #[instrument(level = "debug", skip_all, fields(resource = task.resource()))]
-    async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &mut T) {
+    async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &T) {
         if let Err(e) = self.remove_expired_checkpoints().await {
             error!("error removing expired checkpoints [error={}]", e);
         } else if let Err(e) = task.collect(self.system_clock.now()).await {
