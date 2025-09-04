@@ -318,9 +318,9 @@ impl DefaultDstDistribution {
     }
 
     /// Generates an advance time action. The duration is sampled using a log-uniform
-    /// distribution. The range is hard coded as 1..10_000_000 (1ms to 100 seconds).
+    /// distribution. The range is hard coded as 1..10_000_000 (1ms to 10 seconds).
     fn sample_advance_time(&self) -> DstAction {
-        let sleep_micros = self.sample_log10_uniform(1..100_000_000).into();
+        let sleep_micros = self.sample_log10_uniform(1..10_000_000).into();
         DstAction::AdvanceTime(Duration::from_micros(sleep_micros))
     }
 
