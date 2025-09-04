@@ -97,5 +97,12 @@ jobs:
             git push origin "${TAG}"
           fi
 
-      - name: Publish website
-        uses: ./.github/workflows/release-website.yaml
+  website:
+    name: Deploy website
+    needs: release
+    uses: ./.github/workflows/release-website.yaml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    secrets: inherit
