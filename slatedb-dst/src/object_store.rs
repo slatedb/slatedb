@@ -47,12 +47,6 @@ impl ClockedObjectStore {
         now
     }
 
-    /// Record a creation for the given path. If the path already exists in the map,
-    /// leaves created unchanged and updates modified to now().
-    fn record_created(&self, path: &Path) -> DateTime<Utc> {
-        self.record_modified(path)
-    }
-
     /// Remove any tracked times for this path (after a successful delete or rename).
     fn remove(&self, path: &Path) {
         let mut guard = self
@@ -110,7 +104,6 @@ impl ObjectStore for ClockedObjectStore {
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
         let res = self.inner.put_opts(location, payload, opts).await?;
-        // Record a modification timestamp; initializes created on first observation
         self.record_modified(location);
         Ok(res)
     }
@@ -119,9 +112,9 @@ impl ObjectStore for ClockedObjectStore {
         &self,
         location: &Path,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        // Delegate directly; times will be recorded if caller completes via put_opts path elsewhere.
-        // If multipart is used, last_modified won't be tracked unless a following copy/rename occurs.
-        self.inner.put_multipart(location).await
+        let res = self.inner.put_multipart(location).await;
+        self.record_modified(location);
+        res
     }
 
     async fn put_multipart_opts(
@@ -129,7 +122,9 @@ impl ObjectStore for ClockedObjectStore {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        self.inner.put_multipart_opts(location, opts).await
+        let res = self.inner.put_multipart_opts(location, opts).await;
+        self.record_modified(location);
+        res
     }
 
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
@@ -210,27 +205,27 @@ impl ObjectStore for ClockedObjectStore {
 
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         self.inner.copy(from, to).await?;
-        self.record_created(to);
+        self.record_modified(to);
         Ok(())
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         self.inner.rename(from, to).await?;
         self.remove(from);
-        self.record_created(to);
+        self.record_modified(to);
         Ok(())
     }
 
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         self.inner.copy_if_not_exists(from, to).await?;
-        self.record_created(to);
+        self.record_modified(to);
         Ok(())
     }
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         self.inner.rename_if_not_exists(from, to).await?;
         self.remove(from);
-        self.record_created(to);
+        self.record_modified(to);
         Ok(())
     }
 }

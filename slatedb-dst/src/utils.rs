@@ -124,15 +124,18 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         compression_codec,
         garbage_collector_options: Some(GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
+                min_age: Duration::from_secs(60),
+                interval: Some(Duration::from_secs(60)),
                 ..Default::default()
             }),
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
+                min_age: Duration::from_secs(60),
+                interval: Some(Duration::from_secs(60)),
                 ..Default::default()
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(3600),
+                min_age: Duration::from_secs(60),
+                interval: Some(Duration::from_secs(60)),
                 ..Default::default()
             }),
         }),

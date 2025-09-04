@@ -370,9 +370,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         // Setup the manifest store and load latest manifest
-        let manifest_store = Arc::new(ManifestStore::new(
+        let manifest_store = Arc::new(ManifestStore::new_with_clock(
             &path,
             maybe_cached_main_object_store.clone(),
+            system_clock.clone(),
         ));
         let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
 
