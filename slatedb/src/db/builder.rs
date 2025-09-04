@@ -370,7 +370,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         // Setup the manifest store and load latest manifest
-        let manifest_store = Arc::new(ManifestStore::new_with_clock(
+        let manifest_store = Arc::new(ManifestStore::new(
             &path,
             maybe_cached_main_object_store.clone(),
             system_clock.clone(),
@@ -689,7 +689,11 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
-        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            self.main_object_store.clone(),
+            self.system_clock.clone(),
+        ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
                 self.main_object_store.clone(),
@@ -790,7 +794,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
-        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            self.main_object_store.clone(),
+            self.system_clock.clone(),
+        ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(self.main_object_store.clone(), None),
             SsTableFormat::default(), // read only SSTs can use default

@@ -1222,7 +1222,11 @@ mod tests {
             min_filter_keys: 10,
             ..SsTableFormat::default()
         };
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(PATH),
+            os.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             sst_format,

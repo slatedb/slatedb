@@ -1,3 +1,4 @@
+use crate::clock::SystemClock;
 use crate::db_cache::DbCache;
 use crate::manifest::store::ManifestStore;
 use crate::object_stores::ObjectStores;
@@ -16,6 +17,7 @@ pub(crate) struct DefaultStoreProvider {
     pub(crate) path: Path,
     pub(crate) object_store: Arc<dyn ObjectStore>,
     pub(crate) block_cache: Option<Arc<dyn DbCache>>,
+    pub(crate) system_clock: Arc<dyn SystemClock>,
 }
 
 impl StoreProvider for DefaultStoreProvider {
@@ -32,6 +34,7 @@ impl StoreProvider for DefaultStoreProvider {
         Arc::new(ManifestStore::new(
             &self.path,
             Arc::clone(&self.object_store),
+            Arc::clone(&self.system_clock),
         ))
     }
 }
