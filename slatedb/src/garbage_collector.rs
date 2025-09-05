@@ -623,7 +623,7 @@ mod tests {
         // Manifest 1 with table 1 eligible for deletion
         let mut state = CoreDbState::new();
         state.replay_after_wal_id = 1;
-        state.next_wal_sst_id = 4;
+        state.last_seen_wal_id = 4;
         let mut stored_manifest =
             StoredManifest::create_new_db(manifest_store.clone(), state.clone())
                 .await
@@ -633,7 +633,7 @@ mod tests {
         // Manifest 2 with checkpoint referencing Manifest 1
         let mut dirty = stored_manifest.prepare_dirty();
         dirty.core.replay_after_wal_id = 3;
-        dirty.core.next_wal_sst_id = 4;
+        dirty.core.last_seen_wal_id = 4;
         dirty.core.checkpoints.push(new_checkpoint(1, None));
         stored_manifest.update_manifest(dirty).await.unwrap();
         assert_eq!(2, stored_manifest.id());
@@ -1006,7 +1006,7 @@ mod tests {
 
         for manifest in manifests.values() {
             let wal_sst_start_inclusive = manifest.core.replay_after_wal_id + 1;
-            let wal_sst_end_exclusive = manifest.core.next_wal_sst_id;
+            let wal_sst_end_exclusive = manifest.core.last_seen_wal_id;
             for wal_sst_id in wal_sst_start_inclusive..wal_sst_end_exclusive {
                 assert!(wal_ssts.contains(&SsTableId::Wal(wal_sst_id)));
             }

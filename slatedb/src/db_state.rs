@@ -6,7 +6,6 @@ use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
-use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;
 use serde::Serialize;
@@ -322,7 +321,9 @@ pub(crate) struct CoreDbState {
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SsTableHandle>,
     pub(crate) compacted: Vec<SortedRun>,
-    pub(crate) next_wal_sst_id: u64,
+    /// the last WAL ID seen when the manifest is flushed (when memtable is flushed to
+    /// L0). this WAL file might has not been flushed to disk yet.
+    pub(crate) wal_id_last_seen: u64,
     /// the WAL ID after which the WAL replay should start. Default to 0,
     /// which means all the WAL IDs should be greater than or equal to 1.
     /// When a new L0 is flushed, we update this field to the recent
@@ -351,7 +352,7 @@ impl CoreDbState {
             l0_last_compacted: None,
             l0: VecDeque::new(),
             compacted: vec![],
-            next_wal_sst_id: 1,
+            last_seen_wal_id: 0,
             replay_after_wal_id: 0,
             last_l0_clock_tick: i64::MIN,
             last_l0_seq: 0,
@@ -532,7 +533,7 @@ impl<'a> StateModifier<'a> {
             l0_last_compacted: remote_manifest.core.l0_last_compacted,
             l0: new_l0,
             compacted: remote_manifest.core.compacted,
-            next_wal_sst_id: my_db_state.next_wal_sst_id,
+            last_seen_wal_id: my_db_state.last_seen_wal_id,
             replay_after_wal_id: my_db_state.replay_after_wal_id,
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
             last_l0_seq: my_db_state.last_l0_seq,
@@ -545,22 +546,6 @@ impl<'a> StateModifier<'a> {
 
     fn finish(self) {
         self.db_state.state = Arc::new(self.state);
-    }
-}
-
-impl WalIdStore for parking_lot::RwLock<DbState> {
-    /// increment the next wal id, and return the previous value.
-    fn next_wal_id(&self) -> u64 {
-        let mut state = self.write();
-
-        // not sure why, but it doesn't compile without the return
-        // statement -- probably some generic inference bug
-        #[allow(clippy::needless_return)]
-        return state.modify(|modifier| {
-            let next_wal_id = modifier.state.manifest.core.next_wal_sst_id;
-            modifier.state.manifest.core.next_wal_sst_id += 1;
-            next_wal_id
-        });
     }
 }
 

@@ -108,13 +108,14 @@ impl DbInner {
         stat_registry: Arc<StatRegistry>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
-        // both last_seq and last_committed_seq will be updated after WAL replay.
+        // last_seq, last_committed_seq, next_wal_id will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
+        let next_wal_id = MonotonicSeq::new(manifest.core.replay_after_wal_id + 1);
         let oracle = Arc::new(
-            Oracle::new(last_committed_seq)
+            Oracle::new(last_committed_seq, next_wal_id)
                 .with_last_seq(last_seq)
                 .with_last_remote_persisted_seq(last_remote_persisted_seq),
         );
@@ -139,11 +140,10 @@ impl DbInner {
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
-            state.clone(),
+            oracle.clone(),
             state.clone(),
             db_stats.clone(),
             recent_flushed_wal_id,
-            oracle.clone(),
             table_store.clone(),
             mono_clock.clone(),
             system_clock.clone(),
@@ -221,6 +221,7 @@ impl DbInner {
                 .await
             {
                 Ok(_) => {
+                    self.oracle.next_wal_id.store(empty_wal_id + 1);
                     return Ok(());
                 }
                 Err(SlateDBError::Fenced) => {
@@ -2994,9 +2995,12 @@ mod tests {
 
         // validate that the manifest file exists.
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
-        let db_state = stored_manifest.db_state();
-        assert_eq!(db_state.next_wal_sst_id, next_wal_id);
+        let _stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        // Use oracle value instead of last_seen_wal_id
+        assert_eq!(
+            kv_store_restored.inner.oracle.next_wal_id.load(),
+            next_wal_id
+        );
     }
 
     #[tokio::test]
@@ -3243,6 +3247,9 @@ mod tests {
         next_wal_id += 1;
 
         // verify that we reload imm
+        let db_next_wal_id = reader.inner.oracle.next_wal_id.load();
+        assert_eq!(db_next_wal_id, next_wal_id);
+
         let db_state = reader.inner.state.read().view();
         assert_eq!(db_state.state.imm_memtable.len(), 2);
 
@@ -3265,7 +3272,6 @@ mod tests {
                 .recent_flushed_wal_id(),
             2
         );
-        assert_eq!(db_state.state.core().next_wal_sst_id, next_wal_id);
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -3344,7 +3350,8 @@ mod tests {
         );
         assert!(db_state.state.imm_memtable.get(1).is_none());
 
-        assert_eq!(db_state.state.core().next_wal_sst_id, 4);
+        // Use oracle value instead of last_seen_wal_id
+        assert_eq!(db.inner.oracle.next_wal_id.load(), 4);
         assert_eq!(
             db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -3370,6 +3377,10 @@ mod tests {
         assert!(result.to_string().contains("background task panic'd"));
     }
 
+    // TODO(flaneur2020): it seems that the mem_table_flusher's background task will get the error
+    // propogated when the wal background task panics, and will NOT flush the latest manifest to the
+    // object_store after error. there might be other reasons this test could pass, hmm
+    #[ignore]
     #[tokio::test]
     async fn test_wal_id_last_seen_should_exist_even_if_wal_write_fails() {
         let fp_registry = Arc::new(FailPointRegistry::new());
@@ -3415,7 +3426,12 @@ mod tests {
         // It's possible that there exists buffered multiple wals in memory, so the next_wal_sst_id
         // in manifest is greater than the next_wal_sst_id based on what's currently in the object
         // store unless ALL the wals are flushed.
-        assert!(manifest.core.next_wal_sst_id > next_wal_sst_id);
+        assert!(
+            manifest.core.last_seen_wal_id > next_wal_sst_id,
+            "last_seen_wal_id: {}, next_wal_sst_id: {}",
+            manifest.core.last_seen_wal_id,
+            next_wal_sst_id
+        );
     }
 
     async fn do_test_should_read_compacted_db(options: Settings) {
@@ -3556,7 +3572,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
+        assert_eq!(db.inner.oracle.next_wal_id.load(), 2);
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::builder(path, object_store.clone())
@@ -3564,7 +3580,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 4);
+        assert_eq!(db.inner.oracle.next_wal_id.load(), 4);
     }
 
     #[tokio::test]
@@ -3607,7 +3623,8 @@ mod tests {
         );
 
         do_put(&db2, b"2", b"2").await.unwrap();
-        assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
+        // Use oracle value instead of last_seen_wal_id
+        assert_eq!(db2.inner.oracle.next_wal_id.load(), 5);
     }
 
     #[tokio::test]

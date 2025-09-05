@@ -118,6 +118,7 @@ impl MemtableFlusher {
                 .await?;
             {
                 let min_active_snapshot_seq = self.db_inner.txn_manager.min_active_seq();
+                let last_seen_wal_id = self.db_inner.wal_buffer.last_wal_id();
 
                 let mut guard = self.db_inner.state.write();
                 guard.modify(|modifier| {
@@ -130,6 +131,7 @@ impl MemtableFlusher {
                     modifier.state.manifest.core.l0.push_front(sst_handle);
                     modifier.state.manifest.core.replay_after_wal_id =
                         imm_memtable.recent_flushed_wal_id();
+                    modifier.state.manifest.core.last_seen_wal_id = last_seen_wal_id;
 
                     // ensure the persisted manifest tick never goes backwards in time
                     let memtable_tick = imm_memtable.table().last_tick();

@@ -23,7 +23,6 @@ use crate::{
     tablestore::TableStore,
     types::RowEntry,
     utils::{spawn_bg_task, WatchableOnceCell, WatchableOnceCellReader},
-    wal_id::WalIdStore,
 };
 
 /// [`WalBufferManager`] buffers write operations in memory before flushing them to persistent storage.
@@ -51,7 +50,6 @@ use crate::{
 ///   operations. The manager becomes unusable after encountering a fatal error.
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
-    wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
     // WAL buffer will call `record_fatal_error` if it fails
     db_state: Arc<RwLock<DbState>>,
     db_stats: DbStats,
@@ -84,11 +82,10 @@ struct WalBufferManagerInner {
 impl WalBufferManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
+        oracle: Arc<Oracle>,
         db_state: Arc<RwLock<DbState>>,
         db_stats: DbStats,
         recent_flushed_wal_id: u64,
-        oracle: Arc<Oracle>,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
         system_clock: Arc<dyn SystemClock>,
@@ -104,11 +101,10 @@ impl WalBufferManager {
             recent_flushed_wal_id,
             flush_tx: None,
             background_task: None,
-            oracle,
+            oracle: oracle.clone(),
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
-            wal_id_incrementor,
             db_state,
             db_stats,
             quit_once: WatchableOnceCell::new(),
@@ -159,6 +155,11 @@ impl WalBufferManager {
             .sum::<usize>();
         let current_wal_entries_count = guard.current_wal.metadata().entry_num;
         current_wal_entries_count + flushing_wal_entries_count
+    }
+
+    pub fn last_wal_id(&self) -> u64 {
+        let inner = self.inner.read();
+        inner.oracle.next_wal_id.load()
     }
 
     pub fn recent_flushed_wal_id(&self) -> u64 {
@@ -432,13 +433,15 @@ impl WalBufferManager {
     }
 
     async fn freeze_current_wal(&self) -> Result<(), SlateDBError> {
-        let is_empty = self.inner.read().current_wal.is_empty();
-        if is_empty {
+        let mut inner = self.inner.write();
+        if inner.current_wal.is_empty() {
             return Ok(());
         }
 
-        let next_wal_id = self.wal_id_incrementor.next_wal_id();
-        let mut inner = self.inner.write();
+        // increment WAL id within the lock held
+        let next_wal_id = inner.oracle.next_wal_id.load();
+        inner.oracle.next_wal_id.store(next_wal_id + 1);
+
         let current_wal = std::mem::replace(&mut inner.current_wal, Arc::new(KVTable::new()));
         inner.immutable_wals.push_back((next_wal_id, current_wal));
         Ok(())
@@ -517,24 +520,10 @@ mod tests {
     use crate::utils::MonotonicSeq;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
-    struct MockWalIdStore {
-        next_id: AtomicU64,
-    }
-
-    impl WalIdStore for MockWalIdStore {
-        fn next_wal_id(&self) -> u64 {
-            self.next_id.fetch_add(1, Ordering::SeqCst)
-        }
-    }
-
     async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<TestClock>) {
-        let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
-            next_id: AtomicU64::new(1),
-        });
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(object_store, None),
@@ -544,17 +533,16 @@ mod tests {
         ));
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
-        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
+        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0), MonotonicSeq::new(1)));
         let db_state = Arc::new(RwLock::new(DbState::new(DirtyManifest::new(
             0,
             Manifest::initial(CoreDbState::new()),
         ))));
         let wal_buffer = Arc::new(WalBufferManager::new(
-            wal_id_store,
+            oracle,
             db_state,
             DbStats::new(&StatRegistry::new()),
             0, // recent_flushed_wal_id
-            oracle,
             table_store.clone(),
             mono_clock,
             Arc::new(DefaultSystemClock::default()),
