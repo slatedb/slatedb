@@ -661,8 +661,8 @@ mod tests {
                 // Limit deltas to avoid problematic ranges in Gorilla encoding
                 // Specifically avoid sequence number deltas >= 2^31 that cause sign issues
                 // It is reasonable to assume that production deltas wont exceed these bounds.
-                let safe_seq_delta = (seq_delta % (u32::MAX as u32 / 2)) as u64;
-                let safe_ts_delta = (ts_delta % (u32::MAX as u32 / 2)) as i64;
+                let safe_seq_delta = (seq_delta % (u32::MAX / 2)) as u64;
+                let safe_ts_delta = (ts_delta % (u32::MAX / 2)) as i64;
 
                 current_seq = current_seq.saturating_add(safe_seq_delta);
                 current_ts = current_ts.saturating_add(safe_ts_delta);
