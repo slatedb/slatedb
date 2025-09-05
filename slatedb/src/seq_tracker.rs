@@ -38,7 +38,7 @@ pub(crate) enum FindOption {
 pub(crate) struct SequenceTracker {
     /// Sorted array of sequence numbers
     sequence_numbers: Vec<u64>,
-    /// Sorted array of timestamps (as Unix timestamps)
+    /// Sorted array of timestamps (as Unix timestamp seconds)
     timestamps: Vec<i64>,
     /// Maximum number of entries to store
     capacity: u32,
