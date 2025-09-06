@@ -2,6 +2,7 @@ use crate::db_cache::DbCache;
 use crate::manifest::store::ManifestStore;
 use crate::object_stores::ObjectStores;
 use crate::sst::SsTableFormat;
+use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::TableStore;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -21,7 +22,7 @@ pub(crate) struct DefaultStoreProvider {
 impl StoreProvider for DefaultStoreProvider {
     fn table_store(&self) -> Arc<TableStore> {
         Arc::new(TableStore::new(
-            ObjectStores::new(Arc::clone(&self.object_store), None),
+            ObjectStores::new(RetryingObjectStore::new(Arc::clone(&self.object_store)), None),
             SsTableFormat::default(),
             self.path.clone(),
             self.block_cache.clone(),
@@ -31,7 +32,7 @@ impl StoreProvider for DefaultStoreProvider {
     fn manifest_store(&self) -> Arc<ManifestStore> {
         Arc::new(ManifestStore::new(
             &self.path,
-            Arc::clone(&self.object_store),
+            RetryingObjectStore::new(Arc::clone(&self.object_store)),
         ))
     }
 }

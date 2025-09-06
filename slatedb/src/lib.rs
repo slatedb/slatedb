@@ -109,6 +109,7 @@ mod sorted_run_iterator;
 mod sst;
 mod sst_iter;
 mod store_provider;
+mod retrying_object_store;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;
