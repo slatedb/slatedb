@@ -29,8 +29,8 @@ impl RetryingObjectStore {
     }
 
     #[inline]
-    fn notify(err: &object_store::Error) {
-        info!("retrying object store operation [error={:?}]", err);
+    fn notify(err: &object_store::Error, duration: Duration) {
+        info!("retrying object store operation [error={:?}, duration={:?}]", err, duration);
     }
 
     #[inline]
