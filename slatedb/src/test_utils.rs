@@ -426,7 +426,11 @@ impl ObjectStore for FlakyObjectStore {
         if self
             .fail_first_head
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                if v > 0 { Some(v - 1) } else { None }
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
             })
             .is_ok()
         {

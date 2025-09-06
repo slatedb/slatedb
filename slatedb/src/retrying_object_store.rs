@@ -7,8 +7,8 @@ use futures::stream::BoxStream;
 use log::{info, warn};
 use object_store::path::Path;
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
-    PutOptions, PutPayload, PutResult,
+    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 
 /// A thin wrapper around an `ObjectStore` that retries transient errors with
@@ -95,11 +95,15 @@ impl ObjectStore for RetryingObjectStore {
         let loc = location.clone();
         let payload = payload.clone();
         let opts = opts.clone();
-        (|| async { self.inner.put_opts(&loc, payload.clone(), opts.clone()).await })
-            .retry(Self::retry_builder())
-            .notify(Self::notify)
-            .when(Self::should_retry_os_error)
-            .await
+        (|| async {
+            self.inner
+                .put_opts(&loc, payload.clone(), opts.clone())
+                .await
+        })
+        .retry(Self::retry_builder())
+        .notify(Self::notify)
+        .when(Self::should_retry_os_error)
+        .await
     }
 
     async fn put_multipart(
