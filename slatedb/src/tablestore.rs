@@ -1,9 +1,7 @@
 use std::collections::VecDeque;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
-use std::time::Duration;
 
-use backon::{ExponentialBuilder, Retryable};
 use bytes::Bytes;
 use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
@@ -24,7 +22,6 @@ use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::types::RowEntry;
-use crate::utils;
 use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub struct TableStore {
@@ -201,10 +198,7 @@ impl TableStore {
         let object_store = self.object_stores.store_for(id);
         let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
-        (|| async { write_sst_in_object_store(object_store.clone(), id, &path, &data).await })
-            .retry(ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300))))
-            .when(utils::should_retry_object_store_operation)
-            .await?;
+        write_sst_in_object_store(object_store.clone(), id, &path, &data).await?;
 
         if let Some(ref cache) = self.cache {
             if write_cache {
@@ -605,6 +599,7 @@ mod tests {
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
     use crate::object_stores::ObjectStores;
+    use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
@@ -1211,6 +1206,7 @@ mod tests {
         // Given a flaky store that times out on the first put_opts
         let base: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
+        let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
 
         let format = SsTableFormat {
             block_size: 64,
@@ -1218,7 +1214,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let ts = Arc::new(TableStore::new(
-            ObjectStores::new(flaky.clone(), None),
+            ObjectStores::new(retrying, None),
             format.clone(),
             Path::from(ROOT),
             None,

@@ -7,7 +7,6 @@ use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
-use log::warn;
 use rand::{Rng, RngCore};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -508,35 +507,6 @@ where
         }
     }
     Ok(out)
-}
-
-/// Always retry object store errors unless:
-///
-/// - The error is a fenced error
-/// - The error is an already exists error
-/// - The error is a precondition error
-/// - The error is a not implemented error
-///
-/// These are considered permanent errors in the context of the object store. We're not
-/// using user-facing [crate::ErrorKind] variants for these because we have slightly
-/// different semantics when retrying an object store error vs. what a user should do when
-/// they encounter a [crate::ErrorKind::Operation] error.
-pub(crate) fn should_retry_object_store_operation(error: &SlateDBError) -> bool {
-    let mut retry = true;
-    match error {
-        SlateDBError::Fenced | SlateDBError::ManifestVersionExists => retry = false,
-        SlateDBError::ObjectStoreError(e) => match e.as_ref() {
-            object_store::Error::AlreadyExists { .. }
-            | object_store::Error::Precondition { .. }
-            | object_store::Error::NotImplemented => retry = false,
-            _ => {}
-        },
-        _ => {}
-    }
-    if !retry {
-        warn!("not retrying object store operation [error={:?}]", error);
-    }
-    retry
 }
 
 #[cfg(test)]

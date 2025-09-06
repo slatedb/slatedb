@@ -455,9 +455,7 @@ impl ObjectStore for FlakyObjectStore {
         if self.put_precondition_always.load(Ordering::SeqCst) {
             return Err(object_store::Error::Precondition {
                 path: location.to_string(),
-                source: Box::new(std::io::Error::other(
-                    "injected precondition",
-                )),
+                source: Box::new(std::io::Error::other("injected precondition")),
             });
         }
         if self

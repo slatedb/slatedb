@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use futures::stream::BoxStream;
-use log::{info, warn};
+use log::{debug, info, warn};
 use object_store::path::Path;
 use object_store::{
     GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -19,8 +19,8 @@ pub(crate) struct RetryingObjectStore {
 }
 
 impl RetryingObjectStore {
-    pub fn new(inner: Arc<dyn ObjectStore>) -> Arc<Self> {
-        Arc::new(Self { inner })
+    pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
+        Self { inner }
     }
 
     #[inline]
@@ -30,23 +30,22 @@ impl RetryingObjectStore {
 
     #[inline]
     fn notify(err: &object_store::Error, duration: Duration) {
-        info!("retrying object store operation [error={:?}, duration={:?}]", err, duration);
+        info!(
+            "retrying object store operation [error={:?}, duration={:?}]",
+            err, duration
+        );
     }
 
     #[inline]
     fn should_retry_os_error(err: &object_store::Error) -> bool {
-        // Mirror the semantics of `utils::should_retry_object_store_operation` for
-        // object-store errors (permanent vs transient), and log similarly.
-        let retry = match err {
+        let retry = !matches!(
+            err,
             object_store::Error::AlreadyExists { .. }
-            | object_store::Error::Precondition { .. }
-            | object_store::Error::NotImplemented => false,
-            _ => true,
-        };
-        if retry {
-            info!("retrying object store operation [error={:?}]", err);
-        } else {
-            warn!("not retrying object store operation [error={:?}]", err);
+                | object_store::Error::Precondition { .. }
+                | object_store::Error::NotImplemented
+        );
+        if !retry {
+            debug!("not retrying object store operation [error={:?}]", err);
         }
         retry
     }
@@ -65,11 +64,9 @@ impl ObjectStore for RetryingObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let loc = location.clone();
-        let opts = options.clone();
         (|| async {
             // Options and location must be owned per-attempt.
-            self.inner.get_opts(&loc, opts.clone()).await
+            self.inner.get_opts(&location, options.clone()).await
         })
         .retry(Self::retry_builder())
         .notify(Self::notify)
@@ -78,8 +75,7 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        let loc = location.clone();
-        (|| async { self.inner.head(&loc).await })
+        (|| async { self.inner.head(&location).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry_os_error)
@@ -92,12 +88,9 @@ impl ObjectStore for RetryingObjectStore {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        let loc = location.clone();
-        let payload = payload.clone();
-        let opts = opts.clone();
         (|| async {
             self.inner
-                .put_opts(&loc, payload.clone(), opts.clone())
+                .put_opts(&location, payload.clone(), opts.clone())
                 .await
         })
         .retry(Self::retry_builder())
@@ -110,8 +103,7 @@ impl ObjectStore for RetryingObjectStore {
         &self,
         location: &Path,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        let loc = location.clone();
-        (|| async { self.inner.put_multipart(&loc).await })
+        (|| async { self.inner.put_multipart(&location).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry_os_error)
@@ -123,9 +115,7 @@ impl ObjectStore for RetryingObjectStore {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        let loc = location.clone();
-        let opts = opts.clone();
-        (|| async { self.inner.put_multipart_opts(&loc, opts.clone()).await })
+        (|| async { self.inner.put_multipart_opts(&location, opts.clone()).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry_os_error)
@@ -133,8 +123,7 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        let loc = location.clone();
-        (|| async { self.inner.delete(&loc).await })
+        (|| async { self.inner.delete(&location).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry_os_error)
@@ -164,9 +153,7 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        let from = from.clone();
-        let to = to.clone();
-        (|| async { self.inner.copy(&from, &to).await })
+        (|| async { self.inner.copy(from, to).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry_os_error)
@@ -174,9 +161,7 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        let from = from.clone();
-        let to = to.clone();
-        (|| async { self.inner.rename(&from, &to).await })
+        (|| async { self.inner.rename(from, to).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry_os_error)
@@ -184,9 +169,7 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        let from = from.clone();
-        let to = to.clone();
-        (|| async { self.inner.copy_if_not_exists(&from, &to).await })
+        (|| async { self.inner.copy_if_not_exists(from, to).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry_os_error)
@@ -194,9 +177,7 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        let from = from.clone();
-        let to = to.clone();
-        (|| async { self.inner.rename_if_not_exists(&from, &to).await })
+        (|| async { self.inner.rename_if_not_exists(from, to).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry_os_error)
