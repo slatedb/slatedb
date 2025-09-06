@@ -7,7 +7,7 @@ use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
-use log::{info, warn};
+use log::warn;
 use rand::{Rng, RngCore};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -535,8 +535,6 @@ pub(crate) fn should_retry_object_store_operation(error: &SlateDBError) -> bool 
     }
     if !retry {
         warn!("not retrying object store operation [error={:?}]", error);
-    } else {
-        info!("retrying object store operation [error={:?}]", error);
     }
     retry
 }
