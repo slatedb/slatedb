@@ -2,6 +2,7 @@
 
 mod dst;
 mod error;
+pub mod object_store;
 mod state;
 pub mod utils;
 

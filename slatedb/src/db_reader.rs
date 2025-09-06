@@ -532,10 +532,12 @@ impl DbReader {
         options: DbReaderOptions,
     ) -> Result<Self, crate::Error> {
         let path = path.into();
+        let clock = Arc::new(DefaultSystemClock::default());
         let store_provider = DefaultStoreProvider {
             path,
             object_store,
             block_cache: options.block_cache.clone(),
+            system_clock: clock.clone(),
         };
 
         Self::open_internal(
@@ -543,7 +545,7 @@ impl DbReader {
             checkpoint_id,
             options,
             Arc::new(DefaultLogicalClock::default()),
-            Arc::new(DefaultSystemClock::default()),
+            clock,
             Arc::new(DbRand::default()),
         )
         .await
@@ -1253,7 +1255,7 @@ mod tests {
         }
 
         fn manifest_store(&self) -> Arc<ManifestStore> {
-            Arc::new(ManifestStore::new_with_clock(
+            Arc::new(ManifestStore::new(
                 &self.path,
                 Arc::clone(&self.object_store),
                 self.system_clock.clone(),

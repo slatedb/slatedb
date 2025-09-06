@@ -207,7 +207,7 @@ jobs:
         run: cargo nextest run test_dst_nightly -p slatedb-dst --all-features --profile dst-nightly --no-capture
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
-          RUST_LOG: "warn"
+          RUST_LOG: "info"
           SLATEDB_DST_ROOT: "./"
 
   notify:

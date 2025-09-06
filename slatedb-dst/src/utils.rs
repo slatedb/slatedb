@@ -1,6 +1,6 @@
 //! This module contains helper functions to simplify deterministic simulation (DST).
 
-use log::{error, warn};
+use log::{error, info};
 use rand::Rng;
 use slatedb::clock::LogicalClock;
 use slatedb::clock::SystemClock;
@@ -25,6 +25,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use crate::dst::DstDuration;
+use crate::object_store::ClockedObjectStore;
 use crate::DefaultDstDistribution;
 use crate::Dst;
 use crate::DstOptions;
@@ -78,6 +79,7 @@ pub async fn build_db(
     logical_clock: Arc<dyn LogicalClock>,
     rand: &DbRand,
 ) -> Db {
+    let object_store = Arc::new(ClockedObjectStore::new(object_store, system_clock.clone()));
     let settings = build_settings(rand).await;
     let compaction_scheduler_supplier = build_compaction_scheduler_supplier(rand, &settings).await;
     let mut builder = DbBuilder::new("test_db", object_store);
@@ -189,7 +191,7 @@ pub async fn run_simulation(
     dst_opts: DstOptions,
 ) -> Result<(), Error> {
     let seed = rand.seed();
-    warn!("running simulation [seed={}]", seed);
+    info!("running simulation [seed={}]", seed);
     let mut dst = build_dst(
         object_store,
         system_clock.clone(),

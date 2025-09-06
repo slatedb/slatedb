@@ -219,6 +219,7 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
+    use crate::clock::DefaultSystemClock;
     use crate::manifest::store::{ManifestStore, StoredManifest};
 
     use crate::config::CheckpointOptions;
@@ -241,8 +242,11 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
 
         let parent_path = Path::from("/tmp/test_parent");
-        let parent_manifest_store =
-            Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
+        let parent_manifest_store = Arc::new(ManifestStore::new(
+            &parent_path,
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::default()),
+        ));
         let mut parent_manifest =
             StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new())
                 .await
@@ -253,7 +257,11 @@ mod tests {
             .unwrap();
 
         let clone_path = Path::from("/tmp/test_clone");
-        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
+        let clone_manifest_store = Arc::new(ManifestStore::new(
+            &clone_path,
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::default()),
+        ));
         let clone_stored_manifest = StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
             parent_manifest.manifest(),
@@ -294,7 +302,11 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
 
         let path = Path::from("/tmp/test_db");
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::default()),
+        ));
         let mut manifest =
             StoredManifest::create_new_db(Arc::clone(&manifest_store), CoreDbState::new())
                 .await

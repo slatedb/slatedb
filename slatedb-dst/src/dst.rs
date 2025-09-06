@@ -547,6 +547,8 @@ impl Dst {
             }
             step_count += 1;
         }
+        self.run_flush().await?;
+        self.db.close().await?;
         Ok(())
     }
 

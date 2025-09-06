@@ -324,11 +324,15 @@ impl CompactionExecuteBench {
             table_store.clone(),
             self.rand.clone(),
             stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            self.system_clock.clone(),
         );
         let os = self.object_store.clone();
         info!("load compaction job");
-        let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &self.path,
+            os.clone(),
+            self.system_clock.clone(),
+        ));
         let manifest = StoredManifest::load(manifest_store).await?;
 
         let job = match &compaction {
