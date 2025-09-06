@@ -66,7 +66,7 @@ impl ObjectStore for RetryingObjectStore {
     ) -> object_store::Result<GetResult> {
         (|| async {
             // Options and location must be owned per-attempt.
-            self.inner.get_opts(&location, options.clone()).await
+            self.inner.get_opts(location, options.clone()).await
         })
         .retry(Self::retry_builder())
         .notify(Self::notify)
@@ -75,7 +75,7 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        (|| async { self.inner.head(&location).await })
+        (|| async { self.inner.head(location).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -90,7 +90,7 @@ impl ObjectStore for RetryingObjectStore {
     ) -> object_store::Result<PutResult> {
         (|| async {
             self.inner
-                .put_opts(&location, payload.clone(), opts.clone())
+                .put_opts(location, payload.clone(), opts.clone())
                 .await
         })
         .retry(Self::retry_builder())
@@ -103,7 +103,7 @@ impl ObjectStore for RetryingObjectStore {
         &self,
         location: &Path,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        (|| async { self.inner.put_multipart(&location).await })
+        (|| async { self.inner.put_multipart(location).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -115,7 +115,7 @@ impl ObjectStore for RetryingObjectStore {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        (|| async { self.inner.put_multipart_opts(&location, opts.clone()).await })
+        (|| async { self.inner.put_multipart_opts(location, opts.clone()).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -123,7 +123,7 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        (|| async { self.inner.delete(&location).await })
+        (|| async { self.inner.delete(location).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
