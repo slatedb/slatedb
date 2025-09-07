@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -11,6 +11,7 @@ use object_store::{
     GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
+use parking_lot::RwLock;
 use slatedb::clock::SystemClock;
 
 /// ObjectStore wrapper that overrides metadata times using a provided SystemClock.
@@ -36,10 +37,7 @@ impl ClockedObjectStore {
     /// initialize both created and modified to now().
     fn record_modified(&self, path: &Path) -> DateTime<Utc> {
         let now = self.clock.now();
-        let mut guard = self
-            .times
-            .write()
-            .expect("ClockedObjectStore.times poisoned");
+        let mut guard = self.times.write();
         guard
             .entry(path.clone())
             .and_modify(|t| *t = now)
@@ -49,22 +47,18 @@ impl ClockedObjectStore {
 
     /// Remove any tracked times for this path (after a successful delete or rename).
     fn remove(&self, path: &Path) {
-        let mut guard = self
-            .times
-            .write()
-            .expect("ClockedObjectStore.times poisoned");
+        let mut guard = self.times.write();
         guard.remove(path);
     }
 
     /// Apply recorded last_modified to ObjectMeta if available.
     fn with_recorded_times(&self, meta: ObjectMeta) -> ObjectMeta {
-        if let Ok(guard) = self.times.read() {
-            if let Some(t) = guard.get(&meta.location) {
-                return ObjectMeta {
-                    last_modified: *t,
-                    ..meta
-                };
-            }
+        let guard = self.times.read();
+        if let Some(t) = guard.get(&meta.location) {
+            return ObjectMeta {
+                last_modified: *t,
+                ..meta
+            };
         }
         meta
     }
@@ -139,13 +133,12 @@ impl ObjectStore for ClockedObjectStore {
             .list(prefix)
             .map(move |res| match res {
                 Ok(meta) => {
-                    if let Ok(guard) = times.read() {
-                        if let Some(t) = guard.get(&meta.location) {
-                            return Ok(ObjectMeta {
-                                last_modified: *t,
-                                ..meta
-                            });
-                        }
+                    let guard = times.read();
+                    if let Some(t) = guard.get(&meta.location) {
+                        return Ok(ObjectMeta {
+                            last_modified: *t,
+                            ..meta
+                        });
                     }
                     Ok(meta)
                 }
@@ -164,13 +157,12 @@ impl ObjectStore for ClockedObjectStore {
             .list_with_offset(prefix, offset)
             .map(move |res| match res {
                 Ok(meta) => {
-                    if let Ok(guard) = times.read() {
-                        if let Some(t) = guard.get(&meta.location) {
-                            return Ok(ObjectMeta {
-                                last_modified: *t,
-                                ..meta
-                            });
-                        }
+                    let guard = times.read();
+                    if let Some(t) = guard.get(&meta.location) {
+                        return Ok(ObjectMeta {
+                            last_modified: *t,
+                            ..meta
+                        });
                     }
                     Ok(meta)
                 }
@@ -182,10 +174,7 @@ impl ObjectStore for ClockedObjectStore {
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
         let mut result = self.inner.list_with_delimiter(prefix).await?;
         // Map times for each object
-        let guard = self
-            .times
-            .read()
-            .expect("ClockedObjectStore.times poisoned");
+        let guard = self.times.read();
         result.objects = result
             .objects
             .into_iter()
