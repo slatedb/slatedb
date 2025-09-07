@@ -110,6 +110,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::admin::Admin;
@@ -133,6 +134,7 @@ use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::CoreDbState;
+use crate::dispatcher::MessageDispatcher;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -535,26 +537,23 @@ impl<P: Into<Path>> DbBuilder<P> {
         let garbage_collector_task =
             if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
                 let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
-                let gc_handle = self.gc_runtime.unwrap_or_else(|| tokio_handle.clone());
-                let cleanup_inner = inner.clone();
                 let gc = GarbageCollector::new(
                     manifest_store.clone(),
                     uncached_table_store.clone(),
                     gc_options,
                     inner.stat_registry.clone(),
                     system_clock.clone(),
+                );
+                // Garbage collector only uses tickers, so pass in a dummy rx channel
+                let (_, rx) = mpsc::unbounded_channel();
+                let mut gc_dispatcher = MessageDispatcher::new(
+                    Box::new(gc),
+                    rx,
+                    system_clock.clone(),
                     self.cancellation_token.clone(),
+                    inner.clone().state.read().error(),
                 );
-                let garbage_collector_task = spawn_bg_task(
-                    &gc_handle,
-                    move |result| {
-                        let err = bg_task_result_into_err(result);
-                        warn!("GC thread exited [error={}]", err);
-                        let mut state = cleanup_inner.state.write();
-                        state.record_fatal_error(err.clone())
-                    },
-                    async move { gc.run_async_task().await },
-                );
+                let garbage_collector_task = tokio::spawn(async move { gc_dispatcher.run().await });
                 Some(garbage_collector_task)
             } else {
                 None
@@ -637,7 +636,6 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     options: GarbageCollectorOptions,
     stat_registry: Arc<StatRegistry>,
-    cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
 }
 
@@ -649,7 +647,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             wal_object_store: None,
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
-            cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
         }
     }
@@ -670,12 +667,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Sets the system clock to use for the garbage collector.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
-        self
-    }
-
-    /// Sets the cancellation token to use for the garbage collector.
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = cancellation_token;
         self
     }
 
@@ -709,7 +700,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.options,
             self.stat_registry,
             self.system_clock,
-            self.cancellation_token,
         )
     }
 }
