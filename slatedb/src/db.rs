@@ -2373,7 +2373,11 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
         let write_options = WriteOptions {
             await_durable: false,
@@ -2441,8 +2445,12 @@ mod tests {
             .build()
             .await
             .unwrap();
-
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let clock = Arc::new(DefaultSystemClock::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            clock.clone(),
+        ));
         let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
@@ -2519,7 +2527,11 @@ mod tests {
             .await
             .unwrap();
 
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
@@ -2993,7 +3005,11 @@ mod tests {
         kv_store_restored.close().await.unwrap();
 
         // validate that the manifest file exists.
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
@@ -3398,7 +3414,11 @@ mod tests {
         // on close().
         db.close().await.unwrap();
 
-        let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
+        let manifest_store = ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        );
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
@@ -3429,7 +3449,11 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let ms = ManifestStore::new(&Path::from(path), object_store.clone());
+        let ms = ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        );
         let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap();
 
         // write enough to fill up a few l0 SSTs
@@ -3739,7 +3763,11 @@ mod tests {
 
         // check the last_l0_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
@@ -3786,7 +3814,11 @@ mod tests {
 
         // check the last_clock_tick persisted in the manifest, it should be
         // i64::MIN because no WAL SST has yet made its way into L0
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
@@ -3944,7 +3976,11 @@ mod tests {
         db1.put(b"k", b"v").await.unwrap();
 
         // Fence the db by opening a new one
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
         FenceableManifest::init_writer(
             stored_manifest,
