@@ -7,6 +7,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Isolation level for database transactions.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum IsolationLevel {
+    /// Snapshot Isolation - only detects write-write conflicts
+    #[default]
+    SnapshotIsolation,
+    /// Serializable Snapshot Isolation - detects both read-write and write-write conflicts
+    SerializableSnapshotIsolation,
+}
+
 pub(crate) struct TransactionState {
     /// Indicates whether this transaction is read-only. All read-only transactions are
     /// created by the Snapshot API. Read-only transactions do not participate in conflict
@@ -40,6 +50,8 @@ pub struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
     // random number generator for generating transaction IDs
     db_rand: Arc<DbRand>,
+    // isolation level for transaction conflict detection
+    isolation_level: IsolationLevel,
 }
 
 struct TransactionManagerInner {
@@ -67,6 +79,14 @@ impl TransactionManager {
                 recent_committed_txns: VecDeque::new(),
             })),
             db_rand,
+            isolation_level: IsolationLevel::default(),
+        }
+    }
+
+    pub fn with_isolation_level(self, isolation_level: IsolationLevel) -> Self {
+        Self {
+            isolation_level,
+            ..self
         }
     }
 
@@ -177,6 +197,11 @@ impl TransactionManager {
             txn_state.mark_as_committed(committed_seq);
             inner.recent_committed_txns.push_back(txn_state);
         }
+    }
+
+    /// Get the isolation level for this transaction manager
+    pub fn isolation_level(&self) -> IsolationLevel {
+        self.isolation_level
     }
 
     /// The min started_seq of all active transactions, including snapshots. This value
