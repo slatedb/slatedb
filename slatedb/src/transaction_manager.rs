@@ -146,7 +146,7 @@ impl TransactionManager {
             Some(txn_state) => txn_state.started_seq,
         };
 
-        inner.has_conflict(keys, started_seq)
+        inner.has_write_write_conflict(keys, started_seq)
     }
 
     /// Record a recent write to `recent_committed_txns`. This method should be called after
@@ -260,7 +260,7 @@ impl TransactionManagerInner {
         }
     }
 
-    fn has_conflict(&self, conflict_keys: &HashSet<Bytes>, started_seq: u64) -> bool {
+    fn has_write_write_conflict(&self, conflict_keys: &HashSet<Bytes>, started_seq: u64) -> bool {
         for committed_txn in &self.recent_committed_txns {
             // skip read-only transactions as they don't cause write conflicts
             if committed_txn.read_only {
@@ -491,7 +491,7 @@ mod tests {
 
         // Call the method under test
         let inner = txn_manager.inner.read();
-        let has_conflict = inner.has_conflict(&conflict_keys, case.current_started_seq);
+        let has_conflict = inner.has_write_write_conflict(&conflict_keys, case.current_started_seq);
 
         // Verify result
         assert_eq!(
