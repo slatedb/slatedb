@@ -117,9 +117,15 @@ impl DbInner {
             self.state.write().memtable().table().durable_watcher()
         };
 
-        // track the recent committed txn for conflict check.
-        self.txn_manager
-            .track_recent_committed_txn(txn_id.as_ref(), &conflict_keys, commit_seq);
+        // track the recent committed txn for conflict check. if txn_id is not supplied,
+        // we still consider this as an transaction commit.
+        if let Some(txn_id) = &txn_id {
+            self.txn_manager
+                .track_recent_committed_txn(txn_id, commit_seq);
+        } else {
+            self.txn_manager
+                .track_recent_committed_write_batch(&conflict_keys, commit_seq);
+        }
 
         // update the last_committed_seq, so the writes will be visible to the readers.
         self.oracle.last_committed_seq.store(commit_seq);

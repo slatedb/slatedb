@@ -168,7 +168,7 @@ impl TransactionManager {
         if self.isolation_level != IsolationLevel::SerializableSnapshotIsolation {
             return;
         }
-        
+
         let mut inner = self.inner.write();
         if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
             txn_state.track_read_keys(read_keys.iter().cloned());
@@ -180,7 +180,7 @@ impl TransactionManager {
         if self.isolation_level != IsolationLevel::SerializableSnapshotIsolation {
             return;
         }
-        
+
         let mut inner = self.inner.write();
         if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
             txn_state.track_read_range(range);
@@ -201,8 +201,13 @@ impl TransactionManager {
             }
             IsolationLevel::SerializableSnapshotIsolation => {
                 // Check both write-write and read-write conflicts for SSI
-                let ww_conflict = inner.has_write_write_conflict(&txn_state.write_keys, txn_state.started_seq);
-                let rw_conflict = inner.has_read_write_conflict(&txn_state.read_keys, txn_state.read_ranges.clone(), txn_state.started_seq);
+                let ww_conflict =
+                    inner.has_write_write_conflict(&txn_state.write_keys, txn_state.started_seq);
+                let rw_conflict = inner.has_read_write_conflict(
+                    &txn_state.read_keys,
+                    txn_state.read_ranges.clone(),
+                    txn_state.started_seq,
+                );
                 ww_conflict || rw_conflict
             }
         }
@@ -226,12 +231,7 @@ impl TransactionManager {
     /// to call this method. The normal write operations in a WriteBatch should also be considered
     /// as a recent committed txn, and it's a MUST to track them for conflict check. In this case,
     /// the `txn_id` is `None`.
-    pub fn track_recent_committed_txn(
-        &self,
-        txn_id: Option<&Uuid>,
-        keys: &HashSet<Bytes>,
-        committed_seq: u64,
-    ) {
+    pub fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
 
@@ -239,25 +239,11 @@ impl TransactionManager {
         // recent committed txn for Snapshot Isolation, since it's impossible to have a conflict
         // with a read-only transaction.
         // (it's still needed for Serializable Snapshot Isolation).
-        if !inner.has_non_readonly_active_txn() {
+        if self.isolation_level == IsolationLevel::SnapshotIsolation
+            && !inner.has_non_readonly_active_txn()
+        {
             return;
         }
-
-        // if txn_id is not provided, we simply track the write keys as a recent committed txn.
-        let txn_id = match txn_id {
-            Some(txn_id) => txn_id,
-            None => {
-                inner.recent_committed_txns.push_back(TransactionState {
-                    read_only: false,
-                    started_seq: committed_seq,
-                    committed_seq: Some(committed_seq),
-                    write_keys: keys.clone(),
-                    read_keys: HashSet::new(),
-                    read_ranges: Vec::new(),
-                });
-                return;
-            }
-        };
 
         // remove the txn from active txns and append it to recent_committed_txns.
         if let Some(mut txn_state) = inner.active_txns.remove(txn_id) {
@@ -265,10 +251,33 @@ impl TransactionManager {
             if txn_state.read_only {
                 unreachable!("attempted to commit a read-only transaction");
             }
-            txn_state.track_write_keys(keys.iter().cloned());
             txn_state.mark_as_committed(committed_seq);
             inner.recent_committed_txns.push_back(txn_state);
         }
+    }
+
+    pub fn track_recent_committed_write_batch(&self, keys: &HashSet<Bytes>, committed_seq: u64) {
+        // remove the transaction from active_txns, and add it to recent_committed_txns
+        let mut inner = self.inner.write();
+
+        // if there's no active non-readonly (write) transactions, we don't need to track the
+        // recent committed txn for Snapshot Isolation, since it's impossible to have a conflict
+        // with a read-only transaction.
+        // (it's still needed for Serializable Snapshot Isolation).
+        if self.isolation_level == IsolationLevel::SnapshotIsolation
+            && !inner.has_non_readonly_active_txn()
+        {
+            return;
+        }
+
+        inner.recent_committed_txns.push_back(TransactionState {
+            read_only: false,
+            started_seq: committed_seq,
+            committed_seq: Some(committed_seq),
+            write_keys: keys.clone(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
+        });
     }
 
     /// Get the isolation level for this transaction manager
@@ -457,7 +466,7 @@ mod tests {
 
         // Create and commit a transaction to populate recent_committed_txns
         let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(None, &keys, 50);
+        txn_manager.track_recent_committed_write_batch(&keys, 50);
 
         // Verify recent_committed_txns has content
         assert!(!txn_manager.inner.read().recent_committed_txns.is_empty());
