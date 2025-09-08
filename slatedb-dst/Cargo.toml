@@ -16,11 +16,13 @@ publish = false
 bench = false
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { workspace = true }
 ctor = { workspace = true }
 futures = { workspace = true }
 log = { workspace = true }
 object_store = { workspace = true }
+parking_lot = { workspace = true }
 rand = { workspace = true }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 slatedb = { workspace = true, features = ["lz4", "snappy", "test-util", "wal_disable", "zlib", "zstd"] }
