@@ -291,7 +291,35 @@ impl TransactionManagerInner {
         read_ranges: Vec<BytesRange>,
         started_seq: u64,
     ) -> bool {
-        todo!()
+        for committed_txn in &self.recent_committed_txns {
+            // skip read-only transactions as they don't cause write conflicts
+            if committed_txn.read_only {
+                continue;
+            }
+
+            // All the recent committed txn should have committed_seq set.
+            let other_committed_seq = committed_txn.committed_seq.expect(
+                "all txns in recent_committed_txns should be committed with committed_seq set",
+            );
+
+            // if another transaction committed after the current transaction started,
+            // and they have read-write conflicts, then there's a conflict.
+            if other_committed_seq > started_seq {
+                // Check if any of the current transaction's read keys were written by the committed transaction
+                if !read_keys.is_disjoint(&committed_txn.write_keys) {
+                    return true;
+                }
+
+                // Check if any of the current transaction's read ranges overlap with committed transaction's write keys
+                for read_range in &read_ranges {
+                    if committed_txn.write_keys.iter().any(|write_key| read_range.contains(write_key)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 }
 
