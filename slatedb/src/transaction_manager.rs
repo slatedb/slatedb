@@ -5,6 +5,7 @@ use bytes::Bytes;
 use log::warn;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::RangeBounds;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -31,13 +32,25 @@ pub(crate) struct TransactionState {
     /// a transaction is committed. this is used to check conflicts with recent committed
     /// transactions.
     committed_seq: Option<u64>,
-    /// the conflict keys of the transaction.
+    /// the write keys of the transaction for conflict detection.
     write_keys: HashSet<Bytes>,
+    /// the read keys of the transaction for SSI conflict detection.
+    read_keys: HashSet<Bytes>,
+    /// the read ranges of the transaction for SSI phantom read detection.
+    read_ranges: Vec<BytesRange>,
 }
 
 impl TransactionState {
     fn track_write_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
         self.write_keys.extend(keys);
+    }
+
+    fn track_read_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
+        self.read_keys.extend(keys);
+    }
+
+    fn track_read_range(&mut self, range: BytesRange) {
+        self.read_ranges.push(range);
     }
 
     fn mark_as_committed(&mut self, seq: u64) {
@@ -100,6 +113,8 @@ impl TransactionManager {
             started_seq: seq,
             committed_seq: None,
             write_keys: HashSet::new(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         };
 
         {
@@ -118,6 +133,8 @@ impl TransactionManager {
             started_seq: seq,
             committed_seq: None,
             write_keys: HashSet::new(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         };
 
         {
@@ -137,6 +154,58 @@ impl TransactionManager {
         let mut inner = self.inner.write();
         inner.active_txns.remove(txn_id);
         inner.recycle_recent_committed_txns();
+    }
+
+    pub fn track_write_keys(&self, txn_id: &Uuid, write_keys: &HashSet<Bytes>) {
+        let mut inner = self.inner.write();
+        if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
+            txn_state.track_write_keys(write_keys.iter().cloned());
+        }
+    }
+
+    /// Track a key read operation (for SSI)
+    pub fn track_read_keys(&self, txn_id: &Uuid, read_keys: &HashSet<Bytes>) {
+        if self.isolation_level != IsolationLevel::SerializableSnapshotIsolation {
+            return;
+        }
+        
+        let mut inner = self.inner.write();
+        if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
+            txn_state.track_read_keys(read_keys.iter().cloned());
+        }
+    }
+
+    /// Track a range scan operation (for SSI)
+    pub fn track_read_range(&self, txn_id: &Uuid, range: BytesRange) {
+        if self.isolation_level != IsolationLevel::SerializableSnapshotIsolation {
+            return;
+        }
+        
+        let mut inner = self.inner.write();
+        if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
+            txn_state.track_read_range(range);
+        }
+    }
+
+    pub fn check_has_conflict(&self, txn_id: &Uuid) -> bool {
+        let inner = self.inner.read();
+        let txn_state = match inner.active_txns.get(txn_id) {
+            None => return false,
+            Some(txn_state) => txn_state,
+        };
+
+        match self.isolation_level {
+            IsolationLevel::SnapshotIsolation => {
+                // Only check write-write conflicts for SI
+                inner.has_write_write_conflict(&txn_state.write_keys, txn_state.started_seq)
+            }
+            IsolationLevel::SerializableSnapshotIsolation => {
+                // Check both write-write and read-write conflicts for SSI
+                let ww_conflict = inner.has_write_write_conflict(&txn_state.write_keys, txn_state.started_seq);
+                let rw_conflict = inner.has_read_write_conflict(&txn_state.read_keys, txn_state.read_ranges.clone(), txn_state.started_seq);
+                ww_conflict || rw_conflict
+            }
+        }
     }
 
     /// Check if the current transaction conflicts with any recent committed transactions.
@@ -183,6 +252,8 @@ impl TransactionManager {
                     started_seq: committed_seq,
                     committed_seq: Some(committed_seq),
                     write_keys: keys.clone(),
+                    read_keys: HashSet::new(),
+                    read_ranges: Vec::new(),
                 });
                 return;
             }
@@ -312,7 +383,11 @@ impl TransactionManagerInner {
 
                 // Check if any of the current transaction's read ranges overlap with committed transaction's write keys
                 for read_range in &read_ranges {
-                    if committed_txn.write_keys.iter().any(|write_key| read_range.contains(write_key)) {
+                    if committed_txn
+                        .write_keys
+                        .iter()
+                        .any(|write_key| read_range.contains(write_key))
+                    {
                         return true;
                     }
                 }
@@ -410,6 +485,8 @@ mod tests {
             started_seq: 50,
             committed_seq: Some(80),
             write_keys: ["key1", "key2"].into_iter().map(Bytes::from).collect(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }],
         current_write_keys: vec!["key3", "key4"],
         current_started_seq: 100,
@@ -422,6 +499,8 @@ mod tests {
             started_seq: 50,
             committed_seq: Some(150),
             write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: 100,
@@ -435,12 +514,16 @@ mod tests {
                 started_seq: 30,
                 committed_seq: Some(50),
                 write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+                read_keys: HashSet::new(),
+                read_ranges: Vec::new(),
             },
             TransactionState {
                 read_only: false,
                 started_seq: 80,
                 committed_seq: Some(150),
                 write_keys: ["key2"].into_iter().map(Bytes::from).collect(),
+                read_keys: HashSet::new(),
+                read_ranges: Vec::new(),
             },
         ],
         current_write_keys: vec!["key1", "key2"],
@@ -454,6 +537,8 @@ mod tests {
             started_seq: 80,
             committed_seq: Some(150),
             write_keys: HashSet::new(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: 100,
@@ -466,6 +551,8 @@ mod tests {
             started_seq: 30,
             committed_seq: Some(50),
             write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: 100,
@@ -478,6 +565,8 @@ mod tests {
             started_seq: 100,
             committed_seq: Some(100),
             write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: 100,
@@ -493,6 +582,8 @@ mod tests {
                 .into_iter()
                 .map(Bytes::from)
                 .collect(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }],
         current_write_keys: vec!["key3", "key4", "key5"],
         current_started_seq: 100,
@@ -505,6 +596,8 @@ mod tests {
             started_seq: u64::MAX - 1,
             committed_seq: Some(u64::MAX),
             write_keys: ["key1"].into_iter().map(Bytes::from).collect(),
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }],
         current_write_keys: vec!["key1"],
         current_started_seq: u64::MAX - 1,
@@ -611,6 +704,8 @@ mod tests {
             committed_seq: Some(150),
             write_keys: ["key1", "key2"].into_iter().map(Bytes::from).collect(),
             read_only: false,
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }),
         expected_recent_committed_txns_len: 1,
         expected_active_txns_len: 1, // Only the other transaction remains
@@ -662,6 +757,8 @@ mod tests {
             committed_seq: Some(100),
             write_keys: ["key1", "key2"].into_iter().map(Bytes::from).collect(),
             read_only: false,
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }),
         expected_recent_committed_txns_len: 1,
         expected_active_txns_len: 1, // Now we have the active transaction remaining
@@ -691,6 +788,8 @@ mod tests {
             committed_seq: Some(150),
             write_keys: ["existing_key", "key1", "key2"].into_iter().map(Bytes::from).collect(),
             read_only: false,
+            read_keys: HashSet::new(),
+            read_ranges: Vec::new(),
         }),
         expected_recent_committed_txns_len: 1,
         expected_active_txns_len: 1, // Only the other transaction remains
@@ -853,6 +952,8 @@ mod tests {
                 started_seq: 50,
                 committed_seq: None, // This should not happen in practice but let's test
                 write_keys: HashSet::new(),
+                read_keys: HashSet::new(),
+                read_ranges: Vec::new(),
             });
         }
 

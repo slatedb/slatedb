@@ -73,7 +73,8 @@ impl DbInner {
 
         // check if there's any conflict if this write batch is bound with a txn.
         if let Some(txn_id) = &txn_id {
-            if self.txn_manager.has_conflict(txn_id, &conflict_keys) {
+            self.txn_manager.track_write_keys(txn_id, &conflict_keys);
+            if self.txn_manager.check_has_conflict(txn_id) {
                 return Err(SlateDBError::TransactionConflict);
             }
         }
