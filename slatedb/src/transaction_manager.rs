@@ -22,49 +22,57 @@ pub enum IsolationLevel {
 pub(crate) struct TransactionState {
     /// Indicates whether this transaction is read-only. All read-only transactions are
     /// created by the Snapshot API. Read-only transactions do not participate in conflict
-    /// checking for Snapshot Isolation transactions.
+    /// checking for Snapshot Isolation but may be relevant for Serializable Snapshot Isolation.
     pub(crate) read_only: bool,
-    /// seq is the sequence number when the transaction started. this is used to establish
-    /// a snapshot of this transaction. we should ensure the compactor cannot recycle
-    /// the row versions that are below any seq number of active transactions.
+    /// The sequence number when the transaction started. This is used to establish
+    /// a snapshot of this transaction. The compactor cannot recycle row versions
+    /// below any sequence number of active transactions.
     pub(crate) started_seq: u64,
-    /// the sequence number when the transaction committed. this field is only set AFTER
-    /// a transaction is committed. this is used to check conflicts with recent committed
+    /// The sequence number when the transaction committed. This field is only set AFTER
+    /// a transaction is committed and is used to check conflicts with recent committed
     /// transactions.
     committed_seq: Option<u64>,
-    /// the write keys of the transaction for conflict detection.
+    /// The write keys of the transaction for write-write conflict detection.
+    /// Used in both Snapshot Isolation and Serializable Snapshot Isolation.
     write_keys: HashSet<Bytes>,
-    /// the read keys of the transaction for SSI conflict detection.
+    /// The read keys of the transaction for read-write conflict detection.
+    /// Only used in Serializable Snapshot Isolation mode.
     read_keys: HashSet<Bytes>,
-    /// the read ranges of the transaction for SSI phantom read detection.
+    /// The read ranges of the transaction for phantom read detection.
+    /// Only used in Serializable Snapshot Isolation mode to detect range-based conflicts.
     read_ranges: Vec<BytesRange>,
 }
 
 impl TransactionState {
+    /// Add write keys to this transaction's write set for conflict detection.
     fn track_write_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
         self.write_keys.extend(keys);
     }
 
+    /// Add read keys to this transaction's read set for SSI conflict detection.
     fn track_read_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
         self.read_keys.extend(keys);
     }
 
+    /// Add a read range to this transaction's read set for SSI phantom read detection.
     fn track_read_range(&mut self, range: BytesRange) {
         self.read_ranges.push(range);
     }
 
+    /// Mark this transaction as committed with the given sequence number.
     fn mark_as_committed(&mut self, seq: u64) {
         self.committed_seq = Some(seq);
     }
 }
 
-/// Manages the lifecycle of DbSnapshot objects, tracking all living transaction states
+/// Manages the lifecycle of transaction states and provides isolation-level-aware conflict detection.
+/// Supports both Snapshot Isolation (SI) and Serializable Snapshot Isolation (SSI).
 /// TODO: have a quota for max active transactions.
 pub struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
-    // random number generator for generating transaction IDs
+    /// Random number generator for generating transaction IDs
     db_rand: Arc<DbRand>,
-    // isolation level for transaction conflict detection
+    /// Isolation level for transaction conflict detection (SI or SSI)
     isolation_level: IsolationLevel,
 }
 
@@ -73,15 +81,19 @@ struct TransactionManagerInner {
     active_txns: HashMap<Uuid, TransactionState>,
     /// Tracks recently committed transaction states for conflict checks at commit.
     ///
-    /// An entry can be garbage collected when *all* active transactions (excluding snapshots,
-    /// since snapshots are read-only so it's impossible to have any conflict) have `started_seq`
-    /// strictly greater than the entry's `committed_seq`.
+    /// Garbage collection rules:
+    /// - For Snapshot Isolation (SI): An entry can be garbage collected when *all* active 
+    ///   write transactions have `started_seq` strictly greater than the entry's `committed_seq`.
+    /// - For Serializable Snapshot Isolation (SSI): Entries are needed for both write-write
+    ///   and read-write conflict detection, so similar rules apply but read-only transactions
+    ///   may also need to check against this list.
     ///
     /// Notes:
     /// - Snapshots are treated as read-only transactions.
     /// - Non-transactional writes are modeled as single-op transactions with `started_seq ==
     ///   committed_seq` and follow the same GC rule.
-    /// - If there are no active non-readonly transactions, this deque can be fully drained.
+    /// - If there are no active non-readonly transactions and isolation level is SI,
+    ///   this deque can be fully drained.
     recent_committed_txns: VecDeque<TransactionState>,
 }
 
@@ -97,6 +109,8 @@ impl TransactionManager {
         }
     }
 
+    /// Create a TransactionManager with a specific isolation level.
+    /// This allows configuring whether to use Snapshot Isolation or Serializable Snapshot Isolation.
     pub fn with_isolation_level(self, isolation_level: IsolationLevel) -> Self {
         Self {
             isolation_level,
@@ -156,6 +170,8 @@ impl TransactionManager {
         inner.recycle_recent_committed_txns();
     }
 
+    /// Track write keys for a transaction. This is used for conflict detection.
+    /// Keys should be tracked before calling commit-related methods.
     pub fn track_write_keys(&self, txn_id: &Uuid, write_keys: &HashSet<Bytes>) {
         let mut inner = self.inner.write();
         if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
@@ -187,6 +203,11 @@ impl TransactionManager {
         }
     }
 
+    /// Check if the transaction has conflicts based on the configured isolation level.
+    /// Returns true if there are conflicts that would prevent the transaction from committing.
+    /// 
+    /// For SnapshotIsolation: Only checks write-write conflicts
+    /// For SerializableSnapshotIsolation: Checks both write-write and read-write conflicts
     pub fn check_has_conflict(&self, txn_id: &Uuid) -> bool {
         let inner = self.inner.read();
         let txn_state = match inner.active_txns.get(txn_id) {
@@ -224,13 +245,11 @@ impl TransactionManager {
         inner.has_write_write_conflict(keys, started_seq)
     }
 
-    /// Record a recent write to `recent_committed_txns`. This method should be called after
-    /// [`Self::has_conflict`] is checked as false.
-    ///
-    /// Please note that it's not a requirement to be inside a Transaction for a write operation
-    /// to call this method. The normal write operations in a WriteBatch should also be considered
-    /// as a recent committed txn, and it's a MUST to track them for conflict check. In this case,
-    /// the `txn_id` is `None`.
+    /// Record a recent committed transaction for conflict detection.
+    /// This method should be called after confirming no conflicts exist.
+    /// 
+    /// The transaction will be moved from active_txns to recent_committed_txns
+    /// for future conflict checking with other transactions.
     pub fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
@@ -256,6 +275,9 @@ impl TransactionManager {
         }
     }
 
+    /// Track a non-transactional write batch for conflict detection.
+    /// This is used for regular write operations that are not part of an explicit transaction
+    /// but still need to be tracked for conflict detection with concurrent transactions.
     pub fn track_recent_committed_write_batch(&self, keys: &HashSet<Bytes>, committed_seq: u64) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
@@ -365,6 +387,10 @@ impl TransactionManagerInner {
         false
     }
 
+    /// Check for read-write conflicts between current transaction and recently committed transactions.
+    /// This is used for Serializable Snapshot Isolation (SSI) to detect conflicts where:
+    /// 1. Current transaction read keys that were later written by committed transactions
+    /// 2. Current transaction read ranges that overlap with committed transaction writes (phantom reads)
     fn has_read_write_conflict(
         &self,
         read_keys: &HashSet<Bytes>,
