@@ -1,3 +1,4 @@
+use crate::bytes_range::BytesRange;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
@@ -260,7 +261,7 @@ impl TransactionManagerInner {
         }
     }
 
-    fn has_write_write_conflict(&self, conflict_keys: &HashSet<Bytes>, started_seq: u64) -> bool {
+    fn has_write_write_conflict(&self, write_keys: &HashSet<Bytes>, started_seq: u64) -> bool {
         for committed_txn in &self.recent_committed_txns {
             // skip read-only transactions as they don't cause write conflicts
             if committed_txn.read_only {
@@ -275,13 +276,22 @@ impl TransactionManagerInner {
             // if another transaction committed after the current transaction started,
             // and they have overlapping write keys, then there's a conflict.
             if other_committed_seq > started_seq
-                && !conflict_keys.is_disjoint(&committed_txn.write_keys)
+                && !write_keys.is_disjoint(&committed_txn.write_keys)
             {
                 return true;
             }
         }
 
         false
+    }
+
+    fn has_read_write_conflict(
+        &self,
+        read_keys: &HashSet<Bytes>,
+        read_ranges: Vec<BytesRange>,
+        started_seq: u64,
+    ) -> bool {
+        todo!()
     }
 }
 
