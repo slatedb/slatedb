@@ -706,7 +706,8 @@ mod tests {
 
             // Track committed transaction
             let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
-            txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
+            txn_manager.track_write_keys(&txn_id, &keys);
+            txn_manager.track_recent_committed_txn(&txn_id, 150);
         }),
         expected_recent_committed_txn: Some(TransactionState {
             started_seq: 100,
@@ -727,8 +728,8 @@ mod tests {
 
             // Try to track a non-existent transaction
             let fake_id = Uuid::new_v4();
-            let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
-            txn_manager.track_recent_committed_txn(Some(&fake_id), &keys, 150);
+            let _keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+            txn_manager.track_recent_committed_txn(&fake_id, 150);
         }),
         expected_recent_committed_txn: None,
         expected_recent_committed_txns_len: 0,
@@ -745,8 +746,8 @@ mod tests {
             txn_manager.drop_txn(&txn_id);
 
             // Now track committed transaction - this should not be tracked since no active writers
-            let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
-            txn_manager.track_recent_committed_txn(Some(&txn_id), &keys, 150);
+            let _keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
+            txn_manager.track_recent_committed_txn(&txn_id, 150);
         }),
         expected_recent_committed_txn: None,
         expected_recent_committed_txns_len: 0,
@@ -759,7 +760,7 @@ mod tests {
             let _active_txn = txn_manager.new_txn(50, false);
             // Track without transaction ID (non-transactional write)
             let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
-            txn_manager.track_recent_committed_txn(None, &keys, 100);
+            txn_manager.track_recent_committed_write_batch(&keys, 100);
         }),
         expected_recent_committed_txn: Some(TransactionState {
             started_seq: 100,
@@ -790,7 +791,8 @@ mod tests {
             }
             // Track committed transaction with additional keys
             let additional_keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
-            txn_manager.track_recent_committed_txn(Some(&txn_id), &additional_keys, 150);
+            txn_manager.track_write_keys(&txn_id, &additional_keys);
+            txn_manager.track_recent_committed_txn(&txn_id, 150);
         }),
         expected_recent_committed_txn: Some(TransactionState {
             started_seq: 100,
@@ -878,9 +880,9 @@ mod tests {
         let keys3: HashSet<Bytes> = ["key3"].into_iter().map(Bytes::from).collect();
 
         // Add committed transactions with different committed_seq values
-        txn_manager.track_recent_committed_txn(None, &keys1, 50); // committed_seq = 50
-        txn_manager.track_recent_committed_txn(None, &keys2, 100); // committed_seq = 100
-        txn_manager.track_recent_committed_txn(None, &keys3, 150); // committed_seq = 150
+        txn_manager.track_recent_committed_write_batch(&keys1, 50); // committed_seq = 50
+        txn_manager.track_recent_committed_write_batch(&keys2, 100); // committed_seq = 100
+        txn_manager.track_recent_committed_write_batch(&keys3, 150); // committed_seq = 150
 
         // Verify we have all 3 committed transactions
         assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 3);
@@ -904,8 +906,8 @@ mod tests {
 
         // Add some committed transactions
         let keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(None, &keys, 100);
-        txn_manager.track_recent_committed_txn(None, &keys, 200);
+        txn_manager.track_recent_committed_write_batch(&keys, 100);
+        txn_manager.track_recent_committed_write_batch(&keys, 200);
 
         // Verify they exist
         assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 2);
@@ -928,9 +930,9 @@ mod tests {
 
         // Create committed transactions with seq values around the boundary
         let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(None, &keys, 99); // should be removed
-        txn_manager.track_recent_committed_txn(None, &keys, 100); // should be kept (equal)
-        txn_manager.track_recent_committed_txn(None, &keys, 101); // should be kept
+        txn_manager.track_recent_committed_write_batch(&keys, 99); // should be removed
+        txn_manager.track_recent_committed_write_batch(&keys, 100); // should be kept (equal)
+        txn_manager.track_recent_committed_write_batch(&keys, 101); // should be kept
 
         // Trigger garbage collection - this will keep min_conflict_check_seq = 100
         txn_manager.drop_txn(&active_txn2);
@@ -968,7 +970,7 @@ mod tests {
 
         // Add a normal committed transaction
         let keys: HashSet<Bytes> = ["key1"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(None, &keys, 100);
+        txn_manager.track_recent_committed_write_batch(&keys, 100);
 
         // Create active transactions and trigger garbage collection
         let _active_txn1 = txn_manager.new_txn(150, false); // This sets min to 150
@@ -1006,14 +1008,16 @@ mod tests {
         let other_keys: HashSet<Bytes> = ["key1", "key3"].into_iter().map(Bytes::from).collect();
 
         // Step 4: Commit the other transaction
-        txn_manager.track_recent_committed_txn(Some(&other_txn), &other_keys, 120);
+        txn_manager.track_write_keys(&other_txn, &other_keys);
+        txn_manager.track_recent_committed_txn(&other_txn, 120);
 
         // Step 5: Check for conflicts again - should detect conflict on key1
         let has_conflict = txn_manager.has_conflict(&txn_id, &write_keys);
         assert!(has_conflict); // Should conflict on key1
 
         // Step 6: Commit our transaction despite conflict (simulating retry logic)
-        txn_manager.track_recent_committed_txn(Some(&txn_id), &write_keys, 150);
+        txn_manager.track_write_keys(&txn_id, &write_keys);
+        txn_manager.track_recent_committed_txn(&txn_id, 150);
 
         // Step 7: Verify final state
         assert!(txn_manager.inner.read().active_txns.is_empty());
@@ -1043,7 +1047,8 @@ mod tests {
         assert!(!txn_manager.has_conflict(&txn3, &keys_ab));
 
         // T1 commits at seq 130, writing keyA
-        txn_manager.track_recent_committed_txn(Some(&txn1), &keys_a, 130);
+        txn_manager.track_write_keys(&txn1, &keys_a);
+        txn_manager.track_recent_committed_txn(&txn1, 130);
 
         // T2 should not conflict (writes different key)
         assert!(!txn_manager.has_conflict(&txn2, &keys_b));
@@ -1052,7 +1057,8 @@ mod tests {
         assert!(txn_manager.has_conflict(&txn3, &keys_ab));
 
         // T2 commits at seq 140, writing keyB
-        txn_manager.track_recent_committed_txn(Some(&txn2), &keys_b, 140);
+        txn_manager.track_write_keys(&txn2, &keys_b);
+        txn_manager.track_recent_committed_txn(&txn2, 140);
 
         // T3 should still conflict (now conflicts on both keyA and keyB)
         assert!(txn_manager.has_conflict(&txn3, &keys_ab));
@@ -1075,16 +1081,18 @@ mod tests {
         // Create some old committed transactions (now they will be tracked since we have active txns)
         let keys1: HashSet<Bytes> = ["old_key1"].into_iter().map(Bytes::from).collect();
         let keys2: HashSet<Bytes> = ["old_key2"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(None, &keys1, 50);
-        txn_manager.track_recent_committed_txn(None, &keys2, 60);
+        txn_manager.track_recent_committed_write_batch(&keys1, 50);
+        txn_manager.track_recent_committed_write_batch(&keys2, 60);
 
         // Verify old committed transactions are kept (min_conflict_check_seq = 100)
         assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 2);
 
         // Commit short transactions
         let short_keys: HashSet<Bytes> = ["short_key"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(Some(&short_txn1), &short_keys, 180);
-        txn_manager.track_recent_committed_txn(Some(&short_txn2), &short_keys, 220);
+        txn_manager.track_write_keys(&short_txn1, &short_keys);
+        txn_manager.track_recent_committed_txn(&short_txn1, 180);
+        txn_manager.track_write_keys(&short_txn2, &short_keys);
+        txn_manager.track_recent_committed_txn(&short_txn2, 220);
 
         // Old transactions should still be kept (long_txn still active with seq 100)
         assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 4); // 2 old + 2 new
@@ -1116,7 +1124,8 @@ mod tests {
 
         // Commit a write transaction
         let keys: HashSet<Bytes> = ["test_key"].into_iter().map(Bytes::from).collect();
-        txn_manager.track_recent_committed_txn(Some(&write_txn1), &keys, 120);
+        txn_manager.track_write_keys(&write_txn1, &keys);
+        txn_manager.track_recent_committed_txn(&write_txn1, 120);
 
         // Should track committed transaction because write_txn2 is still active
         assert_eq!(txn_manager.inner.read().recent_committed_txns.len(), 1);
@@ -1253,7 +1262,7 @@ mod tests {
                     self.seq_counter += 10;
                     match txn_id {
                         None => {
-                            manager.track_recent_committed_txn(None, &key_set, self.seq_counter);
+                            manager.track_recent_committed_write_batch(&key_set, self.seq_counter);
                             ExecutionEffect::CommitSuccess
                         }
                         Some(txn_id) => {
@@ -1272,9 +1281,9 @@ mod tests {
 
                             // only record committed txn if there is no conflict
                             if !manager.has_conflict(txn_id, &key_set) {
+                                manager.track_write_keys(txn_id, &key_set);
                                 manager.track_recent_committed_txn(
-                                    Some(txn_id),
-                                    &key_set,
+                                    txn_id,
                                     self.seq_counter,
                                 );
                                 ExecutionEffect::CommitSuccess
