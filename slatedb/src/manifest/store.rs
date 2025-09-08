@@ -1026,6 +1026,7 @@ mod tests {
         // Given a flaky store that times out on the first write
         let base = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
+        let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
         let ms = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
             retrying.clone(),
