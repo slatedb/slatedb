@@ -521,16 +521,13 @@ impl Dst {
     /// from the action sampler and runs it. Reads (get and scan) are verified against the
     /// in-memory state. Writes are run against the DB and the in-memory state.
     pub async fn run_simulation(&mut self, dst_duration: DstDuration) -> Result<(), Error> {
-        let simulated_time = self.system_clock.now();
         let actual_start_time = std::time::Instant::now();
         let mut step_count = 0;
         while dst_duration.should_run(step_count, actual_start_time) {
             let step_action = self.action_sampler.sample_action(&self.state);
             info!(
                 "run_simulation [simulated_time={}, step_count={}, step_action={}]",
-                self.system_clock
-                    .now()
-                    .signed_duration_since(simulated_time),
+                self.system_clock.now(),
                 step_count,
                 step_action,
             );
