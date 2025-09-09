@@ -82,7 +82,7 @@ struct TransactionManagerInner {
     /// Tracks recently committed transaction states for conflict checks at commit.
     ///
     /// Garbage collection rules:
-    /// - For Snapshot Isolation (SI): An entry can be garbage collected when *all* active 
+    /// - For Snapshot Isolation (SI): An entry can be garbage collected when *all* active
     ///   write transactions have `started_seq` strictly greater than the entry's `committed_seq`.
     /// - For Serializable Snapshot Isolation (SSI): Entries are needed for both write-write
     ///   and read-write conflict detection, so similar rules apply but read-only transactions
@@ -205,7 +205,7 @@ impl TransactionManager {
 
     /// Check if the transaction has conflicts based on the configured isolation level.
     /// Returns true if there are conflicts that would prevent the transaction from committing.
-    /// 
+    ///
     /// For SnapshotIsolation: Only checks write-write conflicts
     /// For SerializableSnapshotIsolation: Checks both write-write and read-write conflicts
     pub fn check_has_conflict(&self, txn_id: &Uuid) -> bool {
@@ -247,20 +247,16 @@ impl TransactionManager {
 
     /// Record a recent committed transaction for conflict detection.
     /// This method should be called after confirming no conflicts exist.
-    /// 
+    ///
     /// The transaction will be moved from active_txns to recent_committed_txns
     /// for future conflict checking with other transactions.
     pub fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
 
-        // if there's no active non-readonly (write) transactions, we don't need to track the
-        // recent committed txn for Snapshot Isolation, since it's impossible to have a conflict
-        // with a read-only transaction.
-        // (it's still needed for Serializable Snapshot Isolation).
-        if self.isolation_level == IsolationLevel::SnapshotIsolation
-            && !inner.has_non_readonly_active_txn()
-        {
+        // if all transactions are readonly, then we don't need to track this recent committed
+        // txn, since it's impossible to have a conflict with a read-only transaction.
+        if !inner.has_non_readonly_active_txn() {
             return;
         }
 
@@ -275,20 +271,16 @@ impl TransactionManager {
         }
     }
 
-    /// Track a non-transactional write batch for conflict detection.
-    /// This is used for regular write operations that are not part of an explicit transaction
-    /// but still need to be tracked for conflict detection with concurrent transactions.
+    /// Track a write batch for conflict detection. This is used for regular write operations
+    /// that are not part of an explicit transaction but still need to be tracked for conflict
+    /// detection with concurrent transactions.
     pub fn track_recent_committed_write_batch(&self, keys: &HashSet<Bytes>, committed_seq: u64) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
 
-        // if there's no active non-readonly (write) transactions, we don't need to track the
-        // recent committed txn for Snapshot Isolation, since it's impossible to have a conflict
-        // with a read-only transaction.
-        // (it's still needed for Serializable Snapshot Isolation).
-        if self.isolation_level == IsolationLevel::SnapshotIsolation
-            && !inner.has_non_readonly_active_txn()
-        {
+        // if all transactions are readonly, then we don't need to track this recent committed
+        // txn, since it's impossible to have a conflict with a read-only transaction.
+        if !inner.has_non_readonly_active_txn() {
             return;
         }
 
@@ -300,11 +292,6 @@ impl TransactionManager {
             read_keys: HashSet::new(),
             read_ranges: Vec::new(),
         });
-    }
-
-    /// Get the isolation level for this transaction manager
-    pub fn isolation_level(&self) -> IsolationLevel {
-        self.isolation_level
     }
 
     /// The min started_seq of all active transactions, including snapshots. This value
@@ -1308,10 +1295,7 @@ mod tests {
                             // only record committed txn if there is no conflict
                             if !manager.has_conflict(txn_id, &key_set) {
                                 manager.track_write_keys(txn_id, &key_set);
-                                manager.track_recent_committed_txn(
-                                    txn_id,
-                                    self.seq_counter,
-                                );
+                                manager.track_recent_committed_txn(txn_id, self.seq_counter);
                                 ExecutionEffect::CommitSuccess
                             } else {
                                 ExecutionEffect::CommitConflict
