@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 /// Isolation level for database transactions.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[allow(unused)]
 pub enum IsolationLevel {
     /// Snapshot Isolation - only detects write-write conflicts
     #[default]
@@ -50,11 +51,13 @@ impl TransactionState {
     }
 
     /// Add read keys to this transaction's read set for SSI conflict detection.
+    #[allow(unused)]
     fn track_read_keys(&mut self, keys: impl IntoIterator<Item = Bytes>) {
         self.read_keys.extend(keys);
     }
 
     /// Add a read range to this transaction's read set for SSI phantom read detection.
+    #[allow(unused)]
     fn track_read_range(&mut self, range: BytesRange) {
         self.read_ranges.push(range);
     }
@@ -113,6 +116,7 @@ impl TransactionManager {
 
     /// Create a TransactionManager with a specific isolation level.
     /// This allows configuring whether to use Snapshot Isolation or Serializable Snapshot Isolation.
+    #[allow(unused)]
     pub fn with_isolation_level(self, isolation_level: IsolationLevel) -> Self {
         Self {
             isolation_level,
@@ -182,6 +186,7 @@ impl TransactionManager {
     }
 
     /// Track a key read operation (for SSI)
+    #[allow(unused)]
     pub fn track_read_keys(&self, txn_id: &Uuid, read_keys: &HashSet<Bytes>) {
         if self.isolation_level != IsolationLevel::SerializableSnapshot {
             return;
@@ -194,6 +199,7 @@ impl TransactionManager {
     }
 
     /// Track a range scan operation (for SSI)
+    #[allow(unused)]
     pub fn track_read_range(&self, txn_id: &Uuid, range: BytesRange) {
         if self.isolation_level != IsolationLevel::SerializableSnapshot {
             return;
