@@ -14,9 +14,9 @@ use uuid::Uuid;
 pub enum IsolationLevel {
     /// Snapshot Isolation - only detects write-write conflicts
     #[default]
-    SnapshotIsolation,
+    Snapshot,
     /// Serializable Snapshot Isolation - detects both read-write and write-write conflicts
-    SerializableSnapshotIsolation,
+    SerializableSnapshot,
 }
 
 pub(crate) struct TransactionState {
@@ -82,18 +82,14 @@ struct TransactionManagerInner {
     /// Tracks recently committed transaction states for conflict checks at commit.
     ///
     /// Garbage collection rules:
-    /// - For Snapshot Isolation (SI): An entry can be garbage collected when *all* active
-    ///   write transactions have `started_seq` strictly greater than the entry's `committed_seq`.
-    /// - For Serializable Snapshot Isolation (SSI): Entries are needed for both write-write
-    ///   and read-write conflict detection, so similar rules apply but read-only transactions
-    ///   may also need to check against this list.
+    /// - An entry can be garbage collected when *all* active write transactions have
+    ///   `started_seq` strictly greater than the entry's `committed_seq`.
     ///
     /// Notes:
     /// - Snapshots are treated as read-only transactions.
     /// - Non-transactional writes are modeled as single-op transactions with `started_seq ==
     ///   committed_seq` and follow the same GC rule.
-    /// - If there are no active non-readonly transactions and isolation level is SI,
-    ///   this deque can be fully drained.
+    /// - If there are no active non-readonly transactions, this deque can be fully drained.
     recent_committed_txns: VecDeque<TransactionState>,
 }
 
@@ -181,7 +177,7 @@ impl TransactionManager {
 
     /// Track a key read operation (for SSI)
     pub fn track_read_keys(&self, txn_id: &Uuid, read_keys: &HashSet<Bytes>) {
-        if self.isolation_level != IsolationLevel::SerializableSnapshotIsolation {
+        if self.isolation_level != IsolationLevel::SerializableSnapshot {
             return;
         }
 
@@ -193,7 +189,7 @@ impl TransactionManager {
 
     /// Track a range scan operation (for SSI)
     pub fn track_read_range(&self, txn_id: &Uuid, range: BytesRange) {
-        if self.isolation_level != IsolationLevel::SerializableSnapshotIsolation {
+        if self.isolation_level != IsolationLevel::SerializableSnapshot {
             return;
         }
 
@@ -206,8 +202,8 @@ impl TransactionManager {
     /// Check if the transaction has conflicts based on the configured isolation level.
     /// Returns true if there are conflicts that would prevent the transaction from committing.
     ///
-    /// For SnapshotIsolation: Only checks write-write conflicts
-    /// For SerializableSnapshotIsolation: Checks both write-write and read-write conflicts
+    /// For Snapshot isolation: Only checks write-write conflicts
+    /// For SerializableSnapshot isolation: Checks both write-write and read-write conflicts
     pub fn check_has_conflict(&self, txn_id: &Uuid) -> bool {
         let inner = self.inner.read();
         let txn_state = match inner.active_txns.get(txn_id) {
@@ -216,11 +212,11 @@ impl TransactionManager {
         };
 
         match self.isolation_level {
-            IsolationLevel::SnapshotIsolation => {
+            IsolationLevel::Snapshot => {
                 // Only check write-write conflicts for SI
                 inner.has_write_write_conflict(&txn_state.write_keys, txn_state.started_seq)
             }
-            IsolationLevel::SerializableSnapshotIsolation => {
+            IsolationLevel::SerializableSnapshot => {
                 // Check both write-write and read-write conflicts for SSI
                 let ww_conflict =
                     inner.has_write_write_conflict(&txn_state.write_keys, txn_state.started_seq);
@@ -232,17 +228,6 @@ impl TransactionManager {
                 ww_conflict || rw_conflict
             }
         }
-    }
-
-    /// Check if the current transaction conflicts with any recent committed transactions.
-    pub fn has_conflict(&self, txn_id: &Uuid, keys: &HashSet<Bytes>) -> bool {
-        let inner = self.inner.read();
-        let started_seq = match inner.active_txns.get(txn_id) {
-            None => return false,
-            Some(txn_state) => txn_state.started_seq,
-        };
-
-        inner.has_write_write_conflict(keys, started_seq)
     }
 
     /// Record a recent committed transaction for conflict detection.
@@ -1013,7 +998,8 @@ mod tests {
 
         // Step 2: Simulate conflict detection during transaction
         let write_keys: HashSet<Bytes> = ["key1", "key2"].into_iter().map(Bytes::from).collect();
-        let has_conflict = txn_manager.has_conflict(&txn_id, &write_keys);
+        txn_manager.track_write_keys(&txn_id, &write_keys);
+        let has_conflict = txn_manager.check_has_conflict(&txn_id);
         assert!(!has_conflict); // No conflicts initially
 
         // Step 3: Create another transaction that will commit first
@@ -1025,7 +1011,7 @@ mod tests {
         txn_manager.track_recent_committed_txn(&other_txn, 120);
 
         // Step 5: Check for conflicts again - should detect conflict on key1
-        let has_conflict = txn_manager.has_conflict(&txn_id, &write_keys);
+        let has_conflict = txn_manager.check_has_conflict(&txn_id);
         assert!(has_conflict); // Should conflict on key1
 
         // Step 6: Commit our transaction despite conflict (simulating retry logic)
@@ -1046,35 +1032,38 @@ mod tests {
         let txn_manager = TransactionManager::new(db_rand);
 
         // Create three concurrent transactions
-        let txn1 = txn_manager.new_txn(100, false); // T1 starts at seq 100
-        let txn2 = txn_manager.new_txn(110, false); // T2 starts at seq 110
-        let txn3 = txn_manager.new_txn(120, false); // T3 starts at seq 120
-
         let keys_a: HashSet<Bytes> = ["keyA"].into_iter().map(Bytes::from).collect();
         let keys_b: HashSet<Bytes> = ["keyB"].into_iter().map(Bytes::from).collect();
         let keys_ab: HashSet<Bytes> = ["keyA", "keyB"].into_iter().map(Bytes::from).collect();
 
+        let txn1 = txn_manager.new_txn(100, false); // T1 starts at seq 100
+        let txn2 = txn_manager.new_txn(110, false); // T2 starts at seq 110
+        let txn3 = txn_manager.new_txn(120, false); // T3 starts at seq 120
+        txn_manager.track_write_keys(&txn1, &keys_a);
+        txn_manager.track_write_keys(&txn2, &keys_b);
+        txn_manager.track_write_keys(&txn3, &keys_ab);
+
         // Initially no conflicts
-        assert!(!txn_manager.has_conflict(&txn1, &keys_a));
-        assert!(!txn_manager.has_conflict(&txn2, &keys_b));
-        assert!(!txn_manager.has_conflict(&txn3, &keys_ab));
+        assert!(!txn_manager.check_has_conflict(&txn1));
+        assert!(!txn_manager.check_has_conflict(&txn2));
+        assert!(!txn_manager.check_has_conflict(&txn3));
 
         // T1 commits at seq 130, writing keyA
         txn_manager.track_write_keys(&txn1, &keys_a);
         txn_manager.track_recent_committed_txn(&txn1, 130);
 
         // T2 should not conflict (writes different key)
-        assert!(!txn_manager.has_conflict(&txn2, &keys_b));
+        assert!(!txn_manager.check_has_conflict(&txn2));
 
         // T3 should conflict (writes keyA, started at 120 < 130)
-        assert!(txn_manager.has_conflict(&txn3, &keys_ab));
+        assert!(txn_manager.check_has_conflict(&txn3));
 
         // T2 commits at seq 140, writing keyB
         txn_manager.track_write_keys(&txn2, &keys_b);
         txn_manager.track_recent_committed_txn(&txn2, 140);
 
         // T3 should still conflict (now conflicts on both keyA and keyB)
-        assert!(txn_manager.has_conflict(&txn3, &keys_ab));
+        assert!(txn_manager.check_has_conflict(&txn3));
 
         // Verify state
         assert_eq!(txn_manager.inner.read().active_txns.len(), 1); // Only T3 remains active
@@ -1293,8 +1282,8 @@ mod tests {
                             }
 
                             // only record committed txn if there is no conflict
-                            if !manager.has_conflict(txn_id, &key_set) {
-                                manager.track_write_keys(txn_id, &key_set);
+                            manager.track_write_keys(txn_id, &key_set);
+                            if !manager.check_has_conflict(txn_id) {
                                 manager.track_recent_committed_txn(txn_id, self.seq_counter);
                                 ExecutionEffect::CommitSuccess
                             } else {
