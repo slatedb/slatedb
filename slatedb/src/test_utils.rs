@@ -364,8 +364,14 @@ fn init_tracing() {
 #[derive(Debug)]
 pub(crate) struct FlakyObjectStore {
     inner: Arc<dyn ObjectStore>,
+    // Put options: transient failures on first N attempts
     fail_first_put_opts: AtomicUsize,
     put_opts_attempts: AtomicUsize,
+    // Put options: if set, always return Precondition error (non-retryable)
+    put_precondition_always: std::sync::atomic::AtomicBool,
+    // Head: transient failures on first N attempts
+    fail_first_head: AtomicUsize,
+    head_attempts: AtomicUsize,
 }
 
 impl FlakyObjectStore {
@@ -374,11 +380,28 @@ impl FlakyObjectStore {
             inner,
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
+            put_precondition_always: std::sync::atomic::AtomicBool::new(false),
+            fail_first_head: AtomicUsize::new(0),
+            head_attempts: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn with_put_precondition_always(self) -> Self {
+        self.put_precondition_always.store(true, Ordering::SeqCst);
+        self
+    }
+
+    pub(crate) fn with_head_failures(self, n: usize) -> Self {
+        self.fail_first_head.store(n, Ordering::SeqCst);
+        self
     }
 
     pub(crate) fn put_attempts(&self) -> usize {
         self.put_opts_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn head_attempts(&self) -> usize {
+        self.head_attempts.load(Ordering::SeqCst)
     }
 }
 
@@ -399,6 +422,26 @@ impl ObjectStore for FlakyObjectStore {
     }
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        self.head_attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_first_head
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            return Err(object_store::Error::Generic {
+                store: "flaky_head",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "injected head timeout",
+                )),
+            });
+        }
         self.inner.head(location).await
     }
 
@@ -409,6 +452,12 @@ impl ObjectStore for FlakyObjectStore {
         opts: OS_PutOptions,
     ) -> object_store::Result<PutResult> {
         self.put_opts_attempts.fetch_add(1, Ordering::SeqCst);
+        if self.put_precondition_always.load(Ordering::SeqCst) {
+            return Err(object_store::Error::Precondition {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::other("injected precondition")),
+            });
+        }
         if self
             .fail_first_put_opts
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {

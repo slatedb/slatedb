@@ -139,6 +139,7 @@ use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
+use crate::retrying_object_store::RetryingObjectStore;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
@@ -293,6 +294,11 @@ impl<P: Into<Path>> DbBuilder<P> {
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
+        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> = self
+            .wal_object_store
+            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
+
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
             info!(
@@ -353,7 +359,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 ));
 
                 let cached_object_store = CachedObjectStore::new(
-                    self.main_object_store.clone(),
+                    retrying_main_object_store.clone(),
                     cache_storage,
                     self.settings.object_store_cache_options.part_size_bytes,
                     self.settings.object_store_cache_options.cache_puts,
@@ -364,9 +370,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         };
 
-        let maybe_cached_main_object_store = match &cached_object_store {
+        let maybe_cached_main_object_store: Arc<dyn ObjectStore> = match &cached_object_store {
             Some(cached_store) => cached_store.clone(),
-            None => self.main_object_store.clone(),
+            None => retrying_main_object_store.clone(),
         };
 
         // Setup the manifest store and load latest manifest
@@ -406,7 +412,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
-                self.wal_object_store.clone(),
+                retrying_wal_object_store.clone(),
             ),
             sst_format.clone(),
             path_resolver.clone(),
@@ -481,8 +487,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
-                self.main_object_store.clone(),
-                self.wal_object_store.clone(),
+                retrying_main_object_store.clone(),
+                retrying_wal_object_store.clone(),
             ),
             sst_format,
             path_resolver.clone(),
@@ -619,6 +625,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
 
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
+        // No retrying object stores here, since we don't want to retry admin operations
         Admin {
             path: self.path.into(),
             object_stores: ObjectStores::new(self.main_object_store, self.wal_object_store),
@@ -689,15 +696,19 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
+        let retrying_wal_object_store = self
+            .wal_object_store
+            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
-            self.main_object_store.clone(),
+            retrying_main_object_store.clone(),
             self.system_clock.clone(),
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
-                self.main_object_store.clone(),
-                self.wal_object_store.clone(),
+                retrying_main_object_store.clone(),
+                retrying_wal_object_store.clone(),
             ),
             SsTableFormat::default(), // read only SSTs can use default
             path,
@@ -794,13 +805,14 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
-            self.main_object_store.clone(),
+            retrying_main_object_store.clone(),
             self.system_clock.clone(),
         ));
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.main_object_store.clone(), None),
+            ObjectStores::new(retrying_main_object_store.clone(), None),
             SsTableFormat::default(), // read only SSTs can use default
             path,
             None, // no need for cache in GC
