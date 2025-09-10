@@ -1183,6 +1183,16 @@ mod tests {
             txn_id: Option<Uuid>,
             keys: Vec<String>,
         },
+        // New SSI-specific operations
+        TrackReadKeys {
+            txn_id: Uuid,
+            keys: Vec<String>,
+        },
+        TrackReadRange {
+            txn_id: Uuid,
+            start_key: String,
+            end_key: String,
+        },
         Recycle,
     }
 
@@ -1191,6 +1201,8 @@ mod tests {
         let tracked_txn_ids = Arc::new(Mutex::new(Vec::<Uuid>::new()));
         let tracked_txn_ids_for_drop = Arc::clone(&tracked_txn_ids);
         let tracked_txn_ids_for_commit = Arc::clone(&tracked_txn_ids);
+        let tracked_txn_ids_for_track_read_keys = Arc::clone(&tracked_txn_ids);
+        let tracked_txn_ids_for_track_read_range = Arc::clone(&tracked_txn_ids);
 
         let sample_txn_id = move |tracked_txn_ids: Arc<Mutex<Vec<Uuid>>>| {
             let ids = tracked_txn_ids.lock();
@@ -1225,6 +1237,27 @@ mod tests {
                 vec("key[0-9][0-9]", 1..5),
             )
                 .prop_map(|(txn_id, keys)| TxnOperation::Commit { txn_id, keys }),
+            // Track read keys for SSI
+            (
+                (0..100u32)
+                    .prop_map(move |_| sample_txn_id(tracked_txn_ids_for_track_read_keys.clone())),
+                vec("key[0-9][0-9]", 1..3),
+            )
+                .prop_map(|(txn_id, keys)| TxnOperation::TrackReadKeys { txn_id, keys }),
+            // Track read range for SSI phantom detection
+            (
+                (0..100u32)
+                    .prop_map(move |_| sample_txn_id(tracked_txn_ids_for_track_read_range.clone())),
+                "key[0-9][0-9]",
+                "key[0-9][0-9]",
+            )
+                .prop_map(|(txn_id, start_key, end_key)| {
+                    TxnOperation::TrackReadRange {
+                        txn_id,
+                        start_key: start_key.clone().min(end_key.clone()),
+                        end_key: start_key.max(end_key).to_string(),
+                    }
+                }),
             // recycle
             (0..10u32).prop_map(|_| TxnOperation::Recycle)
         ]
@@ -1266,6 +1299,23 @@ mod tests {
                 }
                 TxnOperation::Drop { txn_id } => {
                     manager.drop_txn(txn_id);
+                    ExecutionEffect::Nothing
+                }
+                TxnOperation::TrackReadKeys { txn_id, keys } => {
+                    let key_set: HashSet<Bytes> =
+                        keys.iter().map(|k| Bytes::from(k.clone())).collect();
+                    manager.track_read_keys(txn_id, &key_set);
+                    ExecutionEffect::Nothing
+                }
+                TxnOperation::TrackReadRange {
+                    txn_id,
+                    start_key,
+                    end_key,
+                } => {
+                    let range = BytesRange::from(
+                        Bytes::from(start_key.clone())..=Bytes::from(end_key.clone()),
+                    );
+                    manager.track_read_range(txn_id, range);
                     ExecutionEffect::Nothing
                 }
                 TxnOperation::Commit { txn_id, keys } => {
@@ -1417,6 +1467,42 @@ mod tests {
                     // when there's no active non-readonly transactions, recent_committed_txns should be empty
                     if !inner.has_non_readonly_active_txn() {
                         prop_assert!(inner.recent_committed_txns.is_empty(), "If there's no active non-readonly transactions, recent_committed_txns should be empty");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn prop_inv_ssi_read_write_conflict_detection(ops in operation_sequence_strategy()) {
+            let db_rand = Arc::new(DbRand::new(0));
+            let txn_manager = TransactionManager::new(db_rand).with_isolation_level(IsolationLevel::SerializableSnapshot);
+            let mut exec_state = ExecutionState::new();
+
+            for op in ops {
+                exec_state.execute_operation(&txn_manager, &op);
+
+                // Verify SSI-specific invariants for SerializableSnapshot isolation
+                let inner = txn_manager.inner.read();
+                for (txn_id, txn_state) in &inner.active_txns {
+                    // If transaction has read keys, verify read-write conflict detection
+                    if !txn_state.read_keys.is_empty() || !txn_state.read_ranges.is_empty() {
+                        let rw_conflict = inner.has_read_write_conflict(
+                            &txn_state.read_keys,
+                            txn_state.read_ranges.clone(),
+                            txn_state.started_seq,
+                        );
+                        let ww_conflict = inner.has_write_write_conflict(
+                            &txn_state.write_keys,
+                            txn_state.started_seq,
+                        );
+                        let overall_conflict = txn_manager.check_has_conflict(txn_id);
+
+                        // For SerializableSnapshot, overall conflict should be RW OR WW
+                        prop_assert_eq!(
+                            overall_conflict, rw_conflict || ww_conflict,
+                            "SSI conflict detection should include both RW and WW conflicts for txn {:?}",
+                            txn_id
+                        );
                     }
                 }
             }
