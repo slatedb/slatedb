@@ -1165,6 +1165,32 @@ mod tests {
         assert_eq!(txn_manager.min_active_seq(), Some(150));
     }
 
+    #[test]
+    fn test_ssi_phantom_read_conflict_on_range() {
+        let db_rand = Arc::new(DbRand::new(0));
+        let txn_manager = TransactionManager::new(db_rand)
+            .with_isolation_level(IsolationLevel::SerializableSnapshot);
+
+        // Reader transaction under SSI that scans a key range
+        let reader_txn = txn_manager.new_txn(100, true);
+
+        // Keep a dummy write txn active so commits are tracked in recent_committed_txns
+        let _active_writer_guard = txn_manager.new_txn(200, false);
+
+        // A separate writer that will commit a key inside the reader's scanned range
+        let writer_txn = txn_manager.new_txn(60, false);
+        let writer_keys: HashSet<Bytes> = ["foo5"].into_iter().map(Bytes::from).collect();
+        txn_manager.track_write_keys(&writer_txn, &writer_keys);
+        txn_manager.track_recent_committed_txn(&writer_txn, 120);
+
+        // Reader scans a range that should include "foo5"
+        let range = BytesRange::from(Bytes::from("foo0")..=Bytes::from("foo9"));
+        txn_manager.track_read_range(&reader_txn, range);
+
+        // Under SSI, this should be detected as a phantom read (read-write) conflict
+        assert!(txn_manager.check_has_conflict(&reader_txn));
+    }
+
     // Property-based tests using proptest for invariant verification
     use proptest::collection::vec;
     use proptest::prelude::*;
