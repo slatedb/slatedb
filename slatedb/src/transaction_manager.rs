@@ -1480,30 +1480,59 @@ mod tests {
 
             for op in ops {
                 exec_state.execute_operation(&txn_manager, &op);
-
-                // Verify SSI-specific invariants for SerializableSnapshot isolation
+                // For every active transaction, verify the smoking-gun invariant:
+                // rw_conflict <=> exists culprit in recent_committed_txns that satisfies rules
                 let inner = txn_manager.inner.read();
-                for (txn_id, txn_state) in &inner.active_txns {
-                    // If transaction has read keys, verify read-write conflict detection
-                    if !txn_state.read_keys.is_empty() || !txn_state.read_ranges.is_empty() {
-                        let rw_conflict = inner.has_read_write_conflict(
-                            &txn_state.read_keys,
-                            txn_state.read_ranges.clone(),
-                            txn_state.started_seq,
-                        );
-                        let ww_conflict = inner.has_write_write_conflict(
-                            &txn_state.write_keys,
-                            txn_state.started_seq,
-                        );
-                        let overall_conflict = txn_manager.check_has_conflict(txn_id);
+                for (_id, txn) in inner.active_txns.iter() {
+                    // Only meaningful for SSI; read-only transactions can also have reads, so include them.
+                    let rw_conflict = inner.has_read_write_conflict(
+                        &txn.read_keys,
+                        txn.read_ranges.clone(),
+                        txn.started_seq,
+                    );
 
-                        // For SerializableSnapshot, overall conflict should be RW OR WW
-                        prop_assert_eq!(
-                            overall_conflict, rw_conflict || ww_conflict,
-                            "SSI conflict detection should include both RW and WW conflicts for txn {:?}",
-                            txn_id
-                        );
+                    // Search for a culprit committed txn
+                    let mut culprit_exists = false;
+                    for committed in inner.recent_committed_txns.iter() {
+                        if committed.read_only {
+                            continue;
+                        }
+                        let Some(other_committed_seq) = committed.committed_seq else { continue };
+                        if other_committed_seq <= txn.started_seq {
+                            continue;
+                        }
+
+                        // Direct read-write conflict on keys
+                        let direct_conflict = !txn.read_keys.is_disjoint(&committed.write_keys);
+
+                        // Phantom conflict via range containment
+                        let mut phantom_conflict = false;
+                        if !txn.read_ranges.is_empty() && !committed.write_keys.is_empty() {
+                            'outer: for range in txn.read_ranges.iter() {
+                                for w in committed.write_keys.iter() {
+                                    if range.contains(w) {
+                                        phantom_conflict = true;
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                        }
+
+                        if direct_conflict || phantom_conflict {
+                            culprit_exists = true;
+                            break;
+                        }
                     }
+
+                    prop_assert_eq!(rw_conflict, culprit_exists,
+                        "SSI RW invariant violation: rw_conflict={} but culprit_exists={} (started_seq={:?}, read_keys_len={}, read_ranges_len={}, recent_committed_len={})",
+                        rw_conflict,
+                        culprit_exists,
+                        txn.started_seq,
+                        txn.read_keys.len(),
+                        txn.read_ranges.len(),
+                        inner.recent_committed_txns.len()
+                    );
                 }
             }
         }
