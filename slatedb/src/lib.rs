@@ -103,6 +103,7 @@ mod proptest_util;
 mod rand;
 mod reader;
 mod retention_iterator;
+mod retrying_object_store;
 mod row_codec;
 mod seq_tracker;
 mod sorted_run_iterator;

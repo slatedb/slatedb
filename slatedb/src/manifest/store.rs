@@ -14,7 +14,6 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::utils;
-use backon::{ExponentialBuilder, Retryable};
 use chrono::Utc;
 use futures::StreamExt;
 use log::{debug, warn};
@@ -570,14 +569,8 @@ impl ManifestStore {
 
     async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
         let manifest_path = &self.get_manifest_path(id);
-
-        (|| async {
-            self.write_manifest_in_object_store(manifest_path, manifest)
-                .await
-        })
-        .retry(ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300))))
-        .when(utils::should_retry_object_store_operation)
-        .await
+        self.write_manifest_in_object_store(manifest_path, manifest)
+            .await
     }
 
     async fn write_manifest_in_object_store(
@@ -775,6 +768,7 @@ mod tests {
     use crate::error;
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use chrono::Timelike;
     use object_store::memory::InMemory;
@@ -1032,9 +1026,10 @@ mod tests {
         // Given a flaky store that times out on the first write
         let base = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
+        let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
         let ms = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
-            flaky.clone(),
+            retrying.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
 
