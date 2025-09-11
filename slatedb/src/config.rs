@@ -1242,7 +1242,7 @@ object_store_cache_options:
     fn test_scan_options_with_max_fetch_tasks() {
         let options = ScanOptions::default().with_max_fetch_tasks(4);
         assert_eq!(options.max_fetch_tasks, 4);
-        
+
         // Verify other fields remain unchanged
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);

@@ -569,7 +569,7 @@ mod tests {
             .with_max_fetch_tasks(4)
             .with_cache_blocks(true)
             .with_read_ahead_bytes(1024);
-        
+
         assert_eq!(options.max_fetch_tasks, 4);
         assert!(options.cache_blocks);
         assert_eq!(options.read_ahead_bytes, 1024);
