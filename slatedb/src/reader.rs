@@ -388,7 +388,6 @@ mod tests {
     struct MockReadDbState {
         memtable: Arc<KVTable>,
         imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-        core: CoreDbState,
     }
 
     impl DbStateReader for MockReadDbState {
@@ -409,7 +408,6 @@ mod tests {
         MockReadDbState {
             memtable: Arc::new(KVTable::new()),
             imm_memtable: VecDeque::new(),
-            core: CoreDbState::new(),
         }
     }
 
