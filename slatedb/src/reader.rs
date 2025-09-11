@@ -135,7 +135,7 @@ impl Reader {
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
+            max_fetch_tasks: options.max_fetch_tasks,
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
@@ -560,5 +560,18 @@ mod tests {
         let result = get.get_inner(mock_level_getters(test_case.entries)).await?;
         assert_eq!(result, test_case.expected);
         Ok(())
+    }
+
+    #[test]
+    fn test_scan_options_builder_pattern() {
+        // Test that the builder pattern works correctly for max_fetch_tasks
+        let options = ScanOptions::default()
+            .with_max_fetch_tasks(4)
+            .with_cache_blocks(true)
+            .with_read_ahead_bytes(1024);
+
+        assert_eq!(options.max_fetch_tasks, 4);
+        assert!(options.cache_blocks);
+        assert_eq!(options.read_ahead_bytes, 1024);
     }
 }
