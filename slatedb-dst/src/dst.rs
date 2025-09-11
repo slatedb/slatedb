@@ -650,7 +650,7 @@ impl Dst {
                     return res;
                 }
                 Poll::Pending => {
-                    let sleep_ms = self.rand.rng().random_range(0..1_000);
+                    let sleep_ms = self.rand.rng().random_range(0..10);
                     self.advance_time(Duration::from_millis(sleep_ms)).await;
                     if self.rand.rng().random_bool(flush_probability) {
                         self.db.flush().await?;
