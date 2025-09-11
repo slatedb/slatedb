@@ -401,7 +401,7 @@ mod tests {
         }
 
         fn core(&self) -> &CoreDbState {
-            &self.core
+            todo!()
         }
     }
 
