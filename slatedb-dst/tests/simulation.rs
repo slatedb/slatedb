@@ -215,9 +215,19 @@ fn test_dst_nightly() -> Result<(), Error> {
         });
         handles.push(handle);
     }
-    for (core, handle) in handles.into_iter().enumerate() {
-        let result = handle.join().expect("join failed");
-        info!("simulation result [core={}, result={:?}]", core, result);
-    }
+    let failed = handles
+        .into_iter()
+        .enumerate()
+        .map(|(core, handle)| {
+            let result = handle.join();
+            if result.is_err() {
+                error!("simulation failed [core={}, result={:?}]", core, result);
+            } else {
+                info!("simulation passed [core={}, result={:?}]", core, result);
+            }
+            result
+        })
+        .any(|result| result.is_err());
+    assert!(!failed, "one or more DSTs failed");
     Ok(())
 }
