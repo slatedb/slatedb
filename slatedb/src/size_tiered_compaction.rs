@@ -10,7 +10,7 @@ use crate::db_state::CoreDbState;
 
 const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 4;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct CompactionSource {
     source: SourceId,
     size: u64,
