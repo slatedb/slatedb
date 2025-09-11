@@ -32,7 +32,7 @@ use crate::DstOptions;
 
 const MIB_1: usize = 1024 * 1024;
 const MIB_500: usize = 500 * MIB_1;
-const GIB_5: usize = 5 * MIB_500;
+const GIB_2: usize = 2048 * MIB_1;
 
 const COMPRESSION_CODECS: [Option<&str>; 5] = [
     Some("snappy"),
@@ -96,14 +96,14 @@ pub async fn build_db(
 /// All arguments are expected to be deterministic.
 pub async fn build_settings(rand: &DbRand) -> Settings {
     let mut rng = rand.rng();
-    let flush_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
+    let flush_interval = rng.random_range(Duration::from_millis(1)..Duration::from_secs(60));
     let manifest_poll_interval = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
     let manifest_update_timeout = rng.random_range(Duration::from_secs(1)..Duration::from_secs(60));
     let min_filter_keys = rng.random_range(100..1000);
     let filter_bits_per_key = rng.random_range(1..20);
     let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
-    let l0_max_ssts = rng.random_range(1..100);
-    let max_unflushed_bytes = rng.random_range(MIB_1..GIB_5);
+    let l0_max_ssts = rng.random_range(4..8); // max L0 size of 4GiB (8 * 500MiB l0 sst size)
+    let max_unflushed_bytes = rng.random_range(MIB_1..GIB_2);
     let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
     let compression_codec =
         if let Some(compression_codec) = COMPRESSION_CODECS[compression_codec_idx] {
@@ -132,7 +132,7 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
                 ..Default::default()
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(3600),
+                min_age: Duration::from_secs(900),
                 ..Default::default()
             }),
         }),
@@ -151,9 +151,9 @@ pub async fn build_compaction_scheduler_supplier(
 ) -> Arc<SizeTieredCompactionSchedulerSupplier> {
     // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
     // Otherwise, the compactor never runs and writers get blocked permanently.
-    let min_compaction_sources = rand.rng().random_range(1..10).min(settings.l0_max_ssts);
+    let min_compaction_sources = rand.rng().random_range(4..10).min(settings.l0_max_ssts);
     // Prevent scheduler from having a higher min compaction sources than max compaction sources.
-    let max_compaction_sources = rand.rng().random_range(1..10).max(min_compaction_sources);
+    let max_compaction_sources = 8.max(min_compaction_sources);
     let options = SizeTieredCompactionSchedulerOptions {
         min_compaction_sources,
         max_compaction_sources,
