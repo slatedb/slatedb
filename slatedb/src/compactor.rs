@@ -103,7 +103,7 @@ impl CompactionProgressTracker {
     }
 }
 
-pub(crate) enum WorkerToOrchestratorMsg {
+pub(crate) enum CompactorMessage {
     CompactionFinished {
         id: Uuid,
         result: Result<SortedRun, SlateDBError>,
@@ -299,9 +299,9 @@ impl CompactorEventHandler {
         }
     }
 
-    async fn handle_worker_rx(&mut self, msg: WorkerToOrchestratorMsg) {
+    async fn handle_worker_rx(&mut self, msg: CompactorMessage) {
         match msg {
-            WorkerToOrchestratorMsg::CompactionFinished { id, result } => match result {
+            CompactorMessage::CompactionFinished { id, result } => match result {
                 Ok(sr) => self
                     .finish_compaction(id, sr)
                     .await
@@ -311,7 +311,7 @@ impl CompactorEventHandler {
                     self.finish_failed_compaction(id);
                 }
             },
-            WorkerToOrchestratorMsg::CompactionProgress {
+            CompactorMessage::CompactionProgress {
                 id,
                 bytes_processed,
             } => {
@@ -890,7 +890,7 @@ mod tests {
         scheduler: Arc<MockScheduler>,
         executor: Arc<MockExecutor>,
         real_executor: Arc<dyn CompactionExecutor>,
-        real_executor_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerToOrchestratorMsg>,
+        real_executor_rx: tokio::sync::mpsc::UnboundedReceiver<CompactorMessage>,
         stats_registry: Arc<StatRegistry>,
         handler: CompactorEventHandler,
     }
@@ -1079,7 +1079,7 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         let job = fixture.assert_started_compaction(1).pop().unwrap();
-        let msg = WorkerToOrchestratorMsg::CompactionFinished {
+        let msg = CompactorMessage::CompactionFinished {
             id: job.id,
             result: Err(SlateDBError::InvalidDBState),
         };
