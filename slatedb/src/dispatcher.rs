@@ -194,6 +194,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     }
 
     /// Runs the dispatcher. This is the primary entry point for running the dispatcher.
+    /// Run blocks until the dispatcher is shutdown or an error occurs.
     ///
     /// [MessageDispatcher::run] is the primary entry point for running the dispatcher;
     /// it is responsible for:

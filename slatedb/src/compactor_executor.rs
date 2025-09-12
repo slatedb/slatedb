@@ -9,8 +9,8 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::clock::SystemClock;
-use crate::compactor::WorkerToOrchestratorMsg;
-use crate::compactor::WorkerToOrchestratorMsg::CompactionFinished;
+use crate::compactor::CompactorMessage;
+use crate::compactor::CompactorMessage::CompactionFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -80,7 +80,7 @@ impl TokioCompactionExecutor {
     pub(crate) fn new(
         handle: tokio::runtime::Handle,
         options: Arc<CompactorOptions>,
-        worker_tx: tokio::sync::mpsc::UnboundedSender<WorkerToOrchestratorMsg>,
+        worker_tx: tokio::sync::mpsc::UnboundedSender<CompactorMessage>,
         table_store: Arc<TableStore>,
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
@@ -123,7 +123,7 @@ struct TokioCompactionTask {
 pub(crate) struct TokioCompactionExecutorInner {
     options: Arc<CompactorOptions>,
     handle: tokio::runtime::Handle,
-    worker_tx: tokio::sync::mpsc::UnboundedSender<WorkerToOrchestratorMsg>,
+    worker_tx: tokio::sync::mpsc::UnboundedSender<CompactorMessage>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<HashMap<u32, TokioCompactionTask>>>,
     rand: Arc<DbRand>,
@@ -214,7 +214,7 @@ impl TokioCompactionExecutorInner {
                 // not already an error (i.e. if the DB is not already shut down).
                 #[allow(clippy::disallowed_methods)]
                 self.worker_tx
-                    .send(WorkerToOrchestratorMsg::CompactionProgress {
+                    .send(CompactorMessage::CompactionProgress {
                         id: compaction.id,
                         bytes_processed: all_iter.total_bytes_processed(),
                     })

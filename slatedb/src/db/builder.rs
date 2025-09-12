@@ -105,7 +105,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fail_parallel::FailPointRegistry;
-use log::{info, warn};
+use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
@@ -145,8 +145,7 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::bg_task_result_into_err;
-use crate::utils::spawn_bg_task;
+use crate::utils::WatchableOnceCell;
 
 /// A builder for creating a new Db instance.
 ///
@@ -510,29 +509,19 @@ impl<P: Into<Path>> DbBuilder<P> {
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
                 .unwrap_or_else(default_compaction_scheduler_supplier);
-            let cleanup_inner = inner.clone();
             let compactor = Compactor::new(
                 manifest_store.clone(),
                 uncached_table_store.clone(),
                 compactor_options.clone(),
                 scheduler_supplier,
+                compaction_handle.clone(),
                 rand.clone(),
                 inner.stat_registry.clone(),
                 system_clock.clone(),
+                inner.clone().state.read().error(),
                 self.cancellation_token.clone(),
             );
-            let compactor_task = spawn_bg_task(
-                // Spawn the main event loop on the main tokio runtime
-                &tokio_handle,
-                move |result: &Result<(), SlateDBError>| {
-                    let err = bg_task_result_into_err(result);
-                    warn!("compactor thread exited [error={}]", err);
-                    let mut state = cleanup_inner.state.write();
-                    state.record_fatal_error(err.clone())
-                },
-                // Spawn the compactor on the compaction runtime
-                async move { compactor.run_async_task(compaction_handle).await },
-            );
+            let compactor_task = tokio::spawn(async move { compactor.run_async_task().await });
             Some(compactor_task)
         } else {
             None
@@ -726,8 +715,9 @@ pub struct CompactorBuilder<P: Into<Path>> {
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
     stat_registry: Arc<StatRegistry>,
-    cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
+    error_state: WatchableOnceCell<SlateDBError>,
+    cancellation_token: CancellationToken,
 }
 
 #[allow(unused)]
@@ -741,8 +731,9 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
             stat_registry: Arc::new(StatRegistry::new()),
-            cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
+            error_state: WatchableOnceCell::new(),
+            cancellation_token: CancellationToken::new(),
         }
     }
 
@@ -792,6 +783,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    pub(crate) fn with_error_state(mut self, error_state: WatchableOnceCell<SlateDBError>) -> Self {
+        self.error_state = error_state;
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
@@ -817,9 +813,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             table_store,
             self.options,
             scheduler_supplier,
+            self.tokio_handle,
             self.rand,
             self.stat_registry,
             self.system_clock,
+            self.error_state,
             self.cancellation_token,
         )
     }
