@@ -664,7 +664,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            retry_duration: std::time::Duration::from_secs(300), // Default 5 minutes
+            retry_duration: std::time::Duration::from_secs(300),
         }
     }
 
