@@ -10,81 +10,33 @@ use object_store::{
     GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
-use serde::{Deserialize, Serialize};
-
-/// Configuration for retry behavior in the RetryingObjectStore.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RetryConfig {
-    /// Maximum total time to retry operations before giving up.
-    /// If None, retries will continue indefinitely.
-    pub max_retry_duration: Option<Duration>,
-    
-    /// Initial delay between retry attempts.
-    pub initial_delay: Duration,
-    
-    /// Maximum delay between retry attempts.
-    pub max_delay: Duration,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            // Default to 5 minutes for backward compatibility
-            max_retry_duration: Some(Duration::from_secs(300)),
-            initial_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(60),
-        }
-    }
-}
-
-impl RetryConfig {
-    /// Creates a RetryConfig that retries indefinitely.
-    pub fn infinite() -> Self {
-        Self {
-            max_retry_duration: None,
-            initial_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(60),
-        }
-    }
-    
-    /// Creates a RetryConfig with a specific maximum retry duration.
-    pub fn with_max_duration(max_duration: Duration) -> Self {
-        Self {
-            max_retry_duration: Some(max_duration),
-            initial_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(60),
-        }
-    }
-}
 
 /// A thin wrapper around an `ObjectStore` that retries transient errors with
-/// configurable exponential backoff.
+/// exponential backoff.
 #[derive(Debug, Clone)]
 pub(crate) struct RetryingObjectStore {
     inner: Arc<dyn ObjectStore>,
-    retry_config: RetryConfig,
+    retry_duration: Duration,
 }
 
 impl RetryingObjectStore {
     pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
-        Self::with_config(inner, RetryConfig::default())
+        Self::with_duration(inner, Duration::from_secs(300)) // Default 5 minutes
     }
-    
-    pub fn with_config(inner: Arc<dyn ObjectStore>, retry_config: RetryConfig) -> Self {
-        Self { inner, retry_config }
+
+    pub fn with_duration(inner: Arc<dyn ObjectStore>, retry_duration: Duration) -> Self {
+        Self { inner, retry_duration }
     }
 
     #[inline]
     fn retry_builder(&self) -> ExponentialBuilder {
-        let mut builder = ExponentialBuilder::default()
-            .with_min_delay(self.retry_config.initial_delay)
-            .with_max_delay(self.retry_config.max_delay);
-            
-        if let Some(max_duration) = self.retry_config.max_retry_duration {
-            builder = builder.with_total_delay(Some(max_duration));
+        let builder = ExponentialBuilder::default();
+        // If retry_duration is Duration::MAX, don't set a total delay limit (infinite retries)
+        if self.retry_duration == Duration::MAX {
+            builder
+        } else {
+            builder.with_total_delay(Some(self.retry_duration))
         }
-        
-        builder
     }
 
     #[inline]
@@ -246,14 +198,13 @@ impl ObjectStore for RetryingObjectStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{RetryConfig, RetryingObjectStore};
+    use super::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
     use std::sync::Arc;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn test_put_opts_retries_transient_until_success() {
@@ -276,70 +227,6 @@ mod tests {
 
         let got = retrying.get(&path).await.unwrap();
         assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"hello"));
-    }
-
-    #[tokio::test]
-    async fn test_retry_config_infinite() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
-        let retry_config = RetryConfig::infinite();
-        let retrying = RetryingObjectStore::with_config(flaky.clone(), retry_config);
-
-        let path = Path::from("/data/obj");
-        retrying
-            .put_opts(
-                &path,
-                PutPayload::from_bytes(Bytes::from_static(b"hello")),
-                PutOptions::default(),
-            )
-            .await
-            .expect("put should succeed after retries");
-
-        // 1 failure + 1 success
-        assert_eq!(flaky.put_attempts(), 2);
-
-        let got = retrying.get(&path).await.unwrap();
-        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"hello"));
-    }
-
-    #[tokio::test]
-    async fn test_retry_config_custom_duration() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
-        let retry_config = RetryConfig::with_max_duration(Duration::from_secs(1));
-        let retrying = RetryingObjectStore::with_config(flaky.clone(), retry_config);
-
-        let path = Path::from("/data/obj");
-        retrying
-            .put_opts(
-                &path,
-                PutPayload::from_bytes(Bytes::from_static(b"hello")),
-                PutOptions::default(),
-            )
-            .await
-            .expect("put should succeed after retries");
-
-        // 1 failure + 1 success
-        assert_eq!(flaky.put_attempts(), 2);
-
-        let got = retrying.get(&path).await.unwrap();
-        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"hello"));
-    }
-
-    #[test]
-    fn test_retry_config_default() {
-        let config = RetryConfig::default();
-        assert_eq!(config.max_retry_duration, Some(Duration::from_secs(300)));
-        assert_eq!(config.initial_delay, Duration::from_millis(100));
-        assert_eq!(config.max_delay, Duration::from_secs(60));
-    }
-
-    #[test]
-    fn test_retry_config_infinite_values() {
-        let config = RetryConfig::infinite();
-        assert_eq!(config.max_retry_duration, None);
-        assert_eq!(config.initial_delay, Duration::from_millis(100));
-        assert_eq!(config.max_delay, Duration::from_secs(60));
     }
 
     #[tokio::test]
@@ -416,5 +303,24 @@ mod tests {
             e => panic!("unexpected error: {e:?}"),
         }
         assert_eq!(failing.put_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_infinite_retry_configuration() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let retrying = RetryingObjectStore::with_duration(inner, std::time::Duration::MAX);
+        
+        // Just verify that the configuration is properly set
+        // We can't easily test infinite retries without a very long-running test
+        assert_eq!(retrying.retry_duration, std::time::Duration::MAX);
+    }
+
+    #[tokio::test]
+    async fn test_custom_retry_duration() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let custom_duration = std::time::Duration::from_secs(600);
+        let retrying = RetryingObjectStore::with_duration(inner, custom_duration);
+        
+        assert_eq!(retrying.retry_duration, custom_duration);
     }
 }

@@ -290,15 +290,15 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the retry configuration for object store operations.
+    /// Sets the retry duration for object store operations.
     ///
-    /// This controls how the underlying object store retries failed operations.
-    /// By default, operations are retried for up to 5 minutes with exponential backoff.
-    /// You can configure infinite retries, different timeouts, or adjust the retry delays.
+    /// This controls how long the underlying object store retries failed operations
+    /// before giving up. By default, operations are retried for up to 5 minutes.
+    /// You can set it to `Duration::MAX` for infinite retries.
     ///
     /// # Arguments
     ///
-    /// * `retry_config` - The retry configuration to use
+    /// * `retry_duration` - The maximum duration to retry operations
     ///
     /// # Returns
     ///
@@ -307,27 +307,24 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// # Examples
     ///
     /// ```
-    /// use slatedb::retrying_object_store::RetryConfig;
     /// use slatedb::{Db, Error};
     /// use slatedb::object_store::memory::InMemory;
     /// use std::sync::Arc;
+    /// use std::time::Duration;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
     ///     let object_store = Arc::new(InMemory::new());
     ///     // Configure infinite retries (never give up)
     ///     let db = Db::builder("test_db", object_store)
-    ///         .with_object_store_retry_config(RetryConfig::infinite())
+    ///         .with_object_store_retry_duration(Duration::MAX)
     ///         .build()
     ///         .await?;
     ///     Ok(())
     /// }
     /// ```
-    pub fn with_object_store_retry_config(
-        mut self,
-        retry_config: crate::retrying_object_store::RetryConfig,
-    ) -> Self {
-        self.settings.object_store_retry_config = retry_config;
+    pub fn with_object_store_retry_duration(mut self, retry_duration: std::time::Duration) -> Self {
+        self.settings.object_store_retry_duration = retry_duration;
         self
     }
 
@@ -337,16 +334,16 @@ impl<P: Into<Path>> DbBuilder<P> {
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_config(
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_duration(
             self.main_object_store,
-            self.settings.object_store_retry_config.clone(),
+            self.settings.object_store_retry_duration,
         ));
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> = self
             .wal_object_store
             .map(|s| {
-                Arc::new(RetryingObjectStore::with_config(
+                Arc::new(RetryingObjectStore::with_duration(
                     s,
-                    self.settings.object_store_retry_config.clone(),
+                    self.settings.object_store_retry_duration,
                 )) as Arc<dyn ObjectStore>
             });
 
@@ -736,16 +733,16 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_config(
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_duration(
             self.main_object_store,
-            crate::retrying_object_store::RetryConfig::default(),
+            std::time::Duration::from_secs(300), // Use default 5 minutes for GC
         ));
         let retrying_wal_object_store = self
             .wal_object_store
             .map(|s| {
-                Arc::new(RetryingObjectStore::with_config(
+                Arc::new(RetryingObjectStore::with_duration(
                     s,
-                    crate::retrying_object_store::RetryConfig::default(),
+                    std::time::Duration::from_secs(300), // Use default 5 minutes for GC
                 )) as Arc<dyn ObjectStore>
             });
         let manifest_store = Arc::new(ManifestStore::new(
@@ -852,9 +849,9 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_config(
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_duration(
             self.main_object_store,
-            crate::retrying_object_store::RetryConfig::default(),
+            std::time::Duration::from_secs(300), // Use default 5 minutes for compactor
         ));
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
@@ -889,4 +886,30 @@ fn default_compaction_scheduler_supplier() -> Arc<dyn CompactionSchedulerSupplie
     Arc::new(SizeTieredCompactionSchedulerSupplier::new(
         SizeTieredCompactionSchedulerOptions::default(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object_store::memory::InMemory;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_with_object_store_retry_duration() {
+        let object_store = Arc::new(InMemory::new());
+        
+        // Test with infinite retries
+        let builder = DbBuilder::new("test_db", object_store.clone())
+            .with_object_store_retry_duration(Duration::MAX);
+        
+        assert_eq!(builder.settings.object_store_retry_duration, Duration::MAX);
+        
+        // Test with custom duration
+        let custom_duration = Duration::from_secs(600);
+        let builder = DbBuilder::new("test_db2", object_store)
+            .with_object_store_retry_duration(custom_duration);
+        
+        assert_eq!(builder.settings.object_store_retry_duration, custom_duration);
+    }
 }

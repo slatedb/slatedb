@@ -46,7 +46,6 @@ pub use error::{Error, ErrorKind};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
-pub use retrying_object_store::RetryConfig;
 pub use types::KeyValue;
 
 pub mod admin;
@@ -104,7 +103,7 @@ mod proptest_util;
 mod rand;
 mod reader;
 mod retention_iterator;
-pub mod retrying_object_store;
+mod retrying_object_store;
 mod row_codec;
 mod seq_tracker;
 mod sorted_run_iterator;
