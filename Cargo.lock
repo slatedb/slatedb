@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "object_store",
@@ -3283,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3344,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-bencher"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-cli"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "clap",
  "humantime",
@@ -3379,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-dst"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-go"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "cbindgen",
  "env_logger",
@@ -3418,7 +3418,7 @@ dependencies = [
 
 [[package]]
 name = "slatedb-py"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "once_cell",
  "pyo3",
