@@ -232,7 +232,7 @@ func (db *DB) DeleteWithOptions(key []byte, writeOpts *WriteOptions) error {
 // Example for reading only durably committed data:
 //
 //	readOpts := &slatedb.ReadOptions{
-//	    DurabilityFilter: slatedb.DurabilityRemote,
+//	    DurabilityFilter: slatedb.DurabilityMemory, // Default
 //	    Dirty:           false,
 //	}
 //	value, err := db.GetWithOptions([]byte("user:123"), readOpts)
@@ -405,7 +405,7 @@ func (db *DB) Close() error {
 //	    process(kv.Key, kv.Value)
 //	}
 func (db *DB) Scan(start, end []byte) (*Iterator, error) {
-	return db.ScanWithOptions(start, end, &ScanOptions{})
+	return db.ScanWithOptions(start, end, nil)
 }
 
 // ScanWithOptions creates a streaming iterator for the specified range with custom scan options
@@ -424,7 +424,7 @@ func (db *DB) Scan(start, end []byte) (*Iterator, error) {
 //
 // ## Examples
 //
-//	opts := &ScanOptions{DurabilityFilter: DurabilityRemote, Dirty: false}
+//	opts := &ScanOptions{DurabilityFilter: DurabilityMemory, Dirty: false}
 //	iter, err := db.ScanWithOptions([]byte("user:"), []byte("user;"), opts)
 //	if err != nil { return err }
 //	defer iter.Close()  // Essential!

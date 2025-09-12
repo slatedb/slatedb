@@ -20,6 +20,7 @@ object_store = { workspace = true, features = ["aws"] }
 tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
 once_cell = { workspace = true }
 log = { workspace = true }
+env_logger = "0.11"
 rand = { workspace = true }
 uuid = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }

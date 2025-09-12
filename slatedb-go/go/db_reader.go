@@ -36,6 +36,13 @@ type DbReader struct {
 //	    CheckpointLifetime:   30000, // 30 second checkpoint lifetime
 //	    MaxMemtableBytes:     1024 * 1024, // 1MB memtable buffer
 //	})
+//
+// Example using all defaults:
+//
+//	// Pass nil to use all defaults
+//	reader, err := slatedb.OpenReader("/tmp/mydb", &slatedb.StoreConfig{
+//	    Provider: slatedb.ProviderLocal,
+//	}, nil, nil)
 func OpenReader(path string, storeConfig *StoreConfig, checkpointId *string, opts *DbReaderOptions) (*DbReader, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
@@ -55,16 +62,7 @@ func OpenReader(path string, storeConfig *StoreConfig, checkpointId *string, opt
 		defer C.free(unsafe.Pointer(cCheckpointId))
 	}
 
-	// Convert options
-	var cOpts *C.CSdbReaderOptions
-	if opts != nil {
-		cOptsVal := C.CSdbReaderOptions{
-			manifest_poll_interval_ms: C.uint64_t(opts.ManifestPollInterval),
-			checkpoint_lifetime_ms:    C.uint64_t(opts.CheckpointLifetime),
-			max_memtable_bytes:        C.uint64_t(opts.MaxMemtableBytes),
-		}
-		cOpts = &cOptsVal
-	}
+	cOpts := convertToCReaderOptions(opts)
 
 	handle := C.slatedb_reader_open(cPath, storeConfigJSON, cCheckpointId, cOpts)
 
@@ -88,7 +86,7 @@ func (r *DbReader) Get(key []byte) ([]byte, error) {
 // Example:
 //
 //	readOpts := &slatedb.ReadOptions{
-//	    DurabilityFilter: slatedb.DurabilityRemote,
+//	    DurabilityFilter: slatedb.DurabilityMemory, // Default
 //	    Dirty:           false,
 //	}
 //	value, err := reader.GetWithOptions([]byte("user:123"), readOpts)
@@ -158,14 +156,14 @@ func (r *DbReader) GetWithOptions(key []byte, opts *ReadOptions) ([]byte, error)
 //	    process(kv.Key, kv.Value)
 //	}
 func (r *DbReader) Scan(start, end []byte) (*Iterator, error) {
-	return r.ScanWithOptions(start, end, &ScanOptions{})
+	return r.ScanWithOptions(start, end, nil)
 }
 
 // ScanWithOptions creates a streaming iterator for the specified range with custom scan options
 //
 // Example:
 //
-//	opts := &ScanOptions{DurabilityFilter: DurabilityRemote, Dirty: false}
+//	opts := &ScanOptions{DurabilityFilter: DurabilityMemory, Dirty: false}
 //	iter, err := reader.ScanWithOptions([]byte("user:"), nil, opts)
 //	if err != nil { return err }
 //	defer iter.Close()  // Essential!

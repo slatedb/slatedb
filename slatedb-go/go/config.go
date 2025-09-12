@@ -94,8 +94,8 @@ type SlateDBOptions struct {
 type DurabilityLevel int
 
 const (
-	DurabilityRemote DurabilityLevel = 0 // Default - only committed data
-	DurabilityMemory DurabilityLevel = 1 // Include uncommitted data in memory
+	DurabilityMemory DurabilityLevel = 0 // Default - includes both persisted and in-memory data
+	DurabilityRemote DurabilityLevel = 1 // Only data persisted to object storage
 )
 
 // WriteOptions controls write operation behavior
@@ -126,9 +126,9 @@ type ReadOptions struct {
 
 // DbReaderOptions controls DbReader behavior
 type DbReaderOptions struct {
-	ManifestPollInterval uint64 // How often to poll for updates (in milliseconds)
-	CheckpointLifetime   uint64 // How long checkpoints should live (in milliseconds)
-	MaxMemtableBytes     uint64 // Max size of in-memory table for WAL buffering
+	ManifestPollInterval uint64 // How often to poll for updates (in milliseconds). Default: 5000 (5s) if 0
+	CheckpointLifetime   uint64 // How long checkpoints should live (in milliseconds). Default: 60000 (60s) if 0
+	MaxMemtableBytes     uint64 // Max size of in-memory table for WAL buffering. Default: 1048576 (1MB) if 0
 }
 
 // ScanOptions contains options for scan operations
@@ -137,19 +137,7 @@ type ScanOptions struct {
 	Dirty            bool   // Include uncommitted writes (default: false)
 	ReadAheadBytes   uint64 // Buffer size for read-ahead (default: 1)
 	CacheBlocks      bool   // Whether to cache fetched blocks (default: false)
-}
-
-// Default returns ScanOptions with default values
-func (opts *ScanOptions) Default() *ScanOptions {
-	if opts == nil {
-		return &ScanOptions{
-			DurabilityFilter: DurabilityRemote,
-			Dirty:            false,
-			ReadAheadBytes:   1,
-			CacheBlocks:      false,
-		}
-	}
-	return opts
+	MaxFetchTasks    uint64 // Maximum concurrent fetch tasks (default: 1)
 }
 
 // convertToCScanOptions converts Go ScanOptions to C ScanOptions
@@ -163,6 +151,7 @@ func convertToCScanOptions(opts *ScanOptions) *C.CSdbScanOptions {
 		dirty:             C.bool(opts.Dirty),
 		read_ahead_bytes:  C.uint64_t(opts.ReadAheadBytes),
 		cache_blocks:      C.bool(opts.CacheBlocks),
+		max_fetch_tasks:   C.uint64_t(opts.MaxFetchTasks),
 	}
 }
 
@@ -197,6 +186,19 @@ func convertToCReadOptions(opts *ReadOptions) *C.CSdbReadOptions {
 	return &C.CSdbReadOptions{
 		durability_filter: C.uint32_t(opts.DurabilityFilter),
 		dirty:             C.bool(opts.Dirty),
+	}
+}
+
+// convertToCReaderOptions converts Go DbReaderOptions to C CSdbReaderOptions
+func convertToCReaderOptions(opts *DbReaderOptions) *C.CSdbReaderOptions {
+	if opts == nil {
+		return nil
+	}
+
+	return &C.CSdbReaderOptions{
+		manifest_poll_interval_ms: C.uint64_t(opts.ManifestPollInterval),
+		checkpoint_lifetime_ms:    C.uint64_t(opts.CheckpointLifetime),
+		max_memtable_bytes:        C.uint64_t(opts.MaxMemtableBytes),
 	}
 }
 
