@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use crossbeam_skiplist::SkipMap;
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +19,7 @@ use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompacti
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
+use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::rand::DbRand;
@@ -115,6 +119,8 @@ pub(crate) enum CompactorMessage {
         /// The total number of bytes processed so far.
         bytes_processed: u64,
     },
+    LogStats,
+    PollManifest,
 }
 
 /// The compactor is responsible for taking groups of sorted runs (this doc uses the term
@@ -234,7 +240,7 @@ impl Compactor {
                     handler.handle_ticker().await;
                 }
                 msg = worker_rx.recv() => {
-                    handler.handle_worker_rx(msg.expect("fatal error receiving worker msg")).await;
+                    handler.handle(msg.expect("fatal error receiving worker msg")).await?;
                 }
             }
         }
@@ -253,6 +259,60 @@ struct CompactorEventHandler {
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
     progress_tracker: CompactionProgressTracker,
+}
+
+#[async_trait]
+impl MessageHandler<CompactorMessage> for CompactorEventHandler {
+    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<CompactorMessage>>)> {
+        vec![
+            (
+                self.options.poll_interval,
+                Box::new(|| CompactorMessage::PollManifest),
+            ),
+            (
+                Duration::from_secs(10),
+                Box::new(|| CompactorMessage::LogStats),
+            ),
+        ]
+    }
+
+    async fn handle(&mut self, message: CompactorMessage) -> Result<(), SlateDBError> {
+        match message {
+            CompactorMessage::LogStats => self.handle_log_ticker(),
+            CompactorMessage::PollManifest => self.handle_ticker().await,
+            CompactorMessage::CompactionFinished { id, result } => match result {
+                Ok(sr) => self
+                    .finish_compaction(id, sr)
+                    .await
+                    .expect("fatal error finishing compaction"),
+                Err(err) => {
+                    error!("error executing compaction [error={:#?}]", err);
+                    self.finish_failed_compaction(id);
+                }
+            },
+            CompactorMessage::CompactionProgress {
+                id,
+                bytes_processed,
+            } => {
+                self.progress_tracker.update_progress(id, bytes_processed);
+            }
+        }
+        Ok(())
+    }
+
+    async fn cleanup(
+        &mut self,
+        mut messages: BoxStream<'async_trait, CompactorMessage>,
+        _result: Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        // drain remaining messages
+        while let Some(msg) = messages.next().await {
+            self.handle(msg).await?;
+        }
+        // shutdown the executor
+        self.stop_executor().await?;
+        Ok(())
+    }
 }
 
 impl CompactorEventHandler {
@@ -296,27 +356,6 @@ impl CompactorEventHandler {
             self.load_manifest()
                 .await
                 .expect("fatal error loading manifest");
-        }
-    }
-
-    async fn handle_worker_rx(&mut self, msg: CompactorMessage) {
-        match msg {
-            CompactorMessage::CompactionFinished { id, result } => match result {
-                Ok(sr) => self
-                    .finish_compaction(id, sr)
-                    .await
-                    .expect("fatal error finishing compaction"),
-                Err(err) => {
-                    error!("error executing compaction [error={:#?}]", err);
-                    self.finish_failed_compaction(id);
-                }
-            },
-            CompactorMessage::CompactionProgress {
-                id,
-                bytes_processed,
-            } => {
-                self.progress_tracker.update_progress(id, bytes_processed);
-            }
         }
     }
 
@@ -1014,7 +1053,11 @@ mod tests {
             .get();
 
         // when:
-        fixture.handler.handle_worker_rx(msg).await;
+        fixture
+            .handler
+            .handle(msg)
+            .await
+            .expect("fatal error handling compaction message");
 
         // then:
         assert!(
@@ -1044,7 +1087,11 @@ mod tests {
         fixture.write_l0().await;
 
         // when:
-        fixture.handler.handle_worker_rx(msg).await;
+        fixture
+            .handler
+            .handle(msg)
+            .await
+            .expect("fatal error handling compaction message");
 
         // then:
         let db_state = fixture.latest_db_state().await;
@@ -1085,7 +1132,11 @@ mod tests {
         };
 
         // when:
-        fixture.handler.handle_worker_rx(msg).await;
+        fixture
+            .handler
+            .handle(msg)
+            .await
+            .expect("fatal error handling compaction message");
 
         // then:
         fixture.scheduler.inject_compaction(compaction.clone());
@@ -1127,7 +1178,11 @@ mod tests {
             .expect("timeout");
 
         // when:
-        fixture.handler.handle_worker_rx(msg).await;
+        fixture
+            .handler
+            .handle(msg)
+            .await
+            .expect("fatal error handling compaction message");
 
         // then:
         let current_dbstate = fixture.latest_db_state().await;
