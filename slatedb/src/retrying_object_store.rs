@@ -20,22 +20,17 @@ pub(crate) struct RetryingObjectStore {
 }
 
 impl RetryingObjectStore {
-    pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
-        Self::with_duration(inner, Duration::from_secs(300)) // Default 5 minutes
-    }
-
-    pub fn with_duration(inner: Arc<dyn ObjectStore>, retry_duration: Duration) -> Self {
+    pub fn new(inner: Arc<dyn ObjectStore>, retry_duration: Duration) -> Self {
         Self { inner, retry_duration }
     }
 
     #[inline]
     fn retry_builder(&self) -> ExponentialBuilder {
-        let builder = ExponentialBuilder::default();
         // If retry_duration is Duration::MAX, don't set a total delay limit (infinite retries)
         if self.retry_duration == Duration::MAX {
-            builder
+            ExponentialBuilder::default()
         } else {
-            builder.with_total_delay(Some(self.retry_duration))
+            ExponentialBuilder::default().with_total_delay(Some(self.retry_duration))
         }
     }
 
@@ -210,7 +205,7 @@ mod tests {
     async fn test_put_opts_retries_transient_until_success() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
-        let retrying = RetryingObjectStore::new(flaky.clone());
+        let retrying = RetryingObjectStore::new(flaky.clone(), std::time::Duration::from_secs(300));
 
         let path = Path::from("/data/obj");
         retrying
@@ -233,7 +228,7 @@ mod tests {
     async fn test_put_opts_does_not_retry_on_already_exists() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0));
-        let retrying = RetryingObjectStore::new(flaky.clone());
+        let retrying = RetryingObjectStore::new(flaky.clone(), std::time::Duration::from_secs(300));
         let path = Path::from("/data/obj");
 
         retrying
@@ -275,7 +270,7 @@ mod tests {
             .unwrap();
 
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_head_failures(1));
-        let retrying = RetryingObjectStore::new(flaky.clone());
+        let retrying = RetryingObjectStore::new(flaky.clone(), std::time::Duration::from_secs(300));
 
         let meta = retrying.head(&path).await.expect("head should succeed");
         assert_eq!(meta.size, 4);
@@ -286,7 +281,7 @@ mod tests {
     async fn test_put_opts_does_not_retry_on_precondition() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let failing = Arc::new(FlakyObjectStore::new(inner, 0).with_put_precondition_always());
-        let retrying = RetryingObjectStore::new(failing.clone());
+        let retrying = RetryingObjectStore::new(failing.clone(), std::time::Duration::from_secs(300));
         let path = Path::from("/p");
 
         let err = retrying
@@ -308,7 +303,7 @@ mod tests {
     #[tokio::test]
     async fn test_infinite_retry_configuration() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let retrying = RetryingObjectStore::with_duration(inner, std::time::Duration::MAX);
+        let retrying = RetryingObjectStore::new(inner, std::time::Duration::MAX);
         
         // Just verify that the configuration is properly set
         // We can't easily test infinite retries without a very long-running test
@@ -319,7 +314,7 @@ mod tests {
     async fn test_custom_retry_duration() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let custom_duration = std::time::Duration::from_secs(600);
-        let retrying = RetryingObjectStore::with_duration(inner, custom_duration);
+        let retrying = RetryingObjectStore::new(inner, custom_duration);
         
         assert_eq!(retrying.retry_duration, custom_duration);
     }

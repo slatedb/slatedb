@@ -290,58 +290,20 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the retry duration for object store operations.
-    ///
-    /// This controls how long the underlying object store retries failed operations
-    /// before giving up. By default, operations are retried for up to 5 minutes.
-    /// You can set it to `Duration::MAX` for infinite retries.
-    ///
-    /// # Arguments
-    ///
-    /// * `retry_duration` - The maximum duration to retry operations
-    ///
-    /// # Returns
-    ///
-    /// The builder instance for chaining.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use slatedb::{Db, Error};
-    /// use slatedb::object_store::memory::InMemory;
-    /// use std::sync::Arc;
-    /// use std::time::Duration;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let object_store = Arc::new(InMemory::new());
-    ///     // Configure infinite retries (never give up)
-    ///     let db = Db::builder("test_db", object_store)
-    ///         .with_object_store_retry_duration(Duration::MAX)
-    ///         .build()
-    ///         .await?;
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn with_object_store_retry_duration(mut self, retry_duration: std::time::Duration) -> Self {
-        self.settings.object_store_retry_duration = retry_duration;
-        self
-    }
-
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_duration(
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
             self.main_object_store,
             self.settings.object_store_retry_duration,
         ));
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> = self
             .wal_object_store
             .map(|s| {
-                Arc::new(RetryingObjectStore::with_duration(
+                Arc::new(RetryingObjectStore::new(
                     s,
                     self.settings.object_store_retry_duration,
                 )) as Arc<dyn ObjectStore>
@@ -690,6 +652,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     options: GarbageCollectorOptions,
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
+    retry_duration: std::time::Duration,
 }
 
 impl<P: Into<Path>> GarbageCollectorBuilder<P> {
@@ -701,6 +664,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
+            retry_duration: std::time::Duration::from_secs(300), // Default 5 minutes
         }
     }
 
@@ -730,19 +694,25 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         self
     }
 
+    /// Sets the retry duration for object store operations in the garbage collector.
+    pub fn with_retry_duration(mut self, retry_duration: std::time::Duration) -> Self {
+        self.retry_duration = retry_duration;
+        self
+    }
+
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_duration(
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
             self.main_object_store,
-            std::time::Duration::from_secs(300), // Use default 5 minutes for GC
+            self.retry_duration,
         ));
         let retrying_wal_object_store = self
             .wal_object_store
             .map(|s| {
-                Arc::new(RetryingObjectStore::with_duration(
+                Arc::new(RetryingObjectStore::new(
                     s,
-                    std::time::Duration::from_secs(300), // Use default 5 minutes for GC
+                    self.retry_duration,
                 )) as Arc<dyn ObjectStore>
             });
         let manifest_store = Arc::new(ManifestStore::new(
@@ -782,6 +752,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     stat_registry: Arc<StatRegistry>,
     cancellation_token: CancellationToken,
     system_clock: Arc<dyn SystemClock>,
+    retry_duration: std::time::Duration,
 }
 
 #[allow(unused)]
@@ -797,6 +768,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             stat_registry: Arc::new(StatRegistry::new()),
             cancellation_token: CancellationToken::new(),
             system_clock: Arc::new(DefaultSystemClock::default()),
+            retry_duration: std::time::Duration::from_secs(300), // Default 5 minutes
         }
     }
 
@@ -846,12 +818,18 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the retry duration for object store operations in the compactor.
+    pub fn with_retry_duration(mut self, retry_duration: std::time::Duration) -> Self {
+        self.retry_duration = retry_duration;
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_duration(
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
             self.main_object_store,
-            std::time::Duration::from_secs(300), // Use default 5 minutes for compactor
+            self.retry_duration,
         ));
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
@@ -896,19 +874,23 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn test_with_object_store_retry_duration() {
+    async fn test_object_store_retry_duration_via_settings() {
         let object_store = Arc::new(InMemory::new());
         
-        // Test with infinite retries
+        // Test with infinite retries using settings
+        let mut settings = Settings::default();
+        settings.object_store_retry_duration = Duration::MAX;
         let builder = DbBuilder::new("test_db", object_store.clone())
-            .with_object_store_retry_duration(Duration::MAX);
+            .with_settings(settings);
         
         assert_eq!(builder.settings.object_store_retry_duration, Duration::MAX);
         
-        // Test with custom duration
+        // Test with custom duration using settings
         let custom_duration = Duration::from_secs(600);
+        let mut settings2 = Settings::default();
+        settings2.object_store_retry_duration = custom_duration;
         let builder = DbBuilder::new("test_db2", object_store)
-            .with_object_store_retry_duration(custom_duration);
+            .with_settings(settings2);
         
         assert_eq!(builder.settings.object_store_retry_duration, custom_duration);
     }
