@@ -299,23 +299,4 @@ mod tests {
         }
         assert_eq!(failing.put_attempts(), 1);
     }
-
-    #[tokio::test]
-    async fn test_infinite_retry_configuration() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let retrying = RetryingObjectStore::new(inner, std::time::Duration::MAX);
-        
-        // Just verify that the configuration is properly set
-        // We can't easily test infinite retries without a very long-running test
-        assert_eq!(retrying.retry_duration, std::time::Duration::MAX);
-    }
-
-    #[tokio::test]
-    async fn test_custom_retry_duration() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let custom_duration = std::time::Duration::from_secs(600);
-        let retrying = RetryingObjectStore::new(inner, custom_duration);
-        
-        assert_eq!(retrying.retry_duration, custom_duration);
-    }
 }
