@@ -759,7 +759,7 @@ impl Default for Settings {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
-            object_store_retry_duration: Duration::from_secs(300), // 5 minutes
+            object_store_retry_duration: Duration::from_secs(300),
             filter_bits_per_key: 10,
             default_ttl: None,
         }
