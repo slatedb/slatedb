@@ -26,12 +26,7 @@ impl RetryingObjectStore {
 
     #[inline]
     fn retry_builder(&self) -> ExponentialBuilder {
-        // If retry_duration is Duration::MAX, don't set a total delay limit (infinite retries)
-        if self.retry_duration == Duration::MAX {
-            ExponentialBuilder::default()
-        } else {
-            ExponentialBuilder::default().with_total_delay(Some(self.retry_duration))
-        }
+        ExponentialBuilder::default().with_total_delay(Some(self.retry_duration))
     }
 
     #[inline]
