@@ -290,16 +290,65 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the retry configuration for object store operations.
+    ///
+    /// This controls how the underlying object store retries failed operations.
+    /// By default, operations are retried for up to 5 minutes with exponential backoff.
+    /// You can configure infinite retries, different timeouts, or adjust the retry delays.
+    ///
+    /// # Arguments
+    ///
+    /// * `retry_config` - The retry configuration to use
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slatedb::retrying_object_store::RetryConfig;
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::memory::InMemory;
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store = Arc::new(InMemory::new());
+    ///     // Configure infinite retries (never give up)
+    ///     let db = Db::builder("test_db", object_store)
+    ///         .with_object_store_retry_config(RetryConfig::infinite())
+    ///         .build()
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn with_object_store_retry_config(
+        mut self,
+        retry_config: crate::retrying_object_store::RetryConfig,
+    ) -> Self {
+        self.settings.object_store_retry_config = retry_config;
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_config(
+            self.main_object_store,
+            self.settings.object_store_retry_config.clone(),
+        ));
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> = self
             .wal_object_store
-            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
+            .map(|s| {
+                Arc::new(RetryingObjectStore::with_config(
+                    s,
+                    self.settings.object_store_retry_config.clone(),
+                )) as Arc<dyn ObjectStore>
+            });
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
@@ -687,10 +736,18 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_config(
+            self.main_object_store,
+            crate::retrying_object_store::RetryConfig::default(),
+        ));
         let retrying_wal_object_store = self
             .wal_object_store
-            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
+            .map(|s| {
+                Arc::new(RetryingObjectStore::with_config(
+                    s,
+                    crate::retrying_object_store::RetryConfig::default(),
+                )) as Arc<dyn ObjectStore>
+            });
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
@@ -795,7 +852,10 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::with_config(
+            self.main_object_store,
+            crate::retrying_object_store::RetryConfig::default(),
+        ));
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),

@@ -4130,6 +4130,7 @@ mod tests {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
+            object_store_retry_config: crate::retrying_object_store::RetryConfig::default(),
             default_ttl: ttl,
         }
     }

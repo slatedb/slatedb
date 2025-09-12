@@ -10,22 +10,81 @@ use object_store::{
     GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
+use serde::{Deserialize, Serialize};
+
+/// Configuration for retry behavior in the RetryingObjectStore.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RetryConfig {
+    /// Maximum total time to retry operations before giving up.
+    /// If None, retries will continue indefinitely.
+    pub max_retry_duration: Option<Duration>,
+    
+    /// Initial delay between retry attempts.
+    pub initial_delay: Duration,
+    
+    /// Maximum delay between retry attempts.
+    pub max_delay: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            // Default to 5 minutes for backward compatibility
+            max_retry_duration: Some(Duration::from_secs(300)),
+            initial_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(60),
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Creates a RetryConfig that retries indefinitely.
+    pub fn infinite() -> Self {
+        Self {
+            max_retry_duration: None,
+            initial_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(60),
+        }
+    }
+    
+    /// Creates a RetryConfig with a specific maximum retry duration.
+    pub fn with_max_duration(max_duration: Duration) -> Self {
+        Self {
+            max_retry_duration: Some(max_duration),
+            initial_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(60),
+        }
+    }
+}
 
 /// A thin wrapper around an `ObjectStore` that retries transient errors with
-/// exponential backoff for up to 5 minutes.
+/// configurable exponential backoff.
 #[derive(Debug, Clone)]
 pub(crate) struct RetryingObjectStore {
     inner: Arc<dyn ObjectStore>,
+    retry_config: RetryConfig,
 }
 
 impl RetryingObjectStore {
     pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
-        Self { inner }
+        Self::with_config(inner, RetryConfig::default())
+    }
+    
+    pub fn with_config(inner: Arc<dyn ObjectStore>, retry_config: RetryConfig) -> Self {
+        Self { inner, retry_config }
     }
 
     #[inline]
-    fn retry_builder() -> ExponentialBuilder {
-        ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300)))
+    fn retry_builder(&self) -> ExponentialBuilder {
+        let mut builder = ExponentialBuilder::default()
+            .with_min_delay(self.retry_config.initial_delay)
+            .with_max_delay(self.retry_config.max_delay);
+            
+        if let Some(max_duration) = self.retry_config.max_retry_duration {
+            builder = builder.with_total_delay(Some(max_duration));
+        }
+        
+        builder
     }
 
     #[inline]
@@ -68,7 +127,7 @@ impl ObjectStore for RetryingObjectStore {
             // Options and location must be owned per-attempt.
             self.inner.get_opts(location, options.clone()).await
         })
-        .retry(Self::retry_builder())
+        .retry(self.retry_builder())
         .notify(Self::notify)
         .when(Self::should_retry)
         .await
@@ -76,7 +135,7 @@ impl ObjectStore for RetryingObjectStore {
 
     async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
         (|| async { self.inner.head(location).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -93,7 +152,7 @@ impl ObjectStore for RetryingObjectStore {
                 .put_opts(location, payload.clone(), opts.clone())
                 .await
         })
-        .retry(Self::retry_builder())
+        .retry(self.retry_builder())
         .notify(Self::notify)
         .when(Self::should_retry)
         .await
@@ -104,7 +163,7 @@ impl ObjectStore for RetryingObjectStore {
         location: &Path,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         (|| async { self.inner.put_multipart(location).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -116,7 +175,7 @@ impl ObjectStore for RetryingObjectStore {
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         (|| async { self.inner.put_multipart_opts(location, opts.clone()).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -124,7 +183,7 @@ impl ObjectStore for RetryingObjectStore {
 
     async fn delete(&self, location: &Path) -> object_store::Result<()> {
         (|| async { self.inner.delete(location).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -146,7 +205,7 @@ impl ObjectStore for RetryingObjectStore {
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
         (|| async { self.inner.list_with_delimiter(prefix).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -154,7 +213,7 @@ impl ObjectStore for RetryingObjectStore {
 
     async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         (|| async { self.inner.copy(from, to).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -162,7 +221,7 @@ impl ObjectStore for RetryingObjectStore {
 
     async fn rename(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         (|| async { self.inner.rename(from, to).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -170,7 +229,7 @@ impl ObjectStore for RetryingObjectStore {
 
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         (|| async { self.inner.copy_if_not_exists(from, to).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -178,7 +237,7 @@ impl ObjectStore for RetryingObjectStore {
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         (|| async { self.inner.rename_if_not_exists(from, to).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .notify(Self::notify)
             .when(Self::should_retry)
             .await
@@ -187,13 +246,14 @@ impl ObjectStore for RetryingObjectStore {
 
 #[cfg(test)]
 mod tests {
-    use super::RetryingObjectStore;
+    use super::{RetryConfig, RetryingObjectStore};
     use crate::test_utils::FlakyObjectStore;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_put_opts_retries_transient_until_success() {
@@ -216,6 +276,70 @@ mod tests {
 
         let got = retrying.get(&path).await.unwrap();
         assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn test_retry_config_infinite() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
+        let retry_config = RetryConfig::infinite();
+        let retrying = RetryingObjectStore::with_config(flaky.clone(), retry_config);
+
+        let path = Path::from("/data/obj");
+        retrying
+            .put_opts(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello")),
+                PutOptions::default(),
+            )
+            .await
+            .expect("put should succeed after retries");
+
+        // 1 failure + 1 success
+        assert_eq!(flaky.put_attempts(), 2);
+
+        let got = retrying.get(&path).await.unwrap();
+        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn test_retry_config_custom_duration() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
+        let retry_config = RetryConfig::with_max_duration(Duration::from_secs(1));
+        let retrying = RetryingObjectStore::with_config(flaky.clone(), retry_config);
+
+        let path = Path::from("/data/obj");
+        retrying
+            .put_opts(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello")),
+                PutOptions::default(),
+            )
+            .await
+            .expect("put should succeed after retries");
+
+        // 1 failure + 1 success
+        assert_eq!(flaky.put_attempts(), 2);
+
+        let got = retrying.get(&path).await.unwrap();
+        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"hello"));
+    }
+
+    #[test]
+    fn test_retry_config_default() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_retry_duration, Some(Duration::from_secs(300)));
+        assert_eq!(config.initial_delay, Duration::from_millis(100));
+        assert_eq!(config.max_delay, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_retry_config_infinite_values() {
+        let config = RetryConfig::infinite();
+        assert_eq!(config.max_retry_duration, None);
+        assert_eq!(config.initial_delay, Duration::from_millis(100));
+        assert_eq!(config.max_delay, Duration::from_secs(60));
     }
 
     #[tokio::test]

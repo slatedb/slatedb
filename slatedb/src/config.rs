@@ -562,6 +562,9 @@ pub struct Settings {
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
 
+    /// Configuration for retry behavior in the object store operations.
+    pub object_store_retry_config: crate::retrying_object_store::RetryConfig,
+
     /// The default time-to-live (TTL) for insertions (note that re-inserting a key
     /// with any value will update the TTL to use the default_ttl)
     ///
@@ -594,6 +597,7 @@ impl std::fmt::Debug for Settings {
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("filter_bits_per_key", &self.filter_bits_per_key)
+            .field("object_store_retry_config", &self.object_store_retry_config)
             .field("default_ttl", &self.default_ttl)
             .finish()
     }
@@ -752,6 +756,7 @@ impl Default for Settings {
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
+            object_store_retry_config: crate::retrying_object_store::RetryConfig::default(),
             filter_bits_per_key: 10,
             default_ttl: None,
         }
