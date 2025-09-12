@@ -19,14 +19,14 @@ use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompacti
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
-use crate::dispatcher::{MessageFactory, MessageHandler};
+use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::rand::DbRand;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::IdGenerator;
+use crate::utils::{IdGenerator, WatchableOnceCell};
 
 pub trait CompactionSchedulerSupplier: Send + Sync {
     fn compaction_scheduler(
@@ -107,6 +107,7 @@ impl CompactionProgressTracker {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum CompactorMessage {
     CompactionFinished {
         id: Uuid,
@@ -154,9 +155,11 @@ pub(crate) struct Compactor {
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    compactor_runtime: Handle,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    error_state: WatchableOnceCell<SlateDBError>,
     cancellation_token: CancellationToken,
 }
 
@@ -167,9 +170,11 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+        compactor_runtime: Handle,
         rand: Arc<DbRand>,
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
+        error_state: WatchableOnceCell<SlateDBError>,
         cancellation_token: CancellationToken,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
@@ -178,10 +183,12 @@ impl Compactor {
             table_store,
             options: Arc::new(options),
             scheduler_supplier,
+            compactor_runtime,
             rand,
             stats,
-            cancellation_token,
             system_clock,
+            error_state,
+            cancellation_token,
         }
     }
 
@@ -191,26 +198,21 @@ impl Compactor {
     /// runs on the provided runtime. This is to keep long-running compaction tasks
     /// from blocking the main runtime.
     ///
-    /// ## Arguments
-    /// * `compactor_runtime` - The runtime to use for running the compactor executor.
-    ///
     /// ## Returns
     /// * `Result<(), SlateDBError>` - The result of the compaction event loop.
-    pub async fn run_async_task(&self, compactor_runtime: Handle) -> Result<(), SlateDBError> {
-        let mut db_runs_log_ticker = self.system_clock.ticker(Duration::from_secs(10));
-        let mut manifest_poll_ticker = self.system_clock.ticker(self.options.poll_interval);
-        let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
+    pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let executor = Arc::new(TokioCompactionExecutor::new(
-            compactor_runtime,
+            self.compactor_runtime.clone(),
             self.options.clone(),
-            worker_tx,
+            tx,
             self.table_store.clone(),
             self.rand.clone(),
             self.stats.clone(),
             self.system_clock.clone(),
         ));
-        let mut handler = CompactorEventHandler::new(
+        let handler = CompactorEventHandler::new(
             self.manifest_store.clone(),
             self.options.clone(),
             scheduler,
@@ -220,32 +222,14 @@ impl Compactor {
             self.system_clock.clone(),
         )
         .await?;
-
-        // Stop the loop when the executor is shut down *and* all remaining
-        // `worker_rx` messages have been drained.
-        while !(self.cancellation_token.is_cancelled() && worker_rx.is_empty()) {
-            tokio::select! {
-                biased;
-                // check the cancellation token first to avoid starting new compaction tasks when the runtime is shutting down
-                _ = self.cancellation_token.cancelled() => {
-                    // Stop the executor. Don't return because there might
-                    // still be messages in `worker_rx`. Let the loop continue
-                    // to drain them until empty.
-                    handler.stop_executor().await?;
-                }
-                _ = db_runs_log_ticker.tick() => {
-                    handler.handle_log_ticker();
-                }
-                _ = manifest_poll_ticker.tick() => {
-                    handler.handle_ticker().await;
-                }
-                msg = worker_rx.recv() => {
-                    handler.handle(msg.expect("fatal error receiving worker msg")).await?;
-                }
-            }
-        }
-
-        Ok(())
+        let mut dispatcher = MessageDispatcher::new(
+            Box::new(handler),
+            rx,
+            self.system_clock.clone(),
+            self.cancellation_token.clone(),
+            self.error_state.clone(),
+        );
+        dispatcher.run().await
     }
 }
 
