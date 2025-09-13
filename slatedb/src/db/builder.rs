@@ -481,8 +481,12 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner.wal_buffer.start_background().await?;
         };
 
-        let memtable_flush_task =
-            inner.spawn_memtable_flush_task(manifest, memtable_flush_rx, &tokio_handle);
+        let memtable_flush_task = inner.spawn_memtable_flush_task(
+            manifest,
+            memtable_flush_rx,
+            &tokio_handle,
+            self.cancellation_token.clone(),
+        );
         let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
 
         // Not to pollute the cache during compaction or GC

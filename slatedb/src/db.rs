@@ -671,14 +671,6 @@ impl Db {
             .expect("failed to close WAL buffer");
 
         // Shutdown the memtable flush thread.
-        self.inner
-            .memtable_flush_notifier
-            .send_safely(
-                self.inner.state.read().error_reader(),
-                MemtableFlushMsg::Shutdown,
-            )
-            .ok();
-
         if let Some(memtable_flush_task) = {
             let mut memtable_flush_task = self.memtable_flush_task.lock();
             memtable_flush_task.take()
