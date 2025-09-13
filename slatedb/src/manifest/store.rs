@@ -14,9 +14,10 @@ use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::utils;
+use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
-use log::{debug, warn};
+use log::debug;
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore};
@@ -26,6 +27,367 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+
+// Generic codec to serialize/deserialize versioned records stored as files
+pub(crate) trait RecordCodec<T>: Send + Sync {
+    fn encode(&self, value: &T) -> Bytes;
+    fn decode(&self, bytes: &[u8]) -> Result<T, SlateDBError>;
+}
+
+// Adapter: use the existing FlatBufferManifestCodec as a RecordCodec for Manifest
+impl RecordCodec<Manifest> for FlatBufferManifestCodec {
+    fn encode(&self, value: &Manifest) -> Bytes {
+        // Delegate to ManifestCodec impl
+        ManifestCodec::encode(self, value)
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<Manifest, SlateDBError> {
+        // Existing codec expects &Bytes; wrap without changing behavior
+        let b = Bytes::copy_from_slice(bytes);
+        ManifestCodec::decode(self, &b)
+    }
+}
+
+// Generic, versioned store for records persisted as numbered files under a directory
+pub(crate) struct RecordStore<T> {
+    object_store: Box<dyn TransactionalObjectStore>,
+    codec: Box<dyn RecordCodec<T>>,
+    file_suffix: &'static str,
+    clock: Arc<dyn SystemClock>,
+}
+
+impl<T> RecordStore<T> {
+    pub(crate) fn new(
+        root_path: &Path,
+        object_store: Arc<dyn ObjectStore>,
+        clock: Arc<dyn SystemClock>,
+        subdir: &str,
+        file_suffix: &'static str,
+        codec: Box<dyn RecordCodec<T>>,
+    ) -> Self {
+        Self {
+            object_store: Box::new(DelegatingTransactionalObjectStore::new(
+                root_path.child(subdir),
+                object_store,
+            )),
+            codec,
+            file_suffix,
+            clock,
+        }
+    }
+
+    fn path_for(&self, id: u64) -> Path {
+        Path::from(format!("{:020}.{}", id, self.file_suffix))
+    }
+
+    fn parse_id(&self, path: &Path) -> Result<u64, SlateDBError> {
+        match path.extension() {
+            Some(ext) if ext == self.file_suffix => path
+                .filename()
+                .expect("invalid filename")
+                .split('.')
+                .next()
+                .ok_or_else(|| InvalidDBState)?
+                .parse()
+                .map_err(|_| InvalidDBState),
+            _ => Err(InvalidDBState),
+        }
+    }
+
+    pub(crate) async fn write(&self, id: u64, value: &T) -> Result<(), SlateDBError> {
+        let path = self.path_for(id);
+        self.object_store
+            .put_if_not_exists(&path, self.codec.encode(value))
+            .await
+            .map_err(|err| {
+                if let AlreadyExists { path: _, source: _ } = err {
+                    SlateDBError::ManifestVersionExists
+                } else {
+                    SlateDBError::from(err)
+                }
+            })?;
+        Ok(())
+    }
+
+    pub(crate) async fn try_read(&self, id: u64) -> Result<Option<T>, SlateDBError> {
+        let path = self.path_for(id);
+        match self.object_store.get(&path).await {
+            Ok(obj) => match obj.bytes().await {
+                Ok(bytes) => self.codec.decode(bytes.as_ref()).map(Some),
+                Err(e) => Err(SlateDBError::from(e)),
+            },
+            Err(e) => match e {
+                Error::NotFound { .. } => Ok(None),
+                _ => Err(SlateDBError::from(e)),
+            },
+        }
+    }
+
+    pub(crate) async fn try_read_latest(&self) -> Result<Option<(u64, T)>, SlateDBError> {
+        let base = &Path::from("/");
+        let mut files_stream = self.object_store.list(Some(base));
+        let mut latest: Option<(u64, T)> = None;
+        let mut max_id: u64 = 0;
+        while let Some(file) = files_stream
+            .next()
+            .await
+            .transpose()
+            .map_err(SlateDBError::from)?
+        {
+            if let Ok(id) = self.parse_id(&file.location) {
+                if id >= max_id {
+                    if let Some(val) = self.try_read(id).await? {
+                        max_id = id;
+                        latest = Some((id, val));
+                    }
+                }
+            }
+        }
+        Ok(latest)
+    }
+
+    // List files for this record type in an id range
+    pub(crate) async fn list<R: RangeBounds<u64>>(
+        &self,
+        id_range: R,
+    ) -> Result<Vec<GenericFileMetadata>, SlateDBError> {
+        let base = &Path::from("/");
+        let mut files_stream = self.object_store.list(Some(base));
+        let mut items = Vec::new();
+        while let Some(file) = files_stream
+            .next()
+            .await
+            .transpose()
+            .map_err(SlateDBError::from)?
+        {
+            match self.parse_id(&file.location) {
+                Ok(id) if id_range.contains(&id) => items.push(GenericFileMetadata {
+                    id,
+                    location: file.location,
+                    last_modified: file.last_modified,
+                    size: file.size as u32,
+                }),
+                _ => {}
+            }
+        }
+        items.sort_by_key(|m| m.id);
+        Ok(items)
+    }
+
+    // Delete a specific versioned file (no additional validation)
+    pub(crate) async fn delete(&self, id: u64) -> Result<(), SlateDBError> {
+        let path = self.path_for(id);
+        debug!("deleting manifest [id={}]", id);
+        self.object_store
+            .delete(&path)
+            .await
+            .map_err(SlateDBError::from)
+    }
+}
+
+// Generic file metadata for versioned records
+#[derive(Debug)]
+pub(crate) struct GenericFileMetadata {
+    pub(crate) id: u64,
+    pub(crate) location: Path,
+    pub(crate) last_modified: chrono::DateTime<Utc>,
+    #[allow(dead_code)]
+    pub(crate) size: u32,
+}
+
+// Generic stored record with optimistic versioned updates
+#[derive(Clone)]
+pub(crate) struct StoredRecord<T> {
+    id: u64,
+    record: T,
+    store: Arc<RecordStore<T>>,
+}
+
+impl<T: Clone> StoredRecord<T> {
+    pub(crate) async fn init(store: Arc<RecordStore<T>>, value: T) -> Result<Self, SlateDBError> {
+        store.write(1, &value).await?;
+        Ok(Self {
+            id: 1,
+            record: value,
+            store,
+        })
+    }
+
+    pub(crate) async fn try_load_latest(
+        store: Arc<RecordStore<T>>,
+    ) -> Result<Option<Self>, SlateDBError> {
+        if let Some((id, record)) = store.try_read_latest().await? {
+            Ok(Some(Self { id, record, store }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) async fn load_latest(store: Arc<RecordStore<T>>) -> Result<Self, SlateDBError> {
+        Self::try_load_latest(store)
+            .await?
+            .ok_or(LatestManifestMissing)
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+    pub(crate) fn record(&self) -> &T {
+        &self.record
+    }
+
+    pub(crate) fn prepare_dirty(&self) -> DirtyRecord<T> {
+        DirtyRecord {
+            id: self.id,
+            value: self.record.clone(),
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        self.id + 1
+    }
+
+    pub(crate) async fn refresh(&mut self) -> Result<&T, SlateDBError> {
+        let Some((id, new_val)) = self.store.try_read_latest().await? else {
+            return Err(InvalidDBState);
+        };
+        self.id = id;
+        self.record = new_val;
+        Ok(&self.record)
+    }
+
+    pub(crate) async fn update_dirty(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
+        if dirty.id != self.id {
+            return Err(ManifestVersionExists);
+        }
+        let next = self.next_id();
+        self.store.write(next, &dirty.value).await?;
+        self.id = next;
+        self.record = dirty.value;
+        Ok(())
+    }
+
+    pub(crate) async fn maybe_apply_update<F>(&mut self, mutator: F) -> Result<(), SlateDBError>
+    where
+        F: Fn(&StoredRecord<T>) -> Result<Option<DirtyRecord<T>>, SlateDBError>,
+    {
+        loop {
+            let Some(dirty) = mutator(self)? else {
+                return Ok(());
+            };
+            match self.update_dirty(dirty).await {
+                Err(SlateDBError::ManifestVersionExists) => {
+                    self.refresh().await?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+                Ok(()) => return Ok(()),
+            }
+        }
+    }
+}
+
+// Local mutable view of a versioned record
+#[derive(Clone, Debug)]
+pub(crate) struct DirtyRecord<T> {
+    id: u64,
+    value: T,
+}
+
+impl<T> DirtyRecord<T> {
+    #[allow(dead_code)]
+    fn id(&self) -> u64 {
+        self.id
+    }
+    #[allow(dead_code)]
+    fn into_value(self) -> T {
+        self.value
+    }
+}
+
+// Generic fenceable wrapper using epoch getters/setters
+pub(crate) struct FenceableRecord<T: Clone> {
+    stored: StoredRecord<T>,
+    local_epoch: u64,
+    get_epoch: fn(&T) -> u64,
+    set_epoch: fn(&mut T, u64),
+}
+
+impl<T: Clone + Send + Sync> FenceableRecord<T> {
+    pub(crate) async fn init(
+        mut stored: StoredRecord<T>,
+        record_update_timeout: Duration,
+        system_clock: Arc<dyn SystemClock>,
+        get_epoch: fn(&T) -> u64,
+        set_epoch: fn(&mut T, u64),
+    ) -> Result<Self, SlateDBError> {
+        utils::timeout(
+            system_clock,
+            record_update_timeout,
+            "record update",
+            async {
+                loop {
+                    let local_epoch = get_epoch(stored.record()) + 1;
+                    let mut new_val = stored.record().clone();
+                    set_epoch(&mut new_val, local_epoch);
+                    let dirty = DirtyRecord {
+                        id: stored.id(),
+                        value: new_val,
+                    };
+                    match stored.update_dirty(dirty).await {
+                        Err(ManifestVersionExists) => {
+                            stored.refresh().await?;
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                        Ok(()) => {
+                            return Ok(Self {
+                                stored,
+                                local_epoch,
+                                get_epoch,
+                                set_epoch,
+                            })
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .map_err(|_| SlateDBError::Timeout {
+            op: "record update",
+            backoff: Duration::from_secs(1),
+        })
+    }
+
+    pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
+        self.stored.refresh().await?;
+        self.check_epoch()
+    }
+
+    pub(crate) fn prepare_dirty(&self) -> Result<DirtyRecord<T>, SlateDBError> {
+        self.check_epoch()?;
+        Ok(DirtyRecord {
+            id: self.stored.id(),
+            value: self.stored.record().clone(),
+        })
+    }
+
+    pub(crate) async fn update_dirty(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
+        self.check_epoch()?;
+        self.stored.update_dirty(dirty).await
+    }
+
+    fn check_epoch(&self) -> Result<(), SlateDBError> {
+        let stored_epoch = (self.get_epoch)(self.stored.record());
+        if self.local_epoch < stored_epoch {
+            return Err(SlateDBError::Fenced);
+        }
+        if self.local_epoch > stored_epoch {
+            panic!("the stored epoch is lower than the local epoch");
+        }
+        Ok(())
+    }
+}
 
 /// Represents a local view of the manifest that is in the process of being updated
 #[derive(Clone, Debug)]
@@ -118,7 +480,7 @@ impl FenceableManifest {
             "manifest update",
             async {
                 loop {
-                    let local_epoch = stored_epoch(&stored_manifest.manifest) + 1;
+                    let local_epoch = stored_epoch(stored_manifest.manifest()) + 1;
                     let mut manifest = stored_manifest.prepare_dirty();
                     set_epoch(&mut manifest, local_epoch);
                     match stored_manifest.update_manifest(manifest).await {
@@ -208,7 +570,7 @@ impl FenceableManifest {
                 Self::check_epoch_against_manifest(
                     self.local_epoch,
                     self.stored_epoch,
-                    &sm.manifest,
+                    sm.manifest(),
                 )?;
                 mutator(sm)
             })
@@ -219,7 +581,7 @@ impl FenceableManifest {
         Self::check_epoch_against_manifest(
             self.local_epoch,
             self.stored_epoch,
-            &self.stored_manifest.manifest,
+            self.stored_manifest.manifest(),
         )
     }
 
@@ -251,15 +613,23 @@ pub(crate) struct StoredManifest {
     id: u64,
     manifest: Manifest,
     manifest_store: Arc<ManifestStore>,
+    inner: StoredRecord<Manifest>,
 }
 
 impl StoredManifest {
     async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
+        // Preserve original behavior: write via ManifestStore (object-store path and semantics)
         store.write_manifest(1, &manifest).await?;
+        let inner = StoredRecord {
+            id: 1,
+            record: manifest.clone(),
+            store: Arc::clone(&store.inner),
+        };
         Ok(Self {
             id: 1,
             manifest,
-            manifest_store: store,
+            manifest_store: Arc::clone(&store),
+            inner,
         })
     }
 
@@ -293,10 +663,16 @@ impl StoredManifest {
         let Some((id, manifest)) = store.try_read_latest_manifest().await? else {
             return Ok(None);
         };
+        let inner = StoredRecord {
+            id,
+            record: manifest.clone(),
+            store: Arc::clone(&store.inner),
+        };
         Ok(Some(Self {
             id,
             manifest,
-            manifest_store: store,
+            manifest_store: Arc::clone(&store),
+            inner,
         }))
     }
 
@@ -328,8 +704,10 @@ impl StoredManifest {
         let Some((id, manifest)) = self.manifest_store.try_read_latest_manifest().await? else {
             return Err(InvalidDBState);
         };
-        self.manifest = manifest;
+        self.inner.id = id;
+        self.inner.record = manifest.clone();
         self.id = id;
+        self.manifest = manifest;
         Ok(&self.manifest)
     }
 
@@ -457,7 +835,7 @@ impl StoredManifest {
         checkpoint_id: Uuid,
         new_lifetime: Duration,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.manifest_store.clock.clone();
+        let clock = self.inner.store.clock.clone();
         self.maybe_apply_manifest_update(|stored_manifest| {
             let mut updated_manifest = stored_manifest.prepare_dirty();
             let checkpoint = updated_manifest
@@ -487,9 +865,12 @@ impl StoredManifest {
         }
         let next_id = self.next_id();
         let manifest = manifest.into();
+        // Preserve original behavior by writing through ManifestStore
         self.manifest_store
             .write_manifest(next_id, &manifest)
             .await?;
+        self.inner.record = manifest.clone();
+        self.inner.id = next_id;
         self.manifest = manifest;
         self.id = next_id;
         Ok(())
@@ -544,10 +925,8 @@ where
 }
 
 pub(crate) struct ManifestStore {
-    object_store: Box<dyn TransactionalObjectStore>,
-    codec: Box<dyn ManifestCodec>,
-    manifest_suffix: &'static str,
-    clock: Arc<dyn SystemClock>,
+    inner: Arc<RecordStore<Manifest>>,
+    pub(crate) clock: Arc<dyn SystemClock>,
 }
 
 impl ManifestStore {
@@ -556,39 +935,19 @@ impl ManifestStore {
         object_store: Arc<dyn ObjectStore>,
         clock: Arc<dyn SystemClock>,
     ) -> Self {
-        Self {
-            object_store: Box::new(DelegatingTransactionalObjectStore::new(
-                root_path.child("manifest"),
-                object_store,
-            )),
-            codec: Box::new(FlatBufferManifestCodec {}),
-            manifest_suffix: "manifest",
-            clock,
-        }
+        let inner = Arc::new(RecordStore::new(
+            root_path,
+            object_store,
+            clock.clone(),
+            "manifest",
+            "manifest",
+            Box::new(FlatBufferManifestCodec {}),
+        ));
+        Self { inner, clock }
     }
 
     async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
-        let manifest_path = &self.get_manifest_path(id);
-        self.write_manifest_in_object_store(manifest_path, manifest)
-            .await
-    }
-
-    async fn write_manifest_in_object_store(
-        &self,
-        path: &Path,
-        manifest: &Manifest,
-    ) -> Result<(), SlateDBError> {
-        self.object_store
-            .put_if_not_exists(path, self.codec.encode(manifest))
-            .await
-            .map_err(|err| {
-                if let AlreadyExists { path: _, source: _ } = err {
-                    SlateDBError::ManifestVersionExists
-                } else {
-                    SlateDBError::from(err)
-                }
-            })?;
-        Ok(())
+        self.inner.write(id, manifest).await
     }
 
     /// Delete a manifest from the object store.
@@ -607,10 +966,8 @@ impl ManifestStore {
             return Err(SlateDBError::InvalidDeletion);
         }
 
-        let manifest_path = &self.get_manifest_path(id);
-        debug!("deleting manifest [manifest_path={}]", manifest_path);
-        self.object_store.delete(manifest_path).await?;
-        Ok(())
+        debug!("deleting manifest [id={}]", id);
+        self.inner.delete(id).await
     }
 
     /// Read a manifest from the object store. The last element in an unbounded
@@ -621,33 +978,17 @@ impl ManifestStore {
         &self,
         id_range: R,
     ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
-        let manifest_path = &Path::from("/");
-        let mut files_stream = self.object_store.list(Some(manifest_path));
-        let mut manifests = Vec::new();
-
-        while let Some(file) = match files_stream.next().await.transpose() {
-            Ok(file) => file,
-            Err(e) => return Err(SlateDBError::from(e)),
-        } {
-            match self.parse_id(&file.location, "manifest") {
-                Ok(id) if id_range.contains(&id) => {
-                    manifests.push(ManifestFileMetadata {
-                        id,
-                        location: file.location,
-                        last_modified: file.last_modified,
-                        size: file.size as u32,
-                    });
-                }
-                Err(_) => warn!(
-                    "unknown file in manifest directory [location={:?}]",
-                    file.location
-                ),
-                _ => {}
-            }
+        let files = self.inner.list(id_range).await?;
+        let mut out = Vec::with_capacity(files.len());
+        for f in files {
+            out.push(ManifestFileMetadata {
+                id: f.id,
+                location: f.location,
+                last_modified: f.last_modified,
+                size: f.size,
+            });
         }
-
-        manifests.sort_by_key(|m| m.id);
-        Ok(manifests)
+        Ok(out)
     }
 
     /// Active manifests include the latest manifest and all manifests referenced
@@ -675,14 +1016,7 @@ impl ManifestStore {
     pub(crate) async fn try_read_latest_manifest(
         &self,
     ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
-        let manifest_metadatas_list = self.list_manifests(..).await?;
-        let latest_manifest = if let Some(metadata) = manifest_metadatas_list.last() {
-            let manifest = self.try_read_manifest(metadata.id).await?;
-            manifest.map(|manifest| (metadata.id, manifest))
-        } else {
-            None
-        };
-        Ok(latest_manifest)
+        Ok(self.inner.try_read_latest().await?)
     }
 
     pub(crate) async fn read_latest_manifest(&self) -> Result<(u64, Manifest), SlateDBError> {
@@ -695,20 +1029,7 @@ impl ManifestStore {
         &self,
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
-        let manifest_path = &self.get_manifest_path(id);
-        match self.object_store.get(manifest_path).await {
-            Ok(manifest) => match manifest.bytes().await {
-                Ok(bytes) => {
-                    let manifest = self.codec.decode(&bytes)?;
-                    Ok(Some(manifest))
-                }
-                Err(e) => Err(SlateDBError::from(e)),
-            },
-            Err(e) => match e {
-                Error::NotFound { .. } => Ok(None),
-                _ => Err(SlateDBError::from(e)),
-            },
-        }
+        self.inner.try_read(id).await
     }
 
     pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {
@@ -729,23 +1050,7 @@ impl ManifestStore {
         Ok(())
     }
 
-    fn parse_id(&self, path: &Path, expected_extension: &str) -> Result<u64, SlateDBError> {
-        match path.extension() {
-            Some(ext) if ext == expected_extension => path
-                .filename()
-                .expect("invalid filename")
-                .split('.')
-                .next()
-                .ok_or_else(|| InvalidDBState)?
-                .parse()
-                .map_err(|_| InvalidDBState),
-            _ => Err(InvalidDBState),
-        }
-    }
-
-    fn get_manifest_path(&self, id: u64) -> Path {
-        Path::from(format!("{:020}.{}", id, self.manifest_suffix))
-    }
+    // parse_id and get_manifest_path no longer needed; RecordStore handles naming.
 }
 
 #[cfg(test)]
