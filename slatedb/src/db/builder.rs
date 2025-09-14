@@ -487,7 +487,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             &tokio_handle,
             self.cancellation_token.clone(),
         );
-        let write_task = inner.spawn_write_task(write_rx, &tokio_handle);
+        let write_task =
+            inner.spawn_write_task(write_rx, &tokio_handle, self.cancellation_token.clone());
 
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
