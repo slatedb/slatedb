@@ -17,7 +17,7 @@ use crate::utils;
 use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
-use log::debug;
+use log::{debug, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore};
@@ -156,19 +156,23 @@ impl<T> RecordStore<T> {
         let base = &Path::from("/");
         let mut files_stream = self.object_store.list(Some(base));
         let mut items = Vec::new();
-        while let Some(file) = files_stream
-            .next()
-            .await
-            .transpose()
-            .map_err(SlateDBError::from)?
-        {
+        while let Some(file) = match files_stream.next().await.transpose() {
+            Ok(file) => file,
+            Err(e) => return Err(SlateDBError::from(e)),
+        } {
             match self.parse_id(&file.location) {
-                Ok(id) if id_range.contains(&id) => items.push(GenericFileMetadata {
-                    id,
-                    location: file.location,
-                    last_modified: file.last_modified,
-                    size: file.size as u32,
-                }),
+                Ok(id) if id_range.contains(&id) => {
+                    items.push(GenericFileMetadata {
+                        id,
+                        location: file.location,
+                        last_modified: file.last_modified,
+                        size: file.size as u32,
+                    });
+                }
+                Err(_) => warn!(
+                    "unknown file in manifest directory [location={:?}]",
+                    file.location
+                ),
                 _ => {}
             }
         }
