@@ -349,6 +349,7 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
         self.stored.update_dirty(dirty).await
     }
 
+    #[allow(clippy::panic)]
     fn check_epoch(&self) -> Result<(), SlateDBError> {
         let stored_epoch = (self.get_epoch)(self.stored.record());
         if self.local_epoch < stored_epoch {
@@ -991,7 +992,7 @@ impl ManifestStore {
     pub(crate) async fn try_read_latest_manifest(
         &self,
     ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
-        Ok(self.inner.try_read_latest().await?)
+        self.inner.try_read_latest().await
     }
 
     pub(crate) async fn read_latest_manifest(&self) -> Result<(u64, Manifest), SlateDBError> {
