@@ -215,34 +215,11 @@ impl<T: Clone> StoredRecord<T> {
         })
     }
 
-    pub(crate) async fn try_load_latest(
-        store: Arc<RecordStore<T>>,
-    ) -> Result<Option<Self>, SlateDBError> {
-        if let Some((id, record)) = store.try_read_latest().await? {
-            Ok(Some(Self { id, record, store }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub(crate) async fn load_latest(store: Arc<RecordStore<T>>) -> Result<Self, SlateDBError> {
-        Self::try_load_latest(store)
-            .await?
-            .ok_or(LatestManifestMissing)
-    }
-
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
     pub(crate) fn record(&self) -> &T {
         &self.record
-    }
-
-    pub(crate) fn prepare_dirty(&self) -> DirtyRecord<T> {
-        DirtyRecord {
-            id: self.id,
-            value: self.record.clone(),
-        }
     }
 
     fn next_id(&self) -> u64 {
@@ -312,6 +289,7 @@ pub(crate) struct FenceableRecord<T: Clone> {
     stored: StoredRecord<T>,
     local_epoch: u64,
     get_epoch: fn(&T) -> u64,
+    #[allow(dead_code)]
     set_epoch: fn(&mut T, u64),
 }
 
@@ -364,14 +342,6 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
         self.stored.refresh().await?;
         self.check_epoch()
-    }
-
-    pub(crate) fn prepare_dirty(&self) -> Result<DirtyRecord<T>, SlateDBError> {
-        self.check_epoch()?;
-        Ok(DirtyRecord {
-            id: self.stored.id(),
-            value: self.stored.record().clone(),
-        })
     }
 
     pub(crate) async fn update_dirty(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
@@ -482,16 +452,6 @@ impl FenceableManifest {
         })
     }
 
-    async fn init(
-        _stored_manifest: StoredManifest,
-        _stored_epoch: fn(&Manifest) -> u64,
-        _set_epoch: fn(&mut DirtyManifest, u64),
-        _manifest_update_timeout: Duration,
-        _system_clock: Arc<dyn SystemClock>,
-    ) -> Result<Self, SlateDBError> {
-        unreachable!("use init_writer or init_compactor")
-    }
-
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
         self.stored_manifest.refresh().await?;
         self.check_epoch()
@@ -509,7 +469,10 @@ impl FenceableManifest {
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
         self.check_epoch()?;
-        let dirty = DirtyRecord { id: manifest.id(), value: Manifest::from(manifest) };
+        let dirty = DirtyRecord {
+            id: manifest.id(),
+            value: Manifest::from(manifest),
+        };
         self.stored_manifest.update_dirty(dirty).await
     }
 
@@ -713,49 +676,33 @@ impl StoredManifest {
         self.id + 1
     }
 
-    /// Creates a new checkpoint from the latest manifest state, and
-    /// applies it to db_state
-    fn apply_new_checkpoint_to_db_state(
-        &self,
-        checkpoint_id: Uuid,
-        options: &CheckpointOptions,
-    ) -> Result<DirtyManifest, SlateDBError> {
-        let checkpoint = self.new_checkpoint(checkpoint_id, options)?;
-        let mut dirty = self.prepare_dirty();
-        dirty.core.checkpoints.push(checkpoint);
-        Ok(dirty)
-    }
-
-    /// Create a new checkpoint from the latest manifest state. This only creates
-    /// the checkpoint struct, but does not persist it in the manifest.
-    pub(crate) fn new_checkpoint(
-        &self,
+    fn new_checkpoint(
+        manifest: &Manifest,
+        current_id: u64,
+        clock: &Arc<dyn SystemClock>,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let expire_time = options
-            .lifetime
-            .map(|l| self.inner.store.clock.now() + l);
-        let db_state = self.db_state();
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
-                let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
+                let Some(source_checkpoint) = manifest.core.find_checkpoint(source_checkpoint_id)
+                else {
                     return Err(CheckpointMissing(source_checkpoint_id));
                 };
                 source_checkpoint.manifest_id
             }
             None => {
-                if !db_state.initialized {
+                if !manifest.core.initialized {
                     return Err(InvalidDBState);
                 }
-                self.next_id()
+                current_id + 1
             }
         };
         Ok(Checkpoint {
             id: checkpoint_id,
             manifest_id,
-            expire_time,
-            create_time: self.inner.store.clock.now(),
+            expire_time: options.lifetime.map(|l| clock.now() + l),
+            create_time: clock.now(),
         })
     }
 
@@ -768,28 +715,13 @@ impl StoredManifest {
         self.inner
             .maybe_apply_update(|sr| {
                 let mut new_val = sr.record().clone();
-                let db_state = &mut new_val.core;
-                let manifest_id = match options.source {
-                    Some(source_checkpoint_id) => {
-                        let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
-                            return Err(CheckpointMissing(source_checkpoint_id));
-                        };
-                        source_checkpoint.manifest_id
-                    }
-                    None => {
-                        if !db_state.initialized {
-                            return Err(InvalidDBState);
-                        }
-                        sr.id() + 1
-                    }
-                };
-                db_state.checkpoints.push(Checkpoint {
-                    id: checkpoint_id,
-                    manifest_id,
-                    expire_time: options.lifetime.map(|l| clock.now() + l),
-                    create_time: clock.now(),
-                });
-                Ok(Some(DirtyRecord { id: sr.id(), value: new_val }))
+                let checkpoint =
+                    Self::new_checkpoint(&new_val, sr.id(), &clock, checkpoint_id, options)?;
+                new_val.core.checkpoints.push(checkpoint);
+                Ok(Some(DirtyRecord {
+                    id: sr.id(),
+                    value: new_val,
+                }))
             })
             .await?;
         // sync from inner
@@ -814,7 +746,10 @@ impl StoredManifest {
                 if new_val.core.checkpoints.len() == before {
                     Ok(None)
                 } else {
-                    Ok(Some(DirtyRecord { id: sr.id(), value: new_val }))
+                    Ok(Some(DirtyRecord {
+                        id: sr.id(),
+                        value: new_val,
+                    }))
                 }
             })
             .await?;
@@ -838,36 +773,23 @@ impl StoredManifest {
         self.inner
             .maybe_apply_update(|sr| {
                 let mut new_val = sr.record().clone();
-                // compute manifest_id for new checkpoint
-                let manifest_id = match new_checkpoint_options.source {
-                    Some(source_checkpoint_id) => {
-                        let Some(source_checkpoint) = new_val
-                            .core
-                            .find_checkpoint(source_checkpoint_id) else {
-                            return Err(CheckpointMissing(source_checkpoint_id));
-                        };
-                        source_checkpoint.manifest_id
-                    }
-                    None => {
-                        if !new_val.core.initialized {
-                            return Err(InvalidDBState);
-                        }
-                        sr.id() + 1
-                    }
-                };
+                // compute new checkpoint
+                let checkpoint = Self::new_checkpoint(
+                    &new_val,
+                    sr.id(),
+                    &clock,
+                    new_checkpoint_id,
+                    new_checkpoint_options,
+                )?;
                 new_val
                     .core
                     .checkpoints
                     .retain(|cp| cp.id != old_checkpoint_id);
-                new_val.core.checkpoints.push(Checkpoint {
-                    id: new_checkpoint_id,
-                    manifest_id,
-                    expire_time: new_checkpoint_options
-                        .lifetime
-                        .map(|l| clock.now() + l),
-                    create_time: clock.now(),
-                });
-                Ok(Some(DirtyRecord { id: sr.id(), value: new_val }))
+                new_val.core.checkpoints.push(checkpoint);
+                Ok(Some(DirtyRecord {
+                    id: sr.id(),
+                    value: new_val,
+                }))
             })
             .await?;
         // sync from inner
@@ -894,11 +816,15 @@ impl StoredManifest {
                     .core
                     .checkpoints
                     .iter_mut()
-                    .find(|c| c.id == checkpoint_id) else {
+                    .find(|c| c.id == checkpoint_id)
+                else {
                     return Err(CheckpointMissing(checkpoint_id));
                 };
                 cp.expire_time = Some(clock.now() + new_lifetime);
-                Ok(Some(DirtyRecord { id: sr.id(), value: new_val }))
+                Ok(Some(DirtyRecord {
+                    id: sr.id(),
+                    value: new_val,
+                }))
             })
             .await?;
         // sync from inner
@@ -922,10 +848,7 @@ impl StoredManifest {
         let next_id = self.next_id();
         let manifest = manifest.into();
         // Preserve original behavior by writing through ManifestStore
-        self.inner
-            .store
-            .write(next_id, &manifest)
-            .await?;
+        self.inner.store.write(next_id, &manifest).await?;
         self.inner.record = manifest.clone();
         self.inner.id = next_id;
         self.manifest = manifest;
@@ -983,7 +906,6 @@ where
 
 pub(crate) struct ManifestStore {
     inner: Arc<RecordStore<Manifest>>,
-    pub(crate) clock: Arc<dyn SystemClock>,
 }
 
 impl ManifestStore {
@@ -1000,11 +922,7 @@ impl ManifestStore {
             "manifest",
             Box::new(FlatBufferManifestCodec {}),
         ));
-        Self { inner, clock }
-    }
-
-    async fn write_manifest(&self, id: u64, manifest: &Manifest) -> Result<(), SlateDBError> {
-        self.inner.write(id, manifest).await
+        Self { inner }
     }
 
     /// Delete a manifest from the object store.
