@@ -6,6 +6,7 @@ use log::{error, trace};
 use parking_lot::RwLock;
 use tokio::{
     runtime::Handle,
+    select,
     sync::{
         mpsc::{self},
         oneshot,
@@ -287,9 +288,11 @@ impl WalBufferManager {
                 result_tx: Some(result_tx),
             },
         )?;
-        result_rx
-            .blocking_recv()
-            .expect("failed to receive flush result")
+        select! {
+            result = result_rx => {
+                result?
+            }
+        }
     }
 
     // flush the wal from previous flush wal id to the last immutable wal
@@ -418,13 +421,13 @@ impl WalBufferManager {
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
         self.cancellation_token.cancel();
-        self.inner
-            .write()
-            .background_task
-            .take()
-            .expect("background task not initialized")
-            .await
-            .expect("failed to join wal buffer task")
+        if let Some(background_task) = self.inner.write().background_task.take() {
+            background_task
+                .await
+                .expect("failed to join wal buffer task")
+        } else {
+            Ok(())
+        }
     }
 }
 
