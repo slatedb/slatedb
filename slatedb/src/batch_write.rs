@@ -58,13 +58,11 @@ pub(crate) struct WriteBatchMessage {
 
 impl std::fmt::Debug for WriteBatchMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WriteBatchMessage { batch, options, .. } => f
-                .debug_struct("WriteBatch")
-                .field("batch", batch)
-                .field("options", options)
-                .finish(),
-        }
+        let WriteBatchMessage { batch, options, .. } = self;
+        f.debug_struct("WriteBatch")
+            .field("batch", batch)
+            .field("options", options)
+            .finish()
     }
 }
 
@@ -85,26 +83,23 @@ impl WriteBatchEventHandler {
 #[async_trait]
 impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
     async fn handle(&mut self, message: WriteBatchMessage) -> Result<(), SlateDBError> {
-        match message {
-            WriteBatchMessage {
-                batch,
-                options,
-                done,
-            } => {
-                let result = self.db_inner.write_batch(batch).await;
-                // if this is the first write and the WAL is disabled, make sure users are flushing
-                // their memtables in a timely manner.
-                if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
-                    self.is_first_write = false;
-                    let this_watcher = result.clone()?;
-                    let this_clock = self.db_inner.system_clock.clone();
-                    tokio::spawn(async move {
-                        monitor_first_write(this_watcher, this_clock).await;
-                    });
-                }
-                _ = done.send(result);
-            }
+        let WriteBatchMessage {
+            batch,
+            options,
+            done,
+        } = message;
+        let result = self.db_inner.write_batch(batch).await;
+        // if this is the first write and the WAL is disabled, make sure users are flushing
+        // their memtables in a timely manner.
+        if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
+            self.is_first_write = false;
+            let this_watcher = result.clone()?;
+            let this_clock = self.db_inner.system_clock.clone();
+            tokio::spawn(async move {
+                monitor_first_write(this_watcher, this_clock).await;
+            });
         }
+        _ = done.send(result);
         Ok(())
     }
 
