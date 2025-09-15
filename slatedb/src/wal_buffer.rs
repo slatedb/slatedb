@@ -1,5 +1,7 @@
 use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
+use futures::stream::BoxStream;
 use log::{debug, error, trace};
 use parking_lot::RwLock;
 use tokio::{
@@ -16,6 +18,7 @@ use crate::{
     clock::{MonotonicClock, SystemClock},
     db_state::{DbState, SsTableId},
     db_stats::DbStats,
+    dispatcher::{MessageFactory, MessageHandler},
     error::SlateDBError,
     iter::KeyValueIterator,
     mem_table::KVTable,
@@ -498,6 +501,62 @@ impl WalBufferManager {
 
 struct WalFlushWork {
     result_tx: Option<oneshot::Sender<Result<(), SlateDBError>>>,
+}
+
+#[async_trait]
+impl MessageHandler<WalFlushWork> for WalBufferManager {
+    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<WalFlushWork>>)> {
+        if let Some(max_flush_interval) = self.max_flush_interval {
+            return vec![(
+                max_flush_interval,
+                Box::new(|| WalFlushWork { result_tx: None }),
+            )];
+        }
+        vec![]
+    }
+
+    async fn handle(&mut self, message: WalFlushWork) -> Result<(), SlateDBError> {
+        let WalFlushWork { result_tx } = message;
+        if let Some(result_tx) = result_tx {
+            let result = self.do_flush().await;
+            // only notify the result when the flush is successful. and if it
+            // finally failed, we'll set the error in quit_once. the caller
+            // of flush() will finally receive the error.
+            if result.is_ok() {
+                result_tx.send(result.clone()).ok();
+            }
+            result
+        } else {
+            self.do_flush().await
+        }
+    }
+
+    async fn cleanup(
+        &mut self,
+        // TODO notify messages of failure and remove quit_once
+        _messages: BoxStream<'async_trait, WalFlushWork>,
+        result: Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        // There are two possible paths to exit the background loop:
+        //
+        // 1. Got fatal error
+        // 2. Got shutdown signal
+        //
+        // In both cases, we need to notify all the flushing WALs to be finished with fatal error or shutdown error.
+        // If we got a fatal error, we need to set it in quit_once to notify the database to enter fatal state.
+        if let Err(e) = &result {
+            self.db_state.write().record_fatal_error(e.clone());
+            self.quit_once.write(Err(e.clone()));
+        }
+        // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
+        // tables finally get notified.
+        let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::BackgroundTaskShutdown);
+        let flushing_wals = self.flushing_wals();
+        for (_, wal) in flushing_wals.iter() {
+            wal.notify_durable(Err(fatal_or_shutdown.clone()));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
