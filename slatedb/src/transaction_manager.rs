@@ -210,12 +210,11 @@ impl TransactionManager {
         // for SSI, we need to check read-write conflicts. if a transaction does not
         // track the read keys or ranges at all, this transaction is considered as
         // same as a SI transaction.
-        let rw_conflict = inner.has_read_write_conflict(
+        inner.has_read_write_conflict(
             &txn_state.read_keys,
             txn_state.read_ranges.clone(),
             txn_state.started_seq,
-        );
-        rw_conflict
+        )
     }
 
     /// Record a recent committed transaction for conflict detection.
