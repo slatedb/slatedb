@@ -84,7 +84,7 @@ pub struct CSdbPutOptions {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CSdbReadOptions {
-    /// Durability filter: 0=Remote, 1=Memory
+    /// Durability filter: 0=Memory, 1=Remote
     pub durability_filter: u32,
     /// Whether to include dirty/uncommitted data
     pub dirty: bool,
@@ -94,10 +94,11 @@ pub struct CSdbReadOptions {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CSdbScanOptions {
-    pub durability_filter: i32, // 0 = Remote (default), 1 = Memory
+    pub durability_filter: i32, // 0 = Memory (default), 1 = Remote
     pub dirty: bool,            // Include uncommitted writes (default: false)
     pub read_ahead_bytes: u64,  // Buffer size for read-ahead (default: 1)
     pub cache_blocks: bool,     // Whether to cache fetched blocks (default: false)
+    pub max_fetch_tasks: u64,   // Maximum concurrent fetch tasks (default: 1)
 }
 
 /// Internal struct for managing database iterators in FFI

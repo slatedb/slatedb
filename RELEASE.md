@@ -32,7 +32,7 @@ The release action will do the following:
 
 To create a patch release for an existing version:
 
-1. If it doesn't already exist, create a <major>.<minor>.x branch from the release tag. So for example, for the v0.6.0 release, run `git checkout -b 0.6.x v0.6.0`.
+1. If it doesn't already exist, create a <major>.<minor>.x branch from the release tag. So for example, for the v0.6.0 release, run `git checkout -b v0.6.x v0.6.0`.
 2. Cherry-pick the desired changes onto the release branch and push it.
 3. Run the release workflow against the release branch and specify the desired release version (e.g. v0.6.1)
 

@@ -128,8 +128,9 @@ for {
 
 // Scanning with custom options
 opts := &slatedb.ScanOptions{
-    DurabilityFilter: slatedb.DurabilityRemote,
+    DurabilityFilter: slatedb.DurabilityRemote, // Only persistent data
     ReadAheadBytes:   1024,
+    MaxFetchTasks:    4, // Higher concurrency
 }
 iter, _ := db.ScanWithOptions([]byte("prefix:"), []byte("prefix;"), opts)
 defer iter.Close()
@@ -194,7 +195,7 @@ defer reader.Close()
 // All read operations available
 value, _ := reader.Get([]byte("key"))
 value, _ := reader.GetWithOptions([]byte("key"), &slatedb.ReadOptions{
-    DurabilityFilter: slatedb.DurabilityRemote,
+    DurabilityFilter: slatedb.DurabilityRemote, // Only persistent data
 })
 
 // Scanning with DbReader
@@ -208,7 +209,7 @@ for {
 
 // DbReader with custom scan options
 iter, _ := reader.ScanWithOptions([]byte("prefix:"), []byte("prefix;"), 
-    &slatedb.ScanOptions{DurabilityFilter: slatedb.DurabilityRemote})
+    &slatedb.ScanOptions{DurabilityFilter: slatedb.DurabilityRemote}) // Only persistent data
 defer iter.Close()
 for {
     kv, err := iter.Next()
@@ -300,10 +301,11 @@ type DbReaderOptions struct {
 }
 
 type ScanOptions struct {
-    DurabilityFilter DurabilityLevel // Filter for scan durability
+    DurabilityFilter DurabilityLevel // Filter for scan durability (default: DurabilityMemory)
     Dirty            bool            // Include uncommitted writes
     ReadAheadBytes   uint64          // Buffer size for read-ahead
     CacheBlocks      bool            // Whether to cache blocks
+    MaxFetchTasks    uint64          // Maximum concurrent fetch tasks (default: 1)
 }
 ```
 
