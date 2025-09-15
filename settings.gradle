@@ -1,0 +1,22 @@
+plugins {
+    // required to download the toolchain (jdk) from a remote repository
+    // https://github.com/gradle/foojay-toolchains
+    // https://docs.gradle.org/current/userguide/toolchains.html#sub:download_repositories
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'slatedb'
+include 'slatedb-java'
+
+// Include build cache configuration
+buildCache {
+    local {
+        enabled = true
+        directory = file('.gradle/build-cache')
+        removeUnusedEntriesAfterDays = 7
+    }
+}
+
+// Gradle feature previews
+enableFeaturePreview('STABLE_CONFIGURATION_CACHE')
+enableFeaturePreview('TYPESAFE_PROJECT_ACCESSORS')

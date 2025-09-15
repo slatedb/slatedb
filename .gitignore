@@ -1,11 +1,14 @@
 **/target
 .DS_Store
 .idea
+.gradle
 .env
 proptest-regressions/
 tmp
 .vscode
+build/
 
 *.pyc
 *.so
 slatedb-py/dist
+slatedb-java/src/main/resources/native

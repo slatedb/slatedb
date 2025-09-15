@@ -1,0 +1,7 @@
+// Root project build file for SlateDB
+
+// Wrapper task for the entire project
+wrapper {
+    gradleVersion = '8.14.3'
+    distributionType = Wrapper.DistributionType.ALL
+}
