@@ -275,6 +275,9 @@ pub struct ScanOptions {
     pub read_ahead_bytes: usize,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
+    /// The maximum number of concurrent tasks for fetching blocks during scans.
+    /// Higher values can improve throughput but use more resources. The default is 1.
+    pub max_fetch_tasks: usize,
 }
 
 impl Default for ScanOptions {
@@ -285,6 +288,7 @@ impl Default for ScanOptions {
             dirty: false,
             read_ahead_bytes: 1,
             cache_blocks: false,
+            max_fetch_tasks: 1,
         }
     }
 }
@@ -315,6 +319,13 @@ impl ScanOptions {
     pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
         Self {
             cache_blocks,
+            ..self
+        }
+    }
+
+    pub fn with_max_fetch_tasks(self, max_fetch_tasks: usize) -> Self {
+        Self {
+            max_fetch_tasks,
             ..self
         }
     }
@@ -917,7 +928,7 @@ impl std::fmt::Debug for CompactorOptions {
 }
 
 /// Options for the Size-Tiered Compaction Scheduler
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SizeTieredCompactionSchedulerOptions {
     /// The minimum number of sources to include together in a single compaction step.
     pub min_compaction_sources: usize,
@@ -1220,6 +1231,19 @@ object_store_cache_options:
         assert!(!options.dirty);
 
         let options = ScanOptions::default();
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+        assert_eq!(options.read_ahead_bytes, 1);
+        assert!(!options.cache_blocks);
+        assert_eq!(options.max_fetch_tasks, 1);
+    }
+
+    #[test]
+    fn test_scan_options_with_max_fetch_tasks() {
+        let options = ScanOptions::default().with_max_fetch_tasks(4);
+        assert_eq!(options.max_fetch_tasks, 4);
+
+        // Verify other fields remain unchanged
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
