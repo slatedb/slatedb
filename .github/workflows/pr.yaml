@@ -178,25 +178,23 @@ jobs:
         run: cargo build --release -p slatedb-go
 
       - name: Grant execute permission for gradlew
-        working-directory: ./slatedb-java
         run: chmod +x gradlew
 
       - name: Build and test Java client
-        working-directory: ./slatedb-java
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: eu-west-2
         run: |
           echo "Building Java client..."
-          ./gradlew copyGoBindingsLib --no-daemon --stacktrace
+          ./gradlew :slatedb-java:copyGoBindingsLib --no-daemon --stacktrace
           echo "Running all tests..."
           if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
             echo "AWS credentials available - E2E tests will run alongside unit tests"
           else
             echo "AWS credentials not available - E2E tests will be skipped automatically via @Requires annotations"
           fi
-          ./gradlew test --no-daemon --stacktrace
+          ./gradlew :slatedb-java:test --no-daemon --stacktrace
 
   microbenchmarks:
     runs-on: ubuntu-latest
