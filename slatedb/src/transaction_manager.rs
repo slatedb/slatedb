@@ -63,14 +63,12 @@ impl TransactionState {
     }
 
     /// Mark this transaction as committed with the given sequence number.
-    fn mark_as_committed(&mut self, seq: u64, reset_read_keys_and_ranges: bool) {
+    fn mark_as_committed(&mut self, seq: u64) {
         self.committed_seq = Some(seq);
         // when a transaction state is tracked into `recent_committed_txns`, we don't need to
         // save the read keys and ranges, since they are not needed for conflict detection.
-        if reset_read_keys_and_ranges {
-            self.read_keys.clear();
-            self.read_ranges.clear();
-        }
+        self.read_keys.clear();
+        self.read_ranges.clear();
     }
 }
 
@@ -263,7 +261,7 @@ impl TransactionManager {
             if txn_state.read_only {
                 unreachable!("attempted to commit a read-only transaction");
             }
-            txn_state.mark_as_committed(committed_seq, true);
+            txn_state.mark_as_committed(committed_seq);
             inner.recent_committed_txns.push_back(txn_state);
         }
     }
