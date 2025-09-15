@@ -421,7 +421,10 @@ impl WalBufferManager {
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
         self.cancellation_token.cancel();
-        if let Some(background_task) = self.inner.write().background_task.take() {
+        if let Some(background_task) = {
+            let mut inner = self.inner.write();
+            inner.background_task.take()
+        } {
             background_task
                 .await
                 .expect("failed to join wal buffer task")
@@ -482,6 +485,10 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
         // tables finally get notified.
         let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::BackgroundTaskShutdown);
+
+        // freeze current WAL to notify writers in the subsequent flushing_wals loop
+        self.wal_buffer.freeze_current_wal().await?;
+
         let flushing_wals = self.wal_buffer.flushing_wals();
         for (_, wal) in flushing_wals.iter() {
             wal.notify_durable(Err(fatal_or_shutdown.clone()));
