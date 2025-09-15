@@ -259,7 +259,7 @@ impl DbInner {
         self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let batch_msg = WriteBatchMessage::WriteBatch {
+        let batch_msg = WriteBatchMessage {
             batch,
             options: options.clone(),
             done: tx,

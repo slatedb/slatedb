@@ -48,20 +48,18 @@ use crate::{
     error::SlateDBError,
 };
 
-pub(crate) enum WriteBatchMessage {
-    WriteBatch {
-        batch: WriteBatch,
-        options: WriteOptions,
-        done: tokio::sync::oneshot::Sender<
-            Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError>,
-        >,
-    },
+pub(crate) struct WriteBatchMessage {
+    pub(crate) batch: WriteBatch,
+    pub(crate) options: WriteOptions,
+    pub(crate) done: tokio::sync::oneshot::Sender<
+        Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError>,
+    >,
 }
 
 impl std::fmt::Debug for WriteBatchMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WriteBatchMessage::WriteBatch { batch, options, .. } => f
+            WriteBatchMessage { batch, options, .. } => f
                 .debug_struct("WriteBatch")
                 .field("batch", batch)
                 .field("options", options)
@@ -88,7 +86,7 @@ impl WriteBatchEventHandler {
 impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
     async fn handle(&mut self, message: WriteBatchMessage) -> Result<(), SlateDBError> {
         match message {
-            WriteBatchMessage::WriteBatch {
+            WriteBatchMessage {
                 batch,
                 options,
                 done,
