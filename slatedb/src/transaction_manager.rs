@@ -79,8 +79,6 @@ pub struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
     /// Random number generator for generating transaction IDs
     db_rand: Arc<DbRand>,
-    /// Isolation level for transaction conflict detection (SI or SSI)
-    isolation_level: IsolationLevel,
 }
 
 struct TransactionManagerInner {
@@ -108,17 +106,6 @@ impl TransactionManager {
                 recent_committed_txns: VecDeque::new(),
             })),
             db_rand,
-            isolation_level: IsolationLevel::default(),
-        }
-    }
-
-    /// Create a TransactionManager with a specific isolation level.
-    /// This allows configuring whether to use Snapshot Isolation or Serializable Snapshot Isolation.
-    #[allow(unused)]
-    pub fn with_isolation_level(self, isolation_level: IsolationLevel) -> Self {
-        Self {
-            isolation_level,
-            ..self
         }
     }
 
@@ -186,10 +173,6 @@ impl TransactionManager {
     /// Track a key read operation (for SSI)
     #[allow(unused)]
     pub fn track_read_keys(&self, txn_id: &Uuid, read_keys: &HashSet<Bytes>) {
-        if self.isolation_level != IsolationLevel::SerializableSnapshot {
-            return;
-        }
-
         let mut inner = self.inner.write();
         if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
             txn_state.track_read_keys(read_keys.iter().cloned());
@@ -199,10 +182,6 @@ impl TransactionManager {
     /// Track a range scan operation (for SSI)
     #[allow(unused)]
     pub fn track_read_range(&self, txn_id: &Uuid, range: BytesRange) {
-        if self.isolation_level != IsolationLevel::SerializableSnapshot {
-            return;
-        }
-
         let mut inner = self.inner.write();
         if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
             txn_state.track_read_range(range);
@@ -221,23 +200,22 @@ impl TransactionManager {
             Some(txn_state) => txn_state,
         };
 
-        match self.isolation_level {
-            IsolationLevel::Snapshot => {
-                // Only check write-write conflicts for SI
-                inner.has_write_write_conflict(&txn_state.write_keys, txn_state.started_seq)
-            }
-            IsolationLevel::SerializableSnapshot => {
-                // Check both write-write and read-write conflicts for SSI
-                let ww_conflict =
-                    inner.has_write_write_conflict(&txn_state.write_keys, txn_state.started_seq);
-                let rw_conflict = inner.has_read_write_conflict(
-                    &txn_state.read_keys,
-                    txn_state.read_ranges.clone(),
-                    txn_state.started_seq,
-                );
-                ww_conflict || rw_conflict
-            }
+        // both SI and SSI need to check write-write conflicts
+        let ww_conflict =
+            inner.has_write_write_conflict(&txn_state.write_keys, txn_state.started_seq);
+        if ww_conflict {
+            return true;
         }
+
+        // for SSI, we need to check read-write conflicts. if a transaction does not
+        // track the read keys or ranges at all, this transaction is considered as
+        // same as a SI transaction.
+        let rw_conflict = inner.has_read_write_conflict(
+            &txn_state.read_keys,
+            txn_state.read_ranges.clone(),
+            txn_state.started_seq,
+        );
+        rw_conflict
     }
 
     /// Record a recent committed transaction for conflict detection.
@@ -379,6 +357,10 @@ impl TransactionManagerInner {
         read_ranges: Vec<BytesRange>,
         started_seq: u64,
     ) -> bool {
+        if read_keys.is_empty() && read_ranges.is_empty() {
+            return false;
+        }
+
         for committed_txn in &self.recent_committed_txns {
             // skip read-only transactions as they don't cause write conflicts
             if committed_txn.read_only {
@@ -1166,8 +1148,7 @@ mod tests {
     #[test]
     fn test_ssi_phantom_read_conflict_on_range() {
         let db_rand = Arc::new(DbRand::new(0));
-        let txn_manager = TransactionManager::new(db_rand)
-            .with_isolation_level(IsolationLevel::SerializableSnapshot);
+        let txn_manager = TransactionManager::new(db_rand);
 
         // Reader transaction under SSI that scans a key range
         let reader_txn = txn_manager.new_txn(100, true);
@@ -1499,7 +1480,7 @@ mod tests {
         #[test]
         fn prop_inv_ssi_read_write_conflict_detection(ops in operation_sequence_strategy()) {
             let db_rand = Arc::new(DbRand::new(0));
-            let txn_manager = TransactionManager::new(db_rand).with_isolation_level(IsolationLevel::SerializableSnapshot);
+            let txn_manager = TransactionManager::new(db_rand);
             let mut exec_state = ExecutionState::new();
 
             for op in ops {
