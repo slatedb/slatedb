@@ -88,13 +88,19 @@
 // TODO Remove once we've migrated to MessageDispatcher
 #![allow(dead_code)]
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    panic::AssertUnwindSafe,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{
     stream::{BoxStream, FuturesUnordered},
-    StreamExt,
+    FutureExt, StreamExt,
 };
 use log::warn;
 use tokio::sync::mpsc;
@@ -210,8 +216,14 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// A [Result] containing the [DbState::error] if it was already set, or the result
     /// of [MessageDispatcher::handle_result] otherwise.
     pub(crate) async fn run(&mut self) -> Result<(), SlateDBError> {
-        // TODO: handle panic here (similar to spawn_bg_task)
-        let result = self.run_loop().await;
+        let result = AssertUnwindSafe(self.run_loop())
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|unwind_result| {
+                Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
+                    unwind_result,
+                ))))
+            });
         let result = self.handle_result(result);
         if let Err(e) = self.cleanup(result.clone()).await {
             warn!("failed to cleanup dispatcher on shutdown [error={:?}]", e);
@@ -251,7 +263,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {},
                 e = error_watcher.await_value() => {
-                    warn!("halting message loop because db is in error state [error={:#?}]", e);
+                    warn!("halting message loop because db is in error state [error={:?}]", e);
                 },
             }
         };
