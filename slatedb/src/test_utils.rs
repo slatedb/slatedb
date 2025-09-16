@@ -129,7 +129,7 @@ impl LogicalClock for TestClock {
 
 pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
     let mut rng = rand::rng();
-    let random_bytes: Vec<u8> = (0..n).map(|_| rng.random()).collect();
+    let random_bytes: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
     Bytes::from(random_bytes)
 }
 
