@@ -89,6 +89,7 @@
 #![allow(dead_code)]
 
 use std::{
+    any::Any,
     future::Future,
     panic::AssertUnwindSafe,
     pin::Pin,
@@ -219,11 +220,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         let result = AssertUnwindSafe(self.run_loop())
             .catch_unwind()
             .await
-            .unwrap_or_else(|unwind_result| {
-                Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
-                    unwind_result,
-                ))))
-            });
+            .unwrap_or_else(Self::handle_panic);
         let result = self.handle_result(result);
         if let Err(e) = self.cleanup(result.clone()).await {
             warn!("failed to cleanup dispatcher on shutdown [error={:?}]", e);
@@ -314,6 +311,12 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         }
         // use the first error that occurred (could be ours, or a previous failure)
         self.error_state.reader().read().map_or(result, Err)
+    }
+
+    fn handle_panic(panic: Box<dyn Any + Send>) -> Result<(), SlateDBError> {
+        Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
+            panic,
+        ))))
     }
 
     /// Tells the handler to clean up any resources.
