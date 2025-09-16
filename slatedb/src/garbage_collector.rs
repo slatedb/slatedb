@@ -742,7 +742,7 @@ mod tests {
         let active_expired_sst_handle = create_sst(table_store.clone()).await;
         let inactive_expired_sst_handle = create_sst(table_store.clone()).await;
         let inactive_unexpired_sst_handle = create_sst(table_store.clone()).await;
-        let path_resolver = PathResolver::new("");
+        let path_resolver = PathResolver::new("/");
 
         // Set expiration for the old SSTs
         let now_minus_24h_expired_l0_sst = set_modified(
@@ -850,7 +850,7 @@ mod tests {
         let active_sst_handle = create_sst(table_store.clone()).await;
         let active_checkpoint_sst_handle = create_sst(table_store.clone()).await;
         let inactive_sst_handle = create_sst(table_store.clone()).await;
-        let path_resolver = PathResolver::new("");
+        let path_resolver = PathResolver::new("/");
 
         // Set expiration for all SSTs to make them eligible for deletion
         let all_tables = vec![
