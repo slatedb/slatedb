@@ -85,9 +85,6 @@
 //! # }
 //! ```
 
-// TODO Remove once we've migrated to MessageDispatcher
-#![allow(dead_code)]
-
 use std::{
     any::Any,
     future::Future,
