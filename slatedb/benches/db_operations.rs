@@ -1,3 +1,6 @@
+// our microbenchmarks use pprof, but it doesn't work on windows
+#![cfg(not(windows))]
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use object_store::memory::InMemory;
 use pprof::criterion::{Output, PProfProfiler};
