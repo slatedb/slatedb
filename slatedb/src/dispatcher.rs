@@ -313,6 +313,15 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         self.error_state.reader().read().map_or(result, Err)
     }
 
+    /// Maps panic errors into SlateDBError::BackgroundTaskPanic.
+    ///
+    /// ## Arguments
+    ///
+    /// * `panic`: The panic to map.
+    ///
+    /// ## Returns
+    ///
+    /// A [Result] containing [SlateDBError::BackgroundTaskPanic], which wraps the panic.
     fn handle_panic(panic: Box<dyn Any + Send>) -> Result<(), SlateDBError> {
         Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
             panic,
@@ -458,6 +467,7 @@ mod test {
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
+    use futures::stream::BoxStream;
     use futures::StreamExt;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -1040,5 +1050,74 @@ mod test {
         ));
         assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
         assert_eq!(log.lock().unwrap().len(), 16);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_dispatcher_catches_panic_from_run_loop() {
+        #[derive(Clone)]
+        struct PanicHandler {
+            cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
+        }
+
+        #[async_trait::async_trait]
+        impl MessageHandler<u8> for PanicHandler {
+            fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<u8>>)> {
+                vec![]
+            }
+
+            async fn handle(&mut self, _message: u8) -> Result<(), SlateDBError> {
+                panic!("intentional panic in handler");
+            }
+
+            async fn cleanup(
+                &mut self,
+                mut messages: BoxStream<'async_trait, u8>,
+                result: Result<(), SlateDBError>,
+            ) -> Result<(), SlateDBError> {
+                // Record the shutdown result and drain any pending messages
+                self.cleanup_called.write(result);
+                while messages.next().await.is_some() {}
+                Ok(())
+            }
+        }
+
+        let cleanup_called = WatchableOnceCell::new();
+        let mut cleanup_reader = cleanup_called.reader();
+        let (tx, rx) = mpsc::unbounded_channel::<u8>();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let handler = PanicHandler { cleanup_called };
+        let cancellation_token = CancellationToken::new();
+        let error_state = WatchableOnceCell::new();
+        let mut dispatcher = MessageDispatcher::new(
+            Box::new(handler),
+            rx,
+            clock.clone(),
+            cancellation_token.clone(),
+            error_state.clone(),
+        );
+        let join = tokio::spawn(async move { dispatcher.run().await });
+
+        // Trigger panic inside the run loop via handle()
+        tx.send(1u8).unwrap();
+
+        // Wait for cleanup to observe the panic result
+        let _ = timeout(Duration::from_secs(30), cleanup_reader.await_value())
+            .await
+            .expect("timeout waiting for cleanup result");
+
+        // Join dispatcher and verify panic was converted and propagated
+        let result = timeout(Duration::from_secs(30), join)
+            .await
+            .expect("dispatcher did not stop in time")
+            .expect("join failed");
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        assert!(matches!(
+            error_state.reader().read(),
+            Some(SlateDBError::BackgroundTaskPanic(_))
+        ));
+        assert!(matches!(
+            cleanup_reader.read(),
+            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
+        ));
     }
 }
