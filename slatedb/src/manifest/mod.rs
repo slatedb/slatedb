@@ -16,6 +16,12 @@ use uuid::Uuid;
 
 pub(crate) mod store;
 
+// Generic codec to serialize/deserialize versioned records stored as files
+pub(crate) trait RecordCodec<T>: Send + Sync {
+    fn encode(&self, value: &T) -> Bytes;
+    fn decode(&self, bytes: &Bytes) -> Result<T, SlateDBError>;
+}
+
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
     pub(crate) external_dbs: Vec<ExternalDb>,
@@ -202,12 +208,6 @@ pub(crate) struct ExternalDb {
     pub(crate) source_checkpoint_id: Uuid,
     pub(crate) final_checkpoint_id: Option<Uuid>,
     pub(crate) sst_ids: Vec<SsTableId>,
-}
-
-pub(crate) trait ManifestCodec: Send + Sync {
-    fn encode(&self, manifest: &Manifest) -> Bytes;
-
-    fn decode(&self, bytes: &Bytes) -> Result<Manifest, SlateDBError>;
 }
 
 impl Manifest {

@@ -8,13 +8,12 @@ use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+use crate::manifest::{ExternalDb, Manifest, RecordCodec};
 use crate::rand::DbRand;
 use crate::transactional_object_store::{
     DelegatingTransactionalObjectStore, TransactionalObjectStore,
 };
 use crate::utils;
-use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
 use log::{debug, warn};
@@ -28,25 +27,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-// Generic codec to serialize/deserialize versioned records stored as files
-pub(crate) trait RecordCodec<T>: Send + Sync {
-    fn encode(&self, value: &T) -> Bytes;
-    fn decode(&self, bytes: &[u8]) -> Result<T, SlateDBError>;
-}
-
-// Adapter: use the existing FlatBufferManifestCodec as a RecordCodec for Manifest
-impl RecordCodec<Manifest> for FlatBufferManifestCodec {
-    fn encode(&self, value: &Manifest) -> Bytes {
-        // Delegate to ManifestCodec impl
-        ManifestCodec::encode(self, value)
-    }
-
-    fn decode(&self, bytes: &[u8]) -> Result<Manifest, SlateDBError> {
-        // Existing codec expects &Bytes; wrap without changing behavior
-        let b = Bytes::copy_from_slice(bytes);
-        ManifestCodec::decode(self, &b)
-    }
-}
 
 // Generic, versioned store for records persisted as numbered files under a directory
 pub(crate) struct RecordStore<T> {
@@ -113,7 +93,7 @@ impl<T> RecordStore<T> {
         let path = self.path_for(id);
         match self.object_store.get(&path).await {
             Ok(obj) => match obj.bytes().await {
-                Ok(bytes) => self.codec.decode(bytes.as_ref()).map(Some),
+                Ok(bytes) => self.codec.decode(&bytes).map(Some),
                 Err(e) => Err(SlateDBError::from(e)),
             },
             Err(e) => match e {
@@ -170,7 +150,7 @@ impl<T> RecordStore<T> {
                     });
                 }
                 Err(_) => warn!(
-                    "unknown file in manifest directory [location={:?}]",
+                    "unknown file in record directory [location={:?}]",
                     file.location
                 ),
                 _ => {}
@@ -919,7 +899,7 @@ impl ManifestStore {
         object_store: Arc<dyn ObjectStore>,
         clock: Arc<dyn SystemClock>,
     ) -> Self {
-        let inner = Arc::new(RecordStore::new(
+        let inner = Arc::new(RecordStore::<Manifest>::new(
             root_path,
             object_store,
             clock.clone(),
