@@ -29,7 +29,7 @@ use crate::flatbuffer_types::manifest_generated::{
     CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun,
     SortedRunArgs, Uuid, UuidArgs,
 };
-use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+use crate::manifest::{ExternalDb, Manifest, RecordCodec};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
@@ -121,7 +121,7 @@ impl FlatBufferSsTableInfoCodec {
 
 pub(crate) struct FlatBufferManifestCodec {}
 
-impl ManifestCodec for FlatBufferManifestCodec {
+impl RecordCodec<Manifest> for FlatBufferManifestCodec {
     fn encode(&self, manifest: &Manifest) -> Bytes {
         Self::create_from_manifest(manifest)
     }
@@ -565,7 +565,7 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
-    use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+    use crate::manifest::{ExternalDb, Manifest, RecordCodec};
     use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
 
