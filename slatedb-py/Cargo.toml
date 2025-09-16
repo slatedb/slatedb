@@ -9,7 +9,7 @@ license.workspace = true
 homepage.workspace = true
 
 [lib]
-name = "slatedb"
+name = "slatedb_py"
 crate-type = ["cdylib"]
 doc = false
 # Disable `libtest` harness because it fights with Criterion's `--output-format bencher`
