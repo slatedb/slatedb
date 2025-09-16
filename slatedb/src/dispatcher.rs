@@ -136,6 +136,7 @@ pub(crate) struct MessageDispatcher<T: Send + std::fmt::Debug> {
     clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
     error_state: WatchableOnceCell<SlateDBError>,
+    #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
 }
 
