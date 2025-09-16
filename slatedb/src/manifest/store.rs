@@ -27,7 +27,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-
 // Generic, versioned store for records persisted as numbered files under a directory
 pub(crate) struct RecordStore<T> {
     object_store: Box<dyn TransactionalObjectStore>,
