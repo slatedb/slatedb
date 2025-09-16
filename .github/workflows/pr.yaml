@@ -103,7 +103,7 @@ jobs:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable"
 
   tests-cross:
-    name: tests (macOS/Windows)
+    name: tests (cross)
     needs: tests
     strategy:
       fail-fast: false
