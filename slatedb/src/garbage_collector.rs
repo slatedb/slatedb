@@ -250,7 +250,7 @@ mod tests {
     use super::*;
 
     use std::collections::HashSet;
-    use std::{fs::File, sync::Arc};
+    use std::{fs::OpenOptions, sync::Arc};
 
     use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
@@ -980,7 +980,9 @@ mod tests {
         seconds_ago: u64,
     ) -> DateTime<Utc> {
         let file = local_object_store.path_to_filesystem(path).unwrap();
-        let file = File::open(file).unwrap();
+        // On Windows, setting file times requires write access to file attributes.
+        // Open with write enabled so `set_modified` succeeds across platforms.
+        let file = OpenOptions::new().write(true).open(file).unwrap();
         let now_minus_24h = DefaultSystemClock::default().now()
             - TimeDelta::seconds(seconds_ago.try_into().unwrap());
         file.set_modified(now_minus_24h.into()).unwrap();
