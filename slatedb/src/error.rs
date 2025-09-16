@@ -337,6 +337,10 @@ impl Error {
         self.source = Some(source);
         self
     }
+
+    pub fn kind(&self) -> &ErrorKind {
+        &self.kind
+    }
 }
 
 impl From<SlateDBError> for Error {
