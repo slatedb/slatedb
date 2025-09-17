@@ -102,6 +102,24 @@ jobs:
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable"
 
+  tests-cross:
+    name: tests (cross)
+    needs: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.98
+      - name: Run Tests
+        run: cargo nextest run --workspace --all-features
+      - name: Run Doc Tests
+        run: cargo test --doc --all-features
+
   bindings-python:
     runs-on: ubuntu-latest
     needs: tests
