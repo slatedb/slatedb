@@ -3,347 +3,24 @@ use crate::clock::SystemClock;
 use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::ManifestVersionExists;
 use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
+    ManifestVersionExists,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::{ExternalDb, Manifest, RecordCodec};
+use crate::manifest::{ExternalDb, Manifest};
 use crate::rand::DbRand;
-use crate::transactional_object_store::{
-    DelegatingTransactionalObjectStore, TransactionalObjectStore,
-};
-use crate::utils;
+use crate::record::store::{DirtyRecord, FenceableRecord, RecordStore, StoredRecord};
 use chrono::Utc;
-use futures::StreamExt;
-use log::{debug, warn};
+use log::debug;
 use object_store::path::Path;
-use object_store::Error::AlreadyExists;
-use object_store::{Error, ObjectStore};
+use object_store::ObjectStore;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
-
-// Generic, versioned store for records persisted as numbered files under a directory
-pub(crate) struct RecordStore<T> {
-    object_store: Box<dyn TransactionalObjectStore>,
-    codec: Box<dyn RecordCodec<T>>,
-    file_suffix: &'static str,
-    clock: Arc<dyn SystemClock>,
-}
-
-impl<T> RecordStore<T> {
-    pub(crate) fn new(
-        root_path: &Path,
-        object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn SystemClock>,
-        subdir: &str,
-        file_suffix: &'static str,
-        codec: Box<dyn RecordCodec<T>>,
-    ) -> Self {
-        Self {
-            object_store: Box::new(DelegatingTransactionalObjectStore::new(
-                root_path.child(subdir),
-                object_store,
-            )),
-            codec,
-            file_suffix,
-            clock,
-        }
-    }
-
-    fn path_for(&self, id: u64) -> Path {
-        Path::from(format!("{:020}.{}", id, self.file_suffix))
-    }
-
-    fn parse_id(&self, path: &Path) -> Result<u64, SlateDBError> {
-        match path.extension() {
-            Some(ext) if ext == self.file_suffix => path
-                .filename()
-                .expect("invalid filename")
-                .split('.')
-                .next()
-                .ok_or_else(|| InvalidDBState)?
-                .parse()
-                .map_err(|_| InvalidDBState),
-            _ => Err(InvalidDBState),
-        }
-    }
-
-    pub(crate) async fn write(&self, id: u64, value: &T) -> Result<(), SlateDBError> {
-        let path = self.path_for(id);
-        self.object_store
-            .put_if_not_exists(&path, self.codec.encode(value))
-            .await
-            .map_err(|err| {
-                if let AlreadyExists { path: _, source: _ } = err {
-                    SlateDBError::ManifestVersionExists
-                } else {
-                    SlateDBError::from(err)
-                }
-            })?;
-        Ok(())
-    }
-
-    pub(crate) async fn try_read(&self, id: u64) -> Result<Option<T>, SlateDBError> {
-        let path = self.path_for(id);
-        match self.object_store.get(&path).await {
-            Ok(obj) => match obj.bytes().await {
-                Ok(bytes) => self.codec.decode(&bytes).map(Some),
-                Err(e) => Err(SlateDBError::from(e)),
-            },
-            Err(e) => match e {
-                Error::NotFound { .. } => Ok(None),
-                _ => Err(SlateDBError::from(e)),
-            },
-        }
-    }
-
-    pub(crate) async fn try_read_latest(&self) -> Result<Option<(u64, T)>, SlateDBError> {
-        let base = &Path::from("/");
-        let mut files_stream = self.object_store.list(Some(base));
-        let mut max_id: u64 = 0;
-        while let Some(file) = files_stream
-            .next()
-            .await
-            .transpose()
-            .map_err(SlateDBError::from)?
-        {
-            if let Ok(id) = self.parse_id(&file.location) {
-                if id > max_id {
-                    max_id = id;
-                }
-            }
-        }
-        if max_id == 0 {
-            return Ok(None);
-        }
-        match self.try_read(max_id).await? {
-            Some(val) => Ok(Some((max_id, val))),
-            None => Ok(None),
-        }
-    }
-
-    // List files for this record type in an id range
-    pub(crate) async fn list<R: RangeBounds<u64>>(
-        &self,
-        id_range: R,
-    ) -> Result<Vec<GenericFileMetadata>, SlateDBError> {
-        let base = &Path::from("/");
-        let mut files_stream = self.object_store.list(Some(base));
-        let mut items = Vec::new();
-        while let Some(file) = match files_stream.next().await.transpose() {
-            Ok(file) => file,
-            Err(e) => return Err(SlateDBError::from(e)),
-        } {
-            match self.parse_id(&file.location) {
-                Ok(id) if id_range.contains(&id) => {
-                    items.push(GenericFileMetadata {
-                        id,
-                        location: file.location,
-                        last_modified: file.last_modified,
-                        size: file.size as u32,
-                    });
-                }
-                Err(_) => warn!(
-                    "unknown file in record directory [location={:?}]",
-                    file.location
-                ),
-                _ => {}
-            }
-        }
-        items.sort_by_key(|m| m.id);
-        Ok(items)
-    }
-
-    // Delete a specific versioned file (no additional validation)
-    pub(crate) async fn delete(&self, id: u64) -> Result<(), SlateDBError> {
-        let path = self.path_for(id);
-        debug!("deleting manifest [id={}]", id);
-        self.object_store
-            .delete(&path)
-            .await
-            .map_err(SlateDBError::from)
-    }
-}
-
-// Generic file metadata for versioned records
-#[derive(Debug)]
-pub(crate) struct GenericFileMetadata {
-    pub(crate) id: u64,
-    pub(crate) location: Path,
-    pub(crate) last_modified: chrono::DateTime<Utc>,
-    #[allow(dead_code)]
-    pub(crate) size: u32,
-}
-
-// Generic stored record with optimistic versioned updates
-#[derive(Clone)]
-pub(crate) struct StoredRecord<T> {
-    id: u64,
-    record: T,
-    store: Arc<RecordStore<T>>,
-}
-
-impl<T: Clone> StoredRecord<T> {
-    pub(crate) async fn init(store: Arc<RecordStore<T>>, value: T) -> Result<Self, SlateDBError> {
-        store.write(1, &value).await?;
-        Ok(Self {
-            id: 1,
-            record: value,
-            store,
-        })
-    }
-
-    pub(crate) fn id(&self) -> u64 {
-        self.id
-    }
-    pub(crate) fn record(&self) -> &T {
-        &self.record
-    }
-
-    fn next_id(&self) -> u64 {
-        self.id + 1
-    }
-
-    pub(crate) async fn refresh(&mut self) -> Result<&T, SlateDBError> {
-        let Some((id, new_val)) = self.store.try_read_latest().await? else {
-            return Err(InvalidDBState);
-        };
-        self.id = id;
-        self.record = new_val;
-        Ok(&self.record)
-    }
-
-    pub(crate) async fn update_dirty(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
-        if dirty.id != self.id {
-            return Err(ManifestVersionExists);
-        }
-        let next = self.next_id();
-        self.store.write(next, &dirty.value).await?;
-        self.id = next;
-        self.record = dirty.value;
-        Ok(())
-    }
-
-    pub(crate) async fn maybe_apply_update<F>(&mut self, mutator: F) -> Result<(), SlateDBError>
-    where
-        F: Fn(&StoredRecord<T>) -> Result<Option<DirtyRecord<T>>, SlateDBError>,
-    {
-        loop {
-            let Some(dirty) = mutator(self)? else {
-                return Ok(());
-            };
-            match self.update_dirty(dirty).await {
-                Err(SlateDBError::ManifestVersionExists) => {
-                    self.refresh().await?;
-                    continue;
-                }
-                Err(e) => return Err(e),
-                Ok(()) => return Ok(()),
-            }
-        }
-    }
-}
-
-// Local mutable view of a versioned record
-#[derive(Clone, Debug)]
-pub(crate) struct DirtyRecord<T> {
-    id: u64,
-    value: T,
-}
-
-impl<T> DirtyRecord<T> {
-    #[allow(dead_code)]
-    fn id(&self) -> u64 {
-        self.id
-    }
-    #[allow(dead_code)]
-    fn into_value(self) -> T {
-        self.value
-    }
-}
-
-// Generic fenceable wrapper using epoch getters/setters
-pub(crate) struct FenceableRecord<T: Clone> {
-    stored: StoredRecord<T>,
-    local_epoch: u64,
-    get_epoch: fn(&T) -> u64,
-    #[allow(dead_code)]
-    set_epoch: fn(&mut T, u64),
-}
-
-impl<T: Clone + Send + Sync> FenceableRecord<T> {
-    pub(crate) async fn init(
-        mut stored: StoredRecord<T>,
-        record_update_timeout: Duration,
-        system_clock: Arc<dyn SystemClock>,
-        get_epoch: fn(&T) -> u64,
-        set_epoch: fn(&mut T, u64),
-    ) -> Result<Self, SlateDBError> {
-        utils::timeout(
-            system_clock,
-            record_update_timeout,
-            "record update",
-            async {
-                loop {
-                    let local_epoch = get_epoch(stored.record()) + 1;
-                    let mut new_val = stored.record().clone();
-                    set_epoch(&mut new_val, local_epoch);
-                    let dirty = DirtyRecord {
-                        id: stored.id(),
-                        value: new_val,
-                    };
-                    match stored.update_dirty(dirty).await {
-                        Err(ManifestVersionExists) => {
-                            stored.refresh().await?;
-                            continue;
-                        }
-                        Err(err) => return Err(err),
-                        Ok(()) => {
-                            return Ok(Self {
-                                stored,
-                                local_epoch,
-                                get_epoch,
-                                set_epoch,
-                            })
-                        }
-                    }
-                }
-            },
-        )
-        .await
-        .map_err(|_| SlateDBError::Timeout {
-            op: "record update",
-            backoff: Duration::from_secs(1),
-        })
-    }
-
-    pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
-        self.stored.refresh().await?;
-        self.check_epoch()
-    }
-
-    pub(crate) async fn update_dirty(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
-        self.check_epoch()?;
-        self.stored.update_dirty(dirty).await
-    }
-
-    #[allow(clippy::panic)]
-    fn check_epoch(&self) -> Result<(), SlateDBError> {
-        let stored_epoch = (self.get_epoch)(self.stored.record());
-        if self.local_epoch < stored_epoch {
-            return Err(SlateDBError::Fenced);
-        }
-        if self.local_epoch > stored_epoch {
-            panic!("the stored epoch is lower than the local epoch");
-        }
-        Ok(())
-    }
-}
 
 /// Represents a local view of the manifest that is in the process of being updated
 #[derive(Clone, Debug)]
@@ -384,7 +61,7 @@ impl DirtyManifest {
 }
 
 pub(crate) struct FenceableManifest {
-    stored_manifest: FenceableRecord<Manifest>,
+    inner: FenceableRecord<Manifest>,
     local_epoch: u64,
     stored_epoch: fn(&Manifest) -> u64,
 }
@@ -409,7 +86,7 @@ impl FenceableManifest {
         .await?;
         let local_epoch = fr.local_epoch;
         Ok(Self {
-            stored_manifest: fr,
+            inner: fr,
             local_epoch,
             stored_epoch: |m| m.writer_epoch,
         })
@@ -430,21 +107,21 @@ impl FenceableManifest {
         .await?;
         let local_epoch = fr.local_epoch;
         Ok(Self {
-            stored_manifest: fr,
+            inner: fr,
             local_epoch,
             stored_epoch: |m| m.compactor_epoch,
         })
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
-        self.stored_manifest.refresh().await?;
+        self.inner.refresh().await?;
         self.check_epoch()
     }
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyManifest, SlateDBError> {
         self.check_epoch()?;
-        let id = self.stored_manifest.stored.id();
-        let manifest = self.stored_manifest.stored.record().clone();
+        let id = self.inner.id();
+        let manifest = self.inner.record().clone();
         Ok(DirtyManifest::new(id, manifest))
     }
 
@@ -457,7 +134,7 @@ impl FenceableManifest {
             id: manifest.id(),
             value: Manifest::from(manifest),
         };
-        self.stored_manifest.update_dirty(dirty).await
+        self.inner.update_dirty(dirty).await
     }
 
     pub(crate) fn new_checkpoint(
@@ -465,8 +142,8 @@ impl FenceableManifest {
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.stored_manifest.stored.store.clock.clone();
-        let db_state = &self.stored_manifest.stored.record().core;
+        let clock = self.inner.clock_arc();
+        let db_state = &self.inner.record().core;
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
                 let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
@@ -478,7 +155,7 @@ impl FenceableManifest {
                 if !db_state.initialized {
                     return Err(InvalidDBState);
                 }
-                self.stored_manifest.stored.id() + 1
+                self.inner.next_id()
             }
         };
         Ok(Checkpoint {
@@ -502,8 +179,7 @@ impl FenceableManifest {
         })
         .await?;
         let checkpoint = self
-            .stored_manifest
-            .stored
+            .inner
             .record()
             .core
             .find_checkpoint(checkpoint_id)
@@ -524,7 +200,7 @@ impl FenceableManifest {
                 return Ok(());
             };
             match self.update_manifest(dirty).await {
-                Err(SlateDBError::ManifestVersionExists) => {
+                Err(SlateDBError::FileVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -535,11 +211,7 @@ impl FenceableManifest {
     }
 
     fn check_epoch(&self) -> Result<(), SlateDBError> {
-        Self::check_epoch_against_manifest(
-            self.local_epoch,
-            self.stored_epoch,
-            self.stored_manifest.stored.record(),
-        )
+        Self::check_epoch_against_manifest(self.local_epoch, self.stored_epoch, self.inner.record())
     }
 
     #[allow(clippy::panic)]
@@ -656,14 +328,10 @@ impl StoredManifest {
         Ok(&self.manifest)
     }
 
-    fn next_id(&self) -> u64 {
-        self.id + 1
-    }
-
     fn new_checkpoint(
         manifest: &Manifest,
         current_id: u64,
-        clock: &Arc<dyn SystemClock>,
+        clock: &dyn SystemClock,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
@@ -695,12 +363,17 @@ impl StoredManifest {
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.inner.store.clock.clone();
+        let clock = self.inner.clock_arc();
         self.inner
             .maybe_apply_update(|sr| {
                 let mut new_val = sr.record().clone();
-                let checkpoint =
-                    Self::new_checkpoint(&new_val, sr.id(), &clock, checkpoint_id, options)?;
+                let checkpoint = Self::new_checkpoint(
+                    &new_val,
+                    sr.id(),
+                    clock.as_ref(),
+                    checkpoint_id,
+                    options,
+                )?;
                 new_val.core.checkpoints.push(checkpoint);
                 Ok(Some(DirtyRecord {
                     id: sr.id(),
@@ -753,7 +426,7 @@ impl StoredManifest {
         new_checkpoint_id: Uuid,
         new_checkpoint_options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.inner.store.clock.clone();
+        let clock = self.inner.clock_arc();
         self.inner
             .maybe_apply_update(|sr| {
                 let mut new_val = sr.record().clone();
@@ -761,7 +434,7 @@ impl StoredManifest {
                 let checkpoint = Self::new_checkpoint(
                     &new_val,
                     sr.id(),
-                    &clock,
+                    clock.as_ref(),
                     new_checkpoint_id,
                     new_checkpoint_options,
                 )?;
@@ -792,7 +465,7 @@ impl StoredManifest {
         checkpoint_id: Uuid,
         new_lifetime: Duration,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.inner.store.clock.clone();
+        let clock = self.inner.clock_arc();
         self.inner
             .maybe_apply_update(|sr| {
                 let mut new_val = sr.record().clone();
@@ -829,14 +502,17 @@ impl StoredManifest {
         if manifest.id() != self.id {
             return Err(ManifestVersionExists);
         }
-        let next_id = self.next_id();
         let manifest = manifest.into();
-        // Preserve original behavior by writing through ManifestStore
-        self.inner.store.write(next_id, &manifest).await?;
-        self.inner.record = manifest.clone();
-        self.inner.id = next_id;
-        self.manifest = manifest;
-        self.id = next_id;
+        let dirty = DirtyRecord {
+            id: self.inner.id(),
+            value: manifest,
+        };
+        self.inner.update_dirty(dirty).await.map_err(|e| match e {
+            SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
+            other => other,
+        })?;
+        self.id = self.inner.id();
+        self.manifest = self.inner.record().clone();
         Ok(())
     }
 
@@ -859,7 +535,7 @@ impl StoredManifest {
             };
 
             return match self.update_manifest(dirty).await {
-                Err(SlateDBError::ManifestVersionExists) => {
+                Err(SlateDBError::FileVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -937,16 +613,18 @@ impl ManifestStore {
         &self,
         id_range: R,
     ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
-        let files = self.inner.list(id_range).await?;
-        let mut out = Vec::with_capacity(files.len());
-        for f in files {
-            out.push(ManifestFileMetadata {
+        let out = self
+            .inner
+            .list(id_range)
+            .await?
+            .into_iter()
+            .map(|f| ManifestFileMetadata {
                 id: f.id,
                 location: f.location,
                 last_modified: f.last_modified,
                 size: f.size,
-            });
-        }
+            })
+            .collect::<Vec<_>>();
         Ok(out)
     }
 
@@ -1008,8 +686,6 @@ impl ManifestStore {
         }
         Ok(())
     }
-
-    // parse_id and get_manifest_path no longer needed; RecordStore handles naming.
 }
 
 #[cfg(test)]
@@ -1254,9 +930,9 @@ mod tests {
     }
 
     async fn assert_state_not_updated(fm: &mut FenceableManifest) {
-        let original_db_state = fm.stored_manifest.stored.record().core.clone();
+        let original_db_state = fm.inner.record().core.clone();
         fm.refresh().await.unwrap();
-        let refreshed_db_state = fm.stored_manifest.stored.record().core.clone();
+        let refreshed_db_state = fm.inner.record().core.clone();
         assert_eq!(refreshed_db_state, original_db_state);
     }
 
