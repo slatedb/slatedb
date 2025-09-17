@@ -203,7 +203,7 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
     fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<MemtableFlushMsg>>)> {
         vec![(
             self.db_inner.settings.manifest_poll_interval,
-            Box::new(move || MemtableFlushMsg::PollManifest),
+            Box::new(|| MemtableFlushMsg::PollManifest),
         )]
     }
 
