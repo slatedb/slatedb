@@ -31,6 +31,12 @@ typedef struct CSdbIterator CSdbIterator;
 // Contains the WriteBatch that can be moved out when writing to the database
 typedef struct CSdbWriteBatch CSdbWriteBatch;
 
+// A builder for creating a new Db instance.
+//
+// This builder provides a fluent API for configuring and opening a SlateDB database.
+// It separates the concerns of configuration options (settings) and components.
+typedef struct DbBuilder_String DbBuilder_String;
+
 // Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
 // Similar to SlateDbFFI but for read-only operations.
 typedef struct DbReaderFFI DbReaderFFI;
@@ -201,6 +207,18 @@ typedef struct CSdbScanResult {
 // - `level` must be a valid C string pointer or null for default level
 struct CSdbResult slatedb_init_logging(const char *level);
 
+// Create default Settings and return as JSON string
+char *slatedb_settings_default(void);
+
+// Load Settings from file and return as JSON string
+char *slatedb_settings_from_file(const char *path);
+
+// Load Settings from environment variables and return as JSON string
+char *slatedb_settings_from_env(const char *prefix);
+
+// Load Settings using auto-detection and return as JSON string
+char *slatedb_settings_load(void);
+
 // # Safety
 //
 // - `batch_out` must be a valid pointer to a location where a batch pointer can be stored
@@ -252,9 +270,7 @@ struct CSdbResult slatedb_write_batch_write(struct CSdbHandle handle,
 // - `batch` must be a valid pointer to a WriteBatch that was previously allocated
 struct CSdbResult slatedb_write_batch_close(struct CSdbWriteBatch *batch);
 
-struct CSdbHandle slatedb_open(const char *path,
-                               const char *store_config_json,
-                               const char *options_json);
+struct CSdbHandle slatedb_open(const char *path, const char *store_config_json);
 
 // # Safety
 //
@@ -311,6 +327,38 @@ struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
                                             uintptr_t end_len,
                                             const struct CSdbScanOptions *options,
                                             struct CSdbIterator **iter_out);
+
+// Create a new DbBuilder
+struct DbBuilder_String *slatedb_builder_new(const char *path, const char *store_config_json);
+
+// Set settings on DbBuilder from JSON
+//
+// # Safety
+//
+// - `builder` must be a valid pointer to a DbBuilder
+// - `settings_json` must be a valid C string pointer
+bool slatedb_builder_with_settings(struct DbBuilder_String *builder, const char *settings_json);
+
+// Set SST block size on DbBuilder
+//
+// # Safety
+//
+// - `builder` must be a valid pointer to a DbBuilder
+bool slatedb_builder_with_sst_block_size(struct DbBuilder_String *builder, uint8_t size);
+
+// Build the database from DbBuilder
+//
+// # Safety
+//
+// - `builder` must be a valid pointer to a DbBuilder that was previously allocated
+struct CSdbHandle slatedb_builder_build(struct DbBuilder_String *builder);
+
+// Free DbBuilder
+//
+// # Safety
+//
+// - `builder` must be a valid pointer to a DbBuilder that was previously allocated
+void slatedb_builder_free(struct DbBuilder_String *builder);
 
 struct CSdbReaderHandle slatedb_reader_open(const char *path,
                                             const char *store_config_json,

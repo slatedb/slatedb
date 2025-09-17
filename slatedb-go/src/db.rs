@@ -1,3 +1,4 @@
+use serde_json;
 use slatedb::admin::load_object_store_from_env;
 use slatedb::Db;
 use std::os::raw::c_char;
@@ -5,7 +6,7 @@ use tokio::runtime::Builder;
 
 use crate::config::{
     convert_put_options, convert_range_bounds, convert_read_options, convert_scan_options,
-    convert_write_options, create_object_store, parse_db_options, parse_store_config,
+    convert_write_options, create_object_store, parse_store_config,
 };
 use crate::error::{
     create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
@@ -15,6 +16,7 @@ use crate::types::{
     CSdbHandle, CSdbIterator, CSdbPutOptions, CSdbReadOptions, CSdbScanOptions, CSdbValue,
     CSdbWriteOptions, SlateDbFFI,
 };
+use slatedb::config::{Settings, SstBlockSize};
 
 // ============================================================================
 // Database Functions
@@ -24,25 +26,9 @@ use crate::types::{
 pub extern "C" fn slatedb_open(
     path: *const c_char,
     store_config_json: *const c_char,
-    options_json: *const c_char,
 ) -> CSdbHandle {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s,
-        Err(_) => return CSdbHandle::null(),
-    };
-
-    // Parse options JSON
-    let options_str = if options_json.is_null() {
-        None
-    } else {
-        match safe_str_from_ptr(options_json) {
-            Ok(s) => Some(s),
-            Err(_) => return CSdbHandle::null(),
-        }
-    };
-
-    let db_options = match parse_db_options(options_str) {
-        Ok(opts) => opts,
         Err(_) => return CSdbHandle::null(),
     };
 
@@ -60,8 +46,7 @@ pub extern "C" fn slatedb_open(
                 parse_store_config(json_str).map_err(|_| CSdbError::InvalidArgument)
             })
             .and_then(|config| {
-                rt.block_on(create_object_store(&config))
-                    .map_err(|_| CSdbError::InvalidArgument)
+                create_object_store(&config).map_err(|_| CSdbError::InvalidArgument)
             });
 
         match store_result {
@@ -77,13 +62,8 @@ pub extern "C" fn slatedb_open(
     };
 
     match rt.block_on(async {
-        let mut builder = Db::builder(path_str, object_store).with_settings(db_options.settings);
-
-        if let Some(block_size) = db_options.sst_block_size {
-            builder = builder.with_sst_block_size(block_size);
-        }
-
-        builder.build().await
+        // Use all defaults - custom configuration should use the Builder API
+        Db::builder(path_str, object_store).build().await
     }) {
         Ok(db) => {
             let ffi = Box::new(SlateDbFFI { rt, db });
@@ -324,5 +304,157 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
             let error_code = slate_error_to_code(&e);
             create_error_result(error_code, &format!("Scan operation failed: {}", e))
         }
+    }
+}
+
+// ============================================================================
+// Database Builder Functions
+// ============================================================================
+
+/// Create a new DbBuilder
+#[no_mangle]
+pub extern "C" fn slatedb_builder_new(
+    path: *const c_char,
+    store_config_json: *const c_char,
+) -> *mut slatedb::DbBuilder<String> {
+    let path_str = match safe_str_from_ptr(path) {
+        Ok(s) => s.to_string(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    // Create object store from config, fall back to environment on failure
+    let object_store = {
+        // Try to parse store config from JSON and create object store
+        let store_result = safe_str_from_ptr(store_config_json)
+            .and_then(|json_str| {
+                parse_store_config(json_str).map_err(|_| CSdbError::InvalidArgument)
+            })
+            .and_then(|config| {
+                create_object_store(&config).map_err(|_| CSdbError::InvalidArgument)
+            });
+
+        match store_result {
+            Ok(store) => store,
+            Err(_) => {
+                // Config failed, try environment fallback
+                match load_object_store_from_env(None) {
+                    Ok(store) => store,
+                    Err(_) => return std::ptr::null_mut(),
+                }
+            }
+        }
+    };
+
+    let builder = Db::builder(path_str, object_store);
+    Box::into_raw(Box::new(builder))
+}
+
+/// Set settings on DbBuilder from JSON
+///
+/// # Safety
+///
+/// - `builder` must be a valid pointer to a DbBuilder
+/// - `settings_json` must be a valid C string pointer
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_builder_with_settings(
+    builder: *mut slatedb::DbBuilder<String>,
+    settings_json: *const c_char,
+) -> bool {
+    if builder.is_null() || settings_json.is_null() {
+        return false;
+    }
+
+    let settings_str = match safe_str_from_ptr(settings_json) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let settings: Settings = match serde_json::from_str(settings_str) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let builder_ref = &mut *builder;
+    // We need to replace the builder since DbBuilder consumes self
+    let old_builder = std::ptr::read(builder_ref);
+    let new_builder = old_builder.with_settings(settings);
+    std::ptr::write(builder_ref, new_builder);
+
+    true
+}
+
+/// Set SST block size on DbBuilder
+///
+/// # Safety
+///
+/// - `builder` must be a valid pointer to a DbBuilder
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_builder_with_sst_block_size(
+    builder: *mut slatedb::DbBuilder<String>,
+    size: u8,
+) -> bool {
+    if builder.is_null() {
+        return false;
+    }
+
+    let block_size = match size {
+        1 => SstBlockSize::Block1Kib,
+        2 => SstBlockSize::Block2Kib,
+        3 => SstBlockSize::Block4Kib,
+        4 => SstBlockSize::Block8Kib,
+        5 => SstBlockSize::Block16Kib,
+        6 => SstBlockSize::Block32Kib,
+        7 => SstBlockSize::Block64Kib,
+        _ => return false,
+    };
+
+    let builder_ref = &mut *builder;
+    // We need to replace the builder since DbBuilder consumes self
+    let old_builder = std::ptr::read(builder_ref);
+    let new_builder = old_builder.with_sst_block_size(block_size);
+    std::ptr::write(builder_ref, new_builder);
+
+    true
+}
+
+/// Build the database from DbBuilder
+///
+/// # Safety
+///
+/// - `builder` must be a valid pointer to a DbBuilder that was previously allocated
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_builder_build(
+    builder: *mut slatedb::DbBuilder<String>,
+) -> CSdbHandle {
+    if builder.is_null() {
+        return CSdbHandle::null();
+    }
+
+    let builder_owned = Box::from_raw(builder);
+
+    // Create a dedicated runtime for this DB instance
+    let rt = match Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(_) => return CSdbHandle::null(),
+    };
+
+    match rt.block_on(builder_owned.build()) {
+        Ok(db) => {
+            let ffi = SlateDbFFI { rt, db };
+            CSdbHandle(Box::into_raw(Box::new(ffi)))
+        }
+        Err(_) => CSdbHandle::null(),
+    }
+}
+
+/// Free DbBuilder
+///
+/// # Safety
+///
+/// - `builder` must be a valid pointer to a DbBuilder that was previously allocated
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_builder_free(builder: *mut slatedb::DbBuilder<String>) {
+    if !builder.is_null() {
+        let _ = Box::from_raw(builder);
     }
 }

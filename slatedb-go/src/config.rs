@@ -1,14 +1,14 @@
-use std::path::PathBuf;
+use std::ffi::{c_char, CString};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::db_reader::CSdbReaderOptions;
+use crate::error::safe_str_from_ptr;
 use crate::types::{CSdbPutOptions, CSdbReadOptions, CSdbScanOptions, CSdbWriteOptions};
 use serde::Deserialize;
 use slatedb::bytes::Bytes;
 use slatedb::config::{
-    CompactorOptions, DbReaderOptions, DurabilityLevel, PutOptions, ReadOptions, ScanOptions,
-    Settings, SstBlockSize, Ttl, WriteOptions,
+    DbReaderOptions, DurabilityLevel, PutOptions, ReadOptions, ScanOptions, Ttl, WriteOptions,
 };
 use slatedb::object_store::ObjectStore;
 use std::ops::Bound;
@@ -27,23 +27,6 @@ pub struct StoreConfigJson {
     pub aws: Option<AwsConfigJson>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct CompactorOptionsJson {
-    pub poll_interval: Option<u64>,           // duration in nanoseconds
-    pub manifest_update_timeout: Option<u64>, // timeout in nanoseconds
-    pub max_sst_size_bytes: Option<u64>,
-    pub max_concurrent_compactions: Option<u32>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SlateDBOptionsJson {
-    pub l0_sst_size_bytes: Option<u64>,
-    pub flush_interval: Option<u64>, // interval in nanoseconds
-    pub cache_folder: Option<String>,
-    pub sst_block_size: Option<u8>,
-    pub compactor_options: Option<CompactorOptionsJson>,
-}
-
 // Parsed configuration types
 
 #[derive(Debug, Clone)]
@@ -52,18 +35,11 @@ pub struct ParsedStoreConfig {
     pub aws_config: Option<AwsConfigJson>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ParsedDbOptions {
-    pub settings: Settings,
-    pub sst_block_size: Option<SstBlockSize>,
-}
-
 // Configuration parsing errors
 #[derive(Debug)]
 pub enum ConfigError {
     JsonParseError(serde_json::Error),
     InvalidProvider(String),
-    InvalidBlockSize(u8),
 }
 
 impl From<serde_json::Error> for ConfigError {
@@ -77,7 +53,6 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::JsonParseError(e) => write!(f, "JSON parse error: {}", e),
             ConfigError::InvalidProvider(p) => write!(f, "Invalid provider: {}", p),
-            ConfigError::InvalidBlockSize(s) => write!(f, "Invalid block size: {}", s),
         }
     }
 }
@@ -108,114 +83,9 @@ pub fn parse_store_config(json_str: &str) -> Result<ParsedStoreConfig, ConfigErr
     })
 }
 
-pub fn parse_db_options(json_str: Option<&str>) -> Result<ParsedDbOptions, ConfigError> {
-    let mut settings = Settings::default();
-    let mut sst_block_size = None;
-
-    if let Some(json) = json_str {
-        let options: SlateDBOptionsJson = serde_json::from_str(json)?;
-
-        // Convert L0 SST size
-        if let Some(l0_size) = options.l0_sst_size_bytes {
-            if l0_size > 0 {
-                settings.l0_sst_size_bytes = l0_size as usize;
-            }
-        }
-
-        // Convert flush interval (Go duration is in nanoseconds)
-        if let Some(flush_interval_ns) = options.flush_interval {
-            if flush_interval_ns > 0 {
-                settings.flush_interval = Some(Duration::from_nanos(flush_interval_ns));
-            }
-        }
-
-        // Convert cache folder
-        if let Some(cache_folder) = options.cache_folder {
-            if !cache_folder.is_empty() {
-                settings.object_store_cache_options.root_folder = Some(PathBuf::from(cache_folder));
-            }
-        }
-
-        // Convert sst_block_size from u8 to SstBlockSize enum
-        if let Some(block_size) = options.sst_block_size {
-            sst_block_size = match block_size {
-                1 => Some(SstBlockSize::Block1Kib),
-                2 => Some(SstBlockSize::Block2Kib),
-                3 => Some(SstBlockSize::Block4Kib),
-                4 => Some(SstBlockSize::Block8Kib),
-                5 => Some(SstBlockSize::Block16Kib),
-                6 => Some(SstBlockSize::Block32Kib),
-                7 => Some(SstBlockSize::Block64Kib),
-                _ => return Err(ConfigError::InvalidBlockSize(block_size)),
-            };
-        }
-
-        // Convert compactor options
-        settings.compactor_options = convert_compactor_options_json(options.compactor_options);
-    } else {
-        // No options provided, use defaults with default compaction
-        settings.compactor_options = Some(CompactorOptions::default());
-    }
-
-    Ok(ParsedDbOptions {
-        settings,
-        sst_block_size,
-    })
-}
-
-// Convert JSON compactor options to Rust CompactorOptions
-fn convert_compactor_options_json(opts: Option<CompactorOptionsJson>) -> Option<CompactorOptions> {
-    let defaults = CompactorOptions::default();
-
-    match opts {
-        None => Some(defaults),
-        Some(opts) => Some(CompactorOptions {
-            poll_interval: if let Some(interval_ns) = opts.poll_interval {
-                if interval_ns > 0 {
-                    Duration::from_nanos(interval_ns)
-                } else {
-                    defaults.poll_interval
-                }
-            } else {
-                defaults.poll_interval
-            },
-
-            manifest_update_timeout: if let Some(timeout_ns) = opts.manifest_update_timeout {
-                if timeout_ns > 0 {
-                    Duration::from_nanos(timeout_ns)
-                } else {
-                    defaults.manifest_update_timeout
-                }
-            } else {
-                defaults.manifest_update_timeout
-            },
-
-            max_sst_size: if let Some(size) = opts.max_sst_size_bytes {
-                if size > 0 {
-                    size as usize
-                } else {
-                    defaults.max_sst_size
-                }
-            } else {
-                defaults.max_sst_size
-            },
-
-            max_concurrent_compactions: if let Some(count) = opts.max_concurrent_compactions {
-                if count > 0 {
-                    count as usize
-                } else {
-                    defaults.max_concurrent_compactions
-                }
-            } else {
-                defaults.max_concurrent_compactions
-            },
-        }),
-    }
-}
-
 // Object store creation helper
 
-pub async fn create_object_store(
+pub fn create_object_store(
     config: &ParsedStoreConfig,
 ) -> Result<Arc<dyn ObjectStore>, crate::error::CSdbResult> {
     use crate::error::{create_error_result, CSdbError};
@@ -225,7 +95,7 @@ pub async fn create_object_store(
         "local" => create_inmemory_store(),
         "aws" => {
             if let Some(aws_cfg) = &config.aws_config {
-                create_aws_store(aws_cfg).await
+                create_aws_store(aws_cfg)
             } else {
                 Err(create_error_result(
                     CSdbError::InvalidArgument,
@@ -369,5 +239,73 @@ pub fn convert_reader_options(c_opts: *const CSdbReaderOptions) -> DbReaderOptio
         checkpoint_lifetime,
         max_memtable_bytes,
         block_cache: defaults.block_cache,
+    }
+}
+
+/// Create default Settings and return as JSON string
+#[no_mangle]
+pub extern "C" fn slatedb_settings_default() -> *mut c_char {
+    let settings = slatedb::config::Settings::default();
+    match serde_json::to_string(&settings) {
+        Ok(json) => match CString::new(json) {
+            Ok(cstr) => cstr.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Load Settings from file and return as JSON string
+#[no_mangle]
+pub extern "C" fn slatedb_settings_from_file(path: *const c_char) -> *mut c_char {
+    let path_str = match safe_str_from_ptr(path) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match slatedb::config::Settings::from_file(path_str) {
+        Ok(settings) => match serde_json::to_string(&settings) {
+            Ok(json) => match CString::new(json) {
+                Ok(cstr) => cstr.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            },
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Load Settings from environment variables and return as JSON string
+#[no_mangle]
+pub extern "C" fn slatedb_settings_from_env(prefix: *const c_char) -> *mut c_char {
+    let prefix_str = match safe_str_from_ptr(prefix) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match slatedb::config::Settings::from_env(prefix_str) {
+        Ok(settings) => match serde_json::to_string(&settings) {
+            Ok(json) => match CString::new(json) {
+                Ok(cstr) => cstr.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            },
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Load Settings using auto-detection and return as JSON string
+#[no_mangle]
+pub extern "C" fn slatedb_settings_load() -> *mut c_char {
+    match slatedb::config::Settings::load() {
+        Ok(settings) => match serde_json::to_string(&settings) {
+            Ok(json) => match CString::new(json) {
+                Ok(cstr) => cstr.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            },
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
     }
 }
