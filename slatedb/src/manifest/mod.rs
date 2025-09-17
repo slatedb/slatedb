@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
-use crate::error::SlateDBError;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
@@ -15,12 +14,6 @@ use serde::Serialize;
 use uuid::Uuid;
 
 pub(crate) mod store;
-
-// Generic codec to serialize/deserialize versioned records stored as files
-pub(crate) trait RecordCodec<T>: Send + Sync {
-    fn encode(&self, value: &T) -> Bytes;
-    fn decode(&self, bytes: &Bytes) -> Result<T, SlateDBError>;
-}
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {

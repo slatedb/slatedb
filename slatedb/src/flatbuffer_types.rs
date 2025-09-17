@@ -29,9 +29,10 @@ use crate::flatbuffer_types::manifest_generated::{
     CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun,
     SortedRunArgs, Uuid, UuidArgs,
 };
-use crate::manifest::{ExternalDb, Manifest, RecordCodec};
+use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::seq_tracker::SequenceTracker;
+use crate::record::RecordCodec;
 use crate::utils::clamp_allocated_size_bytes;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
@@ -565,7 +566,8 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
-    use crate::manifest::{ExternalDb, Manifest, RecordCodec};
+    use crate::manifest::{ExternalDb, Manifest};
+    use crate::record::RecordCodec;
     use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
 
