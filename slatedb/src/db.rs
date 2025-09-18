@@ -3608,10 +3608,7 @@ mod tests {
 
         // assert that db1 can no longer write.
         let err = do_put(&db1, b"1", b"1").await.unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Permission error: detected newer DB client"
-        );
+        assert_eq!(err.to_string(), "Fencing error: detected newer DB client");
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
