@@ -134,7 +134,11 @@ impl FenceableManifest {
             id: manifest.id(),
             value: Manifest::from(manifest),
         };
-        self.inner.update_dirty(dirty).await
+        self.inner.update_dirty(dirty).await.map_err(|e| match e {
+            SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
+            other => other,
+        })?;
+        Ok(())
     }
 
     pub(crate) fn new_checkpoint(
@@ -200,7 +204,7 @@ impl FenceableManifest {
                 return Ok(());
             };
             match self.update_manifest(dirty).await {
-                Err(SlateDBError::FileVersionExists) => {
+                Err(SlateDBError::ManifestVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -535,7 +539,7 @@ impl StoredManifest {
             };
 
             return match self.update_manifest(dirty).await {
-                Err(SlateDBError::FileVersionExists) => {
+                Err(SlateDBError::ManifestVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -613,7 +617,7 @@ impl ManifestStore {
         &self,
         id_range: R,
     ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
-        let out = self
+        let manifests = self
             .inner
             .list(id_range)
             .await?
@@ -625,7 +629,7 @@ impl ManifestStore {
                 size: f.size,
             })
             .collect::<Vec<_>>();
-        Ok(out)
+        Ok(manifests)
     }
 
     /// Active manifests include the latest manifest and all manifests referenced
