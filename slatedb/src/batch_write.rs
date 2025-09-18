@@ -148,16 +148,12 @@ impl DbInner {
             // would violate the guarantee that batches are written atomically. We do
             // this by appending the entire entry batch in a single call to the WAL buffer,
             // which holds a write lock during the append.
-            Some(self.wal_buffer.append(&entries).await?.durable_watcher())
+            let wal_watcher = self.wal_buffer.append(&entries).await?.durable_watcher();
+            self.write_entries_to_memtable(entries);
+            wal_watcher
         } else {
-            None
-        };
-
-        let durable_watcher = {
-            let guard = self.state.read();
-            let memtable = guard.memtable();
-            entries.into_iter().for_each(|entry| memtable.put(entry));
-            durable_watcher.unwrap_or(memtable.table().durable_watcher())
+            // if WAL is disabled, we just write the entries to memtable.
+            self.write_entries_to_memtable(entries)
         };
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
@@ -199,6 +195,17 @@ impl DbInner {
         }
 
         Ok(durable_watcher)
+    }
+
+    /// Write entries to the currently active memtable. Returns a durable watcher for the memtable.
+    fn write_entries_to_memtable(
+        &self,
+        entries: Vec<RowEntry>,
+    ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+        let guard = self.state.read();
+        let memtable = guard.memtable();
+        entries.into_iter().for_each(|entry| memtable.put(entry));
+        memtable.table().durable_watcher()
     }
 
     /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set.
