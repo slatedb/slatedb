@@ -172,8 +172,6 @@ impl DbInner {
             |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
         );
 
-        // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
-        // otherwise, we'll use the memtable's durable watcher.
         if self.wal_enabled {
             self.wal_buffer.maybe_trigger_flush().await?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
