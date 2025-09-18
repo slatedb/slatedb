@@ -132,6 +132,7 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
     pub(crate) fn clock_arc(&self) -> Arc<dyn SystemClock> {
         self.stored.clock_arc()
     }
+
     // The file may have been updated by a reader, or
     // we may have gotten this error after successfully updating
     // if we failed to get the response. Either way, refresh
