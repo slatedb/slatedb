@@ -294,7 +294,7 @@ impl<T> RecordStore<T> {
     pub(crate) async fn try_read_latest(&self) -> Result<Option<(u64, T)>, SlateDBError> {
         let base = &Path::from("/");
         let mut files_stream = self.object_store.list(Some(base));
-        let mut max_id: u64 = 0;
+        let mut max_id: Option<u64> = None;
         while let Some(file) = files_stream
             .next()
             .await
@@ -302,16 +302,12 @@ impl<T> RecordStore<T> {
             .map_err(SlateDBError::from)?
         {
             if let Ok(id) = self.parse_id(&file.location) {
-                if id > max_id {
-                    max_id = id;
-                }
+                max_id = Some(max_id.map_or(id, |m| m.max(id)));
             }
         }
-        if max_id == 0 {
-            return Ok(None);
-        }
-        match self.try_read(max_id).await? {
-            Some(val) => Ok(Some((max_id, val))),
+
+        match max_id {
+            Some(id) => self.try_read(id).await.map(|opt| opt.map(|val| (id, val))),
             None => Ok(None),
         }
     }
