@@ -149,6 +149,9 @@ impl DbInner {
             // this by appending the entire entry batch in a single call to the WAL buffer,
             // which holds a write lock during the append.
             let wal_watcher = self.wal_buffer.append(&entries).await?.durable_watcher();
+            self.wal_buffer.maybe_trigger_flush().await?;
+            // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
+            // in another Pull Request.
             self.write_entries_to_memtable(entries);
             wal_watcher
         } else {
@@ -167,12 +170,6 @@ impl DbInner {
             "write-batch-pre-commit",
             |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
         );
-
-        if self.wal_enabled {
-            self.wal_buffer.maybe_trigger_flush().await?;
-            // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
-            // in another Pull Request.
-        }
 
         // track the recent committed txn for conflict check. if txn_id is not supplied,
         // we still consider this as an transaction commit.
