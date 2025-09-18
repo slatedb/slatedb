@@ -200,14 +200,14 @@ impl WalBufferManager {
 
     /// Append row entries to the current WAL. return the last seq number of the WAL.
     /// TODO: validate the seq number is always increasing.
-    pub async fn append(&self, entries: &[RowEntry]) -> Result<Option<u64>, SlateDBError> {
+    pub async fn append(&self, entries: &[RowEntry]) -> Result<Arc<KVTable>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
 
         let inner = self.inner.write();
         for entry in entries {
             inner.current_wal.put(entry.clone());
         }
-        Ok(entries.last().map(|entry| entry.seq))
+        Ok(inner.current_wal.clone())
     }
 
     /// Check if we need to flush the wal with considering max_wal_size. the checking over `max_wal_size`
