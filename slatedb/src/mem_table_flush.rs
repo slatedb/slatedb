@@ -228,7 +228,7 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
                 if let Err(Err(e)) = sender.send(write_result.clone()) {
                     error!("Failed to send checkpoint error [error={:?}]", e);
                 }
-                write_result.and_then(|_| Ok(()))
+                write_result.map(|_| ())
             }
         }
     }
