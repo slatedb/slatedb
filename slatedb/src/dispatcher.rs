@@ -85,16 +85,20 @@
 //! # }
 //! ```
 
-// TODO Remove once we've migrated to MessageDispatcher
-#![allow(dead_code)]
-
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    future::Future,
+    panic::AssertUnwindSafe,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{
     stream::{BoxStream, FuturesUnordered},
-    StreamExt,
+    FutureExt, StreamExt,
 };
 use log::warn;
 use tokio::sync::mpsc;
@@ -132,6 +136,7 @@ pub(crate) struct MessageDispatcher<T: Send + std::fmt::Debug> {
     clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
     error_state: WatchableOnceCell<SlateDBError>,
+    #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
 }
 
@@ -210,8 +215,10 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// A [Result] containing the [DbState::error] if it was already set, or the result
     /// of [MessageDispatcher::handle_result] otherwise.
     pub(crate) async fn run(&mut self) -> Result<(), SlateDBError> {
-        // TODO: handle panic here (similar to spawn_bg_task)
-        let result = self.run_loop().await;
+        let result = AssertUnwindSafe(self.run_loop())
+            .catch_unwind()
+            .await
+            .unwrap_or_else(Self::handle_panic);
         let result = self.handle_result(result);
         if let Err(e) = self.cleanup(result.clone()).await {
             warn!("failed to cleanup dispatcher on shutdown [error={:?}]", e);
@@ -251,7 +258,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {},
                 e = error_watcher.await_value() => {
-                    warn!("halting message loop because db is in error state [error={:#?}]", e);
+                    warn!("halting message loop because db is in error state [error={:?}]", e);
                 },
             }
         };
@@ -302,6 +309,21 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         }
         // use the first error that occurred (could be ours, or a previous failure)
         self.error_state.reader().read().map_or(result, Err)
+    }
+
+    /// Maps panic errors into SlateDBError::BackgroundTaskPanic.
+    ///
+    /// ## Arguments
+    ///
+    /// * `panic`: The panic to map.
+    ///
+    /// ## Returns
+    ///
+    /// A [Result] containing [SlateDBError::BackgroundTaskPanic], which wraps the panic.
+    fn handle_panic(panic: Box<dyn Any + Send>) -> Result<(), SlateDBError> {
+        Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
+            panic,
+        ))))
     }
 
     /// Tells the handler to clean up any resources.
@@ -443,6 +465,7 @@ mod test {
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
+    use futures::stream::BoxStream;
     use futures::StreamExt;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -1025,5 +1048,74 @@ mod test {
         ));
         assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
         assert_eq!(log.lock().unwrap().len(), 16);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_dispatcher_catches_panic_from_run_loop() {
+        #[derive(Clone)]
+        struct PanicHandler {
+            cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
+        }
+
+        #[async_trait::async_trait]
+        impl MessageHandler<u8> for PanicHandler {
+            fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<u8>>)> {
+                vec![]
+            }
+
+            async fn handle(&mut self, _message: u8) -> Result<(), SlateDBError> {
+                panic!("intentional panic in handler");
+            }
+
+            async fn cleanup(
+                &mut self,
+                mut messages: BoxStream<'async_trait, u8>,
+                result: Result<(), SlateDBError>,
+            ) -> Result<(), SlateDBError> {
+                // Record the shutdown result and drain any pending messages
+                self.cleanup_called.write(result);
+                while messages.next().await.is_some() {}
+                Ok(())
+            }
+        }
+
+        let cleanup_called = WatchableOnceCell::new();
+        let mut cleanup_reader = cleanup_called.reader();
+        let (tx, rx) = mpsc::unbounded_channel::<u8>();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let handler = PanicHandler { cleanup_called };
+        let cancellation_token = CancellationToken::new();
+        let error_state = WatchableOnceCell::new();
+        let mut dispatcher = MessageDispatcher::new(
+            Box::new(handler),
+            rx,
+            clock.clone(),
+            cancellation_token.clone(),
+            error_state.clone(),
+        );
+        let join = tokio::spawn(async move { dispatcher.run().await });
+
+        // Trigger panic inside the run loop via handle()
+        tx.send(1u8).unwrap();
+
+        // Wait for cleanup to observe the panic result
+        let _ = timeout(Duration::from_secs(30), cleanup_reader.await_value())
+            .await
+            .expect("timeout waiting for cleanup result");
+
+        // Join dispatcher and verify panic was converted and propagated
+        let result = timeout(Duration::from_secs(30), join)
+            .await
+            .expect("dispatcher did not stop in time")
+            .expect("join failed");
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        assert!(matches!(
+            error_state.reader().read(),
+            Some(SlateDBError::BackgroundTaskPanic(_))
+        ));
+        assert!(matches!(
+            cleanup_reader.read(),
+            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
+        ));
     }
 }

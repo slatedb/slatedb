@@ -658,11 +658,8 @@ impl Db {
         }
 
         // Shutdown the WAL flush thread.
-        self.inner
-            .wal_buffer
-            .close()
-            .await
-            .expect("failed to close WAL buffer");
+        let result = self.inner.wal_buffer.close().await;
+        info!("wal buffer task exited [result={:?}]", result);
 
         // Shutdown the memtable flush thread.
         if let Some(memtable_flush_task) = {
