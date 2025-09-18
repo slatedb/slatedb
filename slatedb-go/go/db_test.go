@@ -23,7 +23,7 @@ var _ = Describe("DB", func() {
 
 		db, err = slatedb.Open(tmpDir, &slatedb.StoreConfig{
 			Provider: slatedb.ProviderLocal,
-		}, nil)
+		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db).NotTo(BeNil())
 	})
@@ -206,4 +206,186 @@ var _ = Describe("DB", func() {
 			db = nil // Prevent double close in AfterEach
 		})
 	})
+})
+
+var _ = Describe("DB Builder", func() {
+	var tmpDir string
+
+	BeforeEach(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "slatedb_builder_test_*")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		os.RemoveAll(tmpDir)
+	})
+
+	Describe("NewBuilder", func() {
+		It("should create a new builder successfully", func() {
+			builder, err := slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
+				Provider: slatedb.ProviderLocal,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(builder).NotTo(BeNil())
+		})
+
+		It("should fail with invalid store config", func() {
+			builder, err := slatedb.NewBuilder(tmpDir, nil)
+			Expect(err).To(HaveOccurred())
+			Expect(builder).To(BeNil())
+		})
+	})
+
+	Describe("WithSettings", func() {
+		var builder *slatedb.Builder
+
+		BeforeEach(func() {
+			var err error
+			builder, err = slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
+				Provider: slatedb.ProviderLocal,
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should work without any settings (use Rust defaults)", func() {
+			db, err := builder.Build()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(db).NotTo(BeNil())
+
+			err = db.Put([]byte("test"), []byte("value"))
+			Expect(err).NotTo(HaveOccurred())
+
+			value, err := db.Get([]byte("test"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value).To(Equal([]byte("value")))
+
+			err = db.Close()
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should handle nil settings", func() {
+			db, err := builder.WithSettings(nil).Build()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(db).NotTo(BeNil())
+
+			err = db.Close()
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should work with custom settings", func() {
+			// Get default settings and modify specific fields
+			defaults, err := slatedb.SettingsDefault()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Create custom settings based on defaults
+			customSettings := defaults
+			customSettings.FlushInterval = "200ms" // Override flush interval
+			customSettings.MinFilterKeys = 1500    // Override min filter keys
+
+			db, err := builder.WithSettings(customSettings).Build()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(db).NotTo(BeNil())
+
+			// Test that the database works with custom settings
+			err = db.Put([]byte("custom_test"), []byte("custom_value"))
+			Expect(err).NotTo(HaveOccurred())
+
+			value, err := db.Get([]byte("custom_test"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value).To(Equal([]byte("custom_value")))
+
+			err = db.Close()
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Describe("WithSstBlockSize", func() {
+		var builder *slatedb.Builder
+
+		BeforeEach(func() {
+			var err error
+			builder, err = slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
+				Provider: slatedb.ProviderLocal,
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should accept SST block size configuration", func() {
+			db, err := builder.WithSstBlockSize(slatedb.SstBlockSize4Kib).Build()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(db).NotTo(BeNil())
+
+			err = db.Put([]byte("sst_test"), []byte("sst_value"))
+			Expect(err).NotTo(HaveOccurred())
+
+			err = db.Close()
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Describe("Method Chaining", func() {
+		It("should support method chaining", func() {
+			builder, err := slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
+				Provider: slatedb.ProviderLocal,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			db, err := builder.
+				WithSettings(nil).
+				WithSstBlockSize(slatedb.SstBlockSize8Kib).
+				Build()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(db).NotTo(BeNil())
+
+			err = db.Put([]byte("chain_test"), []byte("chain_value"))
+			Expect(err).NotTo(HaveOccurred())
+
+			err = db.Close()
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should support chaining custom settings with SST block size", func() {
+			// Get default settings and customize them
+			defaults, err := slatedb.SettingsDefault()
+			Expect(err).NotTo(HaveOccurred())
+
+			customSettings := defaults
+			customSettings.FlushInterval = "150ms"
+			customSettings.L0SstSizeBytes = 32 * 1024 * 1024 // 32MB
+
+			builder, err := slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
+				Provider: slatedb.ProviderLocal,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			db, err := builder.
+				WithSettings(customSettings).
+				WithSstBlockSize(slatedb.SstBlockSize16Kib).
+				Build()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(db).NotTo(BeNil())
+
+			// Test functionality with both custom settings and SST block size
+			err = db.Put([]byte("combined_test"), []byte("combined_value"))
+			Expect(err).NotTo(HaveOccurred())
+
+			value, err := db.Get([]byte("combined_test"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value).To(Equal([]byte("combined_value")))
+
+			err = db.Close()
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+	})
+
+	Describe("Error Handling", func() {
+		It("should handle invalid store config", func() {
+			_, err := slatedb.NewBuilder(tmpDir, nil)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("storeConfig cannot be nil"))
+		})
+	})
+
 })

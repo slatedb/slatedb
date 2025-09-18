@@ -15,9 +15,7 @@ pub fn create_inmemory_store() -> Result<Arc<dyn ObjectStore>, CSdbResult> {
 }
 
 // Helper function to create AWS S3 object store
-pub async fn create_aws_store(
-    aws_config: &AwsConfigJson,
-) -> Result<Arc<dyn ObjectStore>, CSdbResult> {
+pub fn create_aws_store(aws_config: &AwsConfigJson) -> Result<Arc<dyn ObjectStore>, CSdbResult> {
     let bucket_str = if let Some(bucket) = aws_config.bucket.clone() {
         bucket
     } else if let Ok(bucket) = std::env::var("AWS_BUCKET") {
