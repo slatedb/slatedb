@@ -34,7 +34,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::batch::WriteBatch;
-use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
+use crate::batch_write::WriteBatchMessage;
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -73,7 +73,7 @@ pub(crate) struct DbInner {
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-    pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
+    pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
     #[allow(dead_code)]
@@ -104,7 +104,7 @@ impl DbInner {
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-        write_notifier: UnboundedSender<WriteBatchMsg>,
+        write_notifier: UnboundedSender<WriteBatchMessage>,
         stat_registry: Arc<StatRegistry>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
@@ -259,8 +259,11 @@ impl DbInner {
         self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let batch_msg =
-            WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx }, options.clone());
+        let batch_msg = WriteBatchMessage {
+            batch,
+            options: options.clone(),
+            done: tx,
+        };
 
         self.maybe_apply_backpressure().await?;
         self.write_notifier
@@ -646,15 +649,6 @@ impl Db {
             info!("garbage collector task exited [result={:?}]", result);
         }
 
-        // Shutdown the write batch thread.
-        self.inner
-            .write_notifier
-            .send_safely(
-                self.inner.state.read().error_reader(),
-                WriteBatchMsg::Shutdown,
-            )
-            .ok();
-
         if let Some(write_task) = {
             let mut write_task = self.write_task.lock();
             write_task.take()
@@ -664,21 +658,10 @@ impl Db {
         }
 
         // Shutdown the WAL flush thread.
-        self.inner
-            .wal_buffer
-            .close()
-            .await
-            .expect("failed to close WAL buffer");
+        let result = self.inner.wal_buffer.close().await;
+        info!("wal buffer task exited [result={:?}]", result);
 
         // Shutdown the memtable flush thread.
-        self.inner
-            .memtable_flush_notifier
-            .send_safely(
-                self.inner.state.read().error_reader(),
-                MemtableFlushMsg::Shutdown,
-            )
-            .ok();
-
         if let Some(memtable_flush_task) = {
             let mut memtable_flush_task = self.memtable_flush_task.lock();
             memtable_flush_task.take()

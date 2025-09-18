@@ -441,10 +441,6 @@ impl DbState {
         self.error.reader()
     }
 
-    pub fn record_fatal_error(&mut self, error: SlateDBError) {
-        self.error.write(error);
-    }
-
     pub(crate) fn error(&self) -> WatchableOnceCell<SlateDBError> {
         self.error.clone()
     }
