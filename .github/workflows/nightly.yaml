@@ -210,8 +210,37 @@ jobs:
           RUST_LOG: "info"
           SLATEDB_DST_ROOT: "./"
 
+  detect-flaky-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.98
+      - name: Install gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdb
+      - name: Run tests in a loop for 15 minutes
+        run: |
+          set -euo pipefail
+          SECONDS=0
+          deadline=$((15 * 60))
+          iteration=1
+          while [ $SECONDS -lt $deadline ]; do
+            echo "=== Iteration $iteration (elapsed ${SECONDS}s) ==="
+            if ! cargo nextest run --workspace --lib --all-features --all-targets --profile ci; then
+              echo "Tests failed during iteration $iteration"
+              exit 1
+            fi
+            iteration=$((iteration + 1))
+          done
+          completed=$((iteration - 1))
+          echo "Completed $completed iteration(s) in ${SECONDS}s without failures"
+
   notify:
-    needs: [microbenchmarks, benchmarks, microbenchmark-pprofs, deterministic-simulation-test]
+    needs: [microbenchmarks, benchmarks, microbenchmark-pprofs, deterministic-simulation-test, detect-flaky-tests]
     if: ${{ always() }}
     permissions:
       issues: write
