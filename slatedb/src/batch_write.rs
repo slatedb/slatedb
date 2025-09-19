@@ -142,20 +142,22 @@ impl DbInner {
             }
         }
 
-        if self.wal_enabled {
+        let durable_watcher = if self.wal_enabled {
             // WAL entries must be appended to the wal buffer atomically. Otherwise,
             // the WAL buffer might flush the entries in the middle of the batch, which
             // would violate the guarantee that batches are written atomically. We do
             // this by appending the entire entry batch in a single call to the WAL buffer,
             // which holds a write lock during the append.
-            self.wal_buffer.append(&entries).await?;
-        }
-
-        {
-            let guard = self.state.read();
-            let memtable = guard.memtable();
-            entries.into_iter().for_each(|entry| memtable.put(entry));
-        }
+            let wal_watcher = self.wal_buffer.append(&entries).await?.durable_watcher();
+            self.wal_buffer.maybe_trigger_flush().await?;
+            // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
+            // in another Pull Request.
+            self.write_entries_to_memtable(entries);
+            wal_watcher
+        } else {
+            // if WAL is disabled, we just write the entries to memtable.
+            self.write_entries_to_memtable(entries)
+        };
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
@@ -168,17 +170,6 @@ impl DbInner {
             "write-batch-pre-commit",
             |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
         );
-
-        // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
-        // otherwise, we'll use the memtable's durable watcher.
-        let durable_watcher = if self.wal_enabled {
-            let current_wal = self.wal_buffer.maybe_trigger_flush().await?;
-            // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
-            // in another Pull Request.
-            current_wal.durable_watcher()
-        } else {
-            self.state.write().memtable().table().durable_watcher()
-        };
 
         // track the recent committed txn for conflict check. if txn_id is not supplied,
         // we still consider this as an transaction commit.
@@ -201,6 +192,17 @@ impl DbInner {
         }
 
         Ok(durable_watcher)
+    }
+
+    /// Write entries to the currently active memtable. Returns a durable watcher for the memtable.
+    fn write_entries_to_memtable(
+        &self,
+        entries: Vec<RowEntry>,
+    ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+        let guard = self.state.read();
+        let memtable = guard.memtable();
+        entries.into_iter().for_each(|entry| memtable.put(entry));
+        memtable.table().durable_watcher()
     }
 
     /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set.

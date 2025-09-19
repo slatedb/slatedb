@@ -3288,24 +3288,24 @@ mod tests {
             "return",
         )
         .unwrap();
-
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 128, None))
+            .with_settings(test_db_options(0, 4096, None))
             .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
 
-        // write a few keys that will result in memtable flushes
+        // write data to the WAL, but not enough to trigger a memtable flush
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
         assert!(result.is_ok(), "Failed to write key1");
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
-        let flush_result = db.inner.flush_immutable_memtables().await;
+        // force a flush (even if the memtable is not full)
+        let flush_result = db.inner.flush_memtables().await;
         assert!(flush_result.is_err());
         db.close().await.unwrap();
 
@@ -3322,14 +3322,18 @@ mod tests {
             .await
             .unwrap();
 
-        // verify that we reload imm
         let db_state = db.inner.state.read().view();
 
         // resume write-compacted-sst-io-error since we got a snapshot and
         // want to let the test finish.
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
+        // verify that we reload imm
         assert_eq!(db_state.state.imm_memtable.len(), 1);
+
+        // verify that we have no L0 SSTs because memtables should have failed to flush
+        assert_eq!(db_state.state.core().l0.len(), 0);
+        assert_eq!(db_state.state.core().compacted.len(), 0);
 
         // one empty wal and one wal for the first put
         assert_eq!(

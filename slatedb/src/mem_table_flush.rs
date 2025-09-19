@@ -214,21 +214,21 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
                 self.flush_and_record().await
             }
             MemtableFlushMsg::FlushImmutableMemtables { sender } => {
-                self.flush_and_record().await?;
+                let result = self.flush_and_record().await;
                 if let Some(rsp_sender) = sender {
-                    let res = rsp_sender.send(Ok(()));
+                    let res = rsp_sender.send(result.clone());
                     if let Err(Err(err)) = res {
                         error!("error sending flush response [error={:?}]", err);
                     }
                 }
-                Ok(())
+                result
             }
             MemtableFlushMsg::CreateCheckpoint { options, sender } => {
                 let write_result = self.write_checkpoint_safely(&options).await;
-                if let Err(Err(e)) = sender.send(write_result) {
+                if let Err(Err(e)) = sender.send(write_result.clone()) {
                     error!("Failed to send checkpoint error [error={:?}]", e);
                 }
-                Ok(())
+                write_result.map(|_| ())
             }
         }
     }
