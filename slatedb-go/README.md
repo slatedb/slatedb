@@ -96,7 +96,7 @@ import (
 // Local storage (development)
 db, _ := slatedb.Open("/tmp/cache", &slatedb.StoreConfig{
     Provider: slatedb.ProviderLocal,
-}, nil)
+})
 defer db.Close()
 
 // S3 (production)
@@ -106,11 +106,11 @@ db, _ := slatedb.Open("/tmp/cache", &slatedb.StoreConfig{
         Bucket: "bucket",
         Region: "us-west-2",
     },
-}, nil)
+})
 defer db.Close()
 
 // Environment variables (automatic fallback)
-db, _ := slatedb.Open("/tmp/cache", nil, nil) // nil = use environment
+db, _ := slatedb.Open("/tmp/cache", nil) // nil = use environment
 defer db.Close()
 
 // Basic operations
@@ -143,25 +143,92 @@ for {
 
 ### Advanced Configuration
 
+SlateDB uses a builder pattern with `Settings` for configuration:
+
 ```go
-opts := &slatedb.SlateDBOptions{
-    L0SstSizeBytes: 128 * 1024 * 1024,     // 128MB (default: 64MB)
-    FlushInterval:  50 * time.Millisecond, // 50ms (default: 100ms)
-    CacheFolder:    "/tmp/sst-cache",      // Local SST cache
-    SstBlockSize:   slatedb.SstBlockSize8Kib, // 8KiB blocks
-    CompactorOptions: &slatedb.CompactorOptions{
-        PollInterval:            30 * time.Second, // Compaction check interval
-        MaxSSTSizeBytes:         256 * 1024 * 1024, // 256MB max SST size
-        MaxConcurrentCompactions: 4,                // Parallel compactions
-    },
-}
-db, _ := slatedb.Open("/tmp/cache", &slatedb.StoreConfig{
+// Using builder pattern with custom settings
+builder, _ := slatedb.NewBuilder("/tmp/cache", &slatedb.StoreConfig{
     Provider: slatedb.ProviderAWS,
     AWS: &slatedb.AWSConfig{
         Bucket: "bucket",
         Region: "us-west-2",
     },
-}, opts)
+})
+
+settings := &slatedb.Settings{
+    FlushInterval:    "50ms",        // Default: 100ms
+    L0SstSizeBytes:   128 * 1024 * 1024, // 128MB (default: 64MB)
+    CompactorOptions: &slatedb.CompactorOptions{
+        PollInterval:             "30s",   // Default: 1s
+        ManifestUpdateTimeout:    "300s",  // Default: 30s
+        MaxSstSize:               256 * 1024 * 1024, // 256MB
+        MaxConcurrentCompactions: 4,       // Default: 2
+    },
+    ObjectStoreCacheOptions: &slatedb.ObjectStoreCacheOptions{
+        RootFolder:        "/tmp/sst-cache", // Local SST cache
+        MaxCacheSizeBytes: 1024 * 1024 * 1024, // 1GB cache
+    },
+    GarbageCollectorOptions: &slatedb.GarbageCollectorOptions{
+        Manifest: &slatedb.GarbageCollectorDirectoryOptions{
+            Interval: "60s",  // Run every minute
+            MinAge:   "24h",  // Delete files older than 24h
+        },
+        Wal: slatedb.DefaultGarbageCollectorDirectoryOptions(), // Use defaults
+    },
+}
+
+db, _ := builder.WithSettings(settings).Build()
+```
+
+### Settings Usage Patterns
+
+```go
+// 1. Use defaults
+settings, _ := slatedb.SettingsDefault()
+db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(settings).Build()
+
+// 2. Load from file
+settings, _ := slatedb.SettingsFromFile("slatedb.toml")
+db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(settings).Build()
+
+// 3. Load from environment with prefix
+settings, _ := slatedb.SettingsFromEnv("SLATEDB_")
+db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(settings).Build()
+
+// 4. Auto-detect (file, env, then defaults)
+settings, _ := slatedb.SettingsLoad()
+db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(settings).Build()
+
+// 5. Merge settings (base + overrides)
+base, _ := slatedb.SettingsFromFile("base.toml")
+overrides := &slatedb.Settings{
+    FlushInterval: "50ms", // Override just this field
+}
+merged := slatedb.MergeSettings(base, overrides)
+db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(merged).Build()
+
+// 6. Garbage collection configuration
+settings := &slatedb.Settings{
+    // Disable garbage collection entirely
+    GarbageCollectorOptions: nil,
+}
+
+settings := &slatedb.Settings{
+    // Enable GC with Rust defaults for all directories
+    GarbageCollectorOptions: &slatedb.GarbageCollectorOptions{},
+}
+
+settings := &slatedb.Settings{
+    // Enable GC with custom settings for specific directories
+    GarbageCollectorOptions: &slatedb.GarbageCollectorOptions{
+        Manifest: slatedb.DefaultGarbageCollectorDirectoryOptions(),    // Use defaults
+        Wal:      &slatedb.GarbageCollectorDirectoryOptions{           // Custom
+            Interval: "60s",
+            MinAge:   "1h",
+        },
+        // Compacted: nil (uses Rust defaults)
+    },
+}
 ```
 
 ### Batch Operations
@@ -252,10 +319,19 @@ SlateDB Go bindings provide a clean, structured API organized into the following
 - `Iterator.Seek(key []byte) error` - Seek to specific key
 - `Iterator.Close() error` - Close iterator
 
-### Database Management  
-- `Open(path string, storeConfig *StoreConfig, opts *SlateDBOptions) (*DB, error)`
+### Database Management
+- `NewBuilder(path string, storeConfig *StoreConfig) (*Builder, error)` - Create database builder
+- `Builder.WithSettings(settings *Settings) *Builder` - Configure with settings
+- `Builder.Build() (*DB, error)` - Build and open database
 - `Close() error` - Close database connection
 - `Flush() error` - Flush pending writes to storage
+
+### Settings Configuration
+- `SettingsDefault() (*Settings, error)` - Load default settings
+- `SettingsFromFile(path string) (*Settings, error)` - Load from TOML file
+- `SettingsFromEnv(prefix string) (*Settings, error)` - Load from environment variables
+- `SettingsLoad() (*Settings, error)` - Auto-detect and load settings
+- `MergeSettings(base, override *Settings) *Settings` - Merge settings objects
 
 ### Read-Only Access (DbReader)
 - `OpenReader(path string, storeConfig *StoreConfig, checkpointId *string, opts *DbReaderOptions) (*DbReader, error)`
@@ -264,22 +340,43 @@ SlateDB Go bindings provide a clean, structured API organized into the following
 
 ## Configuration
 
-See `go doc` for complete API reference. Key types:
+SlateDB uses `Settings` for configuration. See `go doc` for complete API reference. Key types:
 
 ```go
-type SlateDBOptions struct {
-    L0SstSizeBytes   uint64            // Default: 64MB
-    FlushInterval    time.Duration     // Default: 100ms
-    CacheFolder      string            // Local SST cache path
-    SstBlockSize     SstBlockSize      // Default: 4KiB
-    CompactorOptions *CompactorOptions // Compaction settings
+type Settings struct {
+    FlushInterval         string                   // Default: "100ms"
+    L0SstSizeBytes        uint64                   // Default: 67108864 (64MB)
+    CompactorOptions      *CompactorOptions        // Compaction settings
+    ObjectStoreCacheOptions *ObjectStoreCacheOptions // Local caching
+    GarbageCollectorOptions *GarbageCollectorOptions // GC settings
 }
 
 type CompactorOptions struct {
-    PollInterval              time.Duration // Default: 5s
-    ManifestUpdateTimeout     time.Duration // Default: 300s
-    MaxSSTSizeBytes          uint64        // Default: 256MB
-    MaxConcurrentCompactions uint32        // Default: 4
+    PollInterval             string // Default: "1s"
+    ManifestUpdateTimeout    string // Default: "30s"
+    MaxSstSize               uint64 // Default: 67108864 (64MB)
+    MaxConcurrentCompactions uint32 // Default: 4
+}
+
+type ObjectStoreCacheOptions struct {
+    RootFolder        string // Local cache directory
+    MaxCacheSizeBytes uint64 // Default: 134217728 (128MB)
+}
+
+type GarbageCollectorOptions struct {
+    Manifest  *GarbageCollectorDirectoryOptions // Manifest cleanup
+    Wal       *GarbageCollectorDirectoryOptions // WAL cleanup
+    Compacted *GarbageCollectorDirectoryOptions // Compacted SST cleanup
+
+    // Behavior:
+    // - nil GarbageCollectorOptions: Garbage collection disabled
+    // - Empty GarbageCollectorOptions{}: Garbage collection enabled with Rust defaults
+    // - Specific directory options: Garbage collection enabled for all directories, options applied to specific directories
+}
+
+type GarbageCollectorDirectoryOptions struct {
+    Interval string // Default: "300s" (5 minutes)
+    MinAge   string // Default: "86400s" (24 hours)
 }
 
 type StoreConfig struct {

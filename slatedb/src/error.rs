@@ -210,7 +210,8 @@ impl From<object_store::Error> for SlateDBError {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Represents the kind of public errors that can be returned to the user.
-#[derive(Debug)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
 pub enum ErrorKind {
     /// The database attempted to use an invalid configuration.
     Configuration,
@@ -231,6 +232,10 @@ pub enum ErrorKind {
     /// retried after the permission issue is resolved.
     Permission,
 
+    /// The current instance has been fenced by a new writer and is no longer usable.
+    /// The operation cannot be retried and a new instance should be opened.
+    Fenced,
+
     /// The operation failed due to a transient error (such as IO unavailability).
     /// The operation can be retried after backing off.
     Transient(Duration),
@@ -244,6 +249,7 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::System => write!(f, "System error"),
             ErrorKind::PersistentState => write!(f, "Persistent state error"),
             ErrorKind::Permission => write!(f, "Permission error"),
+            ErrorKind::Fenced => write!(f, "Fencing error"),
             ErrorKind::Transient(backoff) => {
                 write!(f, "Transient error (retry after: {backoff:?})")
             }
@@ -323,6 +329,15 @@ impl Error {
         }
     }
 
+    /// Creates a new fencing error.
+    pub fn fenced(msg: String) -> Self {
+        Self {
+            msg,
+            kind: ErrorKind::Fenced,
+            source: None,
+        }
+    }
+
     /// Creates a new public transient error.
     pub fn transient(msg: String, backoff: Duration) -> Self {
         Self {
@@ -338,8 +353,8 @@ impl Error {
         self
     }
 
-    pub fn kind(&self) -> &ErrorKind {
-        &self.kind
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
     }
 }
 
@@ -357,7 +372,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidCompaction => Error::operation(msg),
             SlateDBError::CompactionExecutorFailed => Error::system(msg),
             SlateDBError::InvalidClockTick { .. } => Error::operation(msg),
-            SlateDBError::Fenced => Error::permission(msg),
+            SlateDBError::Fenced => Error::fenced(msg),
             SlateDBError::InvalidCachePartSize => Error::operation(msg),
             SlateDBError::InvalidCompressionCodec => Error::operation(msg),
             #[cfg(any(

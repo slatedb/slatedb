@@ -34,7 +34,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::batch::WriteBatch;
-use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
+use crate::batch_write::WriteBatchMessage;
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -73,7 +73,7 @@ pub(crate) struct DbInner {
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-    pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
+    pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
     #[allow(dead_code)]
@@ -104,7 +104,7 @@ impl DbInner {
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-        write_notifier: UnboundedSender<WriteBatchMsg>,
+        write_notifier: UnboundedSender<WriteBatchMessage>,
         stat_registry: Arc<StatRegistry>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
@@ -259,8 +259,11 @@ impl DbInner {
         self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let batch_msg =
-            WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx }, options.clone());
+        let batch_msg = WriteBatchMessage {
+            batch,
+            options: options.clone(),
+            done: tx,
+        };
 
         self.maybe_apply_backpressure().await?;
         self.write_notifier
@@ -646,15 +649,6 @@ impl Db {
             info!("garbage collector task exited [result={:?}]", result);
         }
 
-        // Shutdown the write batch thread.
-        self.inner
-            .write_notifier
-            .send_safely(
-                self.inner.state.read().error_reader(),
-                WriteBatchMsg::Shutdown,
-            )
-            .ok();
-
         if let Some(write_task) = {
             let mut write_task = self.write_task.lock();
             write_task.take()
@@ -664,21 +658,10 @@ impl Db {
         }
 
         // Shutdown the WAL flush thread.
-        self.inner
-            .wal_buffer
-            .close()
-            .await
-            .expect("failed to close WAL buffer");
+        let result = self.inner.wal_buffer.close().await;
+        info!("wal buffer task exited [result={:?}]", result);
 
         // Shutdown the memtable flush thread.
-        self.inner
-            .memtable_flush_notifier
-            .send_safely(
-                self.inner.state.read().error_reader(),
-                MemtableFlushMsg::Shutdown,
-            )
-            .ok();
-
         if let Some(memtable_flush_task) = {
             let mut memtable_flush_task = self.memtable_flush_task.lock();
             memtable_flush_task.take()
@@ -3305,24 +3288,24 @@ mod tests {
             "return",
         )
         .unwrap();
-
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 128, None))
+            .with_settings(test_db_options(0, 4096, None))
             .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
 
-        // write a few keys that will result in memtable flushes
+        // write data to the WAL, but not enough to trigger a memtable flush
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
         assert!(result.is_ok(), "Failed to write key1");
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
-        let flush_result = db.inner.flush_immutable_memtables().await;
+        // force a flush (even if the memtable is not full)
+        let flush_result = db.inner.flush_memtables().await;
         assert!(flush_result.is_err());
         db.close().await.unwrap();
 
@@ -3339,14 +3322,18 @@ mod tests {
             .await
             .unwrap();
 
-        // verify that we reload imm
         let db_state = db.inner.state.read().view();
 
         // resume write-compacted-sst-io-error since we got a snapshot and
         // want to let the test finish.
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
+        // verify that we reload imm
         assert_eq!(db_state.state.imm_memtable.len(), 1);
+
+        // verify that we have no L0 SSTs because memtables should have failed to flush
+        assert_eq!(db_state.state.core().l0.len(), 0);
+        assert_eq!(db_state.state.core().compacted.len(), 0);
 
         // one empty wal and one wal for the first put
         assert_eq!(
@@ -3625,10 +3612,7 @@ mod tests {
 
         // assert that db1 can no longer write.
         let err = do_put(&db1, b"1", b"1").await.unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Permission error: detected newer DB client"
-        );
+        assert_eq!(err.to_string(), "Fencing error: detected newer DB client");
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);

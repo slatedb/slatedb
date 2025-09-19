@@ -25,33 +25,95 @@
 //! _Note: The `write_batch` loop still holds a lock on the db_state. There can still
 //! be contention between `get`s, which holds a lock, and the write loop._
 
+use async_trait::async_trait;
 use fail_parallel::fail_point;
-use log::{info, warn};
+use futures::stream::BoxStream;
+use futures::StreamExt;
+use log::warn;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
+use crate::clock::SystemClock;
 use crate::config::WriteOptions;
+use crate::dispatcher::{MessageDispatcher, MessageHandler};
 use crate::types::{RowEntry, ValueDeletable};
-use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
+use crate::utils::WatchableOnceCellReader;
 use crate::{
     batch::{WriteBatch, WriteOp},
     db::DbInner,
     error::SlateDBError,
 };
 
-pub(crate) enum WriteBatchMsg {
-    Shutdown,
-    WriteBatch(WriteBatchRequest, WriteOptions),
-}
-
-pub(crate) struct WriteBatchRequest {
+pub(crate) struct WriteBatchMessage {
     pub(crate) batch: WriteBatch,
+    pub(crate) options: WriteOptions,
     pub(crate) done: tokio::sync::oneshot::Sender<
         Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError>,
     >,
+}
+
+impl std::fmt::Debug for WriteBatchMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let WriteBatchMessage { batch, options, .. } = self;
+        f.debug_struct("WriteBatch")
+            .field("batch", batch)
+            .field("options", options)
+            .finish()
+    }
+}
+
+struct WriteBatchEventHandler {
+    db_inner: Arc<DbInner>,
+    is_first_write: bool,
+}
+
+impl WriteBatchEventHandler {
+    pub(crate) fn new(db_inner: Arc<DbInner>) -> Self {
+        Self {
+            db_inner,
+            is_first_write: true,
+        }
+    }
+}
+
+#[async_trait]
+impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
+    async fn handle(&mut self, message: WriteBatchMessage) -> Result<(), SlateDBError> {
+        let WriteBatchMessage {
+            batch,
+            options,
+            done,
+        } = message;
+        let result = self.db_inner.write_batch(batch).await;
+        // if this is the first write and the WAL is disabled, make sure users are flushing
+        // their memtables in a timely manner.
+        if self.is_first_write && !self.db_inner.wal_enabled && options.await_durable {
+            self.is_first_write = false;
+            let this_watcher = result.clone()?;
+            let this_clock = self.db_inner.system_clock.clone();
+            tokio::spawn(async move {
+                monitor_first_write(this_watcher, this_clock).await;
+            });
+        }
+        _ = done.send(result);
+        Ok(())
+    }
+
+    async fn cleanup(
+        &mut self,
+        mut messages: BoxStream<'async_trait, WriteBatchMessage>,
+        _result: Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        // drain messages
+        while let Some(msg) = messages.next().await {
+            self.handle(msg).await?;
+        }
+        Ok(())
+    }
 }
 
 impl DbInner {
@@ -80,20 +142,22 @@ impl DbInner {
             }
         }
 
-        if self.wal_enabled {
+        let durable_watcher = if self.wal_enabled {
             // WAL entries must be appended to the wal buffer atomically. Otherwise,
             // the WAL buffer might flush the entries in the middle of the batch, which
             // would violate the guarantee that batches are written atomically. We do
             // this by appending the entire entry batch in a single call to the WAL buffer,
             // which holds a write lock during the append.
-            self.wal_buffer.append(&entries).await?;
-        }
-
-        {
-            let guard = self.state.read();
-            let memtable = guard.memtable();
-            entries.into_iter().for_each(|entry| memtable.put(entry));
-        }
+            let wal_watcher = self.wal_buffer.append(&entries).await?.durable_watcher();
+            self.wal_buffer.maybe_trigger_flush().await?;
+            // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
+            // in another Pull Request.
+            self.write_entries_to_memtable(entries);
+            wal_watcher
+        } else {
+            // if WAL is disabled, we just write the entries to memtable.
+            self.write_entries_to_memtable(entries)
+        };
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
@@ -106,17 +170,6 @@ impl DbInner {
             "write-batch-pre-commit",
             |_| { Err(SlateDBError::from(std::io::Error::other("oops"))) }
         );
-
-        // get the durable watcher. we'll await on current WAL table to be flushed if wal is enabled.
-        // otherwise, we'll use the memtable's durable watcher.
-        let durable_watcher = if self.wal_enabled {
-            let current_wal = self.wal_buffer.maybe_trigger_flush().await?;
-            // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
-            // in another Pull Request.
-            current_wal.durable_watcher()
-        } else {
-            self.state.write().memtable().table().durable_watcher()
-        };
 
         // track the recent committed txn for conflict check. if txn_id is not supplied,
         // we still consider this as an transaction commit.
@@ -139,6 +192,17 @@ impl DbInner {
         }
 
         Ok(durable_watcher)
+    }
+
+    /// Write entries to the currently active memtable. Returns a durable watcher for the memtable.
+    fn write_entries_to_memtable(
+        &self,
+        entries: Vec<RowEntry>,
+    ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+        let guard = self.state.read();
+        let memtable = guard.memtable();
+        entries.into_iter().for_each(|entry| memtable.put(entry));
+        memtable.table().durable_watcher()
     }
 
     /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set.
@@ -167,69 +231,33 @@ impl DbInner {
 
     pub(crate) fn spawn_write_task(
         self: &Arc<Self>,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<WriteBatchMsg>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<WriteBatchMessage>,
         tokio_handle: &Handle,
+        cancellation_token: CancellationToken,
     ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
-        let this = Arc::clone(self);
-        let mut is_stopped = false;
-        let mut is_first_write = true;
-        let monitor_first_write =
-            async move |mut watcher: WatchableOnceCellReader<Result<(), SlateDBError>>| {
-                tokio::select! {
-                    _ = watcher.await_value() => {}
-                    _ = this.system_clock.sleep(Duration::from_secs(5)) => {
-                        warn!("First write not durable after 5 seconds and WAL is disabled. \
-                        SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
-                        is reached. If writer is single threaded or has low throughput, the \
-                        applications must call `flush` to ensure durability in a timely manner.");
-                    }
-                }
-            };
+        let write_batch_event_handler = WriteBatchEventHandler::new(self.clone());
+        let mut dispatcher = MessageDispatcher::new(
+            Box::new(write_batch_event_handler),
+            rx,
+            self.system_clock.clone(),
+            cancellation_token,
+            self.state.write().error(),
+        );
+        Some(tokio_handle.spawn(async move { dispatcher.run().await }))
+    }
+}
 
-        let this = Arc::clone(self);
-        let fut = async move {
-            while !(is_stopped && rx.is_empty()) {
-                match rx.recv().await.expect("unexpected channel close") {
-                    WriteBatchMsg::WriteBatch(write_batch_request, options) => {
-                        let WriteBatchRequest { batch, done } = write_batch_request;
-                        let result = this.write_batch(batch).await;
-                        if is_first_write && !this.wal_enabled && options.await_durable {
-                            is_first_write = false;
-                            let monitor_first_write = monitor_first_write.clone();
-                            let durable_watcher = result.clone()?;
-                            tokio::spawn(async move {
-                                monitor_first_write(durable_watcher).await;
-                            });
-                        }
-                        _ = done.send(result);
-                    }
-                    WriteBatchMsg::Shutdown => {
-                        is_stopped = true;
-                    }
-                }
-            }
-            Ok(())
-        };
-
-        let this = Arc::clone(self);
-        Some(spawn_bg_task(
-            tokio_handle,
-            move |result| {
-                let err = match result {
-                    Ok(()) => {
-                        info!("write task shutdown complete");
-                        SlateDBError::BackgroundTaskShutdown
-                    }
-                    Err(err) => {
-                        warn!("write task exited [error={}]", err);
-                        err.clone()
-                    }
-                };
-                // notify any waiters about the failure
-                let mut state = this.state.write();
-                state.record_fatal_error(err.clone());
-            },
-            fut,
-        ))
+async fn monitor_first_write(
+    mut watcher: WatchableOnceCellReader<Result<(), SlateDBError>>,
+    system_clock: Arc<dyn SystemClock>,
+) {
+    tokio::select! {
+        _ = watcher.await_value() => {}
+        _ = system_clock.sleep(Duration::from_secs(5)) => {
+            warn!("First write not durable after 5 seconds and WAL is disabled. \
+            SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
+            is reached. If writer is single threaded or has low throughput, the \
+            applications must call `flush` to ensure durability in a timely manner.");
+        }
     }
 }
