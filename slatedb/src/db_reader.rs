@@ -4,9 +4,9 @@ use crate::clock::{
 };
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_read::DbRead;
-use crate::db_reader::ManifestPollerMsg::Shutdown;
 use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
+use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
@@ -18,11 +18,13 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, MonotonicSeq, SendSafely, WatchableOnceCell};
+use crate::utils::{IdGenerator, MonotonicSeq, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use crate::{utils, Checkpoint, DbIterator};
+use crate::{Checkpoint, DbIterator};
+use async_trait::async_trait;
 use bytes::Bytes;
-use log::{info, warn};
+use futures::stream::BoxStream;
+use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
@@ -30,16 +32,18 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
-use tokio::runtime::Handle;
-use tokio::select;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Read-only interface for accessing a database from either
 /// the latest persistent state or from an arbitrary checkpoint.
 pub struct DbReader {
     inner: Arc<DbReaderInner>,
-    manifest_poller: Option<ManifestPoller>,
+    manifest_poller_task: Mutex<Option<JoinHandle<Result<(), SlateDBError>>>>,
+    cancellation_token: CancellationToken,
 }
 
 struct DbReaderInner {
@@ -55,13 +59,9 @@ struct DbReaderInner {
     rand: Arc<DbRand>,
 }
 
-struct ManifestPoller {
-    join_handle: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    thread_tx: UnboundedSender<ManifestPollerMsg>,
-}
-
-enum ManifestPollerMsg {
-    Shutdown,
+#[derive(Debug)]
+enum DbReaderMessage {
+    PollManifest,
 }
 
 #[derive(Clone)]
@@ -365,74 +365,22 @@ impl DbReaderInner {
         Ok(())
     }
 
-    fn spawn_manifest_poller(self: &Arc<Self>) -> Result<ManifestPoller, SlateDBError> {
-        let this = Arc::clone(self);
-        async fn core_poll_loop(
-            this: Arc<DbReaderInner>,
-            thread_rx: &mut UnboundedReceiver<ManifestPollerMsg>,
-        ) -> Result<(), SlateDBError> {
-            let mut ticker = this
-                .system_clock
-                .ticker(this.options.manifest_poll_interval);
-            loop {
-                select! {
-                    _ = ticker.tick() => {
-                        let mut manifest = StoredManifest::load(
-                            Arc::clone(&this.manifest_store),
-                        ).await?;
-
-                        let latest_manifest = manifest.manifest();
-                        if this.should_reestablish_checkpoint(&latest_manifest.core) {
-                            let checkpoint = this.replace_checkpoint(&mut manifest).await?;
-                            this.reestablish_checkpoint(checkpoint).await?;
-                        } else  {
-                            this.maybe_replay_new_wals().await?;
-                        }
-
-                        this.maybe_refresh_checkpoint(&mut manifest).await?;
-                    },
-                    msg = thread_rx.recv() => {
-                        return match msg.expect("channel unexpectedly closed") {
-                            Shutdown => {
-                                let mut manifest = StoredManifest::load(
-                                    Arc::clone(&this.manifest_store),
-                                ).await?;
-                                let checkpoint_id = this.state.read().checkpoint.id;
-                                if Some(checkpoint_id) != this.user_checkpoint_id {
-                                    info!("deleting reader established checkpoint for shutdown [checkpoint_id={}]", checkpoint_id);
-                                    manifest.delete_checkpoint(checkpoint_id).await?;
-                                }
-                                Ok(())
-                            },
-                        }
-                    }
-                }
-            }
-        }
-
-        let (thread_tx, mut thread_rx) = tokio::sync::mpsc::unbounded_channel();
-        let fut = async move {
-            let result = core_poll_loop(this, &mut thread_rx).await;
-            info!("manifest poll thread exiting [result={:?}]", result);
-            result
+    fn spawn_manifest_poller(
+        self: &Arc<Self>,
+        cancellation_token: CancellationToken,
+    ) -> JoinHandle<Result<(), SlateDBError>> {
+        let poller = ManifestPoller {
+            inner: Arc::clone(self),
         };
-
-        let this = Arc::clone(self);
-        let join_handle = utils::spawn_bg_task(
-            &Handle::current(),
-            move |result| {
-                warn!("manifest polling thread exited [result={:?}]", result);
-                if let Err(err) = result {
-                    this.error_watcher.write(err.clone());
-                }
-            },
-            fut,
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut disptacher = MessageDispatcher::new(
+            Box::new(poller),
+            rx,
+            self.system_clock.clone(),
+            cancellation_token,
+            self.error_watcher.clone(),
         );
-
-        Ok(ManifestPoller {
-            join_handle: Mutex::new(Some(join_handle)),
-            thread_tx,
-        })
+        tokio::spawn(async move { disptacher.run().await })
     }
 
     async fn replay_wal_into(
@@ -494,6 +442,55 @@ impl DbReaderInner {
         let error_reader = self.error_watcher.reader();
         if let Some(error) = error_reader.read() {
             return Err(error.clone());
+        }
+        Ok(())
+    }
+}
+
+struct ManifestPoller {
+    inner: Arc<DbReaderInner>,
+}
+
+#[async_trait]
+impl MessageHandler<DbReaderMessage> for ManifestPoller {
+    fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<DbReaderMessage>>)> {
+        vec![(
+            self.inner.options.manifest_poll_interval,
+            Box::new(|| DbReaderMessage::PollManifest),
+        )]
+    }
+
+    async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
+        assert!(matches!(message, DbReaderMessage::PollManifest));
+        let mut manifest = StoredManifest::load(Arc::clone(&self.inner.manifest_store)).await?;
+
+        let latest_manifest = manifest.manifest();
+        if self
+            .inner
+            .should_reestablish_checkpoint(&latest_manifest.core)
+        {
+            let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
+            self.inner.reestablish_checkpoint(checkpoint).await?;
+        } else {
+            self.inner.maybe_replay_new_wals().await?;
+        }
+
+        self.inner.maybe_refresh_checkpoint(&mut manifest).await
+    }
+
+    async fn cleanup(
+        &mut self,
+        _messages: BoxStream<'async_trait, DbReaderMessage>,
+        _result: Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        let mut manifest = StoredManifest::load(Arc::clone(&self.inner.manifest_store)).await?;
+        let checkpoint_id = self.inner.state.read().checkpoint.id;
+        if Some(checkpoint_id) != self.inner.user_checkpoint_id {
+            info!(
+                "deleting reader established checkpoint for shutdown [checkpoint_id={}]",
+                checkpoint_id
+            );
+            manifest.delete_checkpoint(checkpoint_id).await?;
         }
         Ok(())
     }
@@ -562,6 +559,7 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
+        let cancellation_token = CancellationToken::new();
         let manifest_store = store_provider.manifest_store();
         let table_store = store_provider.table_store();
         let inner = Arc::new(
@@ -580,15 +578,16 @@ impl DbReader {
         // If no checkpoint was provided, then we have established a new checkpoint
         // from the latest state, and we need to refresh it according to the params
         // of `DbReaderOptions`.
-        let manifest_poller = if checkpoint_id.is_none() {
-            Some(inner.spawn_manifest_poller()?)
+        let manifest_poller_task = if checkpoint_id.is_none() {
+            Some(inner.spawn_manifest_poller(cancellation_token.clone()))
         } else {
             None
         };
 
         Ok(Self {
             inner,
-            manifest_poller,
+            manifest_poller_task: Mutex::new(manifest_poller_task),
+            cancellation_token,
         })
     }
 
@@ -831,19 +830,18 @@ impl DbReader {
     /// ```
     ///
     pub async fn close(&self) -> Result<(), crate::Error> {
-        if let Some(poller) = &self.manifest_poller {
-            poller
-                .thread_tx
-                .send_safely(self.inner.error_watcher.reader(), Shutdown)
-                .ok();
-            if let Some(join_handle) = {
-                let mut guard = poller.join_handle.lock();
-                guard.take()
-            } {
-                let result = join_handle.await.expect("failed to join manifest poller");
-                info!("manifest poller exited [result={:?}]", result);
-            }
+        self.cancellation_token.cancel();
+
+        if let Some(manifest_poller_task) = {
+            let mut maybe_manifest_poller_task = self.manifest_poller_task.lock();
+            maybe_manifest_poller_task.take()
+        } {
+            let result = manifest_poller_task
+                .await
+                .expect("failed to join manifest poller task");
+            info!("manifest poller task exited [result={:?}]", result);
         }
+
         Ok(())
     }
 }
