@@ -22,7 +22,7 @@ pub struct DbIterator<'a> {
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
-        writebatch_iter: Option<WriteBatchIterator<'a>>,
+        write_batch_iter: Option<WriteBatchIterator<'a>>,
         mem_iters: impl IntoIterator<Item = MemTableIterator>,
         l0_iters: impl IntoIterator<Item = SstIterator<'a>>,
         sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
@@ -49,8 +49,10 @@ impl<'a> DbIterator<'a> {
             vec![Box::new(mem_iter?), Box::new(l0_iter?), Box::new(sr_iter?)]
         };
 
-        // Add WriteBatch iterator at the beginning (
-        if let Some(wb_iter) = writebatch_iter {
+        // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
+        // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
+        // not have an real committed sequence number yet.
+        if let Some(wb_iter) = write_batch_iter {
             iters.insert(0, Box::new(wb_iter));
         }
 
