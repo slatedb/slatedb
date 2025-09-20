@@ -31,6 +31,7 @@ use crate::flatbuffer_types::manifest_generated::{
 };
 use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
+use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
@@ -223,6 +224,11 @@ impl FlatBufferManifestCodec {
                 .expect("invalid timestamp"),
             })
             .collect();
+        let sequence_tracker = match manifest.sequence_tracker() {
+            Some(bytes) => SequenceTracker::from_bytes(bytes.bytes())
+                .expect("Invalid encoding of sequence tracker in manifest."),
+            None => SequenceTracker::new(),
+        };
         let core = CoreDbState {
             initialized: manifest.initialized(),
             l0_last_compacted,
@@ -235,6 +241,7 @@ impl FlatBufferManifestCodec {
             checkpoints,
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
+            sequence_tracker,
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -471,6 +478,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
             .wal_object_store_uri
             .as_ref()
             .map(|uri| self.builder.create_string(uri));
+        let sequence_tracker_data = core.sequence_tracker.to_bytes();
+        let sequence_tracker = self.builder.create_vector(sequence_tracker_data.as_slice());
 
         let manifest = ManifestV1::create(
             &mut self.builder,
@@ -490,6 +499,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 last_l0_seq: core.last_l0_seq,
                 wal_object_store_uri,
                 recent_snapshot_min_seq: core.recent_snapshot_min_seq,
+                sequence_tracker: Some(sequence_tracker),
             },
         );
         self.builder.finish(manifest, None);
@@ -721,6 +731,7 @@ mod tests {
                 last_l0_seq: 0,
                 wal_object_store_uri: None,
                 recent_snapshot_min_seq: 0,
+                sequence_tracker: None,
             },
         );
         fbb.finish(manifest, None);

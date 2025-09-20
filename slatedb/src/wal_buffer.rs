@@ -541,7 +541,8 @@ mod tests {
         ));
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
-        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
+        let system_clock = Arc::new(DefaultSystemClock::new());
+        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0), system_clock.clone()));
         let db_state = Arc::new(RwLock::new(DbState::new(DirtyManifest::new(
             0,
             Manifest::initial(CoreDbState::new()),
@@ -554,7 +555,7 @@ mod tests {
             oracle,
             table_store.clone(),
             mono_clock,
-            Arc::new(DefaultSystemClock::default()),
+            system_clock,
             1000,                            // max_wal_bytes_size
             Some(Duration::from_millis(10)), // max_flush_interval
         ));
