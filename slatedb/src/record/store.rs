@@ -293,24 +293,14 @@ impl<T> RecordStore<T> {
     }
 
     pub(crate) async fn try_read_latest(&self) -> Result<Option<(u64, T)>, SlateDBError> {
-        let base = &Path::from("/");
-        let mut files_stream = self.object_store.list(Some(base));
-        let mut max_id: Option<u64> = None;
-        while let Some(file) = files_stream
-            .next()
-            .await
-            .transpose()
-            .map_err(SlateDBError::from)?
-        {
-            if let Ok(id) = self.parse_id(&file.location) {
-                max_id = Some(max_id.map_or(id, |m| m.max(id)));
-            }
+        let files = self.list(..).await?;
+        if let Some(file) = files.last() {
+            return self
+                .try_read(file.id)
+                .await
+                .map(|opt| opt.map(|v| (file.id, v)));
         }
-
-        match max_id {
-            Some(id) => self.try_read(id).await.map(|opt| opt.map(|val| (id, val))),
-            None => Ok(None),
-        }
+        Ok(None)
     }
 
     // List files for this record type in an id range
