@@ -10,7 +10,7 @@ use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::{btree_map, BTreeMap};
-use std::ops::Bound;
+use std::ops::{Bound, RangeBounds};
 use uuid::Uuid;
 
 /// A batch of write operations (puts and/or deletes). All operations in the
@@ -201,10 +201,9 @@ impl WriteBatch {
     #[allow(dead_code)]
     pub(crate) fn iter_range<'a>(
         &'a self,
-        start_key: Option<&[u8]>,
-        end_key: Option<&[u8]>,
+        range: impl RangeBounds<Bytes>,
     ) -> WriteBatchIterator<'a> {
-        WriteBatchIterator::new(self, start_key, end_key, IterationOrder::Ascending)
+        WriteBatchIterator::new(self, range, IterationOrder::Ascending)
     }
 }
 
@@ -218,21 +217,10 @@ pub(crate) struct WriteBatchIterator<'a> {
 impl<'a> WriteBatchIterator<'a> {
     pub fn new(
         batch: &'a WriteBatch,
-        start_key: Option<&[u8]>,
-        end_key: Option<&[u8]>,
+        range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
     ) -> Self {
-        let start_bound = match start_key {
-            Some(key) => Bound::Included(Bytes::copy_from_slice(key)),
-            None => Bound::Unbounded,
-        };
-
-        let end_bound = match end_key {
-            Some(key) => Bound::Excluded(Bytes::copy_from_slice(key)),
-            None => Bound::Unbounded,
-        };
-
-        let mut iter = batch.ops.range((start_bound, end_bound));
+        let mut iter = batch.ops.range(range);
         let current = match ordering {
             IterationOrder::Ascending => iter.next(),
             IterationOrder::Descending => iter.next_back(),
@@ -295,6 +283,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::bytes_range::BytesRange;
     use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;
 
@@ -391,7 +380,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.delete(b"key4");
 
-        let mut iter = batch.iter_range(None, None);
+        let mut iter = batch.iter_range(..);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -417,7 +406,9 @@ mod tests {
         batch.put(b"key5", b"value5");
 
         // Test range [key2, key4)
-        let mut iter = batch.iter_range(Some(b"key2"), Some(b"key4"));
+        let mut iter = batch.iter_range(BytesRange::from(
+            Bytes::from_static(b"key2")..Bytes::from_static(b"key4"),
+        ));
 
         let expected = vec![RowEntry::new_value(b"key3", b"value3", u64::MAX)];
 
@@ -431,7 +422,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key2", b"value2");
 
-        let mut iter = WriteBatchIterator::new(&batch, None, None, IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
 
         let expected = vec![
             RowEntry::new_value(b"key3", b"value3", u64::MAX),
@@ -449,7 +440,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(&batch, None, None, IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         // Seek to key3
         iter.seek(b"key3").await.unwrap();
@@ -470,7 +461,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(&batch, None, None, IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
 
         // Seek to key3 (in descending, we want keys <= key3)
         iter.seek(b"key3").await.unwrap();

@@ -1,11 +1,11 @@
-use crate::batch::WriteBatch;
+use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::KeyValueIterator;
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::mem_table::{ImmutableMemtable, KVTable, MemTableIterator};
 use crate::oracle::Oracle;
 use crate::reader::SstFilterResult::{
@@ -101,6 +101,7 @@ impl Reader {
         key: K,
         options: &ReadOptions,
         db_state: &(dyn DbStateReader + Sync + Send),
+        write_batch: Option<&WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
@@ -111,7 +112,7 @@ impl Reader {
             db_state,
             table_store: self.table_store.clone(),
             db_stats: self.db_stats.clone(),
-            write_batch: None,
+            write_batch,
             now,
         };
         get.get().await
@@ -122,6 +123,7 @@ impl Reader {
         range: BytesRange,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
+        write_batch: Option<&WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<DbIterator, SlateDBError> {
         let mut memtables = VecDeque::new();
@@ -176,7 +178,19 @@ impl Reader {
         let l0_iters = l0_iters_res?;
         let sr_iters = sr_iters_res?;
 
-        DbIterator::new(range, None, memtable_iters, l0_iters, sr_iters, max_seq).await
+        // Create WriteBatchIterator if write_batch is provided
+        let write_batch_iter = write_batch
+            .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
+
+        DbIterator::new(
+            range,
+            write_batch_iter,
+            memtable_iters,
+            l0_iters,
+            sr_iters,
+            max_seq,
+        )
+        .await
     }
 }
 

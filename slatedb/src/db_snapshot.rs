@@ -66,7 +66,7 @@ impl DbSnapshot {
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader
-            .get_with_options(key, options, &db_state, Some(self.started_seq))
+            .get_with_options(key, options, &db_state, None, Some(self.started_seq))
             .await
             .map_err(Into::into)
     }
@@ -119,6 +119,7 @@ impl DbSnapshot {
                 BytesRange::from(range),
                 options,
                 &db_state,
+                None,
                 Some(self.started_seq),
             )
             .await
