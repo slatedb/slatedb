@@ -34,6 +34,9 @@ pub(crate) enum SlateDBError {
     #[error("object store error")]
     ObjectStoreError(#[from] Arc<object_store::Error>),
 
+    #[error("file already exists")]
+    FileVersionExists,
+
     #[error("manifest file already exists")]
     ManifestVersionExists,
 
@@ -433,6 +436,7 @@ impl From<SlateDBError> for Error {
                 Error::configuration(msg).with_source(Box::new(err))
             }
             SlateDBError::TransactionConflict => Error::operation(msg),
+            SlateDBError::FileVersionExists => Error::persistent_state(msg),
         }
     }
 }
