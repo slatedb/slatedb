@@ -5,7 +5,6 @@ use crate::db_state::SsTableId;
 use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
-use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -42,6 +41,9 @@ impl MemtableFlusher {
         self.manifest.refresh().await?;
         let mut wguard_state = self.db_inner.state.write();
         wguard_state.merge_remote_manifest(self.manifest.prepare_dirty()?);
+        let tracker = wguard_state.state().core().sequence_tracker.clone();
+        drop(wguard_state);
+        self.db_inner.oracle.replace_sequence_tracker(tracker);
         Ok(())
     }
 
@@ -160,6 +162,10 @@ impl MemtableFlusher {
                     // we simply use the latest l0 seq.
                     modifier.state.manifest.core.recent_snapshot_min_seq =
                         min_active_snapshot_seq.unwrap_or(modifier.state.manifest.core.last_l0_seq);
+
+                    let sequence_tracker_snapshot =
+                        self.db_inner.oracle.sequence_tracker_snapshot();
+                    modifier.state.manifest.core.sequence_tracker = sequence_tracker_snapshot;
 
                     Ok(())
                 })?;

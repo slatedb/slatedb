@@ -1,5 +1,10 @@
 use std::sync::Arc;
 
+use chrono::{TimeZone, Utc};
+use log::warn;
+use parking_lot::Mutex;
+
+use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::utils::MonotonicSeq;
 
 /// Oracle is a struct that centralizes the generation & maintenance of various
@@ -16,6 +21,7 @@ pub(crate) struct Oracle {
     /// The sequence number of the most recent write that has been fully durable
     /// flushed to the remote storage.
     pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
+    sequence_tracker: Arc<Mutex<SequenceTracker>>,
 }
 
 impl Oracle {
@@ -29,6 +35,7 @@ impl Oracle {
             last_seq: last_committed_seq.clone(),
             last_committed_seq: last_committed_seq.clone(),
             last_remote_persisted_seq: last_committed_seq,
+            sequence_tracker: Arc::new(Mutex::new(SequenceTracker::new())),
         }
     }
 
@@ -47,5 +54,33 @@ impl Oracle {
             last_remote_persisted_seq: Arc::new(last_remote_persisted_seq),
             ..self
         }
+    }
+
+    pub(crate) fn with_sequence_tracker(self, tracker: SequenceTracker) -> Self {
+        Self {
+            sequence_tracker: Arc::new(Mutex::new(tracker)),
+            ..self
+        }
+    }
+
+    pub(crate) fn record_sequence(&self, seq: u64, ts_millis: i64) {
+        match Utc.timestamp_millis_opt(ts_millis).single() {
+            Some(ts) => {
+                let mut tracker = self.sequence_tracker.lock();
+                tracker.insert(TrackedSeq { seq, ts });
+            }
+            None => warn!(
+                "failed to convert millis to timestamp when recording sequence [seq={}, millis={}]",
+                seq, ts_millis
+            ),
+        }
+    }
+
+    pub(crate) fn sequence_tracker_snapshot(&self) -> SequenceTracker {
+        self.sequence_tracker.lock().clone()
+    }
+
+    pub(crate) fn replace_sequence_tracker(&self, tracker: SequenceTracker) {
+        *self.sequence_tracker.lock() = tracker;
     }
 }

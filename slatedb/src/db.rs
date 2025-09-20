@@ -110,13 +110,15 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
+        let initial_sequence_tracker = manifest.core.sequence_tracker.clone();
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
         let oracle = Arc::new(
             Oracle::new(last_committed_seq)
                 .with_last_seq(last_seq)
-                .with_last_remote_persisted_seq(last_remote_persisted_seq),
+                .with_last_remote_persisted_seq(last_remote_persisted_seq)
+                .with_sequence_tracker(initial_sequence_tracker),
         );
 
         let mono_clock = Arc::new(MonotonicClock::new(
