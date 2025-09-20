@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use chrono::{TimeZone, Utc};
-use log::warn;
 use parking_lot::Mutex;
 
+use crate::clock::SystemClock;
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::utils::MonotonicSeq;
 
@@ -22,6 +21,7 @@ pub(crate) struct Oracle {
     /// flushed to the remote storage.
     pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
     sequence_tracker: Arc<Mutex<SequenceTracker>>,
+    system_clock: Arc<dyn SystemClock>,
 }
 
 impl Oracle {
@@ -29,13 +29,17 @@ impl Oracle {
     /// db instance (DbReader), only the last committed sequence number is needed to be
     /// tracked, and last_seq and last_remote_persisted_seq are considered to be
     /// the same as last_committed_seq.
-    pub(crate) fn new(last_committed_seq: MonotonicSeq) -> Self {
+    pub(crate) fn new(
+        last_committed_seq: MonotonicSeq,
+        system_clock: Arc<dyn SystemClock>,
+    ) -> Self {
         let last_committed_seq = Arc::new(last_committed_seq);
         Self {
             last_seq: last_committed_seq.clone(),
             last_committed_seq: last_committed_seq.clone(),
             last_remote_persisted_seq: last_committed_seq,
             sequence_tracker: Arc::new(Mutex::new(SequenceTracker::new())),
+            system_clock,
         }
     }
 
@@ -63,24 +67,13 @@ impl Oracle {
         }
     }
 
-    pub(crate) fn record_sequence(&self, seq: u64, ts_millis: i64) {
-        match Utc.timestamp_millis_opt(ts_millis).single() {
-            Some(ts) => {
-                let mut tracker = self.sequence_tracker.lock();
-                tracker.insert(TrackedSeq { seq, ts });
-            }
-            None => warn!(
-                "failed to convert millis to timestamp when recording sequence [seq={}, millis={}]",
-                seq, ts_millis
-            ),
-        }
+    pub(crate) fn record_sequence(&self, seq: u64) {
+        let ts = self.system_clock.now();
+        let mut tracker = self.sequence_tracker.lock();
+        tracker.insert(TrackedSeq { seq, ts });
     }
 
     pub(crate) fn sequence_tracker_snapshot(&self) -> SequenceTracker {
         self.sequence_tracker.lock().clone()
-    }
-
-    pub(crate) fn replace_sequence_tracker(&self, tracker: SequenceTracker) {
-        *self.sequence_tracker.lock() = tracker;
     }
 }

@@ -41,9 +41,6 @@ impl MemtableFlusher {
         self.manifest.refresh().await?;
         let mut wguard_state = self.db_inner.state.write();
         wguard_state.merge_remote_manifest(self.manifest.prepare_dirty()?);
-        let tracker = wguard_state.state().core().sequence_tracker.clone();
-        drop(wguard_state);
-        self.db_inner.oracle.replace_sequence_tracker(tracker);
         Ok(())
     }
 

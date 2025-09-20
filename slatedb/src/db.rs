@@ -115,7 +115,7 @@ impl DbInner {
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
         let oracle = Arc::new(
-            Oracle::new(last_committed_seq)
+            Oracle::new(last_committed_seq, system_clock.clone())
                 .with_last_seq(last_seq)
                 .with_last_remote_persisted_seq(last_remote_persisted_seq)
                 .with_sequence_tracker(initial_sequence_tracker),
@@ -1253,6 +1253,8 @@ impl DbRead for Db {
 mod tests {
     use async_trait::async_trait;
     use chrono::TimeDelta;
+    #[cfg(feature = "test-util")]
+    use chrono::{TimeZone, Utc};
     use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
@@ -1266,6 +1268,8 @@ mod tests {
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
     use crate::clock::DefaultSystemClock;
+    #[cfg(feature = "test-util")]
+    use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
@@ -1279,6 +1283,8 @@ mod tests {
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
+    #[cfg(feature = "test-util")]
+    use crate::seq_tracker::FindOption;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -2624,6 +2630,109 @@ mod tests {
         // Verify our keys are in the SST
         assert!(found_keys.contains(key1.as_slice()));
         assert!(found_keys.contains(key2.as_slice()));
+    }
+
+    async fn test_sequence_tracker_persisted_across_flush_and_reload_impl(wal_enabled: bool) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_sequence_tracker_flush";
+        let mut settings = test_db_options(0, 256, None);
+        settings.flush_interval = None;
+        settings.wal_enabled = wal_enabled;
+        let logical_clock = Arc::new(TestClock::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .with_system_clock(system_clock.clone())
+            .with_logical_clock(logical_clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+        let put_options = PutOptions::default();
+
+        let timestamps_ms = [0_i64, 60_000, 120_000];
+        for (idx, ts) in timestamps_ms.iter().enumerate() {
+            logical_clock.ticker.store(*ts, Ordering::SeqCst);
+            system_clock.set(*ts);
+            let key = format!("key-{idx}").into_bytes();
+            let value = format!("value-{idx}").into_bytes();
+            kv_store
+                .put_with_options(&key, &value, &put_options, &write_options)
+                .await
+                .unwrap();
+        }
+
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        let target_ts = Utc.timestamp_opt(120, 0).single().unwrap();
+        let persisted_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            move |core| {
+                core.sequence_tracker
+                    .find_seq(target_ts, FindOption::RoundDown)
+                    == Some(3)
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let tracker = persisted_state.sequence_tracker.clone();
+        let oracle_tracker = kv_store.inner.oracle.sequence_tracker_snapshot();
+        assert_eq!(tracker, oracle_tracker);
+
+        let seq1_ts = tracker.find_ts(1, FindOption::RoundDown).unwrap();
+        assert_eq!(seq1_ts.timestamp(), 0);
+
+        let seq2_ts = tracker.find_ts(2, FindOption::RoundDown).unwrap();
+        assert_eq!(seq2_ts.timestamp(), 60);
+
+        let seq3_ts = tracker.find_ts(3, FindOption::RoundDown).unwrap();
+        assert_eq!(seq3_ts.timestamp(), 120);
+
+        let ts_lookup = Utc.timestamp_opt(60, 0).single().unwrap();
+        assert_eq!(tracker.find_seq(ts_lookup, FindOption::RoundDown), Some(2));
+
+        kv_store.close().await.unwrap();
+
+        let reopened = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_system_clock(system_clock.clone())
+            .with_logical_clock(logical_clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let reopened_tracker = reopened.inner.oracle.sequence_tracker_snapshot();
+        assert_eq!(tracker, reopened_tracker);
+
+        reopened.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_enabled() {
+        test_sequence_tracker_persisted_across_flush_and_reload_impl(true).await;
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_disabled() {
+        test_sequence_tracker_persisted_across_flush_and_reload_impl(false).await;
     }
 
     #[tokio::test]
