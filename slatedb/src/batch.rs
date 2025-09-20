@@ -6,6 +6,7 @@
 
 use crate::config::PutOptions;
 use bytes::Bytes;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// A batch of write operations (puts and/or deletes). All operations in the
@@ -40,7 +41,7 @@ use uuid::Uuid;
 /// means that WAL SSTs could get large if there's a large batch write.
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
-    pub(crate) ops: Vec<WriteOp>,
+    pub(crate) ops: BTreeMap<Bytes, WriteOp>,
     pub(crate) txn_id: Option<Uuid>,
 }
 
@@ -85,10 +86,19 @@ impl std::fmt::Debug for WriteOp {
     }
 }
 
+impl WriteOp {
+    pub fn key(&self) -> &Bytes {
+        match self {
+            WriteOp::Put(key, _, _) => key,
+            WriteOp::Delete(key) => key,
+        }
+    }
+}
+
 impl WriteBatch {
     pub fn new() -> Self {
         WriteBatch {
-            ops: Vec::new(),
+            ops: BTreeMap::new(),
             txn_id: None,
         }
     }
@@ -129,11 +139,14 @@ impl WriteBatch {
             value.len() <= u32::MAX as usize,
             "value size must be <= u32::MAX"
         );
-        self.ops.push(WriteOp::Put(
+        self.ops.insert(
             Bytes::copy_from_slice(key),
-            Bytes::copy_from_slice(value),
-            options.clone(),
-        ));
+            WriteOp::Put(
+                Bytes::copy_from_slice(key),
+                Bytes::copy_from_slice(value),
+                options.clone(),
+            ),
+        );
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
@@ -144,7 +157,15 @@ impl WriteBatch {
             key.len() <= u16::MAX as usize,
             "key size must be <= u16::MAX"
         );
-        self.ops.push(WriteOp::Delete(Bytes::copy_from_slice(key)));
+        self.ops.insert(
+            Bytes::copy_from_slice(key),
+            WriteOp::Delete(Bytes::copy_from_slice(key)),
+        );
+    }
+
+    /// Get operation for specified key (O(log n))
+    pub(crate) fn get_op(&self, key: &[u8]) -> Option<&WriteOp> {
+        self.ops.get(key)
     }
 }
 
@@ -198,7 +219,7 @@ mod tests {
     }])]
     fn test_put_delete_batch(#[case] test_case: Vec<WriteOpTestCase>) {
         let mut batch = WriteBatch::new();
-        let mut expected_ops: Vec<WriteOp> = Vec::new();
+        let mut expected_ops: BTreeMap<Bytes, WriteOp> = BTreeMap::new();
         for test_case in test_case {
             if let Some(value) = test_case.value {
                 batch.put_with_options(
@@ -206,16 +227,36 @@ mod tests {
                     value.as_slice(),
                     &test_case.options,
                 );
-                expected_ops.push(WriteOp::Put(
-                    Bytes::from(test_case.key),
-                    Bytes::from(value),
-                    test_case.options,
-                ));
+                expected_ops.insert(
+                    Bytes::from(test_case.key.clone()),
+                    WriteOp::Put(
+                        Bytes::from(test_case.key),
+                        Bytes::from(value),
+                        test_case.options,
+                    ),
+                );
             } else {
                 batch.delete(test_case.key.as_slice());
-                expected_ops.push(WriteOp::Delete(Bytes::from(test_case.key)));
+                expected_ops.insert(
+                    Bytes::from(test_case.key.clone()),
+                    WriteOp::Delete(Bytes::from(test_case.key)),
+                );
             }
         }
         assert_eq!(batch.ops, expected_ops);
+    }
+
+    #[test]
+    fn test_writebatch_deduplication() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key1", b"value2"); // Should overwrite previous
+
+        assert_eq!(batch.ops.len(), 1); // Only one entry due to deduplication
+        let op = batch.ops.get(b"key1".as_ref()).unwrap();
+        match op {
+            WriteOp::Put(_, value, _) => assert_eq!(value.as_ref(), b"value2"),
+            _ => panic!("Expected Put operation"),
+        }
     }
 }

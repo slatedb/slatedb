@@ -146,7 +146,7 @@ impl DbInner {
         batch
             .ops
             .into_iter()
-            .map(|op| match op {
+            .map(|(_, op)| match op {
                 WriteOp::Put(key, value, opts) => RowEntry {
                     key,
                     value: ValueDeletable::Value(value.clone()),
