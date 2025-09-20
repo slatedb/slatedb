@@ -118,14 +118,14 @@ impl Reader {
         get.get().await
     }
 
-    pub(crate) async fn scan_with_options(
+    pub(crate) async fn scan_with_options<'a>(
         &self,
         range: BytesRange,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
-        write_batch: Option<&WriteBatch>,
+        write_batch: Option<&'a WriteBatch>,
         max_seq: Option<u64>,
-    ) -> Result<DbIterator, SlateDBError> {
+    ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
         for memtable in db_state.imm_memtable() {

@@ -10,7 +10,7 @@ use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::{btree_map, BTreeMap};
-use std::ops::{Bound, RangeBounds};
+use std::ops::RangeBounds;
 use uuid::Uuid;
 
 /// A batch of write operations (puts and/or deletes). All operations in the
