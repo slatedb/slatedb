@@ -151,6 +151,16 @@ impl SequenceTracker {
             },
         }
     }
+
+    /// Serialize the tracker into bytes using the RFC-0012 format.
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        encode_sequence_tracker(self)
+    }
+
+    /// Deserialize the tracker from bytes using the RFC-0012 format.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        decode_sequence_tracker(bytes)
+    }
 }
 
 impl Serialize for SequenceTracker {

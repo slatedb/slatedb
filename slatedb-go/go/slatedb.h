@@ -181,6 +181,8 @@ typedef struct CSdbScanResult {
 
 #define ManifestV1_VT_RECENT_SNAPSHOT_MIN_SEQ 32
 
+#define ManifestV1_VT_SEQUENCE_TRACKER 34
+
 #define CompactedSsTable_VT_ID 4
 
 #define CompactedSsTable_VT_INFO 6
