@@ -176,7 +176,7 @@ impl Reader {
         let l0_iters = l0_iters_res?;
         let sr_iters = sr_iters_res?;
 
-        DbIterator::new(range, memtable_iters, l0_iters, sr_iters, max_seq).await
+        DbIterator::new(range, None, memtable_iters, l0_iters, sr_iters, max_seq).await
     }
 }
 

@@ -5,7 +5,7 @@
 //! atomically to the database.
 
 use crate::config::PutOptions;
-use crate::iter::KeyValueIterator;
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -204,17 +204,24 @@ impl WriteBatch {
         start_key: Option<&[u8]>,
         end_key: Option<&[u8]>,
     ) -> WriteBatchIterator<'a> {
-        WriteBatchIterator::new(self, start_key, end_key)
+        WriteBatchIterator::new(self, start_key, end_key, IterationOrder::Ascending)
     }
 }
 
 /// Iterator over WriteBatch entries
 pub(crate) struct WriteBatchIterator<'a> {
     iter: btree_map::Range<'a, Bytes, WriteOp>,
+    ordering: IterationOrder,
+    current: Option<(&'a Bytes, &'a WriteOp)>,
 }
 
 impl<'a> WriteBatchIterator<'a> {
-    pub fn new(batch: &'a WriteBatch, start_key: Option<&[u8]>, end_key: Option<&[u8]>) -> Self {
+    pub fn new(
+        batch: &'a WriteBatch,
+        start_key: Option<&[u8]>,
+        end_key: Option<&[u8]>,
+        ordering: IterationOrder,
+    ) -> Self {
         let start_bound = match start_key {
             Some(key) => Bound::Included(Bytes::copy_from_slice(key)),
             None => Bound::Unbounded,
@@ -225,29 +232,61 @@ impl<'a> WriteBatchIterator<'a> {
             None => Bound::Unbounded,
         };
 
-        let iter = batch.ops.range((start_bound, end_bound));
+        let mut iter = batch.ops.range((start_bound, end_bound));
+        let current = match ordering {
+            IterationOrder::Ascending => iter.next(),
+            IterationOrder::Descending => iter.next_back(),
+        };
 
-        Self { iter }
+        Self {
+            iter,
+            ordering,
+            current,
+        }
     }
 }
 
 #[async_trait]
 impl<'a> KeyValueIterator for WriteBatchIterator<'a> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
-        if let Some((_, op)) = self.iter.next() {
+        // Return current item (similar to MemTableIterator pattern)
+        let result = self.current.map(|(_, op)| {
             // Use u64::MAX as placeholder seq to indicate highest priority
-            let entry = op.to_row_entry(u64::MAX, None, None);
-            Ok(Some(entry))
-        } else {
-            Ok(None)
-        }
+            op.to_row_entry(u64::MAX, None, None)
+        });
+
+        // Advance to next entry based on ordering (similar to next_entry_sync)
+        self.current = match self.ordering {
+            IterationOrder::Ascending => self.iter.next(),
+            IterationOrder::Descending => self.iter.next_back(),
+        };
+
+        Ok(result)
     }
 
-    async fn seek(&mut self, _next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
-        // BTreeMap::Range doesn't support seeking after creation
-        // For a proper implementation, we'd need to recreate the range
-        // For now, this is a no-op - the iterator was already positioned at creation
-        Ok(())
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
+        // Loop similar to MemTableIterator::seek
+        loop {
+            let should_advance = match &self.current {
+                Some((key, _)) => match self.ordering {
+                    // For ascending: advance if current key < target key
+                    IterationOrder::Ascending => key.as_ref() < next_key,
+                    // For descending: advance if current key > target key
+                    IterationOrder::Descending => key.as_ref() > next_key,
+                },
+                None => return Ok(()), // Iterator exhausted
+            };
+
+            if should_advance {
+                // Advance similar to calling next_entry_sync in MemTableIterator
+                self.current = match self.ordering {
+                    IterationOrder::Ascending => self.iter.next(),
+                    IterationOrder::Descending => self.iter.next_back(),
+                };
+            } else {
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -256,6 +295,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::test_utils::assert_iterator;
+    use crate::types::RowEntry;
 
     struct WriteOpTestCase {
         key: Vec<u8>,
@@ -344,9 +385,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_writebatch_iterator() {
-        use crate::test_utils::assert_iterator;
-        use crate::types::RowEntry;
-
         let mut batch = WriteBatch::new();
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
@@ -373,9 +411,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_writebatch_iterator_range() {
-        use crate::test_utils::assert_iterator;
-        use crate::types::RowEntry;
-
         let mut batch = WriteBatch::new();
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
@@ -385,6 +420,66 @@ mod tests {
         let mut iter = batch.iter_range(Some(b"key2"), Some(b"key4"));
 
         let expected = vec![RowEntry::new_value(b"key3", b"value3", u64::MAX)];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_descending() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key3", b"value3");
+        batch.put(b"key2", b"value2");
+
+        let mut iter = WriteBatchIterator::new(&batch, None, None, IterationOrder::Descending);
+
+        let expected = vec![
+            RowEntry::new_value(b"key3", b"value3", u64::MAX),
+            RowEntry::new_value(b"key2", b"value2", u64::MAX),
+            RowEntry::new_value(b"key1", b"value1", u64::MAX),
+        ];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_seek_ascending() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key3", b"value3");
+        batch.put(b"key5", b"value5");
+
+        let mut iter = WriteBatchIterator::new(&batch, None, None, IterationOrder::Ascending);
+
+        // Seek to key3
+        iter.seek(b"key3").await.unwrap();
+
+        // Should get key3 and key5
+        let expected = vec![
+            RowEntry::new_value(b"key3", b"value3", u64::MAX),
+            RowEntry::new_value(b"key5", b"value5", u64::MAX),
+        ];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_seek_descending() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key3", b"value3");
+        batch.put(b"key5", b"value5");
+
+        let mut iter = WriteBatchIterator::new(&batch, None, None, IterationOrder::Descending);
+
+        // Seek to key3 (in descending, we want keys <= key3)
+        iter.seek(b"key3").await.unwrap();
+
+        // Should get key3 and key1 (in descending order)
+        let expected = vec![
+            RowEntry::new_value(b"key3", b"value3", u64::MAX),
+            RowEntry::new_value(b"key1", b"value1", u64::MAX),
+        ];
 
         assert_iterator(&mut iter, expected).await;
     }
