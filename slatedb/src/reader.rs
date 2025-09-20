@@ -201,7 +201,8 @@ impl<'a> LevelGet<'a> {
             match batch.get_op(self.key) {
                 None => Ok(None),
                 Some(op) => {
-                    let entry = op.to_row_entry(u64::MAX, None, None); // Highest priority seq
+                    // place a highest seq number as the placeholder.
+                    let entry = op.to_row_entry(u64::MAX, None, None);
                     Ok(Some(entry))
                 }
             }
