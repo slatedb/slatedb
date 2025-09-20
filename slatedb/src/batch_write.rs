@@ -145,8 +145,8 @@ impl DbInner {
     fn extract_row_entries(&self, batch: WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
         batch
             .ops
-            .into_iter()
-            .map(|(_, op)| match op {
+            .into_values()
+            .map(|op| match op {
                 WriteOp::Put(key, value, opts) => RowEntry {
                     key,
                     value: ValueDeletable::Value(value.clone()),

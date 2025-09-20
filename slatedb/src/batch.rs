@@ -87,6 +87,7 @@ impl std::fmt::Debug for WriteOp {
 }
 
 impl WriteOp {
+    #[allow(dead_code)]
     pub fn key(&self) -> &Bytes {
         match self {
             WriteOp::Put(key, _, _) => key,
@@ -164,6 +165,7 @@ impl WriteBatch {
     }
 
     /// Get operation for specified key (O(log n))
+    #[allow(dead_code)]
     pub(crate) fn get_op(&self, key: &[u8]) -> Option<&WriteOp> {
         self.ops.get(key)
     }
