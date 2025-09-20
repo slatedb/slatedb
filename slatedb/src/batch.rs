@@ -5,6 +5,7 @@
 //! atomically to the database.
 
 use crate::config::PutOptions;
+use crate::types::{RowEntry, ValueDeletable};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -92,6 +93,37 @@ impl WriteOp {
         match self {
             WriteOp::Put(key, _, _) => key,
             WriteOp::Delete(key) => key,
+        }
+    }
+
+    /// Convert WriteOp to RowEntry for queries
+    #[allow(dead_code)]
+    pub(crate) fn to_row_entry(
+        &self,
+        seq: u64,
+        create_ts: Option<i64>,
+        expire_ts: Option<i64>,
+    ) -> RowEntry {
+        match self {
+            WriteOp::Put(key, value, _options) => {
+                // For queries, we don't need to compute expiration time here
+                // since these are uncommitted writes. The expiration will be
+                // computed when the batch is actually written.
+                RowEntry::new(
+                    key.clone(),
+                    ValueDeletable::Value(value.clone()),
+                    seq,
+                    create_ts,
+                    expire_ts,
+                )
+            }
+            WriteOp::Delete(key) => RowEntry::new(
+                key.clone(),
+                ValueDeletable::Tombstone,
+                seq,
+                create_ts,
+                expire_ts,
+            ),
         }
     }
 }

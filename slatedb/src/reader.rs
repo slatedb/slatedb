@@ -1,3 +1,4 @@
+use crate::batch::WriteBatch;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
@@ -110,6 +111,7 @@ impl Reader {
             db_state,
             table_store: self.table_store.clone(),
             db_stats: self.db_stats.clone(),
+            write_batch: None,
             now,
         };
         get.get().await
@@ -185,12 +187,41 @@ struct LevelGet<'a> {
     table_store: Arc<TableStore>,
     db_stats: DbStats,
     now: i64,
+    write_batch: Option<&'a WriteBatch>,
 }
 
 impl<'a> LevelGet<'a> {
+    fn get_write_batch(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
+        async move {
+            let batch = match self.write_batch {
+                Some(batch) => batch,
+                None => return Ok(None),
+            };
+
+            match batch.get_op(self.key) {
+                None => Ok(None),
+                Some(op) => {
+                    let entry = op.to_row_entry(u64::MAX, None, None); // Highest priority seq
+                    Ok(Some(entry))
+                }
+            }
+        }
+        .boxed()
+    }
+
     async fn get(&'a self) -> Result<Option<Bytes>, SlateDBError> {
-        let getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> =
-            vec![self.get_memtable(), self.get_l0(), self.get_compacted()];
+        let mut getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> = vec![];
+
+        // WriteBatch has highest priority
+        if self.write_batch.is_some() {
+            getters.push(self.get_write_batch());
+        }
+
+        getters.extend(vec![
+            self.get_memtable(),
+            self.get_l0(),
+            self.get_compacted(),
+        ]);
 
         self.get_inner(getters).await
     }
@@ -554,6 +585,7 @@ mod tests {
                 None,
             )),
             db_stats: DbStats::new(&stat_registry),
+            write_batch: None,
             now: 10000,
         };
 
