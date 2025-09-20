@@ -34,7 +34,7 @@ use tokio::runtime::Handle;
 use tracing::instrument;
 
 use crate::config::WriteOptions;
-use crate::types::{RowEntry, ValueDeletable};
+use crate::types::RowEntry;
 use crate::utils::{spawn_bg_task, WatchableOnceCellReader};
 use crate::{
     batch::{WriteBatch, WriteOp},
@@ -146,21 +146,12 @@ impl DbInner {
         batch
             .ops
             .into_values()
-            .map(|op| match op {
-                WriteOp::Put(key, value, opts) => RowEntry {
-                    key,
-                    value: ValueDeletable::Value(value.clone()),
-                    create_ts: Some(now),
-                    expire_ts: opts.expire_ts_from(self.settings.default_ttl, now),
-                    seq,
-                },
-                WriteOp::Delete(key) => RowEntry {
-                    key,
-                    value: ValueDeletable::Tombstone,
-                    create_ts: Some(now),
-                    expire_ts: None,
-                    seq,
-                },
+            .map(|op| {
+                let expire_ts = match &op {
+                    WriteOp::Put(_, _, opts) => opts.expire_ts_from(self.settings.default_ttl, now),
+                    WriteOp::Delete(_) => None,
+                };
+                op.to_row_entry(seq, Some(now), expire_ts)
             })
             .collect::<Vec<_>>()
     }
