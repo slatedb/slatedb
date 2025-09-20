@@ -1,10 +1,11 @@
+use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::KeyValueIterator;
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::mem_table::{ImmutableMemtable, KVTable, MemTableIterator};
 use crate::oracle::Oracle;
 use crate::reader::SstFilterResult::{
@@ -100,6 +101,7 @@ impl Reader {
         key: K,
         options: &ReadOptions,
         db_state: &(dyn DbStateReader + Sync + Send),
+        write_batch: Option<&WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
@@ -110,18 +112,20 @@ impl Reader {
             db_state,
             table_store: self.table_store.clone(),
             db_stats: self.db_stats.clone(),
+            write_batch,
             now,
         };
         get.get().await
     }
 
-    pub(crate) async fn scan_with_options(
+    pub(crate) async fn scan_with_options<'a>(
         &self,
         range: BytesRange,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
+        write_batch: Option<&'a WriteBatch>,
         max_seq: Option<u64>,
-    ) -> Result<DbIterator, SlateDBError> {
+    ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
         for memtable in db_state.imm_memtable() {
@@ -174,7 +178,19 @@ impl Reader {
         let l0_iters = l0_iters_res?;
         let sr_iters = sr_iters_res?;
 
-        DbIterator::new(range, memtable_iters, l0_iters, sr_iters, max_seq).await
+        // Create WriteBatchIterator if write_batch is provided
+        let write_batch_iter = write_batch
+            .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
+
+        DbIterator::new(
+            range,
+            write_batch_iter,
+            memtable_iters,
+            l0_iters,
+            sr_iters,
+            max_seq,
+        )
+        .await
     }
 }
 
@@ -185,12 +201,42 @@ struct LevelGet<'a> {
     table_store: Arc<TableStore>,
     db_stats: DbStats,
     now: i64,
+    write_batch: Option<&'a WriteBatch>,
 }
 
 impl<'a> LevelGet<'a> {
+    fn get_write_batch(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
+        async move {
+            let batch = match self.write_batch {
+                Some(batch) => batch,
+                None => return Ok(None),
+            };
+
+            match batch.get_op(self.key) {
+                None => Ok(None),
+                Some(op) => {
+                    // place a highest seq number as the placeholder.
+                    let entry = op.to_row_entry(u64::MAX, None, None);
+                    Ok(Some(entry))
+                }
+            }
+        }
+        .boxed()
+    }
+
     async fn get(&'a self) -> Result<Option<Bytes>, SlateDBError> {
-        let getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> =
-            vec![self.get_memtable(), self.get_l0(), self.get_compacted()];
+        let mut getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> = vec![];
+
+        // WriteBatch has highest priority
+        if self.write_batch.is_some() {
+            getters.push(self.get_write_batch());
+        }
+
+        getters.extend(vec![
+            self.get_memtable(),
+            self.get_l0(),
+            self.get_compacted(),
+        ]);
 
         self.get_inner(getters).await
     }
@@ -554,6 +600,7 @@ mod tests {
                 None,
             )),
             db_stats: DbStats::new(&stat_registry),
+            write_batch: None,
             now: 10000,
         };
 
