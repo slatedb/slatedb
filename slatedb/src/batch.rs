@@ -91,14 +91,6 @@ impl std::fmt::Debug for WriteOp {
 }
 
 impl WriteOp {
-    #[allow(dead_code)]
-    pub fn key(&self) -> &Bytes {
-        match self {
-            WriteOp::Put(key, _, _) => key,
-            WriteOp::Delete(key) => key,
-        }
-    }
-
     /// Convert WriteOp to RowEntry for queries
     #[allow(dead_code)]
     pub(crate) fn to_row_entry(
@@ -222,11 +214,7 @@ pub(crate) struct WriteBatchIterator<'a> {
 }
 
 impl<'a> WriteBatchIterator<'a> {
-    pub fn new(
-        batch: &'a WriteBatch,
-        start_key: Option<&[u8]>,
-        end_key: Option<&[u8]>,
-    ) -> Self {
+    pub fn new(batch: &'a WriteBatch, start_key: Option<&[u8]>, end_key: Option<&[u8]>) -> Self {
         let start_bound = match start_key {
             Some(key) => Bound::Included(Bytes::copy_from_slice(key)),
             None => Bound::Unbounded,
@@ -376,7 +364,7 @@ mod tests {
                 ValueDeletable::Tombstone,
                 u64::MAX,
                 None,
-                None
+                None,
             ),
         ];
 
@@ -396,9 +384,7 @@ mod tests {
         // Test range [key2, key4)
         let mut iter = batch.iter_range(Some(b"key2"), Some(b"key4"));
 
-        let expected = vec![
-            RowEntry::new_value(b"key3", b"value3", u64::MAX),
-        ];
+        let expected = vec![RowEntry::new_value(b"key3", b"value3", u64::MAX)];
 
         assert_iterator(&mut iter, expected).await;
     }
