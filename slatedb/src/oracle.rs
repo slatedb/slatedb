@@ -20,7 +20,12 @@ pub(crate) struct Oracle {
     /// The sequence number of the most recent write that has been fully durable
     /// flushed to the remote storage.
     pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
+    /// A sequence tracker that correlates sequence numbers with system clock ticks.
+    /// The tracker is limited to 8192 entries and downsamples data when it gets full.
     sequence_tracker: Arc<Mutex<SequenceTracker>>,
+    /// The system clock to use when tracking sequence numbers (sequence numbers
+    /// will be associated with the system clock tick and only be recorded every
+    /// 60 seconds worth of ticks to this clock)
     system_clock: Arc<dyn SystemClock>,
 }
 
