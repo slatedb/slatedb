@@ -2632,6 +2632,7 @@ mod tests {
         assert!(found_keys.contains(key2.as_slice()));
     }
 
+    #[cfg(feature = "test-util")]
     async fn test_sequence_tracker_persisted_across_flush_and_reload_impl(wal_enabled: bool) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_sequence_tracker_flush";
