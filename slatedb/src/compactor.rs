@@ -472,6 +472,7 @@ impl CompactorEventHandler {
             compaction_ts: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
+            sequence_tracker: Arc::new(db_state.sequence_tracker.clone()),
         };
         self.progress_tracker
             .add_job(id, job.estimated_source_bytes());

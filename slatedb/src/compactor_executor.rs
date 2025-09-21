@@ -18,6 +18,7 @@ use crate::iter::KeyValueIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::rand::DbRand;
 use crate::retention_iterator::RetentionIterator;
+use crate::seq_tracker::SequenceTracker;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -36,6 +37,7 @@ pub(crate) struct CompactionJob {
     pub(crate) compaction_ts: i64,
     pub(crate) is_dest_last_run: bool,
     pub(crate) retention_min_seq: Option<u64>,
+    pub(crate) sequence_tracker: Arc<SequenceTracker>,
 }
 
 impl std::fmt::Debug for CompactionJob {
@@ -185,6 +187,7 @@ impl TokioCompactionExecutorInner {
             compaction.is_dest_last_run,
             compaction.compaction_ts,
             self.clock.clone(),
+            compaction.sequence_tracker.clone(),
         )
         .await?;
         Ok(retention_iter)

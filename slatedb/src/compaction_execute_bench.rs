@@ -253,6 +253,7 @@ impl CompactionExecuteBench {
             compaction_ts: manifest.db_state().last_l0_clock_tick,
             retention_min_seq: Some(manifest.db_state().recent_snapshot_min_seq),
             is_dest_last_run,
+            sequence_tracker: Arc::new(manifest.db_state().sequence_tracker.clone()),
         })
     }
 
@@ -287,6 +288,7 @@ impl CompactionExecuteBench {
             compaction_ts: state.last_l0_clock_tick,
             retention_min_seq: Some(state.recent_snapshot_min_seq),
             is_dest_last_run,
+            sequence_tracker: Arc::new(state.sequence_tracker.clone()),
         }
     }
 
