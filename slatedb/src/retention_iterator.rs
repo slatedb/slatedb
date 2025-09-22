@@ -80,7 +80,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         sequence_tracker: Arc<SequenceTracker>,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
-        let now = system_clock.now().timestamp_millis();
+        let current_system_ts = system_clock.now().timestamp_millis();
         for (idx, (_, entry)) in versions.into_iter().enumerate() {
             // always keep the latest version (idx == 0), for older versions, check if they are within retention window.
             // retention window is defined by either timeout or seq, or both. if both are not set, only the latest version
@@ -88,18 +88,16 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             let in_retention_window_by_time = retention_timeout
                 .map(|timeout| {
                     let create_sys_ts = sequence_tracker
-                        // we use RoundUp so that we are less aggressive about filtering
-                        // rows (e.g. if the requested window is 10min and the closes recorded
-                        // sequence numbers are 9m30s and 10m30s ago for upper/lower rounding
-                        // respectively we will conservatively select to keep this record in
-                        // the filtered results)
+                        // Use RoundUp to conservatively estimate creation time. For example:
+                        // - If retention window is 10min and current time is 12:00:00
+                        // - And sequence tracker has timestamps at 11:49:30 and 11:50:30
+                        // - RoundUp will use 11:50:30 (later timestamp) to avoid over-aggressive filtering
                         .find_ts(entry.seq, FindOption::RoundUp)
                         .map(|ts| ts.timestamp_millis())
                         // if the sequence number is greater than the last recorded sequence
                         // number we just assume that it was produced now (so it effectively
                         // should be kept in the filtered results)
-                        .unwrap_or(now);
-                    let current_system_ts = system_clock.now().timestamp_millis();
+                        .unwrap_or(current_system_ts);
                     create_sys_ts + (timeout.as_millis() as i64) > current_system_ts
                 })
                 .unwrap_or(false);
