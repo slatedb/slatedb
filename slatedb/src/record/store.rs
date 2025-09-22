@@ -356,7 +356,7 @@ impl<T> RecordStore<T> {
     // Delete a specific versioned file (no additional validation)
     pub(crate) async fn delete(&self, id: u64) -> Result<(), SlateDBError> {
         let path = self.path_for(id);
-        debug!("deleting record [id={}]", id);
+        debug!("deleting record [record_path={}]", path);
         self.object_store
             .delete(&path)
             .await
