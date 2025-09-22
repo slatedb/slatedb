@@ -31,8 +31,8 @@ use crate::flatbuffer_types::manifest_generated::{
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
-use crate::seq_tracker::SequenceTracker;
 use crate::record::RecordCodec;
+use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
