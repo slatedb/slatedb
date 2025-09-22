@@ -28,28 +28,28 @@ pub(crate) struct GenericFileMetadata {
     pub(crate) size: u32,
 }
 
-// Local mutable view of a versioned record
+// Local, mutable view of a versioned record
 #[derive(Clone, Debug)]
 pub(crate) struct DirtyRecord<T> {
-    pub(crate) id: u64,
-    pub(crate) value: T,
+    id: u64,
+    value: T,
 }
 
 // Generic fenceable wrapper using epoch getters/setters
 pub(crate) struct FenceableRecord<T: Clone> {
-    pub(crate) stored: StoredRecord<T>,
-    pub(crate) local_epoch: u64,
-    pub(crate) get_epoch: fn(&T) -> u64,
+    stored: StoredRecord<T>,
+    local_epoch: u64,
+    get_epoch: fn(&T) -> u64,
     #[allow(dead_code)]
-    pub(crate) set_epoch: fn(&mut T, u64),
+    set_epoch: fn(&mut T, u64),
 }
 
 // Generic stored record with optimistic versioned updates
 #[derive(Clone)]
 pub(crate) struct StoredRecord<T> {
-    pub(crate) id: u64,
-    pub(crate) record: T,
-    pub(crate) store: Arc<RecordStore<T>>,
+    id: u64,
+    record: T,
+    store: Arc<RecordStore<T>>,
 }
 
 // Generic, versioned store for records persisted as numbered files under a directory
@@ -61,12 +61,17 @@ pub(crate) struct RecordStore<T> {
 }
 
 impl<T> DirtyRecord<T> {
+    /// Create a new dirty record with the given id and value
+    pub(crate) fn new(id: u64, value: T) -> Self {
+        Self { id, value }
+    }
+
     #[allow(dead_code)]
-    fn id(&self) -> u64 {
+    pub(crate) fn id(&self) -> u64 {
         self.id
     }
     #[allow(dead_code)]
-    fn into_value(self) -> T {
+    pub(crate) fn into_value(self) -> T {
         self.value
     }
 }
@@ -88,10 +93,7 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
                     let local_epoch = get_epoch(stored.record()) + 1;
                     let mut new_val = stored.record().clone();
                     set_epoch(&mut new_val, local_epoch);
-                    let dirty = DirtyRecord {
-                        id: stored.id(),
-                        value: new_val,
-                    };
+                    let dirty = DirtyRecord::new(stored.id(), new_val);
                     match stored.update_dirty(dirty).await {
                         Err(SlateDBError::FileVersionExists) => {
                             stored.refresh().await?;
@@ -117,6 +119,11 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn local_epoch(&self) -> u64 {
+        self.local_epoch
+    }
+
     pub(crate) fn id(&self) -> u64 {
         self.stored.id()
     }
@@ -133,7 +140,14 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
         self.stored.clock_arc()
     }
 
-    // The file may have been updated by a reader, or
+    pub(crate) fn prepare_dirty(&self) -> Result<DirtyRecord<T>, SlateDBError> {
+        self.check_epoch()?;
+        let id = self.id();
+        let record = self.record().clone();
+        Ok(DirtyRecord::new(id, record))
+    }
+
+    // The file may have been updated by a readers, another process, or
     // we may have gotten this error after successfully updating
     // if we failed to get the response. Either way, refresh
     // the file and try the bump again.
@@ -168,6 +182,10 @@ impl<T: Clone> StoredRecord<T> {
             record: value,
             store,
         })
+    }
+
+    pub(crate) fn new(id: u64, record: T, store: Arc<RecordStore<T>>) -> Self {
+        Self { id, record, store }
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -303,7 +321,7 @@ impl<T> RecordStore<T> {
         Ok(None)
     }
 
-    // List files for this record type in an id range
+    // List files for this record type within an id range
     pub(crate) async fn list<R: RangeBounds<u64>>(
         &self,
         id_range: R,

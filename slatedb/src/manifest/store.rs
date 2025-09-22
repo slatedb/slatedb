@@ -62,8 +62,6 @@ impl DirtyManifest {
 
 pub(crate) struct FenceableManifest {
     inner: FenceableRecord<Manifest>,
-    local_epoch: u64,
-    stored_epoch: fn(&Manifest) -> u64,
 }
 
 // This type wraps StoredManifest, and fences other conflicting writers by incrementing
@@ -84,12 +82,7 @@ impl FenceableManifest {
             |m: &mut Manifest, e: u64| m.writer_epoch = e,
         )
         .await?;
-        let local_epoch = fr.local_epoch;
-        Ok(Self {
-            inner: fr,
-            local_epoch,
-            stored_epoch: |m| m.writer_epoch,
-        })
+        Ok(Self { inner: fr })
     }
 
     pub(crate) async fn init_compactor(
@@ -105,35 +98,24 @@ impl FenceableManifest {
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
         )
         .await?;
-        let local_epoch = fr.local_epoch;
-        Ok(Self {
-            inner: fr,
-            local_epoch,
-            stored_epoch: |m| m.compactor_epoch,
-        })
+        Ok(Self { inner: fr })
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
         self.inner.refresh().await?;
-        self.check_epoch()
+        Ok(())
     }
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyManifest, SlateDBError> {
-        self.check_epoch()?;
-        let id = self.inner.id();
-        let manifest = self.inner.record().clone();
-        Ok(DirtyManifest::new(id, manifest))
+        let dirty = self.inner.prepare_dirty()?;
+        Ok(DirtyManifest::new(dirty.id(), dirty.into_value()))
     }
 
     pub(crate) async fn update_manifest(
         &mut self,
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
-        self.check_epoch()?;
-        let dirty = DirtyRecord {
-            id: manifest.id(),
-            value: Manifest::from(manifest),
-        };
+        let dirty = DirtyRecord::new(manifest.id(), Manifest::from(manifest));
         self.inner.update_dirty(dirty).await.map_err(|e| match e {
             SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
             other => other,
@@ -213,26 +195,6 @@ impl FenceableManifest {
             }
         }
     }
-
-    fn check_epoch(&self) -> Result<(), SlateDBError> {
-        Self::check_epoch_against_manifest(self.local_epoch, self.stored_epoch, self.inner.record())
-    }
-
-    #[allow(clippy::panic)]
-    fn check_epoch_against_manifest(
-        local_epoch: u64,
-        stored_epoch: fn(&Manifest) -> u64,
-        manifest: &Manifest,
-    ) -> Result<(), SlateDBError> {
-        let stored_epoch = stored_epoch(manifest);
-        if local_epoch < stored_epoch {
-            return Err(SlateDBError::Fenced);
-        }
-        if local_epoch > stored_epoch {
-            panic!("the stored epoch is lower than the local epoch")
-        }
-        Ok(())
-    }
 }
 
 // Represents the manifest stored in the object store. This type tracks the current
@@ -243,8 +205,6 @@ impl FenceableManifest {
 // can use the `refresh` method to refresh the locally stored manifest+id with the latest
 // manifest stored in the object store.
 pub(crate) struct StoredManifest {
-    id: u64,
-    manifest: Manifest,
     inner: StoredRecord<Manifest>,
 }
 
@@ -252,11 +212,7 @@ impl StoredManifest {
     async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
         // Preserve original behavior: write via ManifestStore (object-store path and semantics)
         let inner = StoredRecord::init(Arc::clone(&store.inner), manifest.clone()).await?;
-        Ok(Self {
-            id: inner.id,
-            manifest,
-            inner,
-        })
+        Ok(Self { inner })
     }
 
     /// Create the initial manifest for a new database.
@@ -289,16 +245,8 @@ impl StoredManifest {
         let Some((id, manifest)) = store.inner.try_read_latest().await? else {
             return Ok(None);
         };
-        let inner = StoredRecord {
-            id,
-            record: manifest.clone(),
-            store: Arc::clone(&store.inner),
-        };
-        Ok(Some(Self {
-            id,
-            manifest,
-            inner,
-        }))
+        let inner = StoredRecord::new(id, manifest.clone(), Arc::clone(&store.inner));
+        Ok(Some(Self { inner }))
     }
 
     /// Load the current manifest from the supplied manifest store. If successful,
@@ -310,26 +258,24 @@ impl StoredManifest {
 
     #[allow(dead_code)]
     pub(crate) fn id(&self) -> u64 {
-        self.id
+        self.inner.id()
     }
 
     pub(crate) fn manifest(&self) -> &Manifest {
-        &self.manifest
+        self.inner.record()
     }
 
     pub(crate) fn prepare_dirty(&self) -> DirtyManifest {
-        DirtyManifest::new(self.id, self.manifest.clone())
+        DirtyManifest::new(self.id(), self.manifest().clone())
     }
 
     pub(crate) fn db_state(&self) -> &CoreDbState {
-        &self.manifest.core
+        &self.manifest().core
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
         self.inner.refresh().await?;
-        self.id = self.inner.id();
-        self.manifest = self.inner.record().clone();
-        Ok(&self.manifest)
+        Ok(self.manifest())
     }
 
     fn new_checkpoint(
@@ -379,15 +325,9 @@ impl StoredManifest {
                     options,
                 )?;
                 new_val.core.checkpoints.push(checkpoint);
-                Ok(Some(DirtyRecord {
-                    id: sr.id(),
-                    value: new_val,
-                }))
+                Ok(Some(DirtyRecord::new(sr.id(), new_val)))
             })
             .await?;
-        // sync from inner
-        self.id = self.inner.id();
-        self.manifest = self.inner.record().clone();
         Ok(self
             .db_state()
             .find_checkpoint(checkpoint_id)
@@ -407,23 +347,16 @@ impl StoredManifest {
                 if new_val.core.checkpoints.len() == before {
                     Ok(None)
                 } else {
-                    Ok(Some(DirtyRecord {
-                        id: sr.id(),
-                        value: new_val,
-                    }))
+                    Ok(Some(DirtyRecord::new(sr.id(), new_val)))
                 }
             })
             .await?;
-        // sync from inner
-        self.id = self.inner.id();
-        self.manifest = self.inner.record().clone();
         Ok(())
     }
 
     /// Replace an existing checkpoint with a new checkpoint. If the old checkpoint
-    /// is no longer present, then the new checkpoint will still be added.
-    /// This is useful when establishing a new checkpoint (e.g. in a reader) in
-    /// order to avoid two manifest updates.
+    /// is missing, the new checkpoint will still be added. This helps avoid
+    /// issuing two manifest updates when creating a new checkpoint.
     pub(crate) async fn replace_checkpoint(
         &mut self,
         old_checkpoint_id: Uuid,
@@ -447,15 +380,9 @@ impl StoredManifest {
                     .checkpoints
                     .retain(|cp| cp.id != old_checkpoint_id);
                 new_val.core.checkpoints.push(checkpoint);
-                Ok(Some(DirtyRecord {
-                    id: sr.id(),
-                    value: new_val,
-                }))
+                Ok(Some(DirtyRecord::new(sr.id(), new_val)))
             })
             .await?;
-        // sync from inner
-        self.id = self.inner.id();
-        self.manifest = self.inner.record().clone();
         let new_checkpoint = self
             .db_state()
             .find_checkpoint(new_checkpoint_id)
@@ -482,15 +409,9 @@ impl StoredManifest {
                     return Err(CheckpointMissing(checkpoint_id));
                 };
                 cp.expire_time = Some(clock.now() + new_lifetime);
-                Ok(Some(DirtyRecord {
-                    id: sr.id(),
-                    value: new_val,
-                }))
+                Ok(Some(DirtyRecord::new(sr.id(), new_val)))
             })
             .await?;
-        // sync from inner
-        self.id = self.inner.id();
-        self.manifest = self.inner.record().clone();
         let checkpoint = self
             .db_state()
             .find_checkpoint(checkpoint_id)
@@ -503,20 +424,15 @@ impl StoredManifest {
         &mut self,
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
-        if manifest.id() != self.id {
+        if manifest.id() != self.id() {
             return Err(ManifestVersionExists);
         }
         let manifest = manifest.into();
-        let dirty = DirtyRecord {
-            id: self.inner.id(),
-            value: manifest,
-        };
+        let dirty = DirtyRecord::new(self.inner.id(), manifest);
         self.inner.update_dirty(dirty).await.map_err(|e| match e {
             SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
             other => other,
         })?;
-        self.id = self.inner.id();
-        self.manifest = self.inner.record().clone();
         Ok(())
     }
 
@@ -955,7 +871,7 @@ mod tests {
             .unwrap();
 
         let mut dirty = sm.prepare_dirty();
-        dirty.core.checkpoints.push(new_checkpoint(sm.id));
+        dirty.core.checkpoints.push(new_checkpoint(sm.inner.id()));
         sm.update_manifest(dirty).await.unwrap();
 
         // When
@@ -1086,8 +1002,8 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_manifest = sm.manifest.clone();
-        let initial_manifest_id = sm.id;
+        let initial_manifest = sm.inner.record().clone();
+        let initial_manifest_id = sm.inner.id();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(1, active_manifests.len());
         assert_eq!(
@@ -1097,7 +1013,7 @@ mod tests {
 
         // Add a checkpoint referencing the latest manifest
         let mut dirty = sm.prepare_dirty();
-        dirty.core.checkpoints.push(new_checkpoint(sm.id));
+        dirty.core.checkpoints.push(new_checkpoint(sm.inner.id()));
         sm.update_manifest(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(2, active_manifests.len());
@@ -1105,7 +1021,10 @@ mod tests {
             Some(&initial_manifest),
             active_manifests.get(&initial_manifest_id)
         );
-        assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
+        assert_eq!(
+            Some(&sm.manifest()),
+            active_manifests.get(&sm.id()).as_ref()
+        );
 
         // Remove the checkpoint and verify that only the latest manifest is active
         let mut dirty = sm.prepare_dirty();
@@ -1113,7 +1032,10 @@ mod tests {
         sm.update_manifest(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(1, active_manifests.len());
-        assert_eq!(Some(&sm.manifest), active_manifests.get(&sm.id));
+        assert_eq!(
+            Some(&sm.manifest()),
+            active_manifests.get(&sm.id()).as_ref()
+        );
     }
 
     #[tokio::test]
@@ -1124,14 +1046,14 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_id = sm.id;
+        let initial_id = sm.inner.id();
         sm.maybe_apply_manifest_update(|_| Ok(None)).await.unwrap();
-        assert_eq!(initial_id, sm.id);
+        assert_eq!(initial_id, sm.inner.id());
 
         sm.maybe_apply_manifest_update(|sm| Ok(Some(sm.prepare_dirty())))
             .await
             .unwrap();
-        assert_eq!(initial_id + 1, sm.id);
+        assert_eq!(initial_id + 1, sm.inner.id());
     }
 
     #[tokio::test]
@@ -1186,7 +1108,7 @@ mod tests {
 
         assert_eq!(
             Some(&refreshed_checkpoint),
-            sm.manifest.core.find_checkpoint(checkpoint.id)
+            sm.manifest().core.find_checkpoint(checkpoint.id)
         );
     }
 
@@ -1232,10 +1154,10 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(checkpoint.id, replaced_checkpoint.id);
-        assert_eq!(None, sm.manifest.core.find_checkpoint(checkpoint.id));
+        assert_eq!(None, sm.manifest().core.find_checkpoint(checkpoint.id));
         assert_eq!(
             Some(&replaced_checkpoint),
-            sm.manifest.core.find_checkpoint(replaced_checkpoint.id),
+            sm.manifest().core.find_checkpoint(replaced_checkpoint.id),
         );
     }
 
@@ -1259,7 +1181,7 @@ mod tests {
 
         assert_eq!(
             Some(&replaced_checkpoint),
-            sm.manifest.core.find_checkpoint(replaced_checkpoint.id),
+            sm.manifest().core.find_checkpoint(replaced_checkpoint.id),
         );
     }
 
@@ -1277,7 +1199,7 @@ mod tests {
             .unwrap();
 
         sm.delete_checkpoint(checkpoint.id).await.unwrap();
-        assert_eq!(None, sm.manifest.core.find_checkpoint(checkpoint.id));
+        assert_eq!(None, sm.manifest().core.find_checkpoint(checkpoint.id));
     }
 
     #[tokio::test]
@@ -1289,10 +1211,10 @@ mod tests {
             .unwrap();
 
         let checkpoint_id = uuid::Uuid::new_v4();
-        let manifest_id = sm.id;
+        let manifest_id = sm.inner.id();
         sm.delete_checkpoint(checkpoint_id).await.unwrap();
         sm.refresh().await.unwrap();
-        assert_eq!(manifest_id, sm.id);
+        assert_eq!(manifest_id, sm.id());
     }
 
     #[tokio::test]
@@ -1317,14 +1239,14 @@ mod tests {
             FenceableManifest::init_writer(sm_b, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-        assert_eq!(1, fm_b.local_epoch);
+        assert_eq!(1, fm_b.inner.local_epoch());
 
         // The last writer always wins
         let mut fm_a =
             FenceableManifest::init_writer(sm_a, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-        assert_eq!(2, fm_a.local_epoch);
+        assert_eq!(2, fm_a.inner.local_epoch());
 
         assert!(matches!(
             fm_b.refresh().await.err(),
