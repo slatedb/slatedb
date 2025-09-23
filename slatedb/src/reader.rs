@@ -95,7 +95,25 @@ impl Reader {
         max_seq
     }
 
-    /// Get the value for the given key, and return None if the value is expired.
+    /// Get the value for the given key.
+    ///
+    /// Returns `Ok(Some(value))` if a non-expired value exists for `key`,
+    /// `Ok(None)` if the key is deleted or the latest visible value is expired,
+    /// and an error if the read fails.
+    ///
+    /// Arguments:
+    /// - `key`: The user key to read. Any type that can be viewed as a byte
+    ///   slice is accepted.
+    /// - `options`: Options for the read, including durability constraint or
+    ///   dirty read.
+    /// - `db_state`: Read-only view over in-memory state (memtables) and on-disk
+    ///    states (level-0 SSTs and compacted sorted runs).
+    /// - `write_batch`: Optional `WriteBatch` to consult first. It's only used when
+    ///   operating within a Transaction.
+    /// - `max_seq`: Optional upper bound on the sequence number visibility. If
+    ///   provided, the read will not return entries with a sequence number
+    ///   greater than this value. The final bound is the minimum of this value
+    ///   and the bound derived from `options` (e.g., durability, dirty read).
     pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
@@ -118,6 +136,25 @@ impl Reader {
         get.get().await
     }
 
+    /// Create an iterator over a key range.
+    ///
+    /// Produces a merged iterator over the provided `write_batch` (if any),
+    /// in-memory memtables, level-0 SSTs, and compacted sorted runs, honoring
+    /// the maximum visible sequence number. The iterator yields only non-
+    /// expired, non-tombstone values.
+    ///
+    /// Arguments
+    /// - `range`: The half-open key range to scan (start inclusive, end
+    ///   exclusive).
+    /// - `options`: Options for the scan, including read-ahead, caching, and the
+    ///   maximum number of concurrent fetch tasks.
+    /// - `db_state`: Read-only view over in-memory state (memtables) and access to on-disk
+    ///   data (level-0 SSTs and compacted sorted runs) needed to construct iterators.
+    /// - `write_batch`: Optional `WriteBatch` to include in the merged scan. It's only used when
+    ///   operating within a Transaction.
+    /// - `max_seq`: Optional upper bound on the sequence number visibility for
+    ///   the scan. If provided, entries with a greater sequence number are
+    ///   filtered out by the iterator construction.
     pub(crate) async fn scan_with_options<'a>(
         &self,
         range: BytesRange,
