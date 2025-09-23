@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_writebatch_iterator() {
+    async fn test_writebatch_iterator_basic() {
         let mut batch = WriteBatch::new();
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
@@ -470,6 +470,131 @@ mod tests {
         let expected = vec![
             RowEntry::new_value(b"key3", b"value3", u64::MAX),
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
+        ];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_empty_batch() {
+        let batch = WriteBatch::new();
+        let mut iter = batch.iter_range(..);
+
+        let result = iter.next_entry().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_seek_to_nonexistent() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key3", b"value3");
+
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+
+        // Seek to key2 (doesn't exist)
+        iter.seek(b"key2").await.unwrap();
+
+        // Should get key3 (next available)
+        let result = iter.next_entry().await.unwrap();
+        assert!(result.is_some());
+        let entry = result.unwrap();
+        assert_eq!(entry.key, Bytes::from_static(b"key3"));
+        assert_eq!(
+            entry.value,
+            ValueDeletable::Value(Bytes::from_static(b"value3"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_seek_beyond_end() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key3", b"value3");
+
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+
+        // Seek beyond maximum key
+        iter.seek(b"key9").await.unwrap();
+
+        // Should be exhausted
+        let result = iter.next_entry().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_multiple_tombstones() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.delete(b"key2");
+        batch.put(b"key3", b"value3");
+        batch.delete(b"key4");
+
+        let mut iter = batch.iter_range(..);
+
+        let expected = vec![
+            RowEntry::new_value(b"key1", b"value1", u64::MAX),
+            RowEntry::new(
+                Bytes::from_static(b"key2"),
+                ValueDeletable::Tombstone,
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new_value(b"key3", b"value3", u64::MAX),
+            RowEntry::new(
+                Bytes::from_static(b"key4"),
+                ValueDeletable::Tombstone,
+                u64::MAX,
+                None,
+                None,
+            ),
+        ];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_seek_before_first() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key2", b"value2");
+        batch.put(b"key3", b"value3");
+
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+
+        // Seek before first key
+        iter.seek(b"key1").await.unwrap();
+
+        // Should get key2 (first available)
+        let result = iter.next_entry().await.unwrap();
+        assert!(result.is_some());
+        let entry = result.unwrap();
+        assert_eq!(entry.key, Bytes::from_static(b"key2"));
+    }
+
+    #[tokio::test]
+    async fn test_writebatch_iterator_range_with_tombstones() {
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.delete(b"key2");
+        batch.put(b"key3", b"value3");
+        batch.delete(b"key4");
+        batch.put(b"key5", b"value5");
+
+        // Range [key2, key4) should include tombstones
+        let mut iter = batch.iter_range(BytesRange::from(
+            Bytes::from_static(b"key2")..Bytes::from_static(b"key4"),
+        ));
+
+        let expected = vec![
+            RowEntry::new(
+                Bytes::from_static(b"key2"),
+                ValueDeletable::Tombstone,
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new_value(b"key3", b"value3", u64::MAX),
         ];
 
         assert_iterator(&mut iter, expected).await;
