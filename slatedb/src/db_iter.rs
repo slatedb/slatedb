@@ -2,7 +2,7 @@ use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::KeyValueIterator;
+use crate::iter::{EmptyIterator, KeyValueIterator};
 use crate::mem_table::MemTableIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -28,7 +28,14 @@ impl<'a> DbIterator<'a> {
         sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
-        let mut iters: Vec<Box<dyn KeyValueIterator>> = {
+        let iters: Vec<Box<dyn KeyValueIterator>> = {
+            // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
+            // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
+            // not have an real committed sequence number yet.
+            let write_batch_iter = write_batch_iter
+                .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator>)
+                .unwrap_or_else(|| Box::new(EmptyIterator::new()));
+
             // Apply the max_seq filter to all the iterators. Please note that we should apply this filter BEFORE
             // merging the iterators.
             //
@@ -46,15 +53,15 @@ impl<'a> DbIterator<'a> {
                 MergeIterator::new(l0_iters),
                 MergeIterator::new(sr_iters)
             );
-            vec![Box::new(mem_iter?), Box::new(l0_iter?), Box::new(sr_iter?)]
-        };
 
-        // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
-        // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
-        // not have an real committed sequence number yet.
-        if let Some(wb_iter) = write_batch_iter {
-            iters.insert(0, Box::new(wb_iter));
-        }
+            // Wrap all the iterators as Box<dyn KeyValueIterator>
+            vec![
+                write_batch_iter,
+                Box::new(mem_iter?),
+                Box::new(l0_iter?),
+                Box::new(sr_iter?),
+            ]
+        };
 
         let iter = MergeIterator::new(iters).await?;
         Ok(DbIterator {
