@@ -264,7 +264,10 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
 
         // notify in-memory memtables of error
         let state = self.db_inner.state.read();
-        debug!("notifying in-memory memtable of shutdown [result={:?}]", result);
+        debug!(
+            "notifying in-memory memtable of shutdown [result={:?}]",
+            result
+        );
         state.memtable().table().notify_durable(Err(error.clone()));
         for imm_table in state.state().imm_memtable.iter() {
             debug!(
