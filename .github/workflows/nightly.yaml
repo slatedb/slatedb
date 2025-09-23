@@ -50,7 +50,7 @@ jobs:
 
   benchmarks:
     runs-on: warp-ubuntu-latest-x64-16x
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -210,56 +210,31 @@ jobs:
           RUST_LOG: "info"
           SLATEDB_DST_ROOT: "./"
 
-  notify:
-    needs: [microbenchmarks, benchmarks, microbenchmark-pprofs, deterministic-simulation-test]
-    if: ${{ always() }}
-    permissions:
-      issues: write
-      contents: read
+  detect-flaky-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - name: Comment or open issue if any dependency failed
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-        uses: actions/github-script@v7
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
         with:
-          script: |
-            const {owner, repo} = context.repo;
-            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const body = `Another failure.\n\nRun: ${runUrl}`;
-
-            const issues = await github.paginate(
-              github.rest.issues.listForRepo,
-              { owner, repo, state: 'open', per_page: 100 }
-            );
-            const hit = issues.find(i => i.title === 'Nightly failed');
-
-            if (hit) {
-              await github.rest.issues.createComment({ owner, repo, issue_number: hit.number, body });
-            } else {
-              await github.rest.issues.create({
-                owner, repo,
-                title: 'Nightly failed',
-                body: `Run: ${runUrl}`,
-                labels: ['ci-failure']
-              });
-            }
-
-      - name: 'Close any open "Nightly failed" issues on success'
-        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const body = `Nightly succeeded.\n\nRun: ${runUrl}\n\nClosing this issue.`;
-
-            const issues = await github.paginate(
-              github.rest.issues.listForRepo,
-              { owner, repo, state: 'open', per_page: 100 }
-            );
-            const toClose = issues.filter(i => i.title === 'Nightly failed');
-
-            for (const issue of toClose) {
-              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body });
-              await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed' });
-            }
+          tool: nextest@0.9.98
+      - name: Install gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdb
+      - name: Run tests in a loop for 15 minutes
+        run: |
+          set -euo pipefail
+          SECONDS=0
+          deadline=$((15 * 60))
+          iteration=1
+          while [ $SECONDS -lt $deadline ]; do
+            echo "=== Iteration $iteration (elapsed ${SECONDS}s) ==="
+            if ! cargo nextest run --workspace --lib --all-features --all-targets --profile ci; then
+              echo "Tests failed during iteration $iteration"
+              exit 1
+            fi
+            iteration=$((iteration + 1))
+          done
+          completed=$((iteration - 1))
+          echo "Completed $completed iteration(s) in ${SECONDS}s without failures"

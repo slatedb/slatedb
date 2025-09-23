@@ -8,6 +8,7 @@ package slatedb
 */
 import "C"
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"unsafe"
@@ -76,55 +77,24 @@ func resultToError(result C.struct_CSdbResult) error {
 	return baseErr
 }
 
-// Open opens a SlateDB database with the specified object storage provider
-// This replaces OpenMemory and OpenS3 functions for a unified API
-//
-// Parameters:
-//   - path: Local path for database metadata and WAL files
-//   - storeConfig: Object storage provider configuration
-//   - opts: Optional database configuration. Use nil for defaults.
-//
-// Example for local storage (testing/development):
-//
-//	// Local storage (testing/development)
-//	db, err := slatedb.Open("/tmp/mydb", &slatedb.StoreConfig{
-//	    Provider: slatedb.ProviderLocal,
-//	}, nil)
-//
-//	// AWS S3 storage with custom timeout
-//	db, err := slatedb.Open("/tmp/mydb", &slatedb.StoreConfig{
-//	    Provider: slatedb.ProviderAWS,
-//	    AWS: &slatedb.AWSConfig{
-//	        Bucket: "my-slatedb-bucket",
-//	        Region: "us-east-1",
-//	        RequestTimeout: 30 * time.Second,
-//	    },
-//	}, &slatedb.SlateDBOptions{
-//	    FlushInterval: 200 * time.Millisecond,
-//	})
-func Open(path string, storeConfig *StoreConfig, opts *SlateDBOptions) (*DB, error) {
+// Open opens a SlateDB database with default settings
+// For more advanced configuration, use NewBuilder() instead
+func Open(path string, storeConfig *StoreConfig) (*DB, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
 	// Convert Go structs to JSON strings
 	storeConfigJSON, storeConfigPtr := convertStoreConfigToJSON(storeConfig)
-	optionsJSON, optionsPtr := convertOptionsToJSON(opts)
-
 	defer func() {
-		// Free JSON string memory
 		if storeConfigPtr != nil {
 			C.free(storeConfigPtr)
 		}
-		if optionsPtr != nil {
-			C.free(optionsPtr)
-		}
 	}()
 
-	handle := C.slatedb_open(cPath, storeConfigJSON, optionsJSON)
+	handle := C.slatedb_open(cPath, storeConfigJSON)
 
 	// Check if handle is null (indicates error)
-	// We need to check if the pointer inside the handle is null
-	if unsafe.Pointer(handle._0) == unsafe.Pointer(uintptr(0)) {
+	if handle._0 == nil {
 		return nil, errors.New("failed to open database")
 	}
 
@@ -472,4 +442,98 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 		ptr:    iterPtr,
 		closed: false,
 	}, nil
+}
+
+// Builder represents a database builder that mirrors Rust's DbBuilder
+type Builder struct {
+	path         string
+	storeConfig  *StoreConfig
+	settings     *Settings
+	sstBlockSize *SstBlockSize
+}
+
+// NewBuilder creates a new database builder
+func NewBuilder(path string, storeConfig *StoreConfig) (*Builder, error) {
+	if storeConfig == nil {
+		return nil, errors.New("storeConfig cannot be nil")
+	}
+
+	return &Builder{
+		path:        path,
+		storeConfig: storeConfig,
+	}, nil
+}
+
+// WithSettings sets the Settings for the database
+func (b *Builder) WithSettings(settings *Settings) *Builder {
+	b.settings = settings
+	return b
+}
+
+// WithSstBlockSize sets the SST block size for the database
+func (b *Builder) WithSstBlockSize(size SstBlockSize) *Builder {
+	b.sstBlockSize = &size
+	return b
+}
+
+// Build creates the database using the configured options
+func (b *Builder) Build() (*DB, error) {
+	// Convert StoreConfig to JSON
+	storeConfigJSON, err := json.Marshal(b.storeConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal store config: %w", err)
+	}
+
+	// Create builder via FFI
+	cPath := C.CString(b.path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	cStoreConfigJSON := C.CString(string(storeConfigJSON))
+	defer C.free(unsafe.Pointer(cStoreConfigJSON))
+
+	builderPtr := C.slatedb_builder_new(cPath, cStoreConfigJSON)
+	if builderPtr == nil {
+		return nil, errors.New("failed to create database builder")
+	}
+	// Note: Don't defer free here - slatedb_builder_build() consumes the builder
+
+	// Apply settings
+	if b.settings != nil {
+		defaults, err := SettingsDefault()
+		if err != nil {
+			C.slatedb_builder_free(builderPtr) // Free on error
+			return nil, fmt.Errorf("failed to get default settings: %w", err)
+		}
+		finalSettings := MergeSettings(defaults, b.settings)
+
+		settingsJSON, err := json.Marshal(finalSettings)
+		if err != nil {
+			C.slatedb_builder_free(builderPtr) // Free on error
+			return nil, fmt.Errorf("failed to marshal settings: %w", err)
+		}
+
+		cSettingsJSON := C.CString(string(settingsJSON))
+		defer C.free(unsafe.Pointer(cSettingsJSON))
+
+		if !C.slatedb_builder_with_settings(builderPtr, cSettingsJSON) {
+			C.slatedb_builder_free(builderPtr) // Free on error
+			return nil, errors.New("failed to apply settings to builder")
+		}
+	}
+
+	// Apply SST block size if provided
+	if b.sstBlockSize != nil {
+		if !C.slatedb_builder_with_sst_block_size(builderPtr, C.uchar(*b.sstBlockSize)) {
+			C.slatedb_builder_free(builderPtr) // Free on error
+			return nil, errors.New("failed to apply SST block size to builder")
+		}
+	}
+
+	// Build the database - this consumes the builder, so no need to free after this point
+	handle := C.slatedb_builder_build(builderPtr)
+	if handle._0 == nil {
+		return nil, errors.New("failed to build database")
+	}
+
+	return &DB{handle: handle}, nil
 }

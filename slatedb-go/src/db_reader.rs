@@ -138,8 +138,7 @@ pub extern "C" fn slatedb_reader_open(
                 parse_store_config(json_str).map_err(|_| CSdbError::InvalidArgument)
             })
             .and_then(|config| {
-                rt.block_on(create_object_store(&config))
-                    .map_err(|_| CSdbError::InvalidArgument)
+                create_object_store(&config).map_err(|_| CSdbError::InvalidArgument)
             });
 
         match store_result {

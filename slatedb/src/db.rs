@@ -34,7 +34,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::batch::WriteBatch;
-use crate::batch_write::{WriteBatchMsg, WriteBatchRequest};
+use crate::batch_write::WriteBatchMessage;
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -73,7 +73,7 @@ pub(crate) struct DbInner {
     pub(crate) settings: Settings,
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-    pub(crate) write_notifier: UnboundedSender<WriteBatchMsg>,
+    pub(crate) write_notifier: UnboundedSender<WriteBatchMessage>,
     pub(crate) db_stats: DbStats,
     pub(crate) stat_registry: Arc<StatRegistry>,
     #[allow(dead_code)]
@@ -104,19 +104,21 @@ impl DbInner {
         table_store: Arc<TableStore>,
         manifest: DirtyManifest,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
-        write_notifier: UnboundedSender<WriteBatchMsg>,
+        write_notifier: UnboundedSender<WriteBatchMessage>,
         stat_registry: Arc<StatRegistry>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
+        let initial_sequence_tracker = manifest.core.sequence_tracker.clone();
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
         let oracle = Arc::new(
-            Oracle::new(last_committed_seq)
+            Oracle::new(last_committed_seq, system_clock.clone())
                 .with_last_seq(last_seq)
-                .with_last_remote_persisted_seq(last_remote_persisted_seq),
+                .with_last_remote_persisted_seq(last_remote_persisted_seq)
+                .with_sequence_tracker(initial_sequence_tracker),
         );
 
         let mono_clock = Arc::new(MonotonicClock::new(
@@ -259,8 +261,11 @@ impl DbInner {
         self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let batch_msg =
-            WriteBatchMsg::WriteBatch(WriteBatchRequest { batch, done: tx }, options.clone());
+        let batch_msg = WriteBatchMessage {
+            batch,
+            options: options.clone(),
+            done: tx,
+        };
 
         self.maybe_apply_backpressure().await?;
         self.write_notifier
@@ -646,15 +651,6 @@ impl Db {
             info!("garbage collector task exited [result={:?}]", result);
         }
 
-        // Shutdown the write batch thread.
-        self.inner
-            .write_notifier
-            .send_safely(
-                self.inner.state.read().error_reader(),
-                WriteBatchMsg::Shutdown,
-            )
-            .ok();
-
         if let Some(write_task) = {
             let mut write_task = self.write_task.lock();
             write_task.take()
@@ -664,21 +660,10 @@ impl Db {
         }
 
         // Shutdown the WAL flush thread.
-        self.inner
-            .wal_buffer
-            .close()
-            .await
-            .expect("failed to close WAL buffer");
+        let result = self.inner.wal_buffer.close().await;
+        info!("wal buffer task exited [result={:?}]", result);
 
         // Shutdown the memtable flush thread.
-        self.inner
-            .memtable_flush_notifier
-            .send_safely(
-                self.inner.state.read().error_reader(),
-                MemtableFlushMsg::Shutdown,
-            )
-            .ok();
-
         if let Some(memtable_flush_task) = {
             let mut memtable_flush_task = self.memtable_flush_task.lock();
             memtable_flush_task.take()
@@ -1268,6 +1253,8 @@ impl DbRead for Db {
 mod tests {
     use async_trait::async_trait;
     use chrono::TimeDelta;
+    #[cfg(feature = "test-util")]
+    use chrono::{TimeZone, Utc};
     use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
@@ -1281,6 +1268,8 @@ mod tests {
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
     use crate::clock::DefaultSystemClock;
+    #[cfg(feature = "test-util")]
+    use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
@@ -1294,6 +1283,8 @@ mod tests {
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
+    #[cfg(feature = "test-util")]
+    use crate::seq_tracker::FindOption;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -2641,6 +2632,110 @@ mod tests {
         assert!(found_keys.contains(key2.as_slice()));
     }
 
+    #[cfg(feature = "test-util")]
+    async fn test_sequence_tracker_persisted_across_flush_and_reload_impl(wal_enabled: bool) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_sequence_tracker_flush";
+        let mut settings = test_db_options(0, 256, None);
+        settings.flush_interval = None;
+        settings.wal_enabled = wal_enabled;
+        let logical_clock = Arc::new(TestClock::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .with_system_clock(system_clock.clone())
+            .with_logical_clock(logical_clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path),
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+        let put_options = PutOptions::default();
+
+        let timestamps_ms = [0_i64, 60_000, 120_000];
+        for (idx, ts) in timestamps_ms.iter().enumerate() {
+            logical_clock.ticker.store(*ts, Ordering::SeqCst);
+            system_clock.set(*ts);
+            let key = format!("key-{idx}").into_bytes();
+            let value = format!("value-{idx}").into_bytes();
+            kv_store
+                .put_with_options(&key, &value, &put_options, &write_options)
+                .await
+                .unwrap();
+        }
+
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        let target_ts = Utc.timestamp_opt(120, 0).single().unwrap();
+        let persisted_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            move |core| {
+                core.sequence_tracker
+                    .find_seq(target_ts, FindOption::RoundDown)
+                    == Some(3)
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let tracker = persisted_state.sequence_tracker.clone();
+        let oracle_tracker = kv_store.inner.oracle.sequence_tracker_snapshot();
+        assert_eq!(tracker, oracle_tracker);
+
+        let seq1_ts = tracker.find_ts(1, FindOption::RoundDown).unwrap();
+        assert_eq!(seq1_ts.timestamp(), 0);
+
+        let seq2_ts = tracker.find_ts(2, FindOption::RoundDown).unwrap();
+        assert_eq!(seq2_ts.timestamp(), 60);
+
+        let seq3_ts = tracker.find_ts(3, FindOption::RoundDown).unwrap();
+        assert_eq!(seq3_ts.timestamp(), 120);
+
+        let ts_lookup = Utc.timestamp_opt(60, 0).single().unwrap();
+        assert_eq!(tracker.find_seq(ts_lookup, FindOption::RoundDown), Some(2));
+
+        kv_store.close().await.unwrap();
+
+        let reopened = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_system_clock(system_clock.clone())
+            .with_logical_clock(logical_clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let reopened_tracker = reopened.inner.oracle.sequence_tracker_snapshot();
+        assert_eq!(tracker, reopened_tracker);
+
+        reopened.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_enabled() {
+        test_sequence_tracker_persisted_across_flush_and_reload_impl(true).await;
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_disabled() {
+        test_sequence_tracker_persisted_across_flush_and_reload_impl(false).await;
+    }
+
     #[tokio::test]
     async fn test_flush_with_options_wal() {
         let fp_registry = Arc::new(FailPointRegistry::new());
@@ -3305,24 +3400,24 @@ mod tests {
             "return",
         )
         .unwrap();
-
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 128, None))
+            .with_settings(test_db_options(0, 4096, None))
             .with_fp_registry(fp_registry.clone())
             .build()
             .await
             .unwrap();
 
-        // write a few keys that will result in memtable flushes
+        // write data to the WAL, but not enough to trigger a memtable flush
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
         assert!(result.is_ok(), "Failed to write key1");
         assert_eq!(db.inner.wal_buffer.recent_flushed_wal_id(), 2);
 
-        let flush_result = db.inner.flush_immutable_memtables().await;
+        // force a flush (even if the memtable is not full)
+        let flush_result = db.inner.flush_memtables().await;
         assert!(flush_result.is_err());
         db.close().await.unwrap();
 
@@ -3339,14 +3434,18 @@ mod tests {
             .await
             .unwrap();
 
-        // verify that we reload imm
         let db_state = db.inner.state.read().view();
 
         // resume write-compacted-sst-io-error since we got a snapshot and
         // want to let the test finish.
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
+        // verify that we reload imm
         assert_eq!(db_state.state.imm_memtable.len(), 1);
+
+        // verify that we have no L0 SSTs because memtables should have failed to flush
+        assert_eq!(db_state.state.core().l0.len(), 0);
+        assert_eq!(db_state.state.core().compacted.len(), 0);
 
         // one empty wal and one wal for the first put
         assert_eq!(
@@ -3625,10 +3724,7 @@ mod tests {
 
         // assert that db1 can no longer write.
         let err = do_put(&db1, b"1", b"1").await.unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Permission error: detected newer DB client"
-        );
+        assert_eq!(err.to_string(), "Fencing error: detected newer DB client");
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);

@@ -34,7 +34,7 @@ pub(crate) enum FindOption {
 /// Uses two sorted arrays for bi-directional lookup between sequence numbers and timestamps.
 /// When capacity is reached, downsamples by removing every other entry to maintain bounded memory.
 /// Data is compressed using Gorilla encoding (delta-of-deltas) for efficient storage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct SequenceTracker {
     /// Sorted array of sequence numbers
     sequence_numbers: Vec<u64>,
@@ -46,6 +46,16 @@ pub(crate) struct SequenceTracker {
     interval_secs: u64,
     /// Last recorded timestamp to enforce interval
     last_recorded_ts: Option<i64>,
+}
+
+impl PartialEq for SequenceTracker {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare only the essential data, ignoring last_recorded_ts which is implementation detail
+        self.sequence_numbers == other.sequence_numbers
+            && self.timestamps == other.timestamps
+            && self.capacity == other.capacity
+            && self.interval_secs == other.interval_secs
+    }
 }
 
 #[allow(dead_code)]
@@ -150,6 +160,16 @@ impl SequenceTracker {
                 _ => None,
             },
         }
+    }
+
+    /// Serialize the tracker into bytes using the RFC-0012 format.
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        encode_sequence_tracker(self)
+    }
+
+    /// Deserialize the tracker from bytes using the RFC-0012 format.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        decode_sequence_tracker(bytes)
     }
 }
 

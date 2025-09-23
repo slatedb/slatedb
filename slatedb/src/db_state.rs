@@ -5,6 +5,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
+use crate::seq_tracker::SequenceTracker;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
@@ -340,6 +341,7 @@ pub(crate) struct CoreDbState {
     /// recent snapshot still references an older version of a key, it should not be
     /// recycled. This field is updated when a new L0 is flushed.
     pub(crate) recent_snapshot_min_seq: u64,
+    pub(crate) sequence_tracker: SequenceTracker,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) wal_object_store_uri: Option<String>,
 }
@@ -358,6 +360,7 @@ impl CoreDbState {
             checkpoints: vec![],
             wal_object_store_uri: None,
             recent_snapshot_min_seq: 0,
+            sequence_tracker: SequenceTracker::new(),
         }
     }
 
@@ -439,10 +442,6 @@ impl DbState {
 
     pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
         self.error.reader()
-    }
-
-    pub fn record_fatal_error(&mut self, error: SlateDBError) {
-        self.error.write(error);
     }
 
     pub(crate) fn error(&self) -> WatchableOnceCell<SlateDBError> {
@@ -536,9 +535,10 @@ impl<'a> StateModifier<'a> {
             replay_after_wal_id: my_db_state.replay_after_wal_id,
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
             last_l0_seq: my_db_state.last_l0_seq,
+            recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
+            sequence_tracker: remote_manifest.core.sequence_tracker,
             checkpoints: remote_manifest.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
-            recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
         };
         self.state.manifest = remote_manifest;
     }

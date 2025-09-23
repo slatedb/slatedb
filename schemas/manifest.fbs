@@ -95,6 +95,9 @@ table ManifestV1 {
     // needs this to determine whether it's safe to drop duplicate key writes. If a recent snapshot
     // still references an older version of a key, it should not be dropped.
     recent_snapshot_min_seq: ulong;
+
+    // Serialized sequence tracker data as defined in RFC-0012.
+    sequence_tracker: [ubyte];
 }
 
 table CompactedSstId {

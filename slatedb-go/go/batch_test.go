@@ -22,7 +22,7 @@ var _ = Describe("WriteBatch", func() {
 
 		db, err = slatedb.Open(tmpDir, &slatedb.StoreConfig{
 			Provider: slatedb.ProviderLocal,
-		}, nil)
+		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db).NotTo(BeNil())
 	})

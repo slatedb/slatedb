@@ -34,7 +34,7 @@ use std::{
 };
 
 use crate::error::SlateDBError;
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use log::info;
 
 /// Defines the physical clock that SlateDB will use to measure time for things
@@ -58,13 +58,12 @@ pub trait SystemClock: Debug + Send + Sync {
 /// specified duration has elapsed. This is to mimic Tokio's ticker behavior.
 pub struct SystemClockTicker<'a> {
     clock: &'a dyn SystemClock,
-    duration: TimeDelta,
+    duration: Duration,
     last_tick: DateTime<Utc>,
 }
 
 impl<'a> SystemClockTicker<'a> {
     fn new(clock: &'a dyn SystemClock, duration: Duration) -> Self {
-        let duration = TimeDelta::from_std(duration).expect("duration is out of range");
         Self {
             clock,
             duration,
@@ -80,10 +79,7 @@ impl<'a> SystemClockTicker<'a> {
     /// will tick immediately.
     pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            let sleep_duration = self
-                .calc_duration()
-                .to_std()
-                .expect("duration is out of range");
+            let sleep_duration = self.calc_duration();
             self.clock.sleep(sleep_duration).await;
             self.last_tick = self.clock.now();
         })
@@ -92,13 +88,15 @@ impl<'a> SystemClockTicker<'a> {
     /// Calculates the duration until the next tick.
     ///
     /// The duration is calculated as `duration - (now - last_tick)`.
-    fn calc_duration(&self) -> TimeDelta {
-        let zero = TimeDelta::milliseconds(0);
+    fn calc_duration(&self) -> Duration {
+        let zero = Duration::from_millis(0);
         let now_dt = self.clock.now();
-        let elapsed = now_dt.signed_duration_since(self.last_tick);
-        assert!(elapsed >= zero, "elapsed time is negative");
+        let elapsed = now_dt
+            .signed_duration_since(self.last_tick)
+            .to_std()
+            .expect("elapsed time is negative");
         // If we've already passed the next tick, sleep for 0ms to tick immediately.
-        TimeDelta::max(self.duration - elapsed, zero)
+        self.duration.checked_sub(elapsed).unwrap_or(zero)
     }
 }
 
