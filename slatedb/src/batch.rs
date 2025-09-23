@@ -167,13 +167,11 @@ impl WriteBatch {
             value.len() <= u32::MAX as usize,
             "value size must be <= u32::MAX"
         );
+
+        let key = Bytes::copy_from_slice(key);
         self.ops.insert(
-            Bytes::copy_from_slice(key),
-            WriteOp::Put(
-                Bytes::copy_from_slice(key),
-                Bytes::copy_from_slice(value),
-                options.clone(),
-            ),
+            key.clone(),
+            WriteOp::Put(key, Bytes::copy_from_slice(value), options.clone()),
         );
     }
 
@@ -185,10 +183,9 @@ impl WriteBatch {
             key.len() <= u16::MAX as usize,
             "key size must be <= u16::MAX"
         );
-        self.ops.insert(
-            Bytes::copy_from_slice(key),
-            WriteOp::Delete(Bytes::copy_from_slice(key)),
-        );
+
+        let key = Bytes::copy_from_slice(key);
+        self.ops.insert(key.clone(), WriteOp::Delete(key));
     }
 
     pub(crate) fn get_op(&self, key: &[u8]) -> Option<&WriteOp> {
