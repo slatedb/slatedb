@@ -191,14 +191,12 @@ impl WriteBatch {
         );
     }
 
-    /// Get operation for specified key (O(log n))
-    #[allow(dead_code)]
     pub(crate) fn get_op(&self, key: &[u8]) -> Option<&WriteOp> {
         self.ops.get(key)
     }
 
     /// Create an iterator over the WriteBatch entries in the given range
-    #[allow(dead_code)]
+    #[allow(unused)]
     pub(crate) fn iter_range<'a>(
         &'a self,
         range: impl RangeBounds<Bytes>,

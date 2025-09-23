@@ -426,6 +426,8 @@ impl<'a> LevelGet<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch::{WriteBatch, WriteOp};
+    use crate::config::PutOptions;
     use crate::object_stores::ObjectStores;
     use crate::{sst::SsTableFormat, stats::StatRegistry, types::ValueDeletable};
     use object_store::{memory::InMemory, path::Path};
@@ -605,6 +607,169 @@ mod tests {
         };
 
         let result = get.get_inner(mock_level_getters(test_case.entries)).await?;
+        assert_eq!(result, test_case.expected);
+        Ok(())
+    }
+
+    struct LevelGetWriteBatchTestCase {
+        write_batch_ops: Vec<WriteOp>,
+        entries: Vec<Option<RowEntry>>, // order: memtable, l0, compacted, ...
+        key: Bytes,
+        expected: Option<Bytes>,
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![WriteOp::Put(Bytes::from_static(b"key"), Bytes::from_static(b"wb_value"), PutOptions::default())],
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"mem_value")),
+                10,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"l0_value")),
+                9,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"compact_value")),
+                8,
+                Some(10000),
+                None,
+            )),
+        ],
+        key: Bytes::from_static(b"key"),
+        expected: Some(Bytes::from_static(b"wb_value")),
+    })]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![WriteOp::Delete(Bytes::from_static(b"key"))],
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"mem_value")),
+                10,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"l0_value")),
+                9,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"compact_value")),
+                8,
+                Some(10000),
+                None,
+            )),
+        ],
+        key: Bytes::from_static(b"key"),
+        expected: None, // Delete tombstones all lower levels
+    })]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![], // No WriteBatch operations
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"mem_value")),
+                10,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"l0_value")),
+                9,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"compact_value")),
+                8,
+                Some(10000),
+                None,
+            )),
+        ],
+        key: Bytes::from_static(b"key"),
+        expected: Some(Bytes::from_static(b"mem_value")), // Should get memtable value
+    })]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![WriteOp::Put(Bytes::from_static(b"key"), Bytes::from_static(b"wb_value"), PutOptions::default())],
+        entries: vec![],
+        key: Bytes::from_static(b"key"),
+        expected: Some(Bytes::from_static(b"wb_value")), // WriteBatch only
+    })]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![WriteOp::Put(Bytes::from_static(b"different_key"), Bytes::from_static(b"wb_value"), PutOptions::default())],
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"mem_value")),
+                10,
+                Some(10000),
+                None,
+            )),
+        ],
+        key: Bytes::from_static(b"key"),
+        expected: Some(Bytes::from_static(b"mem_value")), // WriteBatch doesn't affect different key
+    })]
+    async fn test_level_get_with_writebatch(
+        #[case] test_case: LevelGetWriteBatchTestCase,
+    ) -> Result<(), SlateDBError> {
+        let mock_read_db_state = mock_db_state();
+        let stat_registry = StatRegistry::new();
+
+        // Create WriteBatch from provided operations
+        let write_batch = if test_case.write_batch_ops.is_empty() {
+            None
+        } else {
+            let mut batch = WriteBatch::new();
+            for op in &test_case.write_batch_ops {
+                match op {
+                    WriteOp::Put(key, value, opts) => batch.put_with_options(key, value, opts),
+                    WriteOp::Delete(key) => batch.delete(key),
+                }
+            }
+            Some(batch)
+        };
+
+        let get = LevelGet {
+            key: &test_case.key,
+            max_seq: None,
+            db_state: &mock_read_db_state,
+            table_store: Arc::new(TableStore::new(
+                ObjectStores::new(Arc::new(InMemory::new()), None),
+                SsTableFormat::default(),
+                Path::from(""),
+                None,
+            )),
+            db_stats: DbStats::new(&stat_registry),
+            write_batch: write_batch.as_ref(),
+            now: 10000,
+        };
+
+        let mut getters: Vec<BoxFuture<'_, Result<Option<RowEntry>, SlateDBError>>> = vec![];
+
+        // Add WriteBatch getter first (highest priority)
+        if let Some(_batch) = write_batch.as_ref() {
+            getters.push(get.get_write_batch());
+        }
+
+        // Add provided entries as subsequent getters in order
+        getters.extend(mock_level_getters(test_case.entries.clone()));
+
+        let result = get.get_inner(getters).await?;
         assert_eq!(result, test_case.expected);
         Ok(())
     }
