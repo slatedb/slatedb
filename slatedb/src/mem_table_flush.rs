@@ -242,10 +242,7 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
         mut messages: BoxStream<'async_trait, MemtableFlushMsg>,
         result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        let error = result
-            .clone()
-            .err()
-            .unwrap_or(SlateDBError::BackgroundTaskShutdown);
+        let error = result.clone().err().unwrap_or(SlateDBError::Closed);
         // drain remaining messages
         while let Some(message) = messages.next().await {
             match message {
