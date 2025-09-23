@@ -231,13 +231,26 @@ impl Reader {
     }
 }
 
+/// [`LevelGet`] is a helper struct for [`Reader::get_with_options`], it encapsulates the
+/// read path of getting a value for a given key.
+///
+/// This struct implements the multi-level read strategy that checks data sources
+/// in priority order: write batch → memtables → L0 SSTs → compacted sorted runs.
+/// The first valid (non-tombstone, non-expired) value found is returned.
 struct LevelGet<'a> {
+    /// The key to get.
     key: &'a [u8],
+    /// The maximum sequence number to filter the entries, this field is used inside Snapshot and Transaction.
     max_seq: Option<u64>,
+    /// The reference to in-memory state (memtables) and on-disk states (level-0 SSTs and compacted sorted runs).
     db_state: &'a (dyn DbStateReader + Sync + Send),
+    /// The table store to read the data from.
     table_store: Arc<TableStore>,
+    /// The reference to the database statistics.
     db_stats: DbStats,
+    /// The current time, it's used to check if the entry is expired.
     now: i64,
+    /// The optional write batch to read the data from. It's only used when operating within a Transaction.
     write_batch: Option<&'a WriteBatch>,
 }
 
