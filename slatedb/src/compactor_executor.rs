@@ -15,6 +15,7 @@ use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
+use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
 use crate::rand::DbRand;
 use crate::retention_iterator::RetentionIterator;
@@ -77,6 +78,7 @@ pub(crate) struct TokioCompactionExecutor {
 }
 
 impl TokioCompactionExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         handle: tokio::runtime::Handle,
         options: Arc<CompactorOptions>,
@@ -85,6 +87,7 @@ impl TokioCompactionExecutor {
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
         clock: Arc<dyn SystemClock>,
+        manifest_store: Arc<ManifestStore>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
@@ -97,6 +100,7 @@ impl TokioCompactionExecutor {
                 stats,
                 clock,
                 is_stopped: AtomicBool::new(false),
+                manifest_store,
             }),
         }
     }
@@ -130,6 +134,7 @@ pub(crate) struct TokioCompactionExecutorInner {
     stats: Arc<CompactionStats>,
     clock: Arc<dyn SystemClock>,
     is_stopped: AtomicBool,
+    manifest_store: Arc<ManifestStore>,
 }
 
 impl TokioCompactionExecutorInner {
@@ -178,6 +183,8 @@ impl TokioCompactionExecutorInner {
         let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])
             .await?
             .with_dedup(false);
+
+        let stored_manifest = StoredManifest::load(self.manifest_store.clone()).await?;
         let retention_iter = RetentionIterator::new(
             merge_iter,
             None,
@@ -185,6 +192,7 @@ impl TokioCompactionExecutorInner {
             compaction.is_dest_last_run,
             compaction.compaction_ts,
             self.clock.clone(),
+            Arc::new(stored_manifest.db_state().sequence_tracker.clone()),
         )
         .await?;
         Ok(retention_iter)
