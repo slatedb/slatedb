@@ -674,6 +674,7 @@ impl Db {
             info!("mem table flush task exited [result={:?}]", result);
         }
 
+        self.inner.state.write().error().write(SlateDBError::Closed);
         info!("db closed");
         Ok(())
     }
