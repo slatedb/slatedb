@@ -317,6 +317,14 @@ impl CompactionExecuteBench {
         let compactor_options = CompactorOptions::default();
         let registry = Arc::new(StatRegistry::new());
         let stats = Arc::new(CompactionStats::new(registry.clone()));
+        let os = self.object_store.clone();
+
+        let manifest_store = Arc::new(ManifestStore::new(
+            &self.path,
+            os.clone(),
+            self.system_clock.clone(),
+        ));
+
         let executor = TokioCompactionExecutor::new(
             Handle::current(),
             Arc::new(compactor_options),
@@ -325,16 +333,11 @@ impl CompactionExecuteBench {
             self.rand.clone(),
             stats.clone(),
             self.system_clock.clone(),
+            manifest_store.clone(),
         );
-        let os = self.object_store.clone();
-        info!("load compaction job");
-        let manifest_store = Arc::new(ManifestStore::new(
-            &self.path,
-            os.clone(),
-            self.system_clock.clone(),
-        ));
-        let manifest = StoredManifest::load(manifest_store).await?;
 
+        info!("load compaction job");
+        let manifest = StoredManifest::load(manifest_store).await?;
         let job = match &compaction {
             Some(compaction) => {
                 info!("load job from existing compaction");

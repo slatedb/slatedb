@@ -211,6 +211,7 @@ impl Compactor {
             self.rand.clone(),
             self.stats.clone(),
             self.system_clock.clone(),
+            self.manifest_store.clone(),
         ));
         let handler = CompactorEventHandler::new(
             self.manifest_store.clone(),
@@ -945,6 +946,7 @@ mod tests {
                 rand.clone(),
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
+                manifest_store.clone(),
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),
