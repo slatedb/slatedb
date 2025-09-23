@@ -674,6 +674,7 @@ impl Db {
             info!("mem table flush task exited [result={:?}]", result);
         }
 
+        info!("db closed");
         Ok(())
     }
 
