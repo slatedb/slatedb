@@ -107,7 +107,7 @@ impl Reader {
     /// - `options`: Options for the read, including durability constraint or
     ///   dirty read.
     /// - `db_state`: Read-only view over in-memory state (memtables) and on-disk
-    ///    states (level-0 SSTs and compacted sorted runs).
+    ///   states (level-0 SSTs and compacted sorted runs).
     /// - `write_batch`: Optional `WriteBatch` to consult first. It's only used when
     ///   operating within a Transaction.
     /// - `max_seq`: Optional upper bound on the sequence number visibility. If

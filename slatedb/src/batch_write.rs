@@ -40,7 +40,7 @@ use tracing::instrument;
 use crate::clock::SystemClock;
 use crate::config::WriteOptions;
 use crate::dispatcher::{MessageDispatcher, MessageHandler};
-use crate::types::{RowEntry, ValueDeletable};
+use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::{
     batch::{WriteBatch, WriteOp},
