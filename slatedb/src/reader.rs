@@ -1,10 +1,11 @@
+use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::KeyValueIterator;
+use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::mem_table::{ImmutableMemtable, KVTable, MemTableIterator};
 use crate::oracle::Oracle;
 use crate::reader::SstFilterResult::{
@@ -94,12 +95,31 @@ impl Reader {
         max_seq
     }
 
-    /// Get the value for the given key, and return None if the value is expired.
+    /// Get the value for the given key.
+    ///
+    /// Returns `Ok(Some(value))` if a non-expired value exists for `key`,
+    /// `Ok(None)` if the key is deleted or the latest visible value is expired,
+    /// and an error if the read fails.
+    ///
+    /// Arguments:
+    /// - `key`: The user key to read. Any type that can be viewed as a byte
+    ///   slice is accepted.
+    /// - `options`: Options for the read, including durability constraint or
+    ///   dirty read.
+    /// - `db_state`: Read-only view over in-memory state (memtables) and on-disk
+    ///   states (level-0 SSTs and compacted sorted runs).
+    /// - `write_batch`: Optional `WriteBatch` to consult first. It's only used when
+    ///   operating within a Transaction.
+    /// - `max_seq`: Optional upper bound on the sequence number visibility. If
+    ///   provided, the read will not return entries with a sequence number
+    ///   greater than this value. The final bound is the minimum of this value
+    ///   and the bound derived from `options` (e.g., durability, dirty read).
     pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
         db_state: &(dyn DbStateReader + Sync + Send),
+        write_batch: Option<&WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
@@ -110,18 +130,39 @@ impl Reader {
             db_state,
             table_store: self.table_store.clone(),
             db_stats: self.db_stats.clone(),
+            write_batch,
             now,
         };
         get.get().await
     }
 
-    pub(crate) async fn scan_with_options(
+    /// Create an iterator over a key range.
+    ///
+    /// Produces a merged iterator over the provided `write_batch` (if any),
+    /// in-memory memtables, level-0 SSTs, and compacted sorted runs, honoring
+    /// the maximum visible sequence number. The iterator yields only non-
+    /// expired, non-tombstone values.
+    ///
+    /// Arguments
+    /// - `range`: The half-open key range to scan (start inclusive, end
+    ///   exclusive).
+    /// - `options`: Options for the scan, including read-ahead, caching, and the
+    ///   maximum number of concurrent fetch tasks.
+    /// - `db_state`: Read-only view over in-memory state (memtables) and access to on-disk
+    ///   data (level-0 SSTs and compacted sorted runs) needed to construct iterators.
+    /// - `write_batch`: Optional `WriteBatch` to include in the merged scan. It's only used when
+    ///   operating within a Transaction.
+    /// - `max_seq`: Optional upper bound on the sequence number visibility for
+    ///   the scan. If provided, entries with a greater sequence number are
+    ///   filtered out by the iterator construction.
+    pub(crate) async fn scan_with_options<'a>(
         &self,
         range: BytesRange,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
+        write_batch: Option<&'a WriteBatch>,
         max_seq: Option<u64>,
-    ) -> Result<DbIterator, SlateDBError> {
+    ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
         for memtable in db_state.imm_memtable() {
@@ -174,23 +215,78 @@ impl Reader {
         let l0_iters = l0_iters_res?;
         let sr_iters = sr_iters_res?;
 
-        DbIterator::new(range, memtable_iters, l0_iters, sr_iters, max_seq).await
+        // Create WriteBatchIterator if write_batch is provided
+        let write_batch_iter = write_batch
+            .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
+
+        DbIterator::new(
+            range,
+            write_batch_iter,
+            memtable_iters,
+            l0_iters,
+            sr_iters,
+            max_seq,
+        )
+        .await
     }
 }
 
+/// [`LevelGet`] is a helper struct for [`Reader::get_with_options`], it encapsulates the
+/// read path of getting a value for a given key.
+///
+/// This struct implements the multi-level read strategy that checks data sources
+/// in priority order: write batch → memtables → L0 SSTs → compacted sorted runs.
+/// The first valid (non-tombstone, non-expired) value found is returned.
 struct LevelGet<'a> {
+    /// The key to get.
     key: &'a [u8],
+    /// The maximum sequence number to filter the entries, this field is used inside Snapshot and Transaction.
     max_seq: Option<u64>,
+    /// The reference to in-memory state (memtables) and on-disk states (level-0 SSTs and compacted sorted runs).
     db_state: &'a (dyn DbStateReader + Sync + Send),
+    /// The table store to read the data from.
     table_store: Arc<TableStore>,
+    /// The reference to the database statistics.
     db_stats: DbStats,
+    /// The current time, it's used to check if the entry is expired.
     now: i64,
+    /// The optional write batch to read the data from. It's only used when operating within a Transaction.
+    write_batch: Option<&'a WriteBatch>,
 }
 
 impl<'a> LevelGet<'a> {
+    fn get_write_batch(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
+        async move {
+            let batch = match self.write_batch {
+                Some(batch) => batch,
+                None => return Ok(None),
+            };
+
+            match batch.get_op(self.key) {
+                None => Ok(None),
+                Some(op) => {
+                    // place a highest seq number as the placeholder.
+                    let entry = op.to_row_entry(u64::MAX, None, None);
+                    Ok(Some(entry))
+                }
+            }
+        }
+        .boxed()
+    }
+
     async fn get(&'a self) -> Result<Option<Bytes>, SlateDBError> {
-        let getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> =
-            vec![self.get_memtable(), self.get_l0(), self.get_compacted()];
+        let mut getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> = vec![];
+
+        // WriteBatch has highest priority
+        if self.write_batch.is_some() {
+            getters.push(self.get_write_batch());
+        }
+
+        getters.extend(vec![
+            self.get_memtable(),
+            self.get_l0(),
+            self.get_compacted(),
+        ]);
 
         self.get_inner(getters).await
     }
@@ -380,6 +476,8 @@ impl<'a> LevelGet<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch::{WriteBatch, WriteOp};
+    use crate::config::PutOptions;
     use crate::object_stores::ObjectStores;
     use crate::{sst::SsTableFormat, stats::StatRegistry, types::ValueDeletable};
     use object_store::{memory::InMemory, path::Path};
@@ -554,10 +652,174 @@ mod tests {
                 None,
             )),
             db_stats: DbStats::new(&stat_registry),
+            write_batch: None,
             now: 10000,
         };
 
         let result = get.get_inner(mock_level_getters(test_case.entries)).await?;
+        assert_eq!(result, test_case.expected);
+        Ok(())
+    }
+
+    struct LevelGetWriteBatchTestCase {
+        write_batch_ops: Vec<WriteOp>,
+        entries: Vec<Option<RowEntry>>, // order: memtable, l0, compacted, ...
+        key: Bytes,
+        expected: Option<Bytes>,
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![WriteOp::Put(Bytes::from_static(b"key"), Bytes::from_static(b"wb_value"), PutOptions::default())],
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"mem_value")),
+                10,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"l0_value")),
+                9,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"compact_value")),
+                8,
+                Some(10000),
+                None,
+            )),
+        ],
+        key: Bytes::from_static(b"key"),
+        expected: Some(Bytes::from_static(b"wb_value")),
+    })]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![WriteOp::Delete(Bytes::from_static(b"key"))],
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"mem_value")),
+                10,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"l0_value")),
+                9,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"compact_value")),
+                8,
+                Some(10000),
+                None,
+            )),
+        ],
+        key: Bytes::from_static(b"key"),
+        expected: None, // Delete tombstones all lower levels
+    })]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![], // No WriteBatch operations
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"mem_value")),
+                10,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"l0_value")),
+                9,
+                Some(10000),
+                None,
+            )),
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"compact_value")),
+                8,
+                Some(10000),
+                None,
+            )),
+        ],
+        key: Bytes::from_static(b"key"),
+        expected: Some(Bytes::from_static(b"mem_value")), // Should get memtable value
+    })]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![WriteOp::Put(Bytes::from_static(b"key"), Bytes::from_static(b"wb_value"), PutOptions::default())],
+        entries: vec![],
+        key: Bytes::from_static(b"key"),
+        expected: Some(Bytes::from_static(b"wb_value")), // WriteBatch only
+    })]
+    #[case(LevelGetWriteBatchTestCase {
+        write_batch_ops: vec![WriteOp::Put(Bytes::from_static(b"different_key"), Bytes::from_static(b"wb_value"), PutOptions::default())],
+        entries: vec![
+            Some(RowEntry::new(
+                Bytes::from_static(b"key"),
+                ValueDeletable::Value(Bytes::from_static(b"mem_value")),
+                10,
+                Some(10000),
+                None,
+            )),
+        ],
+        key: Bytes::from_static(b"key"),
+        expected: Some(Bytes::from_static(b"mem_value")), // WriteBatch doesn't affect different key
+    })]
+    async fn test_level_get_with_writebatch(
+        #[case] test_case: LevelGetWriteBatchTestCase,
+    ) -> Result<(), SlateDBError> {
+        let mock_read_db_state = mock_db_state();
+        let stat_registry = StatRegistry::new();
+
+        // Create WriteBatch from provided operations
+        let write_batch = if test_case.write_batch_ops.is_empty() {
+            None
+        } else {
+            let mut batch = WriteBatch::new();
+            for op in &test_case.write_batch_ops {
+                match op {
+                    WriteOp::Put(key, value, opts) => batch.put_with_options(key, value, opts),
+                    WriteOp::Delete(key) => batch.delete(key),
+                }
+            }
+            Some(batch)
+        };
+
+        let get = LevelGet {
+            key: &test_case.key,
+            max_seq: None,
+            db_state: &mock_read_db_state,
+            table_store: Arc::new(TableStore::new(
+                ObjectStores::new(Arc::new(InMemory::new()), None),
+                SsTableFormat::default(),
+                Path::from(""),
+                None,
+            )),
+            db_stats: DbStats::new(&stat_registry),
+            write_batch: write_batch.as_ref(),
+            now: 10000,
+        };
+
+        let mut getters: Vec<BoxFuture<'_, Result<Option<RowEntry>, SlateDBError>>> = vec![];
+
+        // Add WriteBatch getter first (highest priority)
+        if let Some(_batch) = write_batch.as_ref() {
+            getters.push(get.get_write_batch());
+        }
+
+        // Add provided entries as subsequent getters in order
+        getters.extend(mock_level_getters(test_case.entries.clone()));
+
+        let result = get.get_inner(getters).await?;
         assert_eq!(result, test_case.expected);
         Ok(())
     }

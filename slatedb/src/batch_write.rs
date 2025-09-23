@@ -40,7 +40,7 @@ use tracing::instrument;
 use crate::clock::SystemClock;
 use crate::config::WriteOptions;
 use crate::dispatcher::{MessageDispatcher, MessageHandler};
-use crate::types::{RowEntry, ValueDeletable};
+use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::{
     batch::{WriteBatch, WriteOp},
@@ -210,22 +210,13 @@ impl DbInner {
     fn extract_row_entries(&self, batch: WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
         batch
             .ops
-            .into_iter()
-            .map(|op| match op {
-                WriteOp::Put(key, value, opts) => RowEntry {
-                    key,
-                    value: ValueDeletable::Value(value.clone()),
-                    create_ts: Some(now),
-                    expire_ts: opts.expire_ts_from(self.settings.default_ttl, now),
-                    seq,
-                },
-                WriteOp::Delete(key) => RowEntry {
-                    key,
-                    value: ValueDeletable::Tombstone,
-                    create_ts: Some(now),
-                    expire_ts: None,
-                    seq,
-                },
+            .into_values()
+            .map(|op| {
+                let expire_ts = match &op {
+                    WriteOp::Put(_, _, opts) => opts.expire_ts_from(self.settings.default_ttl, now),
+                    WriteOp::Delete(_) => None,
+                };
+                op.to_row_entry(seq, Some(now), expire_ts)
             })
             .collect::<Vec<_>>()
     }

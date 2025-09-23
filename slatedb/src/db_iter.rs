@@ -1,7 +1,8 @@
+use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::KeyValueIterator;
+use crate::iter::{EmptyIterator, KeyValueIterator};
 use crate::mem_table::MemTableIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -21,12 +22,20 @@ pub struct DbIterator<'a> {
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
+        write_batch_iter: Option<WriteBatchIterator<'a>>,
         mem_iters: impl IntoIterator<Item = MemTableIterator>,
         l0_iters: impl IntoIterator<Item = SstIterator<'a>>,
         sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
     ) -> Result<Self, SlateDBError> {
-        let iters: [Box<dyn KeyValueIterator>; 3] = {
+        let iters: Vec<Box<dyn KeyValueIterator>> = {
+            // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
+            // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
+            // not have an real committed sequence number yet.
+            let write_batch_iter = write_batch_iter
+                .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator>)
+                .unwrap_or_else(|| Box::new(EmptyIterator::new()));
+
             // Apply the max_seq filter to all the iterators. Please note that we should apply this filter BEFORE
             // merging the iterators.
             //
@@ -44,7 +53,14 @@ impl<'a> DbIterator<'a> {
                 MergeIterator::new(l0_iters),
                 MergeIterator::new(sr_iters)
             );
-            [Box::new(mem_iter?), Box::new(l0_iter?), Box::new(sr_iter?)]
+
+            // Wrap all the iterators as Box<dyn KeyValueIterator>
+            vec![
+                write_batch_iter,
+                Box::new(mem_iter?),
+                Box::new(l0_iter?),
+                Box::new(sr_iter?),
+            ]
         };
 
         let iter = MergeIterator::new(iters).await?;
@@ -140,9 +156,11 @@ impl<'a> DbIterator<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::batch::{WriteBatch, WriteBatchIterator};
     use crate::bytes_range::BytesRange;
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
+    use crate::iter::IterationOrder;
     use crate::mem_table::MemTableIterator;
     use crate::mem_table::WritableKVTable;
     use crate::types::RowEntry;
@@ -154,6 +172,7 @@ mod tests {
         let mem_iters: VecDeque<MemTableIterator> = VecDeque::new();
         let mut iter = DbIterator::new(
             BytesRange::from(..),
+            None,
             mem_iters,
             VecDeque::new(),
             VecDeque::new(),
@@ -195,6 +214,7 @@ mod tests {
         // Create DbIterator with max_seq = 100
         let mut iter = DbIterator::new(
             BytesRange::from(..),
+            None,
             vec![mem_iter1, mem_iter2],
             VecDeque::new(),
             VecDeque::new(),
@@ -224,6 +244,7 @@ mod tests {
         let mem_iter = mem.table().range_ascending(BytesRange::from(..));
         let mut iter = DbIterator::new(
             BytesRange::from(..),
+            None,
             vec![mem_iter],
             VecDeque::new(),
             VecDeque::new(),
@@ -254,5 +275,42 @@ mod tests {
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, Bytes::from_static(b"key2"));
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dbiterator_with_writebatch() {
+        // Create a WriteBatch with some data
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key3", b"value3");
+
+        // Create WriteBatchIterator
+        let wb_iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+
+        // Create DbIterator with WriteBatch
+        let mem_iters: VecDeque<MemTableIterator> = VecDeque::new();
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            Some(wb_iter),
+            mem_iters,
+            VecDeque::new(),
+            VecDeque::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Should get data from WriteBatch in sorted order
+        let kv1 = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv1.key, Bytes::from_static(b"key1"));
+        assert_eq!(kv1.value, Bytes::from_static(b"value1"));
+
+        let kv2 = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv2.key, Bytes::from_static(b"key3"));
+        assert_eq!(kv2.value, Bytes::from_static(b"value3"));
+
+        // Should be done
+        let kv3 = iter.next().await.unwrap();
+        assert!(kv3.is_none());
     }
 }

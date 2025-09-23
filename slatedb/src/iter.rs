@@ -61,3 +61,22 @@ impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
         self.as_mut().seek(next_key).await
     }
 }
+
+pub(crate) struct EmptyIterator;
+
+impl EmptyIterator {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl KeyValueIterator for EmptyIterator {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        Ok(None)
+    }
+
+    async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+}
