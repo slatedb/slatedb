@@ -187,21 +187,21 @@ pub extern "C" fn slatedb_reader_open(
 /// - `handle` must contain a valid reader handle pointer
 /// - `key` must point to valid memory of at least `key_len` bytes
 /// - `read_options` must be a valid pointer to CSdbReadOptions or null
-/// - `result` must be a valid pointer to a location where a value can be stored
+/// - `value_out` must be a valid pointer to a location where a value can be stored
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_reader_get_with_options(
     mut handle: CSdbReaderHandle,
     key: *const u8,
     key_len: usize,
     read_options: *const CSdbReadOptions,
-    result: *mut CSdbValue,
+    value_out: *mut CSdbValue,
 ) -> CSdbResult {
     if handle.is_null() {
         return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
     }
 
-    if key.is_null() || result.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key or result is null");
+    if key.is_null() || value_out.is_null() {
+        return create_error_result(CSdbError::NullPointer, "Key or value_out is null");
     }
 
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
@@ -210,20 +210,20 @@ pub unsafe extern "C" fn slatedb_reader_get_with_options(
     let inner = handle.as_inner();
     match inner.block_on(inner.reader.get_with_options(key_slice, &rust_read_opts)) {
         Ok(Some(bytes)) => {
-            let data = bytes.as_ptr() as *mut u8;
-            let len = bytes.len();
+            let value_vec = bytes.to_vec();
+            let len = value_vec.len();
 
-            // Leak the bytes so they remain valid for C caller
-            std::mem::forget(bytes);
+            let boxed_slice = value_vec.into_boxed_slice();
+            let data = Box::into_raw(boxed_slice) as *mut u8;
 
             unsafe {
-                *result = CSdbValue { data, len };
+                *value_out = CSdbValue { data, len };
             }
             create_success_result()
         }
         Ok(None) => {
             unsafe {
-                *result = CSdbValue {
+                *value_out = CSdbValue {
                     data: ptr::null_mut(),
                     len: 0,
                 };
