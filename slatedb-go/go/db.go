@@ -212,7 +212,7 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 	}
 
 	keyPtr := (*C.uint8_t)(unsafe.Pointer(&key[0]))
-	var value C.struct_CSdbValue
+	var value C.CSdbValue
 	cReadOpts := convertToCReadOptions(readOpts)
 
 	result := C.slatedb_get_with_options(

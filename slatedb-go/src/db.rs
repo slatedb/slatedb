@@ -254,25 +254,25 @@ pub extern "C" fn slatedb_close(handle: CSdbHandle) -> CSdbResult {
 /// # Safety
 ///
 /// - `handle` must contain a valid database handle pointer
-/// - `start` must point to valid memory of at least `start_len` bytes (if not null)
-/// - `end` must point to valid memory of at least `end_len` bytes (if not null)
-/// - `options` must be a valid pointer to CSdbScanOptions or null
-/// - `iter_out` must be a valid pointer to a location where an iterator pointer can be stored
+/// - `start_key` must point to valid memory of at least `start_key_len` bytes (if not null)
+/// - `end_key` must point to valid memory of at least `end_key_len` bytes (if not null)
+/// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+/// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_scan_with_options(
     mut handle: CSdbHandle,
-    start: *const u8,
-    start_len: usize,
-    end: *const u8,
-    end_len: usize,
-    options: *const CSdbScanOptions,
-    iter_out: *mut *mut CSdbIterator,
+    start_key: *const u8,
+    start_key_len: usize,
+    end_key: *const u8,
+    end_key_len: usize,
+    scan_options: *const CSdbScanOptions,
+    iterator_ptr: *mut *mut CSdbIterator,
 ) -> CSdbResult {
     if handle.is_null() {
         return create_error_result(CSdbError::NullPointer, "Database handle is null");
     }
 
-    if iter_out.is_null() {
+    if iterator_ptr.is_null() {
         return create_error_result(CSdbError::NullPointer, "Iterator output pointer is null");
     }
 
@@ -281,10 +281,11 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
     let db_ffi = handle.as_inner();
 
     // Convert range bounds
-    let (start_bound, end_bound) = convert_range_bounds(start, start_len, end, end_len);
+    let (start_bound, end_bound) =
+        convert_range_bounds(start_key, start_key_len, end_key, end_key_len);
 
     // Convert scan options
-    let scan_opts = convert_scan_options(options);
+    let scan_opts = convert_scan_options(scan_options);
 
     // Create the iterator using the bounds
     match db_ffi.block_on(
@@ -296,7 +297,7 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
             // Create FFI wrapper
             let iter_ffi = CSdbIterator::new(handle_ptr, iter);
             unsafe {
-                *iter_out = Box::into_raw(iter_ffi);
+                *iterator_ptr = Box::into_raw(iter_ffi);
             }
             create_success_result()
         }

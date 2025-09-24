@@ -318,17 +318,17 @@ struct CSdbResult slatedb_close(struct CSdbHandle handle);
 // # Safety
 //
 // - `handle` must contain a valid database handle pointer
-// - `start` must point to valid memory of at least `start_len` bytes (if not null)
-// - `end` must point to valid memory of at least `end_len` bytes (if not null)
-// - `options` must be a valid pointer to CSdbScanOptions or null
-// - `iter_out` must be a valid pointer to a location where an iterator pointer can be stored
+// - `start_key` must point to valid memory of at least `start_key_len` bytes (if not null)
+// - `end_key` must point to valid memory of at least `end_key_len` bytes (if not null)
+// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
 struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
-                                            const uint8_t *start,
-                                            uintptr_t start_len,
-                                            const uint8_t *end,
-                                            uintptr_t end_len,
-                                            const struct CSdbScanOptions *options,
-                                            struct CSdbIterator **iter_out);
+                                            const uint8_t *start_key,
+                                            uintptr_t start_key_len,
+                                            const uint8_t *end_key,
+                                            uintptr_t end_key_len,
+                                            const struct CSdbScanOptions *scan_options,
+                                            struct CSdbIterator **iterator_ptr);
 
 // Create a new DbBuilder
 struct DbBuilder_String *slatedb_builder_new(const char *path, const char *store_config_json);
@@ -372,12 +372,12 @@ struct CSdbReaderHandle slatedb_reader_open(const char *path,
 // - `handle` must contain a valid reader handle pointer
 // - `key` must point to valid memory of at least `key_len` bytes
 // - `read_options` must be a valid pointer to CSdbReadOptions or null
-// - `result` must be a valid pointer to a location where a value can be stored
+// - `value_out` must be a valid pointer to a location where a value can be stored
 struct CSdbResult slatedb_reader_get_with_options(struct CSdbReaderHandle handle,
                                                   const uint8_t *key,
                                                   uintptr_t key_len,
                                                   const struct CSdbReadOptions *read_options,
-                                                  struct CSdbValue *result);
+                                                  struct CSdbValue *value_out);
 
 // # Safety
 //
