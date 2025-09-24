@@ -285,7 +285,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
                 },
             }
         }
-        Err(SlateDBError::BackgroundTaskShutdown)
+        Ok(())
     }
 
     /// Handles the result of [MessageDispatcher::run_loop] using the following logic:
@@ -602,17 +602,14 @@ mod test {
             .expect("join failed");
 
         // Verify final state
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
+        assert!(matches!(result, Ok(())));
+        assert!(error_state.reader().read().is_none());
         assert!(matches!(
             cleanup_called
                 .reader()
                 .read()
                 .expect("cleanup result not set"),
-            Err(SlateDBError::BackgroundTaskShutdown)
+            Ok(()),
         ));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
@@ -773,15 +770,9 @@ mod test {
             .expect("join failed");
 
         // Verify final state
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
-        assert!(matches!(
-            cleanup_called.reader().read(),
-            Some(Err(SlateDBError::BackgroundTaskShutdown))
-        ));
+        assert!(matches!(result, Ok(())));
+        assert!(error_state.reader().read().is_none());
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
             messages,
@@ -869,12 +860,9 @@ mod test {
             .expect("join failed");
 
         // Verify final state
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
-        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert!(matches!(result, Ok(())));
+        assert!(error_state.reader().read().is_none());
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 9);
     }
 
@@ -962,12 +950,9 @@ mod test {
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
-        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert!(matches!(result, Ok(())));
+        assert!(error_state.reader().read().is_none());
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 10);
     }
 
@@ -1041,12 +1026,9 @@ mod test {
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskShutdown)
-        ));
-        assert!(matches!(cleanup_called.reader().read(), Some(Err(_))));
+        assert!(matches!(result, Ok(())));
+        assert!(error_state.reader().read().is_none());
+        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 16);
     }
 

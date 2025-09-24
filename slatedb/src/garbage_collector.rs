@@ -1170,7 +1170,7 @@ mod tests {
         let jh = tokio::spawn(async move { dispatcher.run().await });
         cancellation_token.cancel();
         let result = jh.await.unwrap();
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskShutdown)));
+        assert!(matches!(result, Ok(())));
 
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(cancellation_token.is_cancelled());

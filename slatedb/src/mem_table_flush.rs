@@ -242,10 +242,7 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
         mut messages: BoxStream<'async_trait, MemtableFlushMsg>,
         result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        let error = result
-            .clone()
-            .err()
-            .unwrap_or(SlateDBError::BackgroundTaskShutdown);
+        let error = result.clone().err().unwrap_or(SlateDBError::Closed);
         // drain remaining messages
         while let Some(message) = messages.next().await {
             match message {
@@ -267,11 +264,14 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
 
         // notify in-memory memtables of error
         let state = self.db_inner.state.read();
-        info!("notifying in-memory memtable of error");
+        debug!(
+            "notifying in-memory memtable of shutdown [result={:?}]",
+            result
+        );
         state.memtable().table().notify_durable(Err(error.clone()));
         for imm_table in state.state().imm_memtable.iter() {
-            info!(
-                "notifying imm memtable of error [last_wal_id={}, error={:?}]",
+            debug!(
+                "notifying imm memtable of shutdown [last_wal_id={}, error={:?}]",
                 imm_table.recent_flushed_wal_id(),
                 error,
             );

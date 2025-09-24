@@ -484,7 +484,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         }
         // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
         // tables finally get notified.
-        let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::BackgroundTaskShutdown);
+        let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::Closed);
 
         // freeze current WAL to notify writers in the subsequent flushing_wals loop
         self.wal_buffer.freeze_current_wal().await?;

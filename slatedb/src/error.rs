@@ -107,8 +107,8 @@ pub(crate) enum SlateDBError {
     // we need to wrap the panic args in a mutex so that SlateDbError is Sync
     BackgroundTaskPanic(Arc<Mutex<Box<dyn Any + Send>>>),
 
-    #[error("background task shutdown")]
-    BackgroundTaskShutdown,
+    #[error("db is closed")]
+    Closed,
 
     #[error("merge operator error")]
     MergeOperatorError(#[from] MergeOperatorError),
@@ -392,7 +392,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::BackgroundTaskPanic(err) => {
                 Error::system(msg).with_source(Box::new(PanicError(err)))
             }
-            SlateDBError::BackgroundTaskShutdown => Error::system(msg),
+            SlateDBError::Closed => Error::system(msg),
             SlateDBError::MergeOperatorError(err) => {
                 Error::operation(msg).with_source(Box::new(err))
             }
