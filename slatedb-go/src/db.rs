@@ -281,7 +281,8 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
     let db_ffi = handle.as_inner();
 
     // Convert range bounds
-    let (start_bound, end_bound) = convert_range_bounds(start_key, start_key_len, end_key, end_key_len);
+    let (start_bound, end_bound) =
+        convert_range_bounds(start_key, start_key_len, end_key, end_key_len);
 
     // Convert scan options
     let scan_opts = convert_scan_options(scan_options);
