@@ -1,3 +1,68 @@
+//! SlateDB Generic Record Store
+//!
+//! This module provides generic, reusable primitives for persisting versioned records
+//! as flat files in an object store, with optimistic concurrency control and optional
+//! epoch-based fencing.
+//!
+//! File layout and naming
+//! ----------------------
+//! - Records are stored under a root directory and logical subdirectory provided at
+//!   construction time (see `RecordStore::new`).
+//! - Each version is a single file whose name is a zero-padded 20-digit decimal id
+//!   followed by a fixed suffix, e.g. `00000000000000000001.manifest`.
+//! - New versions must use the next consecutive id (`current_id + 1`).
+//! - We rely on `put_if_not_exists` to enforce CAS at the storage layer. If a file with
+//!   the same id already exists, the write fails with `FileVersionExists`.
+//!
+//! Core types
+//! ----------
+//! - `RecordStore<T>`: Owns the object store handle, codec, file suffix, and clock. It
+//!   can `write(id, &T)`, `try_read(id)`, `try_read_latest()`, `list(range)`, and
+//!   `delete(id)`.
+//! - `StoredRecord<T>`: In-memory view of the latest known `{ id, record }`. Supports:
+//!   - `refresh()` to load the current latest version from storage
+//!   - `update_dirty(DirtyRecord<T>)` to perform a CAS write to `next_id()`
+//!   - `maybe_apply_update(mutator)` to loop: mutate -> write -> on conflict refresh and retry
+//! - `DirtyRecord<T>`: A local, mutable candidate `{ id, value }` to be written.
+//! - `FenceableRecord<T>`: Wraps `StoredRecord<T>` and enforces epoch fencing for writers.
+//!   On `init`, it bumps the epoch field (via provided `get_epoch`/`set_epoch` fns) and writes
+//!   that update, fencing out stale writers. Subsequent operations check the stored epoch and
+//!   return `Fenced` if the local epoch is behind.
+//!
+//! Error semantics
+//! ---------------
+//! - `FileVersionExists` is returned when a CAS write fails because a concurrent writer
+//!   created the target id first. Callers typically handle this by `refresh()` and retrying.
+//! - `InvalidDBState` may be returned when an expected record is missing or file names are
+//!   malformed.
+//!
+//! Listing and latest
+//! ------------------
+//! - `RecordStore::list(range)` scans the subdirectory, parses ids from filenames matching the
+//!   configured suffix, filters by `RangeBounds`, sorts ascending by id, and returns metadata.
+//! - `try_read_latest()` lists unbounded (`..`), takes the last entry (highest id), and reads it.
+//!
+//! Example (Manifest)
+//! ------------------
+//! A `ManifestStore` composes `RecordStore<Manifest>` with suffix `"manifest"`. File names look
+//! like `00000000000000000001.manifest`, `00000000000000000002.manifest`, etc. `StoredManifest`
+//! is a thin wrapper around `StoredRecord<Manifest>` that adds domain-specific helpers (e.g.
+//! checkpoint calculations) and maps generic CAS conflicts to `ManifestVersionExists`.
+//!
+//! Concurrency
+//! -----------
+//! - Use `maybe_apply_update` for optimistic updates that automatically retry on conflicts.
+//! - For writers that must be fenced, initialize a `FenceableRecord` to atomically bump the
+//!   epoch, then rely on `check_epoch` during subsequent updates.
+//!
+//! Timing and timeouts
+//! -------------------
+//! - Operations that must complete within a bounded time (like epoch bump on init) can be
+//!   wrapped with `utils::timeout`, using the provided `SystemClock`.
+//!
+//! The goal is to keep this module fully generic and free of manifest-specific logic; all
+//! manifest semantics live in `manifest/store.rs` and use these primitives by delegation.
+
 use chrono::Utc;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -38,6 +103,7 @@ pub(crate) struct DirtyRecord<T> {
 // Generic fenceable wrapper using epoch getters/setters
 pub(crate) struct FenceableRecord<T: Clone> {
     stored: StoredRecord<T>,
+    clock: Arc<dyn SystemClock>,
     local_epoch: u64,
     get_epoch: fn(&T) -> u64,
     #[allow(dead_code)]
@@ -85,12 +151,13 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
         set_epoch: fn(&mut T, u64),
     ) -> Result<Self, SlateDBError> {
         utils::timeout(
-            system_clock,
+            system_clock.clone(),
             record_update_timeout,
             "record update",
             async {
                 loop {
                     let local_epoch = get_epoch(stored.record()) + 1;
+                    let clock = system_clock.clone();
                     let mut new_val = stored.record().clone();
                     set_epoch(&mut new_val, local_epoch);
                     let dirty = DirtyRecord::new(stored.id(), new_val);
@@ -103,6 +170,7 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
                         Ok(()) => {
                             return Ok(Self {
                                 stored,
+                                clock,
                                 local_epoch,
                                 get_epoch,
                                 set_epoch,
@@ -137,7 +205,7 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
     }
 
     pub(crate) fn clock_arc(&self) -> Arc<dyn SystemClock> {
-        self.stored.clock_arc()
+        self.clock.clone()
     }
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyRecord<T>, SlateDBError> {
@@ -315,7 +383,7 @@ impl<T> RecordStore<T> {
         if let Some(file) = files.last() {
             return self
                 .try_read(file.id)
-                .await
+            .await
                 .map(|opt| opt.map(|v| (file.id, v)));
         }
         Ok(None)
@@ -361,5 +429,198 @@ impl<T> RecordStore<T> {
             .delete(&path)
             .await
             .map_err(SlateDBError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::clock::DefaultSystemClock;
+    use crate::record::SlateDBError;
+    use crate::record::store::{RecordCodec, RecordStore,FenceableRecord, StoredRecord, DirtyRecord};
+    use std::sync::Arc;
+    use object_store::path::Path;
+    use bytes::Bytes;
+    use object_store::memory::InMemory;
+    use tokio::time::Duration as TokioDuration;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TestVal {
+        epoch: u64,
+        payload: u64,
+    }
+
+    struct TestValCodec;
+
+    impl RecordCodec<TestVal> for TestValCodec {
+        fn encode(&self, value: &TestVal) -> Bytes {
+            // simple "epoch:payload" encoding
+            Bytes::from(format!("{}:{}", value.epoch, value.payload))
+        }
+
+        fn decode(&self, bytes: &Bytes) -> Result<TestVal, SlateDBError> {
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| SlateDBError::InvalidDBState)?;
+            let mut parts = s.split(':');
+            let epoch = parts
+                .next()
+                .ok_or(SlateDBError::InvalidDBState)?
+                .parse()
+                .map_err(|_| SlateDBError::InvalidDBState)?;
+            let payload = parts
+                .next()
+                .ok_or(SlateDBError::InvalidDBState)?
+                .parse()
+                .map_err(|_| SlateDBError::InvalidDBState)?;
+            Ok(TestVal { epoch, payload })
+        }
+    }
+
+    fn new_store() -> Arc<RecordStore<TestVal>> {
+        let os = Arc::new(InMemory::new());
+        Arc::new(RecordStore::new(
+            &Path::from("/root"),
+            os,
+            Arc::new(DefaultSystemClock::new()),
+            "test",
+            "val",
+            Box::new(TestValCodec),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_init_write_and_read_latest() {
+        let store = new_store();
+        let mut sr = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 1 })
+            .await
+            .unwrap();
+        assert_eq!(1, sr.id());
+        assert_eq!(TestVal { epoch: 0, payload: 1 }, *sr.record());
+
+        // update to next id
+        let dirty = DirtyRecord::new(sr.id(), TestVal { epoch: 0, payload: 2 });
+        sr.update_dirty(dirty).await.unwrap();
+        assert_eq!(2, sr.id());
+        assert_eq!(TestVal { epoch: 0, payload: 2 }, *sr.record());
+
+        // try_read_latest matches stored
+        let latest = store.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(2, latest.0);
+        assert_eq!(TestVal { epoch: 0, payload: 2 }, latest.1);
+    }
+
+    #[tokio::test]
+    async fn test_update_dirty_version_conflict() {
+        let store = new_store();
+        let mut a = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 10 })
+            .await
+            .unwrap();
+
+        // Create another view B from latest
+        let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
+        let mut b: StoredRecord<TestVal> = StoredRecord::new(id_b, val_b, Arc::clone(&store));
+
+        // A updates first
+        a.update_dirty(DirtyRecord::new(a.id(), TestVal { epoch: 0, payload: 11 }))
+            .await
+            .unwrap();
+
+        // B attempts update based on stale id; maybe_apply_update should refresh and succeed
+        b.maybe_apply_update(|sr| {
+            let mut next = sr.record().clone();
+            next.payload = 12;
+            Ok(Some(DirtyRecord::new(sr.id(), next)))
+        })
+        .await
+        .unwrap();
+
+        let latest = store.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(TestVal { epoch: 0, payload: 12 }, latest.1);
+    }
+
+    #[tokio::test]
+    async fn test_list_ranges_sorted() {
+        let store = new_store();
+        let mut sr = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 1 })
+            .await
+            .unwrap();
+        for p in 2..=4u64 {
+            sr.update_dirty(DirtyRecord::new(sr.id(), TestVal { epoch: 0, payload: p }))
+                .await
+                .unwrap();
+        }
+
+        let all = store.list(..).await.unwrap();
+        assert_eq!(4, all.len());
+        assert!(all.windows(2).all(|w| w[0].id < w[1].id));
+
+        let right_bounded = store.list(..3).await.unwrap();
+        assert_eq!(2, right_bounded.len());
+        assert_eq!(1, right_bounded[0].id);
+        assert_eq!(2, right_bounded[1].id);
+
+        let left_bounded = store.list(3..).await.unwrap();
+        assert_eq!(2, left_bounded.len());
+        assert_eq!(3, left_bounded[0].id);
+        assert_eq!(4, left_bounded[1].id);
+    }
+
+    #[tokio::test]
+    async fn test_update_dirty_id_mismatch_errors() {
+        let store = new_store();
+        let mut sr = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 1 })
+            .await
+            .unwrap();
+        // Force mismatch
+        let err = sr
+            .update_dirty(DirtyRecord::new(sr.id() + 1, TestVal { epoch: 0, payload: 2 }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SlateDBError::FileVersionExists));
+    }
+
+    #[tokio::test]
+    async fn test_fenceable_record_epoch_bump_and_fence() {
+        let store = new_store();
+        // initial record
+        let sr = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 0 })
+            .await
+            .unwrap();
+
+        // writer A bumps to epoch 1
+        let mut fa = FenceableRecord::init(
+            sr.clone(),
+            TokioDuration::from_secs(5),
+            Arc::new(DefaultSystemClock::new()),
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+        )
+        .await
+        .unwrap();
+
+        let (_, v1) = store.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(1, v1.epoch);
+
+        // writer B bumps to epoch 2
+        let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
+        let sb = StoredRecord::new(id_b, val_b, Arc::clone(&store));
+        let mut fb = FenceableRecord::init(
+            sb,
+            TokioDuration::from_secs(5),
+            Arc::new(DefaultSystemClock::new()),
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+        )
+        .await
+        .unwrap();
+
+        let (_, v2) = store.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(2, v2.epoch);
+
+        // A is now fenced
+        let res = fa.refresh().await;
+        assert!(matches!(res, Err(SlateDBError::Fenced)));
+
+        // B can refresh
+        assert!(fb.refresh().await.is_ok());
     }
 }
