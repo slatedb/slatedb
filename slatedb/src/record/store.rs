@@ -156,7 +156,6 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
             async {
                 loop {
                     let local_epoch = get_epoch(stored.record()) + 1;
-                    let clock = system_clock.clone();
                     let mut new_val = stored.record().clone();
                     set_epoch(&mut new_val, local_epoch);
                     let dirty = DirtyRecord::new(stored.id(), new_val);
@@ -169,7 +168,6 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
                         Ok(()) => {
                             return Ok(Self {
                                 stored,
-                                clock,
                                 local_epoch,
                                 get_epoch,
                                 set_epoch,
@@ -378,7 +376,7 @@ impl<T> RecordStore<T> {
         if let Some(file) = files.last() {
             return self
                 .try_read(file.id)
-            .await
+                .await
                 .map(|opt| opt.map(|v| (file.id, v)));
         }
         Ok(None)
@@ -430,12 +428,14 @@ impl<T> RecordStore<T> {
 #[cfg(test)]
 mod tests {
     use crate::clock::DefaultSystemClock;
+    use crate::record::store::{
+        DirtyRecord, FenceableRecord, RecordCodec, RecordStore, StoredRecord,
+    };
     use crate::record::SlateDBError;
-    use crate::record::store::{RecordCodec, RecordStore,FenceableRecord, StoredRecord, DirtyRecord};
-    use std::sync::Arc;
-    use object_store::path::Path;
     use bytes::Bytes;
     use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use std::sync::Arc;
     use tokio::time::Duration as TokioDuration;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -453,8 +453,7 @@ mod tests {
         }
 
         fn decode(&self, bytes: &Bytes) -> Result<TestVal, SlateDBError> {
-            let s = std::str::from_utf8(bytes)
-                .map_err(|_| SlateDBError::InvalidDBState)?;
+            let s = std::str::from_utf8(bytes).map_err(|_| SlateDBError::InvalidDBState)?;
             let mut parts = s.split(':');
             let epoch = parts
                 .next()
@@ -485,39 +484,81 @@ mod tests {
     #[tokio::test]
     async fn test_init_write_and_read_latest() {
         let store = new_store();
-        let mut sr = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 1 })
-            .await
-            .unwrap();
+        let mut sr = StoredRecord::init(
+            Arc::clone(&store),
+            TestVal {
+                epoch: 0,
+                payload: 1,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(1, sr.id());
-        assert_eq!(TestVal { epoch: 0, payload: 1 }, *sr.record());
+        assert_eq!(
+            TestVal {
+                epoch: 0,
+                payload: 1
+            },
+            *sr.record()
+        );
 
         // update to next id
-        let dirty = DirtyRecord::new(sr.id(), TestVal { epoch: 0, payload: 2 });
+        let dirty = DirtyRecord::new(
+            sr.id(),
+            TestVal {
+                epoch: 0,
+                payload: 2,
+            },
+        );
         sr.update_dirty(dirty).await.unwrap();
         assert_eq!(2, sr.id());
-        assert_eq!(TestVal { epoch: 0, payload: 2 }, *sr.record());
+        assert_eq!(
+            TestVal {
+                epoch: 0,
+                payload: 2
+            },
+            *sr.record()
+        );
 
         // try_read_latest matches stored
         let latest = store.try_read_latest().await.unwrap().unwrap();
         assert_eq!(2, latest.0);
-        assert_eq!(TestVal { epoch: 0, payload: 2 }, latest.1);
+        assert_eq!(
+            TestVal {
+                epoch: 0,
+                payload: 2
+            },
+            latest.1
+        );
     }
 
     #[tokio::test]
     async fn test_update_dirty_version_conflict() {
         let store = new_store();
-        let mut a = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 10 })
-            .await
-            .unwrap();
+        let mut a = StoredRecord::init(
+            Arc::clone(&store),
+            TestVal {
+                epoch: 0,
+                payload: 10,
+            },
+        )
+        .await
+        .unwrap();
 
         // Create another view B from latest
         let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
         let mut b: StoredRecord<TestVal> = StoredRecord::new(id_b, val_b, Arc::clone(&store));
 
         // A updates first
-        a.update_dirty(DirtyRecord::new(a.id(), TestVal { epoch: 0, payload: 11 }))
-            .await
-            .unwrap();
+        a.update_dirty(DirtyRecord::new(
+            a.id(),
+            TestVal {
+                epoch: 0,
+                payload: 11,
+            },
+        ))
+        .await
+        .unwrap();
 
         // B attempts update based on stale id; maybe_apply_update should refresh and succeed
         b.maybe_apply_update(|sr| {
@@ -529,19 +570,37 @@ mod tests {
         .unwrap();
 
         let latest = store.try_read_latest().await.unwrap().unwrap();
-        assert_eq!(TestVal { epoch: 0, payload: 12 }, latest.1);
+        assert_eq!(
+            TestVal {
+                epoch: 0,
+                payload: 12
+            },
+            latest.1
+        );
     }
 
     #[tokio::test]
     async fn test_list_ranges_sorted() {
         let store = new_store();
-        let mut sr = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 1 })
+        let mut sr = StoredRecord::init(
+            Arc::clone(&store),
+            TestVal {
+                epoch: 0,
+                payload: 1,
+            },
+        )
+        .await
+        .unwrap();
+        for p in 2..=4u64 {
+            sr.update_dirty(DirtyRecord::new(
+                sr.id(),
+                TestVal {
+                    epoch: 0,
+                    payload: p,
+                },
+            ))
             .await
             .unwrap();
-        for p in 2..=4u64 {
-            sr.update_dirty(DirtyRecord::new(sr.id(), TestVal { epoch: 0, payload: p }))
-                .await
-                .unwrap();
         }
 
         let all = store.list(..).await.unwrap();
@@ -562,12 +621,24 @@ mod tests {
     #[tokio::test]
     async fn test_update_dirty_id_mismatch_errors() {
         let store = new_store();
-        let mut sr = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 1 })
-            .await
-            .unwrap();
+        let mut sr = StoredRecord::init(
+            Arc::clone(&store),
+            TestVal {
+                epoch: 0,
+                payload: 1,
+            },
+        )
+        .await
+        .unwrap();
         // Force mismatch
         let err = sr
-            .update_dirty(DirtyRecord::new(sr.id() + 1, TestVal { epoch: 0, payload: 2 }))
+            .update_dirty(DirtyRecord::new(
+                sr.id() + 1,
+                TestVal {
+                    epoch: 0,
+                    payload: 2,
+                },
+            ))
             .await
             .unwrap_err();
         assert!(matches!(err, SlateDBError::FileVersionExists));
@@ -577,9 +648,15 @@ mod tests {
     async fn test_fenceable_record_epoch_bump_and_fence() {
         let store = new_store();
         // initial record
-        let sr = StoredRecord::init(Arc::clone(&store), TestVal { epoch: 0, payload: 0 })
-            .await
-            .unwrap();
+        let sr = StoredRecord::init(
+            Arc::clone(&store),
+            TestVal {
+                epoch: 0,
+                payload: 0,
+            },
+        )
+        .await
+        .unwrap();
 
         // writer A bumps to epoch 1
         let mut fa = FenceableRecord::init(

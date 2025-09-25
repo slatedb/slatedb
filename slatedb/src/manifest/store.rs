@@ -84,7 +84,10 @@ impl FenceableManifest {
             |m: &mut Manifest, e: u64| m.writer_epoch = e,
         )
         .await?;
-        Ok(Self { inner: fr, clock: clock })
+        Ok(Self {
+            inner: fr,
+            clock,
+        })
     }
 
     pub(crate) async fn init_compactor(
@@ -101,7 +104,10 @@ impl FenceableManifest {
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
         )
         .await?;
-        Ok(Self { inner: fr, clock: clock })
+        Ok(Self {
+            inner: fr,
+            clock,
+        })
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
