@@ -84,10 +84,7 @@ impl FenceableManifest {
             |m: &mut Manifest, e: u64| m.writer_epoch = e,
         )
         .await?;
-        Ok(Self {
-            inner: fr,
-            clock,
-        })
+        Ok(Self { inner: fr, clock })
     }
 
     pub(crate) async fn init_compactor(
@@ -104,10 +101,7 @@ impl FenceableManifest {
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
         )
         .await?;
-        Ok(Self {
-            inner: fr,
-            clock,
-        })
+        Ok(Self { inner: fr, clock })
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
@@ -439,7 +433,7 @@ impl StoredManifest {
         }
         let manifest = manifest.into();
         let dirty = DirtyRecord::new(self.inner.id(), manifest);
-        self.inner.update_dirty(dirty).await.map_err(|e| match e {
+        self.inner.update(dirty).await.map_err(|e| match e {
             SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
             other => other,
         })

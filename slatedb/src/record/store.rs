@@ -21,7 +21,7 @@
 //!   `delete(id)`.
 //! - `StoredRecord<T>`: In-memory view of the latest known `{ id, record }`. Supports:
 //!   - `refresh()` to load the current latest version from storage
-//!   - `update_dirty(DirtyRecord<T>)` to perform a CAS write to `next_id()`
+//!   - `update(DirtyRecord<T>)` to perform a CAS write to `next_id()`
 //!   - `maybe_apply_update(mutator)` to loop: mutate -> write -> on conflict refresh and retry
 //! - `DirtyRecord<T>`: A local, mutable candidate `{ id, value }` to be written.
 //! - `FenceableRecord<T>`: Wraps `StoredRecord<T>` and enforces epoch fencing for writers.
@@ -159,7 +159,7 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
                     let mut new_val = stored.record().clone();
                     set_epoch(&mut new_val, local_epoch);
                     let dirty = DirtyRecord::new(stored.id(), new_val);
-                    match stored.update_dirty(dirty).await {
+                    match stored.update(dirty).await {
                         Err(SlateDBError::FileVersionExists) => {
                             stored.refresh().await?;
                             continue;
@@ -219,7 +219,7 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
 
     pub(crate) async fn update_dirty(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
         self.check_epoch()?;
-        self.stored.update_dirty(dirty).await
+        self.stored.update(dirty).await
     }
 
     #[allow(clippy::panic)]
@@ -273,7 +273,7 @@ impl<T: Clone> StoredRecord<T> {
         Ok(&self.record)
     }
 
-    pub(crate) async fn update_dirty(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
+    pub(crate) async fn update(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
         if dirty.id != self.id {
             return Err(FileVersionExists);
         }
@@ -292,7 +292,7 @@ impl<T: Clone> StoredRecord<T> {
             let Some(dirty) = mutator(self)? else {
                 return Ok(());
             };
-            match self.update_dirty(dirty).await {
+            match self.update(dirty).await {
                 Err(SlateDBError::FileVersionExists) => {
                     self.refresh().await?;
                     continue;
@@ -510,7 +510,7 @@ mod tests {
                 payload: 2,
             },
         );
-        sr.update_dirty(dirty).await.unwrap();
+        sr.update(dirty).await.unwrap();
         assert_eq!(2, sr.id());
         assert_eq!(
             TestVal {
@@ -550,7 +550,7 @@ mod tests {
         let mut b: StoredRecord<TestVal> = StoredRecord::new(id_b, val_b, Arc::clone(&store));
 
         // A updates first
-        a.update_dirty(DirtyRecord::new(
+        a.update(DirtyRecord::new(
             a.id(),
             TestVal {
                 epoch: 0,
@@ -592,7 +592,7 @@ mod tests {
         .await
         .unwrap();
         for p in 2..=4u64 {
-            sr.update_dirty(DirtyRecord::new(
+            sr.update(DirtyRecord::new(
                 sr.id(),
                 TestVal {
                     epoch: 0,
@@ -632,7 +632,7 @@ mod tests {
         .unwrap();
         // Force mismatch
         let err = sr
-            .update_dirty(DirtyRecord::new(
+            .update(DirtyRecord::new(
                 sr.id() + 1,
                 TestVal {
                     epoch: 0,
