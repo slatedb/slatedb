@@ -89,6 +89,10 @@ pub enum ErrorKind {
     /// retried after the permission issue is resolved.
     Permission,
 
+    /// The current instance has been fenced by a new writer and is no longer usable.
+    /// The operation cannot be retried and a new instance should be opened.
+    Fenced,
+
     /// The operation failed due to a transient error (such as IO unavailability).
     /// The operation can be retried after backing off.
     Transient(Duration),
