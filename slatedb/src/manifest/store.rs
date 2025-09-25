@@ -61,6 +61,7 @@ impl DirtyManifest {
 }
 
 pub(crate) struct FenceableManifest {
+    clock: Arc<dyn SystemClock>,
     inner: FenceableRecord<Manifest>,
 }
 
@@ -73,6 +74,7 @@ impl FenceableManifest {
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
+        let clock = system_clock.clone();
         // Initialize generic fenceable record using writer epoch
         let fr = FenceableRecord::init(
             stored_manifest.inner,
@@ -82,7 +84,7 @@ impl FenceableManifest {
             |m: &mut Manifest, e: u64| m.writer_epoch = e,
         )
         .await?;
-        Ok(Self { inner: fr })
+        Ok(Self { inner: fr, clock: clock })
     }
 
     pub(crate) async fn init_compactor(
@@ -90,6 +92,7 @@ impl FenceableManifest {
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
+        let clock = system_clock.clone();
         let fr = FenceableRecord::init(
             stored_manifest.inner,
             manifest_update_timeout,
@@ -98,7 +101,7 @@ impl FenceableManifest {
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
         )
         .await?;
-        Ok(Self { inner: fr })
+        Ok(Self { inner: fr, clock: clock })
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
@@ -121,12 +124,16 @@ impl FenceableManifest {
         })
     }
 
+    fn clock_arc(&self) -> Arc<dyn SystemClock> {
+        self.clock.clone()
+    }
+
     pub(crate) fn new_checkpoint(
         &self,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.inner.clock_arc();
+        let clock = self.clock_arc();
         let db_state = &self.inner.record().core;
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {

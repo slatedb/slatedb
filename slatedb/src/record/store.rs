@@ -103,7 +103,6 @@ pub(crate) struct DirtyRecord<T> {
 // Generic fenceable wrapper using epoch getters/setters
 pub(crate) struct FenceableRecord<T: Clone> {
     stored: StoredRecord<T>,
-    clock: Arc<dyn SystemClock>,
     local_epoch: u64,
     get_epoch: fn(&T) -> u64,
     #[allow(dead_code)]
@@ -202,10 +201,6 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
 
     pub(crate) fn record(&self) -> &T {
         self.stored.record()
-    }
-
-    pub(crate) fn clock_arc(&self) -> Arc<dyn SystemClock> {
-        self.clock.clone()
     }
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyRecord<T>, SlateDBError> {
