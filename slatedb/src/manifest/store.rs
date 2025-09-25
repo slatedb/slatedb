@@ -102,8 +102,7 @@ impl FenceableManifest {
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
-        self.inner.refresh().await?;
-        Ok(())
+        self.inner.refresh().await
     }
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyManifest, SlateDBError> {
@@ -119,8 +118,7 @@ impl FenceableManifest {
         self.inner.update_dirty(dirty).await.map_err(|e| match e {
             SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
             other => other,
-        })?;
-        Ok(())
+        })
     }
 
     pub(crate) fn new_checkpoint(
@@ -350,8 +348,7 @@ impl StoredManifest {
                     Ok(Some(DirtyRecord::new(sr.id(), new_val)))
                 }
             })
-            .await?;
-        Ok(())
+            .await
     }
 
     /// Replace an existing checkpoint with a new checkpoint. If the old checkpoint
@@ -432,8 +429,7 @@ impl StoredManifest {
         self.inner.update_dirty(dirty).await.map_err(|e| match e {
             SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
             other => other,
-        })?;
-        Ok(())
+        })
     }
 
     /// Apply an update to a stored manifest repeatedly retrying the update
