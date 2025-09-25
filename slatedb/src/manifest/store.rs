@@ -211,13 +211,17 @@ impl FenceableManifest {
 // manifest stored in the object store.
 pub(crate) struct StoredManifest {
     inner: StoredRecord<Manifest>,
+    clock: Arc<dyn SystemClock>,
 }
 
 impl StoredManifest {
     async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
         // Preserve original behavior: write via ManifestStore (object-store path and semantics)
         let inner = StoredRecord::init(Arc::clone(&store.inner), manifest.clone()).await?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            clock: Arc::clone(&store.clock),
+        })
     }
 
     /// Create the initial manifest for a new database.
@@ -251,7 +255,10 @@ impl StoredManifest {
             return Ok(None);
         };
         let inner = StoredRecord::new(id, manifest.clone(), Arc::clone(&store.inner));
-        Ok(Some(Self { inner }))
+        Ok(Some(Self {
+            inner,
+            clock: Arc::clone(&store.clock),
+        }))
     }
 
     /// Load the current manifest from the supplied manifest store. If successful,
@@ -318,7 +325,7 @@ impl StoredManifest {
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.inner.clock_arc();
+        let clock = Arc::clone(&self.clock);
         self.inner
             .maybe_apply_update(|sr| {
                 let mut new_val = sr.record().clone();
@@ -367,7 +374,7 @@ impl StoredManifest {
         new_checkpoint_id: Uuid,
         new_checkpoint_options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.inner.clock_arc();
+        let clock = Arc::clone(&self.clock);
         self.inner
             .maybe_apply_update(|sr| {
                 let mut new_val = sr.record().clone();
@@ -400,7 +407,7 @@ impl StoredManifest {
         checkpoint_id: Uuid,
         new_lifetime: Duration,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.inner.clock_arc();
+        let clock = Arc::clone(&self.clock);
         self.inner
             .maybe_apply_update(|sr| {
                 let mut new_val = sr.record().clone();
@@ -489,6 +496,7 @@ where
 
 pub(crate) struct ManifestStore {
     inner: Arc<RecordStore<Manifest>>,
+    clock: Arc<dyn SystemClock>,
 }
 
 impl ManifestStore {
@@ -500,12 +508,11 @@ impl ManifestStore {
         let inner = Arc::new(RecordStore::<Manifest>::new(
             root_path,
             object_store,
-            clock.clone(),
             "manifest",
             "manifest",
             Box::new(FlatBufferManifestCodec {}),
         ));
-        Self { inner }
+        Self { inner, clock }
     }
 
     /// Delete a manifest from the object store.

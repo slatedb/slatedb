@@ -122,7 +122,6 @@ pub(crate) struct RecordStore<T> {
     object_store: Box<dyn TransactionalObjectStore>,
     codec: Box<dyn RecordCodec<T>>,
     file_suffix: &'static str,
-    clock: Arc<dyn SystemClock>,
 }
 
 impl<T> DirtyRecord<T> {
@@ -256,10 +255,6 @@ impl<T: Clone> StoredRecord<T> {
         &self.record
     }
 
-    pub(crate) fn clock_arc(&self) -> Arc<dyn SystemClock> {
-        self.store.clock.clone()
-    }
-
     pub(crate) fn next_id(&self) -> u64 {
         self.id + 1
     }
@@ -308,7 +303,6 @@ impl<T> RecordStore<T> {
     pub(crate) fn new(
         root_path: &Path,
         object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn SystemClock>,
         subdir: &str,
         file_suffix: &'static str,
         codec: Box<dyn RecordCodec<T>>,
@@ -320,7 +314,6 @@ impl<T> RecordStore<T> {
             )),
             codec,
             file_suffix,
-            clock,
         }
     }
 
@@ -474,7 +467,6 @@ mod tests {
         Arc::new(RecordStore::new(
             &Path::from("/root"),
             os,
-            Arc::new(DefaultSystemClock::new()),
             "test",
             "val",
             Box::new(TestValCodec),
