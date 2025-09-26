@@ -20,7 +20,7 @@ use std::fmt;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Once};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
@@ -274,33 +274,26 @@ pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> Encod
     encoded_sst_builder.build().unwrap()
 }
 
+/// A compactor that compacts if there are L0s and `should_compact` returns true.
+/// All SSTs from L0 and all sorted runs are always compacted into sorted run 0.
 #[derive(Clone)]
 pub(crate) struct OnDemandCompactionScheduler {
-    pub(crate) should_compact: Arc<AtomicBool>,
+    pub(crate) should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>,
 }
 
 impl OnDemandCompactionScheduler {
-    fn new() -> Self {
-        Self {
-            should_compact: Arc::new(AtomicBool::new(false)),
-        }
+    fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
+        Self { should_compact }
     }
 }
 
 impl CompactionScheduler for OnDemandCompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction> {
-        if !self.should_compact.load(Ordering::SeqCst) {
+        if !(self.should_compact)(state) {
             return vec![];
         }
 
-        // this compactor will only compact if there are L0s,
-        // it won't compact only lower levels for simplicity
         let db_state = state.db_state();
-        if db_state.l0.is_empty() {
-            return vec![];
-        }
-
-        self.should_compact.store(false, Ordering::SeqCst);
 
         // always compact into sorted run 0
         let next_sr_id = 0;
@@ -326,9 +319,9 @@ pub(crate) struct OnDemandCompactionSchedulerSupplier {
 }
 
 impl OnDemandCompactionSchedulerSupplier {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
         Self {
-            scheduler: OnDemandCompactionScheduler::new(),
+            scheduler: OnDemandCompactionScheduler::new(should_compact),
         }
     }
 }
