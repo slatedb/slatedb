@@ -697,14 +697,19 @@ mod tests {
     #[cfg(feature = "wal_disable")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_tombstones_in_l0() {
-        use std::sync::atomic::Ordering;
-
         use crate::test_utils::OnDemandCompactionSchedulerSupplier;
 
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
 
-        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| {
+                // compact when there are at least 2 SSTs in L0 (one for key 'a' and one for key 'b')
+                state.db_state().l0.len() == 2 ||
+                // or when there is one SST in L0 and one in L1 (one for delete key 'a' and one for compacted key 'a'+'b')
+                (state.db_state().l0.len() == 1 && state.db_state().compacted.len() == 1)
+            },
+        )));
 
         let mut options = db_options(Some(compactor_options()));
         options.wal_enabled = false;
@@ -721,13 +726,10 @@ mod tests {
         let (manifest_store, table_store) = build_test_stores(os.clone());
 
         // put key 'a' into L1 (and key 'b' so that when we delete 'a' the SST is non-empty)
+        // since these are both await_durable=true, we're guaranteed to have one L0 SST for each.
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
-        scheduler
-            .scheduler
-            .should_compact
-            .store(true, Ordering::SeqCst);
         let db_state = await_compaction(&db, manifest_store.clone()).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
@@ -759,10 +761,6 @@ mod tests {
         let tombstone = iter.next_entry().await.unwrap();
         assert!(tombstone.unwrap().value.is_tombstone());
 
-        scheduler
-            .scheduler
-            .should_compact
-            .store(true, Ordering::SeqCst);
         let db_state = await_compacted_compaction(manifest_store.clone(), db_state.compacted)
             .await
             .unwrap();
@@ -1293,7 +1291,6 @@ mod tests {
             let core_db_state = get_db_state(manifest_store.clone()).await;
             let empty_l0 = core_db_state.l0.is_empty();
             let compaction_ran = core_db_state.l0_last_compacted.is_some();
-
             if empty_wal && empty_memtable && empty_l0 && compaction_ran {
                 return Some(core_db_state);
             }
