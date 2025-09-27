@@ -17,7 +17,7 @@ use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::utils::{get_now_for_read, is_not_expired};
-use crate::{error::SlateDBError, filter, DbIterator, db_iter::DbIteratorRangeTracker};
+use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, filter, DbIterator};
 
 use bytes::Bytes;
 use futures::future::{join, BoxFuture};
@@ -227,7 +227,7 @@ impl Reader {
             l0_iters,
             sr_iters,
             max_seq,
-            None, // range_tracker - only used for transactions
+            range_tracker,
         )
         .await
     }

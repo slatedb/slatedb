@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -58,7 +59,7 @@ pub struct DBTransaction {
     /// Isolation level for this transaction
     isolation_level: IsolationLevel,
     /// Range trackers for scanned ranges (used for SSI conflict detection)
-    range_trackers: Vec<Arc<DbIteratorRangeTracker>>,
+    range_trackers: Mutex<Vec<Arc<DbIteratorRangeTracker>>>,
 }
 
 impl DBTransaction {
@@ -78,7 +79,7 @@ impl DBTransaction {
             write_batch: WriteBatch::new(),
             db_inner,
             isolation_level,
-            range_trackers: Vec::new(),
+            range_trackers: Mutex::new(Vec::new()),
         })
     }
 
@@ -181,7 +182,7 @@ impl DBTransaction {
         // Track read range for SSI conflict detection if needed
         let range_tracker = if self.isolation_level == IsolationLevel::SerializableSnapshot {
             let tracker = Arc::new(DbIteratorRangeTracker::new());
-            self.range_trackers.push(tracker.clone());
+            self.range_trackers.lock().push(tracker.clone());
             Some(tracker)
         } else {
             None
@@ -265,6 +266,17 @@ impl DBTransaction {
     /// ## Errors
     /// - `Error`: if there was an error committing the transaction
     pub async fn commit(self) -> Result<(), crate::Error> {
+        // Extract actual scanned ranges from trackers for SSI conflict detection
+        if self.isolation_level == IsolationLevel::SerializableSnapshot {
+            for tracker in self.range_trackers.lock().iter() {
+                if tracker.has_data() {
+                    if let Some(range) = tracker.get_range() {
+                        self.txn_manager.track_read_range(&self.txn_id, range);
+                    }
+                }
+            }
+        }
+
         // Check for conflicts before committing
         if self.txn_manager.check_has_conflict(&self.txn_id) {
             return Err(crate::Error::from(SlateDBError::TransactionConflict));
