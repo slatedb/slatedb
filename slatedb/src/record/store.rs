@@ -216,7 +216,7 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
         self.check_epoch()
     }
 
-    pub(crate) async fn update_dirty(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
+    pub(crate) async fn update(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
         self.check_epoch()?;
         self.stored.update(dirty).await
     }
