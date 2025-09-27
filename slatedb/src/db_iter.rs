@@ -10,16 +10,17 @@ use crate::sst_iter::SstIterator;
 use crate::types::KeyValue;
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DbIteratorRangeTracker {
-    inner: Arc<Mutex<RangeTrackerInner>>,
+    inner: Mutex<DbIteratorRangeTrackerInner>,
 }
 
 #[derive(Debug)]
-struct RangeTrackerInner {
+struct DbIteratorRangeTrackerInner {
     first_key: Option<Bytes>,
     last_key: Option<Bytes>,
     has_data: bool,
@@ -28,16 +29,16 @@ struct RangeTrackerInner {
 impl DbIteratorRangeTracker {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(RangeTrackerInner {
+            inner: Mutex::new(DbIteratorRangeTrackerInner {
                 first_key: None,
                 last_key: None,
                 has_data: false,
-            })),
+            }),
         }
     }
 
-    pub fn update_key(&self, key: &[u8]) {
-        let mut inner = self.inner.lock().unwrap();
+    pub fn track_key(&self, key: &[u8]) {
+        let mut inner = self.inner.lock();
         let key_bytes = Bytes::copy_from_slice(key);
 
         inner.first_key = Some(match &inner.first_key {
@@ -56,7 +57,7 @@ impl DbIteratorRangeTracker {
     }
 
     pub fn get_range(&self) -> Option<BytesRange> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         match (&inner.first_key, &inner.last_key) {
             (Some(first), Some(last)) => {
                 use std::ops::Bound;
@@ -70,7 +71,7 @@ impl DbIteratorRangeTracker {
     }
 
     pub fn has_data(&self) -> bool {
-        self.inner.lock().unwrap().has_data
+        self.inner.lock().has_data
     }
 }
 
@@ -166,7 +167,7 @@ impl<'a> DbIterator<'a> {
                 self.last_key = Some(kv.key.clone());
                 // Track the key in range tracker if present
                 if let Some(tracker) = &self.range_tracker {
-                    tracker.update_key(&kv.key);
+                    tracker.track_key(&kv.key);
                 }
             }
             result.map_err(Into::into)
