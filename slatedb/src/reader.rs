@@ -17,7 +17,7 @@ use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::utils::{get_now_for_read, is_not_expired};
-use crate::{error::SlateDBError, filter, DbIterator};
+use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, filter, DbIterator};
 
 use bytes::Bytes;
 use futures::future::{join, BoxFuture};
@@ -162,6 +162,7 @@ impl Reader {
         db_state: &(dyn DbStateReader + Sync),
         write_batch: Option<&'a WriteBatch>,
         max_seq: Option<u64>,
+        range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
@@ -226,6 +227,7 @@ impl Reader {
             l0_iters,
             sr_iters,
             max_seq,
+            range_tracker,
         )
         .await
     }

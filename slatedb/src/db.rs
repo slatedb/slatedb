@@ -199,7 +199,7 @@ impl DbInner {
         self.check_error()?;
         let db_state = self.state.read().view();
         self.reader
-            .scan_with_options(range, options, &db_state, None, None)
+            .scan_with_options(range, options, &db_state, None, None, None)
             .await
     }
 
