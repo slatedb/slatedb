@@ -97,7 +97,7 @@ pub(crate) struct GenericFileMetadata {
 #[derive(Clone, Debug)]
 pub(crate) struct DirtyRecord<T> {
     id: u64,
-    value: T,
+    pub(crate) value: T,
 }
 
 // Generic fenceable wrapper using epoch getters/setters
@@ -125,11 +125,6 @@ pub(crate) struct RecordStore<T> {
 }
 
 impl<T> DirtyRecord<T> {
-    /// Create a new dirty record with the given id and value
-    pub(crate) fn new(id: u64, value: T) -> Self {
-        Self { id, value }
-    }
-
     #[allow(dead_code)]
     pub(crate) fn id(&self) -> u64 {
         self.id
@@ -157,7 +152,8 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
                     let local_epoch = get_epoch(stored.record()) + 1;
                     let mut new_val = stored.record().clone();
                     set_epoch(&mut new_val, local_epoch);
-                    let dirty = DirtyRecord::new(stored.id(), new_val);
+                    let mut dirty = stored.prepare_dirty();
+                    dirty.value = new_val;
                     match stored.update(dirty).await {
                         Err(SlateDBError::FileVersionExists) => {
                             stored.refresh().await?;
@@ -188,10 +184,6 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
         self.local_epoch
     }
 
-    pub(crate) fn id(&self) -> u64 {
-        self.stored.id()
-    }
-
     pub(crate) fn next_id(&self) -> u64 {
         self.stored.next_id()
     }
@@ -202,9 +194,7 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyRecord<T>, SlateDBError> {
         self.check_epoch()?;
-        let id = self.id();
-        let record = self.record().clone();
-        Ok(DirtyRecord::new(id, record))
+        Ok(self.stored.prepare_dirty())
     }
 
     // The file may have been updated by a readers, another process, or
@@ -257,6 +247,14 @@ impl<T: Clone> StoredRecord<T> {
 
     pub(crate) fn next_id(&self) -> u64 {
         self.id + 1
+    }
+
+    /// Create a dirty snapshot of the current record for mutation-and-write flows
+    pub(crate) fn prepare_dirty(&self) -> DirtyRecord<T> {
+        DirtyRecord {
+            id: self.id,
+            value: self.record.clone(),
+        }
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<&T, SlateDBError> {
@@ -421,9 +419,7 @@ impl<T> RecordStore<T> {
 #[cfg(test)]
 mod tests {
     use crate::clock::DefaultSystemClock;
-    use crate::record::store::{
-        DirtyRecord, FenceableRecord, RecordCodec, RecordStore, StoredRecord,
-    };
+    use crate::record::store::{FenceableRecord, RecordCodec, RecordStore, StoredRecord};
     use crate::record::SlateDBError;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -495,13 +491,11 @@ mod tests {
         );
 
         // update to next id
-        let dirty = DirtyRecord::new(
-            sr.id(),
-            TestVal {
-                epoch: 0,
-                payload: 2,
-            },
-        );
+        let mut dirty = sr.prepare_dirty();
+        dirty.value = TestVal {
+            epoch: 0,
+            payload: 2,
+        };
         sr.update(dirty).await.unwrap();
         assert_eq!(2, sr.id());
         assert_eq!(
@@ -542,21 +536,20 @@ mod tests {
         let mut b: StoredRecord<TestVal> = StoredRecord::new(id_b, val_b, Arc::clone(&store));
 
         // A updates first
-        a.update(DirtyRecord::new(
-            a.id(),
-            TestVal {
-                epoch: 0,
-                payload: 11,
-            },
-        ))
-        .await
-        .unwrap();
+        let mut dirty = a.prepare_dirty();
+        dirty.value = TestVal {
+            epoch: 0,
+            payload: 11,
+        };
+        a.update(dirty).await.unwrap();
 
         // B attempts update based on stale id; maybe_apply_update should refresh and succeed
         b.maybe_apply_update(|sr| {
             let mut next = sr.record().clone();
             next.payload = 12;
-            Ok(Some(DirtyRecord::new(sr.id(), next)))
+            let mut dirty = sr.prepare_dirty();
+            dirty.value = next;
+            Ok(Some(dirty))
         })
         .await
         .unwrap();
@@ -584,15 +577,12 @@ mod tests {
         .await
         .unwrap();
         for p in 2..=4u64 {
-            sr.update(DirtyRecord::new(
-                sr.id(),
-                TestVal {
-                    epoch: 0,
-                    payload: p,
-                },
-            ))
-            .await
-            .unwrap();
+            let mut dirty = sr.prepare_dirty();
+            dirty.value = TestVal {
+                epoch: 0,
+                payload: p,
+            };
+            sr.update(dirty).await.unwrap();
         }
 
         let all = store.list(..).await.unwrap();
@@ -613,7 +603,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_dirty_id_mismatch_errors() {
         let store = new_store();
-        let mut sr = StoredRecord::init(
+        let sr = StoredRecord::init(
             Arc::clone(&store),
             TestVal {
                 epoch: 0,
@@ -623,16 +613,12 @@ mod tests {
         .await
         .unwrap();
         // Force mismatch
-        let err = sr
-            .update(DirtyRecord::new(
-                sr.id() + 1,
-                TestVal {
-                    epoch: 0,
-                    payload: 2,
-                },
-            ))
-            .await
-            .unwrap_err();
+        let mut dirty = sr.prepare_dirty();
+        dirty.value = TestVal {
+            epoch: 0,
+            payload: 2,
+        };
+        let err = sr.store.write(dirty.id(), &dirty.value).await.unwrap_err();
         assert!(matches!(err, SlateDBError::FileVersionExists));
     }
 
