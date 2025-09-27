@@ -177,6 +177,7 @@ impl DBTransaction {
 
         // Track read range for SSI conflict detection if needed
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
+            // TODO: we should track the range that actually scanned by the db_iter.
             let range_bytes = BytesRange::from(range.clone());
             self.txn_manager.track_read_range(&self.txn_id, range_bytes);
         }
@@ -249,23 +250,6 @@ impl DBTransaction {
     /// ## Errors
     /// - `Error`: if there was an error buffering the delete
     pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), crate::Error> {
-        self.delete_with_options(key, &WriteOptions::default())
-    }
-
-    /// Delete a key from the transaction with custom options.
-    /// The delete will be buffered in the transaction's write batch until commit.
-    ///
-    /// ## Arguments
-    /// - `key`: the key to delete
-    /// - `options`: the write options to use
-    ///
-    /// ## Errors
-    /// - `Error`: if there was an error buffering the delete
-    pub fn delete_with_options<K: AsRef<[u8]>>(
-        &mut self,
-        key: K,
-        _options: &WriteOptions,
-    ) -> Result<(), crate::Error> {
         self.write_batch.delete(key);
         Ok(())
     }
@@ -290,6 +274,7 @@ impl DBTransaction {
     /// Rollback the transaction by discarding all buffered operations.
     /// This is automatically called when the transaction is dropped.
     pub fn rollback(self) {
+        // TODO: we may require to track the state of DbTransaction about whether it's committed or rolled back.
         todo!()
     }
 }
