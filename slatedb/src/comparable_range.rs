@@ -6,28 +6,61 @@ use std::{
 
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 
-#[derive(Debug, Eq)]
-pub(crate) struct StartBound<T: Ord> {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum BoundPosition {
+    Start,
+    End,
+}
+
+impl BoundPosition {
+    fn is_start(&self) -> bool {
+        self == &BoundPosition::Start
+    }
+}
+
+#[derive(Clone, Debug, Eq)]
+pub(crate) struct ComparableBound<T: Ord> {
     inner: Bound<T>,
+    position: BoundPosition,
 }
 
-impl<T: Ord + Clone> Clone for StartBound<T> {
-    fn clone(&self) -> Self {
+impl<T: Ord> ComparableBound<T> {
+    pub(crate) fn start(inner: Bound<T>) -> Self {
         Self {
-            inner: self.inner.clone(),
+            inner,
+            position: BoundPosition::Start,
+        }
+    }
+
+    pub(crate) fn end(inner: Bound<T>) -> Self {
+        Self {
+            inner,
+            position: BoundPosition::End,
+        }
+    }
+
+    pub(crate) fn as_ref(&self) -> ComparableBound<&T> {
+        ComparableBound {
+            inner: self.inner.as_ref(),
+            position: self.position.clone(),
         }
     }
 }
 
-impl<T: Ord + Clone> StartBound<&T> {
-    pub(crate) fn cloned(&self) -> StartBound<T> {
-        StartBound {
+impl<T: Ord + Clone> ComparableBound<&T> {
+    pub(crate) fn cloned(&self) -> ComparableBound<T> {
+        ComparableBound {
             inner: self.inner.cloned(),
+            position: self.position.clone(),
         }
     }
 }
 
-impl<T: Ord + Serialize> Serialize for StartBound<T> {
+/// Serialize the inner bound, which is the same as the original bound.
+/// This serializer does **not** serialize the `position` field
+/// to keep the original bound serialization format.
+/// We leave determining the position to the ComparableRange serializer.
+impl<T: Ord + Serialize> Serialize for ComparableBound<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -36,146 +69,71 @@ impl<T: Ord + Serialize> Serialize for StartBound<T> {
     }
 }
 
-impl<T: Ord + Hash> Hash for StartBound<T> {
+impl<T: Ord + Hash> Hash for ComparableBound<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.inner.hash(state)
+        self.inner.hash(state);
+        self.position.hash(state);
     }
 }
 
-impl<T: Ord> From<Bound<T>> for StartBound<T> {
-    fn from(bound: Bound<T>) -> Self {
-        Self { inner: bound }
-    }
-}
-
-impl<T: Ord> From<StartBound<T>> for Bound<T> {
-    fn from(bound: StartBound<T>) -> Self {
+impl<T: Ord> From<ComparableBound<T>> for Bound<T> {
+    fn from(bound: ComparableBound<T>) -> Self {
         bound.inner
     }
 }
 
-impl<T: Ord> PartialEq for StartBound<T> {
+impl<T: Ord> PartialEq for ComparableBound<T> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
-impl<T: Ord> PartialOrd for StartBound<T> {
+impl<T: Ord> PartialOrd for ComparableBound<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T: Ord> Ord for StartBound<T> {
+impl<T: Ord> Ord for ComparableBound<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        cmp_bound(&self.inner, &other.inner, true)
-    }
-}
-
-#[derive(Debug, Eq)]
-pub(crate) struct EndBound<T: Ord> {
-    inner: Bound<T>,
-}
-
-impl<T: Ord + Clone> Clone for EndBound<T> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl<T: Ord + Clone> EndBound<&T> {
-    pub(crate) fn cloned(&self) -> EndBound<T> {
-        EndBound {
-            inner: self.inner.cloned(),
-        }
-    }
-}
-
-impl<T: Ord + Serialize> Serialize for EndBound<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.inner.serialize(serializer)
-    }
-}
-
-impl<T: Ord + Hash> Hash for EndBound<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.inner.hash(state)
-    }
-}
-
-impl<T: Ord> From<Bound<T>> for EndBound<T> {
-    fn from(bound: Bound<T>) -> Self {
-        Self { inner: bound }
-    }
-}
-
-impl<T: Ord> From<EndBound<T>> for Bound<T> {
-    fn from(bound: EndBound<T>) -> Self {
-        bound.inner
-    }
-}
-
-impl<T: Ord> PartialEq for EndBound<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl<T: Ord> PartialOrd for EndBound<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T: Ord> Ord for EndBound<T> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        cmp_bound(&self.inner, &other.inner, false)
-    }
-}
-
-fn cmp_bound<T: Ord>(a: &Bound<T>, b: &Bound<T>, start: bool) -> Ordering {
-    match (a, b) {
-        (Bound::Included(a), Bound::Included(b)) | (Bound::Excluded(a), Bound::Excluded(b)) => {
-            a.cmp(b)
-        }
-        (Bound::Included(a), Bound::Excluded(b)) => match a.cmp(b) {
-            Ordering::Equal => {
-                if start {
+        match (&self.inner, &other.inner) {
+            (Bound::Included(a), Bound::Included(b)) | (Bound::Excluded(a), Bound::Excluded(b)) => {
+                a.cmp(b)
+            }
+            (Bound::Included(a), Bound::Excluded(b)) => match a.cmp(b) {
+                Ordering::Equal => {
+                    if self.position.is_start() {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                other => other,
+            },
+            (Bound::Excluded(a), Bound::Included(b)) => match a.cmp(b) {
+                Ordering::Equal => {
+                    if self.position.is_start() {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                other => other,
+            },
+            (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
+            (Bound::Unbounded, _) => {
+                if self.position.is_start() {
                     Ordering::Less
                 } else {
                     Ordering::Greater
                 }
             }
-            other => other,
-        },
-        (Bound::Excluded(a), Bound::Included(b)) => match a.cmp(b) {
-            Ordering::Equal => {
-                if start {
+            (_, Bound::Unbounded) => {
+                if self.position.is_start() {
                     Ordering::Greater
                 } else {
                     Ordering::Less
                 }
-            }
-            other => other,
-        },
-        (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
-        (Bound::Unbounded, _) => {
-            if start {
-                Ordering::Less
-            } else {
-                Ordering::Greater
-            }
-        }
-        (_, Bound::Unbounded) => {
-            if start {
-                Ordering::Greater
-            } else {
-                Ordering::Less
             }
         }
     }
@@ -183,15 +141,15 @@ fn cmp_bound<T: Ord>(a: &Bound<T>, b: &Bound<T>, start: bool) -> Ordering {
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct ComparableRange<T: Ord> {
-    start: StartBound<T>,
-    end: EndBound<T>,
+    start: ComparableBound<T>,
+    end: ComparableBound<T>,
 }
 
 impl<T: Ord> ComparableRange<T> {
     pub(crate) fn new(start: Bound<T>, end: Bound<T>) -> Self {
         Self {
-            start: StartBound::from(start),
-            end: EndBound::from(end),
+            start: ComparableBound::start(start),
+            end: ComparableBound::end(end),
         }
     }
 }
@@ -273,16 +231,12 @@ impl<T: Ord + Clone> ComparableRange<T> {
         }
     }
 
-    pub(crate) fn comparable_start_bound(&self) -> StartBound<&T> {
-        StartBound {
-            inner: self.start_bound(),
-        }
+    pub(crate) fn comparable_start_bound(&self) -> ComparableBound<&T> {
+        self.start.as_ref()
     }
 
-    pub(crate) fn comparable_end_bound(&self) -> EndBound<&T> {
-        EndBound {
-            inner: self.end_bound(),
-        }
+    pub(crate) fn comparable_end_bound(&self) -> ComparableBound<&T> {
+        self.end.as_ref()
     }
 }
 
@@ -313,7 +267,7 @@ pub(crate) mod tests {
     use rand::seq::SliceRandom;
     use rstest::rstest;
 
-    use crate::comparable_range::{ComparableRange, EndBound, StartBound};
+    use crate::comparable_range::{ComparableBound, ComparableRange};
 
     struct TestCase(Bound<u32>, Bound<u32>, Ordering);
 
@@ -329,8 +283,8 @@ pub(crate) mod tests {
     #[case(TestCase(Bound::Included(1), Bound::Unbounded, Ordering::Greater))]
     #[case(TestCase(Bound::Excluded(1), Bound::Unbounded, Ordering::Greater))]
     fn test_start_bound_cmp(#[case] test_case: TestCase) {
-        let lhs = StartBound::from(test_case.0);
-        let rhs = StartBound::from(test_case.1);
+        let lhs = ComparableBound::start(test_case.0);
+        let rhs = ComparableBound::start(test_case.1);
         assert_eq!(lhs.cmp(&rhs), test_case.2);
     }
 
@@ -346,8 +300,8 @@ pub(crate) mod tests {
     #[case(TestCase(Bound::Included(1), Bound::Unbounded, Ordering::Less))]
     #[case(TestCase(Bound::Excluded(1), Bound::Unbounded, Ordering::Less))]
     fn test_end_bound_cmp(#[case] test_case: TestCase) {
-        let lhs = EndBound::from(test_case.0);
-        let rhs = EndBound::from(test_case.1);
+        let lhs = ComparableBound::end(test_case.0);
+        let rhs = ComparableBound::end(test_case.1);
         assert_eq!(lhs.cmp(&rhs), test_case.2);
     }
 
