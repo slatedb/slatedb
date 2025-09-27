@@ -6,9 +6,10 @@ use uuid::Uuid;
 
 use crate::batch::WriteBatch;
 use crate::bytes_range::BytesRange;
-use crate::config::{ReadOptions, ScanOptions};
+use crate::config::{PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
 use crate::db_iter::DbIterator;
+use crate::error::SlateDBError;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::DbRead;
 
@@ -59,6 +60,7 @@ pub struct DBTransaction {
 }
 
 impl DBTransaction {
+    #[allow(unused)]
     pub(crate) fn new(
         db_inner: Arc<DbInner>,
         txn_manager: Arc<TransactionManager>,
@@ -197,24 +199,98 @@ impl DBTransaction {
             .map_err(Into::into)
     }
 
-    /// Get the transaction ID
-    pub fn txn_id(&self) -> &Uuid {
-        &self.txn_id
+    /// Put a key-value pair into the transaction.
+    /// The write will be buffered in the transaction's write batch until commit.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error buffering the write
+    pub fn put<K, V>(&mut self, key: K, value: V) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.put_with_options(key, value, &PutOptions::default())
     }
 
-    /// Get the started sequence number
-    pub fn started_seq(&self) -> u64 {
-        self.started_seq
+    /// Put a key-value pair into the transaction with custom options.
+    /// The write will be buffered in the transaction's write batch until commit.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to write
+    /// - `value`: the value to write
+    /// - `options`: the put options to use
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error buffering the write
+    pub fn put_with_options<K, V>(
+        &mut self,
+        key: K,
+        value: V,
+        options: &PutOptions,
+    ) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.write_batch.put_with_options(key, value, options);
+        Ok(())
     }
 
-    /// Get the isolation level
-    pub fn isolation_level(&self) -> IsolationLevel {
-        self.isolation_level
+    /// Delete a key from the transaction.
+    /// The delete will be buffered in the transaction's write batch until commit.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to delete
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error buffering the delete
+    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), crate::Error> {
+        self.delete_with_options(key, &WriteOptions::default())
     }
 
-    /// Check if this transaction has any conflicts
-    pub fn has_conflict(&self) -> bool {
-        self.txn_manager.check_has_conflict(&self.txn_id)
+    /// Delete a key from the transaction with custom options.
+    /// The delete will be buffered in the transaction's write batch until commit.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to delete
+    /// - `options`: the write options to use
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error buffering the delete
+    pub fn delete_with_options<K: AsRef<[u8]>>(
+        &mut self,
+        key: K,
+        _options: &WriteOptions,
+    ) -> Result<(), crate::Error> {
+        self.write_batch.delete(key);
+        Ok(())
+    }
+
+    /// Commit the transaction by writing all buffered operations to the database.
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error committing the transaction
+    pub async fn commit(self) -> Result<(), crate::Error> {
+        // Check for conflicts before committing
+        if self.txn_manager.check_has_conflict(&self.txn_id) {
+            return Err(crate::Error::from(SlateDBError::TransactionConflict));
+        }
+
+        // Write the transaction's batch to the database
+        self.db_inner
+            .write_with_options(self.write_batch.clone(), &WriteOptions::default())
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Rollback the transaction by discarding all buffered operations.
+    /// This is automatically called when the transaction is dropped.
+    pub fn rollback(self) {
+        todo!()
     }
 }
 
