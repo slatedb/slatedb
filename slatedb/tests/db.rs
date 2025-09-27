@@ -2,9 +2,12 @@
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use slatedb::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
+use slatedb::config::{
+    CompactorOptions, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, WriteOptions,
+};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
+use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use slatedb::Db;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,9 +57,16 @@ async fn test_concurrent_writers_and_readers() {
         l0_sst_size_bytes: 4 * 4096,
         ..Default::default()
     };
+    let supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
+        SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 1,
+            ..Default::default()
+        },
+    ));
     let db = Arc::new(
         Db::builder("/tmp/test_concurrent_writers_readers", object_store.clone())
             .with_settings(config)
+            .with_compaction_scheduler_supplier(supplier)
             .build()
             .await
             .unwrap(),

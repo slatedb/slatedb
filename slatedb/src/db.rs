@@ -1260,7 +1260,7 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -1791,7 +1791,7 @@ mod tests {
         expected_cache_parts: Vec<(&str, usize)>,
     ) -> (Arc<CachedObjectStore>, Db) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mut opts = test_db_options(0, 1024, None);
+        let opts = test_db_options(0, 1024, None);
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_")
             .tempdir()
@@ -1800,9 +1800,10 @@ mod tests {
         let stats_registry = StatRegistry::new();
         let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let part_size = 1024;
+        eprintln!("temp_dir: {:?}", temp_dir.path());
 
         let cache_storage = Arc::new(FsCacheStorage::new(
-            temp_dir.path().to_path_buf(),
+            temp_dir.keep(),
             None,
             None,
             cache_stats.clone(),
@@ -1819,8 +1820,6 @@ mod tests {
         )
         .unwrap();
 
-        opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
-        opts.object_store_cache_options.cache_puts = cache_puts_enabled;
         let kv_store = Db::builder(db_path, cached_object_store.clone())
             .with_settings(opts)
             .build()
@@ -1852,8 +1851,8 @@ mod tests {
         let expected_cache_parts =
             vec![
             ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
-            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 2),
-            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 2),
+            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 1),
+            ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 1),
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
         ];
 
@@ -1871,10 +1870,10 @@ mod tests {
     async fn test_get_with_object_store_cache_put_caching_enabled() {
         let expected_cache_parts =
             vec![
-            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 2),
-            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 2),
-            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 2),
-            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000002.sst", 2),
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000001.manifest", 1),
+            ("tmp/test_kv_store_with_put_cache_enabled/manifest/00000000000000000002.manifest", 1),
+            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000001.sst", 1),
+            ("tmp/test_kv_store_with_put_cache_enabled/wal/00000000000000000002.sst", 1),
         ];
 
         let (_cached_object_store, kv_store) = test_object_store_cache_helper(
@@ -3542,7 +3541,11 @@ mod tests {
     async fn do_test_should_read_compacted_db(options: Settings) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
-        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new());
+        let should_compact_l0 = Arc::new(AtomicBool::new(false));
+        let this_should_compact_l0 = should_compact_l0.clone();
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| this_should_compact_l0.swap(false, Ordering::SeqCst),
+        )));
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
@@ -3570,10 +3573,7 @@ mod tests {
                 // only runs once per `should_compact`, and memtables might still be getting
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
-                compaction_scheduler
-                    .scheduler
-                    .should_compact
-                    .store(true, Ordering::SeqCst);
+                should_compact_l0.store(true, Ordering::SeqCst);
                 s.l0_last_compacted.is_some() && s.l0.is_empty()
             },
             Duration::from_secs(10),
@@ -3598,10 +3598,7 @@ mod tests {
                 // only runs once per `should_compact`, and memtables might still be getting
                 // flushed (await_durable in the put()'s above only wait for the writes to hit
                 // the WAL before returning).
-                compaction_scheduler
-                    .scheduler
-                    .should_compact
-                    .store(true, Ordering::SeqCst);
+                should_compact_l0.store(true, Ordering::SeqCst);
                 s.l0_last_compacted.is_some() && s.l0.is_empty()
             },
             Duration::from_secs(10),
