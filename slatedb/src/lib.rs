@@ -81,6 +81,7 @@ mod db_read;
 mod db_reader;
 mod db_snapshot;
 mod db_state;
+mod db_transaction;
 mod dispatcher;
 mod error;
 mod filter;
