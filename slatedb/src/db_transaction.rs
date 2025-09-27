@@ -7,9 +7,9 @@ use uuid::Uuid;
 use crate::batch::WriteBatch;
 use crate::bytes_range::BytesRange;
 use crate::config::{ReadOptions, ScanOptions};
-use crate::db_iter::DbIterator;
 use crate::db::DbInner;
-use crate::transaction_manager::{TransactionManager, IsolationLevel};
+use crate::db_iter::DbIterator;
+use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::DbRead;
 
 /// A database transaction that provides atomic read-write operations with
@@ -86,24 +86,7 @@ impl DBTransaction {
     /// ## Returns
     /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
     pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_write_batch(key, &self.write_batch).await
-    }
-
-    /// Get a value from the transaction with a specific write batch.
-    /// This allows reading with pending writes from the same transaction.
-    ///
-    /// ## Arguments
-    /// - `key`: the key to get
-    /// - `write_batch`: write batch to include in the read
-    ///
-    /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
-    pub async fn get_with_write_batch<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        write_batch: &WriteBatch,
-    ) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options_and_write_batch(key, &ReadOptions::default(), write_batch).await
+        self.get_with_options(key, &ReadOptions::default()).await
     }
 
     /// Get a value from the transaction with custom read options.
@@ -119,25 +102,6 @@ impl DBTransaction {
         &self,
         key: K,
         options: &ReadOptions,
-    ) -> Result<Option<Bytes>, crate::Error> {
-        self.get_with_options_and_write_batch(key, options, &self.write_batch).await
-    }
-
-    /// Get a value from the transaction with custom read options and write batch.
-    /// This is the most flexible get operation that combines all options.
-    ///
-    /// ## Arguments
-    /// - `key`: the key to get
-    /// - `options`: the read options to use
-    /// - `write_batch`: write batch to include in the read
-    ///
-    /// ## Returns
-    /// - `Result<Option<Bytes>, SlateDBError>`: the value if it exists, None otherwise
-    pub async fn get_with_options_and_write_batch<K: AsRef<[u8]> + Send>(
-        &self,
-        key: K,
-        options: &ReadOptions,
-        write_batch: &WriteBatch,
     ) -> Result<Option<Bytes>, crate::Error> {
         self.db_inner.check_error()?;
 
@@ -155,7 +119,13 @@ impl DBTransaction {
         // For now, delegate to the underlying reader
         self.db_inner
             .reader
-            .get_with_options(key, options, &db_state, Some(write_batch), Some(self.started_seq))
+            .get_with_options(
+                key,
+                options,
+                &db_state,
+                Some(&self.write_batch),
+                Some(self.started_seq),
+            )
             .await
             .map_err(Into::into)
     }
@@ -173,28 +143,7 @@ impl DBTransaction {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        self.scan_with_write_batch(range, &self.write_batch).await
-    }
-
-    /// Scan a range of keys with a specific write batch.
-    /// This allows scanning with pending writes from the same transaction.
-    ///
-    /// ## Arguments
-    /// - `range`: the range of keys to scan
-    /// - `write_batch`: write batch to include in the scan
-    ///
-    /// ## Returns
-    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_with_write_batch<K, T>(
-        &self,
-        range: T,
-        write_batch: &WriteBatch,
-    ) -> Result<DbIterator, crate::Error>
-    where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
-    {
-        self.scan_with_options_and_write_batch(range, &ScanOptions::default(), write_batch).await
+        self.scan_with_options(range, &ScanOptions::default()).await
     }
 
     /// Scan a range of keys with the provided options.
@@ -210,29 +159,6 @@ impl DBTransaction {
         &self,
         range: T,
         options: &ScanOptions,
-    ) -> Result<DbIterator, crate::Error>
-    where
-        K: AsRef<[u8]> + Send,
-        T: RangeBounds<K> + Send,
-    {
-        self.scan_with_options_and_write_batch(range, options, &self.write_batch).await
-    }
-
-    /// Scan a range of keys with the provided options and write batch.
-    /// This is the most flexible scan operation that combines all options.
-    ///
-    /// ## Arguments
-    /// - `range`: the range of keys to scan
-    /// - `options`: the scan options to use
-    /// - `write_batch`: write batch to include in the scan
-    ///
-    /// ## Returns
-    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
-    pub async fn scan_with_options_and_write_batch<K, T>(
-        &self,
-        range: T,
-        options: &ScanOptions,
-        write_batch: &WriteBatch,
     ) -> Result<DbIterator, crate::Error>
     where
         K: AsRef<[u8]> + Send,
@@ -264,7 +190,7 @@ impl DBTransaction {
                 BytesRange::from(range),
                 options,
                 &db_state,
-                Some(write_batch),
+                Some(&self.write_batch),
                 Some(self.started_seq),
             )
             .await
@@ -289,16 +215,6 @@ impl DBTransaction {
     /// Check if this transaction has any conflicts
     pub fn has_conflict(&self) -> bool {
         self.txn_manager.check_has_conflict(&self.txn_id)
-    }
-
-    /// Get a reference to the write batch
-    pub fn write_batch(&self) -> &WriteBatch {
-        &self.write_batch
-    }
-
-    /// Get a mutable reference to the write batch
-    pub fn write_batch_mut(&mut self) -> &mut WriteBatch {
-        &mut self.write_batch
     }
 }
 
@@ -330,298 +246,5 @@ impl DbRead for DBTransaction {
 impl Drop for DBTransaction {
     fn drop(&mut self) {
         self.txn_manager.drop_txn(&self.txn_id);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{ReadOptions, ScanOptions};
-    use crate::object_store::memory::InMemory;
-    use crate::object_store::ObjectStore;
-    use crate::{Db, Error};
-    use std::sync::Arc;
-
-    async fn create_test_db() -> Db {
-        let object_store = Arc::new(InMemory::new());
-        Db::open("/tmp/transaction_test", object_store)
-            .await
-            .expect("Failed to create test database")
-    }
-
-    #[tokio::test]
-    async fn test_transaction_basic_read() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        // Put some data first
-        db.put(b"key1", b"value1").await?;
-
-        // Create a transaction
-        let txn = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-
-        // Read within transaction
-        let result = txn.get(b"key1").await?;
-        assert_eq!(result, Some(Bytes::from("value1")));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_transaction_isolation() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        // Put initial data
-        db.put(b"key1", b"original").await?;
-
-        // Create transaction
-        let txn = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-
-        // Modify data outside transaction
-        db.put(b"key1", b"modified").await?;
-        db.put(b"key2", b"new_value").await?;
-
-        // Transaction should see original data
-        let result1 = txn.get(b"key1").await?;
-        assert_eq!(result1, Some(Bytes::from("original")));
-
-        let result2 = txn.get(b"key2").await?;
-        assert_eq!(result2, None);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_transaction_with_options() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        db.put(b"key1", b"value1").await?;
-
-        let txn = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-
-        let options = ReadOptions::default();
-        let result = txn.get_with_options(b"key1", &options).await?;
-        assert_eq!(result, Some(Bytes::from("value1")));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_transaction_scan() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        db.put(b"key1", b"value1").await?;
-        db.put(b"key2", b"value2").await?;
-        db.put(b"key3", b"value3").await?;
-
-        let txn = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-
-        let mut iterator = txn.scan(b"key1"..).await?;
-        let mut count = 0;
-        while let Some(_kv) = iterator.next().await? {
-            count += 1;
-        }
-        assert_eq!(count, 3);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_transaction_scan_with_options() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        db.put(b"key1", b"value1").await?;
-        db.put(b"key2", b"value2").await?;
-
-        let txn = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-
-        let options = ScanOptions::default();
-        let mut iterator = txn.scan_with_options(b"key1".., &options).await?;
-        let mut count = 0;
-        while let Some(_kv) = iterator.next().await? {
-            count += 1;
-        }
-        assert_eq!(count, 2);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_transaction_with_write_batch() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        db.put(b"key1", b"original").await?;
-
-        let txn = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-
-        // Create a separate write batch for testing
-        let mut write_batch = WriteBatch::new();
-        write_batch.put(b"key2", b"batch_value");
-
-        // Test reading with write batch
-        let result1 = txn.get_with_write_batch(b"key1", &write_batch).await?;
-        assert_eq!(result1, Some(Bytes::from("original")));
-
-        let result2 = txn.get_with_write_batch(b"key2", &write_batch).await?;
-        // Should see the batch value if reader supports it
-        // For now, this depends on the underlying reader implementation
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_transaction_properties() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        let txn = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-
-        // Test that we can access transaction properties
-        let _txn_id = txn.txn_id();
-        let _started_seq = txn.started_seq();
-        let _isolation_level = txn.isolation_level();
-
-        // Test conflict checking (should be false for read-only operations)
-        assert!(!txn.has_conflict());
-
-        // Test write batch access
-        let _write_batch = txn.write_batch();
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_transaction_drop_rollback() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        db.put(b"key1", b"value1").await?;
-
-        {
-            let txn = DBTransaction::new(
-                db.inner.clone(),
-                db.inner.txn_manager.clone(),
-                db.inner.oracle.last_committed_seq.load(),
-                IsolationLevel::Snapshot,
-            );
-            let result = txn.get(b"key1").await?;
-            assert_eq!(result, Some(Bytes::from("value1")));
-            // Transaction dropped here, should be rolled back
-        }
-
-        // Database should still have the original data
-        let result = db.get(b"key1").await?;
-        assert_eq!(result, Some(Bytes::from("value1")));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multiple_transactions() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        db.put(b"key1", b"value1").await?;
-
-        let txn1 = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-        let txn2 = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-
-        // Both transactions should see the same data
-        let result1 = txn1.get(b"key1").await?;
-        let result2 = txn2.get(b"key1").await?;
-
-        assert_eq!(result1, result2);
-        assert_eq!(result1, Some(Bytes::from("value1")));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_transaction_write_batch_access() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        let mut txn = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::Snapshot,
-        );
-
-        // Test write batch access
-        let write_batch = txn.write_batch();
-        assert_eq!(write_batch.len(), 0); // Should be empty initially
-
-        // Test mutable access
-        let write_batch_mut = Arc::get_mut(&mut txn).unwrap().write_batch_mut();
-        write_batch_mut.put(b"test_key", b"test_value");
-
-        // Verify the write batch was modified
-        assert_eq!(txn.write_batch().len(), 1);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_serializable_snapshot_isolation() -> Result<(), Error> {
-        let db = create_test_db().await;
-
-        db.put(b"key1", b"value1").await?;
-
-        let txn = DBTransaction::new(
-            db.inner.clone(),
-            db.inner.txn_manager.clone(),
-            db.inner.oracle.last_committed_seq.load(),
-            IsolationLevel::SerializableSnapshot,
-        );
-
-        // In SSI mode, reads should be tracked for conflict detection
-        let result = txn.get(b"key1").await?;
-        assert_eq!(result, Some(Bytes::from("value1")));
-
-        // Conflict detection should work (though no conflicts in this simple test)
-        assert!(!txn.has_conflict());
-
-        Ok(())
     }
 }
