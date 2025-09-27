@@ -79,7 +79,7 @@ pub struct DbIterator<'a> {
     iter: MergeIterator<'a>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
-    range_tracker: Option<DbIteratorRangeTracker>,
+    range_tracker: Option<Arc<DbIteratorRangeTracker>>,
 }
 
 impl<'a> DbIterator<'a> {
@@ -90,7 +90,7 @@ impl<'a> DbIterator<'a> {
         l0_iters: impl IntoIterator<Item = SstIterator<'a>>,
         sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
-        range_tracker: Option<DbIteratorRangeTracker>,
+        range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<Self, SlateDBError> {
         let iters: Vec<Box<dyn KeyValueIterator>> = {
             // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted

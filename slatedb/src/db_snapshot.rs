@@ -121,6 +121,7 @@ impl DbSnapshot {
                 &db_state,
                 None,
                 Some(self.started_seq),
+                None,
             )
             .await
             .map_err(Into::into)

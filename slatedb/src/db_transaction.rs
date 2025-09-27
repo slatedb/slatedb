@@ -2,14 +2,13 @@ use bytes::Bytes;
 use std::collections::HashSet;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use std::sync::Mutex;
 use uuid::Uuid;
 
 use crate::batch::WriteBatch;
 use crate::bytes_range::BytesRange;
 use crate::config::{PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
-use crate::db_iter::DbIterator;
+use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::DbRead;
@@ -58,6 +57,8 @@ pub struct DBTransaction {
     db_inner: Arc<DbInner>,
     /// Isolation level for this transaction
     isolation_level: IsolationLevel,
+    /// Range trackers for scanned ranges (used for SSI conflict detection)
+    range_trackers: Vec<Arc<DbIteratorRangeTracker>>,
 }
 
 impl DBTransaction {
@@ -77,6 +78,7 @@ impl DBTransaction {
             write_batch: WriteBatch::new(),
             db_inner,
             isolation_level,
+            range_trackers: Vec::new(),
         })
     }
 
@@ -177,11 +179,13 @@ impl DBTransaction {
         let range = (start, end);
 
         // Track read range for SSI conflict detection if needed
-        if self.isolation_level == IsolationLevel::SerializableSnapshot {
-            // TODO: we should track the range that actually scanned by the db_iter.
-            let range_bytes = BytesRange::from(range.clone());
-            self.txn_manager.track_read_range(&self.txn_id, range_bytes);
-        }
+        let range_tracker = if self.isolation_level == IsolationLevel::SerializableSnapshot {
+            let tracker = Arc::new(DbIteratorRangeTracker::new());
+            self.range_trackers.push(tracker.clone());
+            Some(tracker)
+        } else {
+            None
+        };
 
         self.db_inner.check_error()?;
         let db_state = self.db_inner.state.read().view();
@@ -196,6 +200,7 @@ impl DBTransaction {
                 &db_state,
                 Some(&self.write_batch),
                 Some(self.started_seq),
+                range_tracker,
             )
             .await
             .map_err(Into::into)

@@ -203,7 +203,7 @@ impl DbReaderInner {
         self.check_error()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
-            .scan_with_options(range, options, db_state.as_ref(), None, None)
+            .scan_with_options(range, options, db_state.as_ref(), None, None, None)
             .await
     }
 
