@@ -117,15 +117,15 @@ impl FenceableManifest {
         &mut self,
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
-        let dirty = DirtyRecord::new(manifest.id(), Manifest::from(manifest));
+        let mut dirty = self.inner.prepare_dirty()?;
+        if dirty.id() != manifest.id {
+            return Err(SlateDBError::ManifestVersionExists);
+        }
+        dirty.value = Manifest::from(manifest);
         self.inner.update_dirty(dirty).await.map_err(|e| match e {
             SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
             other => other,
         })
-    }
-
-    fn clock_arc(&self) -> Arc<dyn SystemClock> {
-        self.clock.clone()
     }
 
     pub(crate) fn new_checkpoint(
@@ -133,7 +133,7 @@ impl FenceableManifest {
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.clock_arc();
+        let clock =  self.clock.clone();
         let db_state = &self.inner.record().core;
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
@@ -359,7 +359,7 @@ impl StoredManifest {
                 if new_val.core.checkpoints.len() == before {
                     Ok(None)
                 } else {
-                    Ok(Some(DirtyRecord::new(sr.id(), new_val)))
+                    Ok(Some(DirtyRecord{id: sr.id(), value: new_val}))
                 }
             })
             .await
@@ -391,7 +391,7 @@ impl StoredManifest {
                     .checkpoints
                     .retain(|cp| cp.id != old_checkpoint_id);
                 new_val.core.checkpoints.push(checkpoint);
-                Ok(Some(DirtyRecord::new(sr.id(), new_val)))
+                Ok(Some(DirtyRecord{id: sr.id(), value: new_val}))
             })
             .await?;
         let new_checkpoint = self
@@ -420,7 +420,7 @@ impl StoredManifest {
                     return Err(CheckpointMissing(checkpoint_id));
                 };
                 cp.expire_time = Some(clock.now() + new_lifetime);
-                Ok(Some(DirtyRecord::new(sr.id(), new_val)))
+                Ok(Some(DirtyRecord{id: sr.id(), value: new_val}))
             })
             .await?;
         let checkpoint = self
@@ -439,7 +439,7 @@ impl StoredManifest {
             return Err(ManifestVersionExists);
         }
         let manifest = manifest.into();
-        let dirty = DirtyRecord::new(self.inner.id(), manifest);
+        let dirty = DirtyRecord{id: self.inner.id(), value: manifest};
         self.inner.update(dirty).await.map_err(|e| match e {
             SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
             other => other,
