@@ -37,20 +37,19 @@ impl DbIteratorRangeTracker {
         }
     }
 
-    pub fn track_key(&self, key: &[u8]) {
+    pub fn track_key(&self, key: &Bytes) {
         let mut inner = self.inner.lock();
-        let key_bytes = Bytes::copy_from_slice(key);
 
         inner.first_key = Some(match &inner.first_key {
-            Some(first) if key_bytes < *first => key_bytes.clone(),
+            Some(first) if key < first => key.clone(),
             Some(first) => first.clone(),
-            None => key_bytes.clone(),
+            None => key.clone(),
         });
 
         inner.last_key = Some(match &inner.last_key {
-            Some(last) if key_bytes > *last => key_bytes.clone(),
+            Some(last) if key > last => key.clone(),
             Some(last) => last.clone(),
-            None => key_bytes.clone(),
+            None => key.clone(),
         });
 
         inner.has_data = true;
