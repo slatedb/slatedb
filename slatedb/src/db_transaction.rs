@@ -274,8 +274,7 @@ impl DBTransaction {
     /// Rollback the transaction by discarding all buffered operations.
     /// This is automatically called when the transaction is dropped.
     pub fn rollback(self) {
-        // TODO: we may require to track the state of DbTransaction about whether it's committed or rolled back.
-        todo!()
+        // do nothing, trigger the Drop of the transaction
     }
 }
 
