@@ -11,12 +11,75 @@ use crate::types::KeyValue;
 
 use bytes::Bytes;
 use std::ops::RangeBounds;
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone)]
+pub struct DbIteratorRangeTracker {
+    inner: Arc<Mutex<RangeTrackerInner>>,
+}
+
+#[derive(Debug)]
+struct RangeTrackerInner {
+    first_key: Option<Bytes>,
+    last_key: Option<Bytes>,
+    has_data: bool,
+}
+
+impl DbIteratorRangeTracker {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RangeTrackerInner {
+                first_key: None,
+                last_key: None,
+                has_data: false,
+            })),
+        }
+    }
+
+    pub fn update_key(&self, key: &[u8]) {
+        let mut inner = self.inner.lock().unwrap();
+        let key_bytes = Bytes::copy_from_slice(key);
+
+        inner.first_key = Some(match &inner.first_key {
+            Some(first) if key_bytes < *first => key_bytes.clone(),
+            Some(first) => first.clone(),
+            None => key_bytes.clone(),
+        });
+
+        inner.last_key = Some(match &inner.last_key {
+            Some(last) if key_bytes > *last => key_bytes.clone(),
+            Some(last) => last.clone(),
+            None => key_bytes.clone(),
+        });
+
+        inner.has_data = true;
+    }
+
+    pub fn get_range(&self) -> Option<BytesRange> {
+        let inner = self.inner.lock().unwrap();
+        match (&inner.first_key, &inner.last_key) {
+            (Some(first), Some(last)) => {
+                use std::ops::Bound;
+                Some(BytesRange::from((
+                    Bound::Included(first.clone()),
+                    Bound::Included(last.clone()),
+                )))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn has_data(&self) -> bool {
+        self.inner.lock().unwrap().has_data
+    }
+}
 
 pub struct DbIterator<'a> {
     range: BytesRange,
     iter: MergeIterator<'a>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
+    range_tracker: Option<DbIteratorRangeTracker>,
 }
 
 impl<'a> DbIterator<'a> {
@@ -27,6 +90,7 @@ impl<'a> DbIterator<'a> {
         l0_iters: impl IntoIterator<Item = SstIterator<'a>>,
         sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
+        range_tracker: Option<DbIteratorRangeTracker>,
     ) -> Result<Self, SlateDBError> {
         let iters: Vec<Box<dyn KeyValueIterator>> = {
             // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
@@ -69,6 +133,7 @@ impl<'a> DbIterator<'a> {
             iter,
             invalidated_error: None,
             last_key: None,
+            range_tracker,
         })
     }
 
@@ -99,6 +164,10 @@ impl<'a> DbIterator<'a> {
             let result = self.maybe_invalidate(result);
             if let Ok(Some(ref kv)) = &result {
                 self.last_key = Some(kv.key.clone());
+                // Track the key in range tracker if present
+                if let Some(tracker) = &self.range_tracker {
+                    tracker.update_key(&kv.key);
+                }
             }
             result.map_err(Into::into)
         }
@@ -177,6 +246,7 @@ mod tests {
             VecDeque::new(),
             VecDeque::new(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -219,6 +289,7 @@ mod tests {
             VecDeque::new(),
             VecDeque::new(),
             Some(100),
+            None,
         )
         .await
         .unwrap();
@@ -248,6 +319,7 @@ mod tests {
             vec![mem_iter],
             VecDeque::new(),
             VecDeque::new(),
+            None,
             None,
         )
         .await
@@ -295,6 +367,7 @@ mod tests {
             mem_iters,
             VecDeque::new(),
             VecDeque::new(),
+            None,
             None,
         )
         .await

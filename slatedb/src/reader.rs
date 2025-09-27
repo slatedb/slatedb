@@ -226,6 +226,7 @@ impl Reader {
             l0_iters,
             sr_iters,
             max_seq,
+            None, // range_tracker - only used for transactions
         )
         .await
     }

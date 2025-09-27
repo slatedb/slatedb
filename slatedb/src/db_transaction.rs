@@ -2,6 +2,7 @@ use bytes::Bytes;
 use std::collections::HashSet;
 use std::ops::RangeBounds;
 use std::sync::Arc;
+use std::sync::Mutex;
 use uuid::Uuid;
 
 use crate::batch::WriteBatch;
