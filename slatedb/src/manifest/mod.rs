@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
-use crate::error::SlateDBError;
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
@@ -202,12 +201,6 @@ pub(crate) struct ExternalDb {
     pub(crate) source_checkpoint_id: Uuid,
     pub(crate) final_checkpoint_id: Option<Uuid>,
     pub(crate) sst_ids: Vec<SsTableId>,
-}
-
-pub(crate) trait ManifestCodec: Send + Sync {
-    fn encode(&self, manifest: &Manifest) -> Bytes;
-
-    fn decode(&self, bytes: &Bytes) -> Result<Manifest, SlateDBError>;
 }
 
 impl Manifest {
