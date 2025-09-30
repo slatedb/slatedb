@@ -29,7 +29,7 @@ use crate::DbRead;
 ///
 /// #     let object_store = Arc::new(InMemory::new());
 /// #     let db = Db::open("path/to/db", object_store).await?;
-/// let txn = db.begin_transaction(IsolationLevel::Snapshot).await?;
+/// let mut txn = db.begin_transaction(IsolationLevel::Snapshot).await?;
 ///
 /// // Read operations
 /// let value = txn.get(b"key").await?;
@@ -331,6 +331,7 @@ impl Drop for DBTransaction {
 mod tests {
     use super::*;
     use crate::object_store::memory::InMemory;
+    use rstest::rstest;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -387,5 +388,179 @@ mod tests {
 
         // Commit empty transaction - should succeed
         txn.commit().await.unwrap();
+    }
+
+    // Transaction test structures for table-driven tests
+    #[derive(Debug, Clone)]
+    struct TransactionTestCase {
+        name: &'static str,
+        initial_data: Vec<(&'static str, &'static str)>,
+        operations: Vec<TransactionTestOp>,
+        expected_results: Vec<TransactionTestOpResult>,
+    }
+
+    #[derive(Debug, Clone)]
+    enum TransactionTestOp {
+        TxnGet(&'static str),
+        TxnPut(&'static str, &'static str),
+        TxnDelete(&'static str),
+        DbPut(&'static str, &'static str),
+        DbGet(&'static str),
+        Commit,
+        Rollback,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum TransactionTestOpResult {
+        GotValue(Option<String>),
+        Empty,
+        Conflicted,
+        Invalid,
+    }
+
+    async fn execute_transaction_test(test_case: TransactionTestCase) {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open(test_case.name, object_store).await.unwrap();
+
+        // Setup initial data
+        for (key, value) in test_case.initial_data {
+            db.put(key, value).await.unwrap();
+        }
+
+        let mut txn_opt = Some(db.begin_transaction(IsolationLevel::SerializableSnapshot).await.unwrap());
+
+        for (i, operation) in test_case.operations.iter().enumerate() {
+            let result = match operation {
+                TransactionTestOp::TxnGet(key) => {
+                    if let Some(txn) = txn_opt.as_ref() {
+                        let val = txn.get(key).await.unwrap();
+                        TransactionTestOpResult::GotValue(val.map(|b| String::from_utf8(b.to_vec()).ok()).flatten())
+                    } else {
+                        TransactionTestOpResult::Invalid
+                    }
+                },
+                TransactionTestOp::TxnPut(key, value) => {
+                    if let Some(txn) = txn_opt.as_mut() {
+                        txn.put(key, value).unwrap();
+                        TransactionTestOpResult::Empty
+                    } else {
+                        TransactionTestOpResult::Invalid
+                    }
+                },
+                TransactionTestOp::TxnDelete(key) => {
+                    if let Some(txn) = txn_opt.as_mut() {
+                        txn.delete(key).unwrap();
+                        TransactionTestOpResult::Empty
+                    } else {
+                        TransactionTestOpResult::Invalid
+                    }
+                },
+                TransactionTestOp::DbPut(key, value) => {
+                    db.put(key, value).await.unwrap();
+                    TransactionTestOpResult::Empty
+                },
+                TransactionTestOp::DbGet(key) => {
+                    let val = db.get(key).await.unwrap();
+                    TransactionTestOpResult::GotValue(val.map(|b| String::from_utf8(b.to_vec()).ok()).flatten())
+                },
+                TransactionTestOp::Commit => {
+                    if let Some(txn) = txn_opt.take() {
+                        match txn.commit().await {
+                            Ok(_) => TransactionTestOpResult::Empty,
+                            Err(_) => TransactionTestOpResult::Conflicted,
+                        }
+                    } else {
+                        TransactionTestOpResult::Invalid
+                    }
+                },
+                TransactionTestOp::Rollback => {
+                    if let Some(txn) = txn_opt.take() {
+                        txn.rollback();
+                        TransactionTestOpResult::Empty
+                    } else {
+                        TransactionTestOpResult::Invalid
+                    }
+                },
+            };
+
+            let expected = &test_case.expected_results[i];
+            assert_eq!(
+                result, *expected,
+                "Test '{}' failed at operation {}: expected {:?}, got {:?}",
+                test_case.name, i, expected, result
+            );
+        }
+    }
+
+    // Table-driven tests using rstest
+    #[rstest]
+    #[case::si_basic_visibility(
+        "si_basic_visibility",
+        vec![("k1", "v1")],
+        vec![
+            TransactionTestOp::TxnGet("k1"),
+            TransactionTestOp::Commit,
+        ],
+        vec![
+            TransactionTestOpResult::GotValue(Some("v1".to_string())),
+            TransactionTestOpResult::Empty,
+        ]
+    )]
+    #[case::si_write_visibility_in_txn(
+        "si_write_visibility_in_txn",
+        vec![("k1", "v1")],
+        vec![
+            TransactionTestOp::TxnPut("k1", "v2"),
+            TransactionTestOp::TxnGet("k1"),
+            TransactionTestOp::Commit,
+        ],
+        vec![
+            TransactionTestOpResult::Empty,
+            TransactionTestOpResult::GotValue(Some("v2".to_string())),
+            TransactionTestOpResult::Empty,
+        ]
+    )]
+    #[case::si_delete_visibility_in_txn(
+        "si_delete_visibility_in_txn",
+        vec![("k1", "v1")],
+        vec![
+            TransactionTestOp::TxnDelete("k1"),
+            TransactionTestOp::TxnGet("k1"),
+            TransactionTestOp::Commit,
+        ],
+        vec![
+            TransactionTestOpResult::Empty,
+            TransactionTestOpResult::GotValue(None),
+            TransactionTestOpResult::Empty,
+        ]
+    )]
+    #[case::si_rollback_visibility(
+        "si_rollback_visibility",
+        vec![("k1", "v1")],
+        vec![
+            TransactionTestOp::TxnPut("k1", "v2"),
+            TransactionTestOp::Rollback,
+            TransactionTestOp::DbGet("k1"),
+        ],
+        vec![
+            TransactionTestOpResult::Empty,
+            TransactionTestOpResult::Empty,
+            TransactionTestOpResult::GotValue(Some("v1".to_string())),
+        ]
+    )]
+    #[tokio::test]
+    async fn test_si_table_driven(
+        #[case] test_name: &'static str,
+        #[case] initial_data: Vec<(&'static str, &'static str)>,
+        #[case] operations: Vec<TransactionTestOp>,
+        #[case] expected_results: Vec<TransactionTestOpResult>,
+    ) {
+        let test_case = TransactionTestCase {
+            name: test_name,
+            initial_data,
+            operations,
+            expected_results,
+        };
+        execute_transaction_test(test_case).await;
     }
 }
