@@ -344,7 +344,10 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin transaction
-        let txn = db.begin_transaction(IsolationLevel::SerializableSnapshot).await.unwrap();
+        let txn = db
+            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
 
         // Read within transaction - should see the initial data
         let value = txn.get(b"k1").await.unwrap();
@@ -364,7 +367,10 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin transaction
-        let mut txn = db.begin_transaction(IsolationLevel::SerializableSnapshot).await.unwrap();
+        let mut txn = db
+            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
 
         // Write within transaction
         txn.put(b"k1", b"v2").unwrap();
@@ -384,7 +390,10 @@ mod tests {
         let db = crate::Db::open("test_db", object_store).await.unwrap();
 
         // Begin transaction
-        let txn = db.begin_transaction(IsolationLevel::SerializableSnapshot).await.unwrap();
+        let txn = db
+            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
 
         // Commit empty transaction - should succeed
         txn.commit().await.unwrap();
@@ -400,6 +409,7 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     enum TransactionTestOp {
         TxnGet(&'static str),
         TxnPut(&'static str, &'static str),
@@ -427,18 +437,24 @@ mod tests {
             db.put(key, value).await.unwrap();
         }
 
-        let mut txn_opt = Some(db.begin_transaction(IsolationLevel::SerializableSnapshot).await.unwrap());
+        let mut txn_opt = Some(
+            db.begin_transaction(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap(),
+        );
 
         for (i, operation) in test_case.operations.iter().enumerate() {
             let result = match operation {
                 TransactionTestOp::TxnGet(key) => {
                     if let Some(txn) = txn_opt.as_ref() {
                         let val = txn.get(key).await.unwrap();
-                        TransactionTestOpResult::GotValue(val.map(|b| String::from_utf8(b.to_vec()).ok()).flatten())
+                        TransactionTestOpResult::GotValue(
+                            val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
+                        )
                     } else {
                         TransactionTestOpResult::Invalid
                     }
-                },
+                }
                 TransactionTestOp::TxnPut(key, value) => {
                     if let Some(txn) = txn_opt.as_mut() {
                         txn.put(key, value).unwrap();
@@ -446,7 +462,7 @@ mod tests {
                     } else {
                         TransactionTestOpResult::Invalid
                     }
-                },
+                }
                 TransactionTestOp::TxnDelete(key) => {
                     if let Some(txn) = txn_opt.as_mut() {
                         txn.delete(key).unwrap();
@@ -454,15 +470,17 @@ mod tests {
                     } else {
                         TransactionTestOpResult::Invalid
                     }
-                },
+                }
                 TransactionTestOp::DbPut(key, value) => {
                     db.put(key, value).await.unwrap();
                     TransactionTestOpResult::Empty
-                },
+                }
                 TransactionTestOp::DbGet(key) => {
                     let val = db.get(key).await.unwrap();
-                    TransactionTestOpResult::GotValue(val.map(|b| String::from_utf8(b.to_vec()).ok()).flatten())
-                },
+                    TransactionTestOpResult::GotValue(
+                        val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
+                    )
+                }
                 TransactionTestOp::Commit => {
                     if let Some(txn) = txn_opt.take() {
                         match txn.commit().await {
@@ -472,7 +490,7 @@ mod tests {
                     } else {
                         TransactionTestOpResult::Invalid
                     }
-                },
+                }
                 TransactionTestOp::Rollback => {
                     if let Some(txn) = txn_opt.take() {
                         txn.rollback();
@@ -480,7 +498,7 @@ mod tests {
                     } else {
                         TransactionTestOpResult::Invalid
                     }
-                },
+                }
             };
 
             let expected = &test_case.expected_results[i];

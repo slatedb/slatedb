@@ -1237,7 +1237,10 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn begin_transaction(&self, isolation_level: IsolationLevel) -> Result<DBTransaction, crate::Error> {
+    pub async fn begin_transaction(
+        &self,
+        isolation_level: IsolationLevel,
+    ) -> Result<DBTransaction, crate::Error> {
         self.inner.check_error()?;
         let seq = self.inner.oracle.last_committed_seq.load();
         let txn = DBTransaction::new(
