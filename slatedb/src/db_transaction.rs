@@ -34,12 +34,12 @@ use crate::DbRead;
 /// // Read operations
 /// let value = txn.get(b"key").await?;
 ///
-/// // Write operations (not implemented yet)
-/// // txn.put(b"key", b"value").await?;
-/// // txn.delete(b"key").await?;
+/// // Write operations
+/// txn.put(b"key", b"value")?;
+/// txn.delete(b"key")?;
 ///
-/// // Commit the transaction (not implemented yet)
-/// // txn.commit().await?;
+/// // Commit the transaction
+/// txn.commit().await?;
 /// # Ok(())
 /// # };
 /// ```
@@ -69,10 +69,10 @@ impl DBTransaction {
         txn_manager: Arc<TransactionManager>,
         seq: u64,
         isolation_level: IsolationLevel,
-    ) -> Arc<Self> {
+    ) -> Self {
         let txn_id = txn_manager.new_txn(seq, false); // false = not read-only
 
-        Arc::new(Self {
+        Self {
             txn_id,
             started_seq: seq,
             txn_manager,
@@ -80,7 +80,7 @@ impl DBTransaction {
             db_inner,
             isolation_level,
             range_trackers: Mutex::new(Vec::new()),
-        })
+        }
     }
 
     /// Get a value from the transaction with default read options.
@@ -324,5 +324,68 @@ impl DbRead for DBTransaction {
 impl Drop for DBTransaction {
     fn drop(&mut self) {
         self.txn_manager.drop_txn(&self.txn_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object_store::memory::InMemory;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_si_basic_visibility() {
+        // Setup database with initial data
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Put initial data
+        db.put(b"k1", b"v1").await.unwrap();
+
+        // Begin transaction
+        let txn = db.begin_transaction(IsolationLevel::SerializableSnapshot).await.unwrap();
+
+        // Read within transaction - should see the initial data
+        let value = txn.get(b"k1").await.unwrap();
+        assert_eq!(value, Some(Bytes::from_static(b"v1")));
+
+        // Commit transaction
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_si_write_visibility_in_txn() {
+        // Setup database with initial data
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Put initial data
+        db.put(b"k1", b"v1").await.unwrap();
+
+        // Begin transaction
+        let mut txn = db.begin_transaction(IsolationLevel::SerializableSnapshot).await.unwrap();
+
+        // Write within transaction
+        txn.put(b"k1", b"v2").unwrap();
+
+        // Read within transaction - should see the updated value
+        let value = txn.get(b"k1").await.unwrap();
+        assert_eq!(value, Some(Bytes::from_static(b"v2")));
+
+        // Commit transaction
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_si_empty_transaction() {
+        // Setup database
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Begin transaction
+        let txn = db.begin_transaction(IsolationLevel::SerializableSnapshot).await.unwrap();
+
+        // Commit empty transaction - should succeed
+        txn.commit().await.unwrap();
     }
 }

@@ -28,6 +28,9 @@ use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
+
+use crate::db_transaction::DBTransaction;
+use crate::transaction_manager::IsolationLevel;
 use parking_lot::{Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -1209,6 +1212,41 @@ impl Db {
     /// Get the metrics registry for the database.
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
+    }
+
+    /// Begin a new transaction with the specified isolation level.
+    ///
+    /// ## Arguments
+    /// - `isolation_level`: the isolation level for the transaction
+    ///
+    /// ## Returns
+    /// - `Result<DBTransaction, crate::Error>`: the transaction handle
+    ///
+    /// ## Examples
+    ///
+    /// ```rust
+    /// use slatedb::{Db, IsolationLevel};
+    /// use slatedb::object_store::memory::InMemory;
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), slatedb::Error> {
+    ///     let object_store = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     let txn = db.begin_transaction(IsolationLevel::SerializableSnapshot).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn begin_transaction(&self, isolation_level: IsolationLevel) -> Result<DBTransaction, crate::Error> {
+        self.inner.check_error()?;
+        let seq = self.inner.oracle.last_committed_seq.load();
+        let txn = DBTransaction::new(
+            self.inner.clone(),
+            self.inner.txn_manager.clone(),
+            seq,
+            isolation_level,
+        );
+        Ok(txn)
     }
 
     /// Resolve an object store from a URL.
