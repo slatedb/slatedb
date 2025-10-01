@@ -444,61 +444,61 @@ mod tests {
         );
 
         for (i, operation) in test_case.operations.iter().enumerate() {
-            let result = match operation {
-                TransactionTestOp::TxnGet(key) => {
-                    if let Some(txn) = txn_opt.as_ref() {
+            let result = match txn_opt.as_ref() {
+                Some(_) => match operation {
+                    TransactionTestOp::TxnGet(key) => {
+                        let txn = txn_opt.as_ref().unwrap();
                         let val = txn.get(key).await.unwrap();
                         TransactionTestOpResult::GotValue(
                             val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
                         )
-                    } else {
-                        TransactionTestOpResult::Invalid
                     }
-                }
-                TransactionTestOp::TxnPut(key, value) => {
-                    if let Some(txn) = txn_opt.as_mut() {
+                    TransactionTestOp::TxnPut(key, value) => {
+                        let txn = txn_opt.as_mut().unwrap();
                         txn.put(key, value).unwrap();
                         TransactionTestOpResult::Empty
-                    } else {
-                        TransactionTestOpResult::Invalid
                     }
-                }
-                TransactionTestOp::TxnDelete(key) => {
-                    if let Some(txn) = txn_opt.as_mut() {
+                    TransactionTestOp::TxnDelete(key) => {
+                        let txn = txn_opt.as_mut().unwrap();
                         txn.delete(key).unwrap();
                         TransactionTestOpResult::Empty
-                    } else {
-                        TransactionTestOpResult::Invalid
                     }
-                }
-                TransactionTestOp::DbPut(key, value) => {
-                    db.put(key, value).await.unwrap();
-                    TransactionTestOpResult::Empty
-                }
-                TransactionTestOp::DbGet(key) => {
-                    let val = db.get(key).await.unwrap();
-                    TransactionTestOpResult::GotValue(
-                        val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
-                    )
-                }
-                TransactionTestOp::Commit => {
-                    if let Some(txn) = txn_opt.take() {
+                    TransactionTestOp::Commit => {
+                        let txn = txn_opt.take().unwrap();
                         match txn.commit().await {
                             Ok(_) => TransactionTestOpResult::Empty,
                             Err(_) => TransactionTestOpResult::Conflicted,
                         }
-                    } else {
-                        TransactionTestOpResult::Invalid
                     }
-                }
-                TransactionTestOp::Rollback => {
-                    if let Some(txn) = txn_opt.take() {
+                    TransactionTestOp::Rollback => {
+                        let txn = txn_opt.take().unwrap();
                         txn.rollback();
                         TransactionTestOpResult::Empty
-                    } else {
-                        TransactionTestOpResult::Invalid
                     }
-                }
+                    TransactionTestOp::DbPut(key, value) => {
+                        db.put(key, value).await.unwrap();
+                        TransactionTestOpResult::Empty
+                    }
+                    TransactionTestOp::DbGet(key) => {
+                        let val = db.get(key).await.unwrap();
+                        TransactionTestOpResult::GotValue(
+                            val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
+                        )
+                    }
+                },
+                None => match operation {
+                    TransactionTestOp::DbPut(key, value) => {
+                        db.put(key, value).await.unwrap();
+                        TransactionTestOpResult::Empty
+                    }
+                    TransactionTestOp::DbGet(key) => {
+                        let val = db.get(key).await.unwrap();
+                        TransactionTestOpResult::GotValue(
+                            val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
+                        )
+                    }
+                    _ => TransactionTestOpResult::Invalid,
+                },
             };
 
             let expected = &test_case.expected_results[i];
