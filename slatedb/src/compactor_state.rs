@@ -259,8 +259,6 @@ impl CompactorState {
             last_sr_id = sr.id;
         }
     }
-
-    // State-level validation removed; policy validation lives in CompactionScheduler
 }
 
 #[cfg(test)]
