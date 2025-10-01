@@ -801,11 +801,13 @@ mod tests {
             operations: vec![
                 TransactionTestOp::DbPut("k1", "v2"),
                 TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::TxnPut("k3"),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::GotValue(Some("v2".to_string())),
+                TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Conflicted,
             ]
         }
