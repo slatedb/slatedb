@@ -198,8 +198,8 @@ impl DbInner {
     fn extract_row_entries(&self, batch: &WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
         batch
             .ops
-            .iter()
-            .map(|(_, op)| {
+            .values()
+            .map(|op| {
                 let expire_ts = match &op {
                     WriteOp::Put(_, _, opts) => opts.expire_ts_from(self.settings.default_ttl, now),
                     WriteOp::Delete(_) => None,

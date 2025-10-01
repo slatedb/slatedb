@@ -589,7 +589,7 @@ mod tests {
                     TransactionTestOp::TxnScan(start, end) => {
                         let txn = txn_opt.as_ref().unwrap();
                         let mut iter = txn
-                            .scan(&Bytes::from_static(*start)[..]..=&Bytes::from_static(end)[..])
+                            .scan(&Bytes::from_static(start)[..]..=&Bytes::from_static(end)[..])
                             .await
                             .unwrap();
                         let mut scanned_keys = Vec::new();
