@@ -437,7 +437,6 @@ mod tests {
 
     use crate::compactor::CompactionScheduler;
     use crate::compactor_state::{Compaction, CompactorState, SourceId};
-    use crate::error::SlateDBError;
 
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -736,11 +735,10 @@ mod tests {
         // when:
         let compaction = create_l0_compaction(l0_sst.make_contiguous(), 0);
         let result = scheduler
-            .validate_compaction(&state, &compaction)
-            .map_err(|_e| SlateDBError::InvalidCompaction);
+            .validate_compaction(&state, &compaction);
 
         // then:
-        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -757,11 +755,10 @@ mod tests {
         // when:
         let compaction = create_l0_compaction(l0_sst.make_contiguous(), 0);
         let result = scheduler
-            .validate_compaction(&state, &compaction)
-            .map_err(|_e| SlateDBError::InvalidCompaction);
+            .validate_compaction(&state, &compaction);
 
         // then:
-        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -776,11 +773,10 @@ mod tests {
         compaction.sources.push(SourceId::SortedRun(5));
         // when:
         let result = scheduler
-            .validate_compaction(&state, &compaction)
-            .map_err(|_e| SlateDBError::InvalidCompaction);
+            .validate_compaction(&state, &compaction);
 
         // then:
-        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
+        assert!(result.is_err());
     }
 
     fn create_sst(size: u64) -> SsTableHandle {
