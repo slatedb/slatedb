@@ -265,6 +265,12 @@ impl DBTransaction {
     /// ## Errors
     /// - `Error`: if there was an error committing the transaction
     pub async fn commit(self) -> Result<(), crate::Error> {
+        // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
+        // conflict, neither write-write conflict.
+        if self.write_batch.is_empty() {
+            return Ok(());
+        }
+
         // Extract actual scanned ranges from trackers for SSI conflict detection
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
             for tracker in self.range_trackers.lock().iter() {
@@ -503,6 +509,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct TransactionTestCase {
         name: &'static str,
+        isolation_level: IsolationLevel,
         initial_data: Vec<(&'static str, &'static str)>,
         operations: Vec<TransactionTestOp>,
         expected_results: Vec<TransactionTestOpResult>,
@@ -538,7 +545,7 @@ mod tests {
         }
 
         let mut txn_opt = Some(
-            db.begin_transaction(IsolationLevel::SerializableSnapshot)
+            db.begin_transaction(test_case.isolation_level)
                 .await
                 .unwrap(),
         );
@@ -612,9 +619,10 @@ mod tests {
 
     // Table-driven tests using rstest
     #[rstest]
-    #[case::si_basic_visibility(
+    #[case::ssi_basic_visibility(
         TransactionTestCase {
-            name: "si_basic_visibility",
+            name: "ssi_basic_visibility",
+            isolation_level: IsolationLevel::SerializableSnapshot,
             initial_data: vec![("k1", "v1")],
             operations: vec![
                 TransactionTestOp::TxnGet("k1"),
@@ -626,9 +634,10 @@ mod tests {
             ]
         }
     )]
-    #[case::si_write_visibility_in_txn(
+    #[case::ssi_write_visibility_in_txn(
         TransactionTestCase {
-            name: "si_write_visibility_in_txn",
+            name: "ssi_write_visibility_in_txn",
+            isolation_level: IsolationLevel::SerializableSnapshot,
             initial_data: vec![("k1", "v1")],
             operations: vec![
                 TransactionTestOp::TxnPut("k1", "v2"),
@@ -642,9 +651,10 @@ mod tests {
             ]
         }
     )]
-    #[case::si_delete_visibility_in_txn(
+    #[case::ssi_delete_visibility_in_txn(
         TransactionTestCase {
-            name: "si_delete_visibility_in_txn",
+            name: "ssi_delete_visibility_in_txn",
+            isolation_level: IsolationLevel::SerializableSnapshot,
             initial_data: vec![("k1", "v1")],
             operations: vec![
                 TransactionTestOp::TxnDelete("k1"),
@@ -658,9 +668,10 @@ mod tests {
             ]
         }
     )]
-    #[case::si_rollback_visibility(
+    #[case::ssi_rollback_visibility(
         TransactionTestCase {
-            name: "si_rollback_visibility",
+            name: "ssi_rollback_visibility",
+            isolation_level: IsolationLevel::SerializableSnapshot,
             initial_data: vec![("k1", "v1")],
             operations: vec![
                 TransactionTestOp::TxnPut("k1", "v2"),
@@ -674,8 +685,25 @@ mod tests {
             ]
         }
     )]
+    #[case::si_concurrent_read_snapshot(
+        TransactionTestCase {
+            name: "ssi_concurrent_read_snapshot",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::DbPut("k1", "v2"),
+                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Empty,
+            ]
+        }
+    )]
     #[tokio::test]
-    async fn test_si_table_driven(#[case] test_case: TransactionTestCase) {
+    async fn test_txn_table_driven(#[case] test_case: TransactionTestCase) {
         execute_transaction_test(test_case).await;
     }
 }

@@ -204,6 +204,10 @@ impl WriteBatch {
     pub(crate) fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
         self.ops.keys().cloned()
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
 }
 
 /// Iterator over WriteBatch entries
