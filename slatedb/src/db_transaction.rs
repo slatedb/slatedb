@@ -801,12 +801,12 @@ mod tests {
             operations: vec![
                 TransactionTestOp::DbPut("k1", "v2"),
                 TransactionTestOp::TxnGet("k1"),
-                TransactionTestOp::TxnPut("k3"),
+                TransactionTestOp::TxnPut("k3", "v3"),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
-                TransactionTestOpResult::GotValue(Some("v2".to_string())),
+                TransactionTestOpResult::GotValue(Some("v1".to_string())),
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Conflicted,
             ]
@@ -824,7 +824,7 @@ mod tests {
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
-                TransactionTestOpResult::GotValue(Some("v2".to_string())),
+                TransactionTestOpResult::GotValue(Some("v1".to_string())),
                 TransactionTestOpResult::Empty,
             ]
         }
@@ -837,10 +837,12 @@ mod tests {
             operations: vec![
                 TransactionTestOp::TxnScan(b"k1", b"k5"),
                 TransactionTestOp::DbPut("k3", "v3_new"),
+                TransactionTestOp::TxnPut("k100", "v100"),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
-                TransactionTestOpResult::GotValue(Some("scan_results".to_string())),
+                TransactionTestOpResult::Scanned(vec![Bytes::from("k1"), Bytes::from("k2"), Bytes::from("k3"), Bytes::from("k4"), Bytes::from("k5")]),
+                TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Conflicted,
             ]
@@ -854,10 +856,12 @@ mod tests {
             operations: vec![
                 TransactionTestOp::TxnScan(b"k1", b"k5"),
                 TransactionTestOp::DbPut("k3", "v3_new"),
+                TransactionTestOp::TxnPut("k100", "v100"),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
-                TransactionTestOpResult::GotValue(Some("scan_results".to_string())),
+                TransactionTestOpResult::Scanned(vec![Bytes::from("k1"), Bytes::from("k2"), Bytes::from("k3"), Bytes::from("k4"), Bytes::from("k5")]),
+                TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Empty,
             ]
