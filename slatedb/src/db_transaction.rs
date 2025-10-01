@@ -121,7 +121,6 @@ impl DBTransaction {
 
         let db_state = self.db_inner.state.read().view();
 
-        // TODO: Implement proper write batch integration in the reader
         // For now, delegate to the underlying reader
         self.db_inner
             .reader
@@ -417,6 +416,41 @@ mod tests {
         txn1.commit().await.unwrap();
 
         // Commit second transaction - should fail due to conflict
+        let result = txn2.commit().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_txn_ssi_commit_conflict() {
+        // Setup database with initial data
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Put initial data
+        db.put(b"k1", b"v1").await.unwrap();
+        db.put(b"k2", b"v2.1").await.unwrap();
+
+        // Begin first transaction
+        let mut txn1 = db
+            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        txn1.put(b"k1", b"v2").unwrap();
+        txn1.put(b"k2", b"v2.2").unwrap();
+
+        // Begin second transaction
+        let mut txn2 = db
+            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let val2 = txn2.get(b"k2").await.unwrap();
+        assert_eq!(val2, Some(Bytes::from_static(b"v2.1")));
+        txn2.put(b"k3", b"v3").unwrap();
+
+        // Commit first transaction - should succeed
+        txn1.commit().await.unwrap();
+
+        // Commit second transaction - should fail due to conflict for reading k2
         let result = txn2.commit().await;
         assert!(result.is_err());
     }
