@@ -20,7 +20,7 @@ use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
-use crate::error::SlateDBError;
+use crate::error::{Error, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::rand::DbRand;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -37,6 +37,13 @@ pub trait CompactionSchedulerSupplier: Send + Sync {
 
 pub trait CompactionScheduler: Send + Sync {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
+    fn validate_compaction(
+        &self,
+        _state: &CompactorState,
+        _compaction: &Compaction,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// Tracks progress of various compactions. Progress is updated from the executor with
@@ -426,6 +433,9 @@ impl CompactorEventHandler {
                 );
                 break;
             }
+            self.scheduler
+                .validate_compaction(&self.state, compaction)
+                .map_err(|_e| SlateDBError::InvalidCompaction)?;
             self.submit_compaction(compaction.clone()).await?;
         }
         Ok(())
