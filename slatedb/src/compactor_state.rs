@@ -121,8 +121,6 @@ impl CompactorState {
         id: Uuid,
         compaction: Compaction,
     ) -> Result<Uuid, SlateDBError> {
-        // Validation is enforced by the CompactionScheduler. Compactor calls
-        // scheduler.validate_compaction(...) before submitting here.
         if self
             .compactions
             .values()
