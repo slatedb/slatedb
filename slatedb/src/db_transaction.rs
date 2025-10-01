@@ -190,7 +190,6 @@ impl DBTransaction {
         self.db_inner.check_error()?;
         let db_state = self.db_inner.state.read().view();
 
-        // TODO: Implement proper write batch integration in the reader
         // For now, delegate to the underlying reader
         self.db_inner
             .reader
@@ -561,6 +560,8 @@ mod tests {
         Invalid,
     }
 
+    // TODO: let this method take a db, an ops list, return vec of results. this method might
+    // be useful to be reused in proptest.
     async fn execute_transaction_test(test_case: TransactionTestCase) {
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let db = crate::Db::open(test_case.name, object_store).await.unwrap();
@@ -577,6 +578,7 @@ mod tests {
         );
 
         for (i, operation) in test_case.operations.iter().enumerate() {
+            // TODO: use match (Some(txn), TxnGet), etc.
             let result = match txn_opt.as_ref() {
                 Some(_) => match operation {
                     TransactionTestOp::TxnGet(key) => {
