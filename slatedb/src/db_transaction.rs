@@ -702,6 +702,125 @@ mod tests {
             ]
         }
     )]
+    #[case::ssi_write_write_conflict(
+        TransactionTestCase {
+            name: "ssi_write_write_conflict",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::TxnPut("k1", "v2"),
+                TransactionTestOp::DbPut("k1", "v3"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
+    #[case::ssi_read_write_conflict(
+        TransactionTestCase {
+            name: "ssi_read_write_conflict",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::DbPut("k1", "v2"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
+    #[case::si_read_write_no_conflict(
+        TransactionTestCase {
+            name: "si_read_write_no_conflict",
+            isolation_level: IsolationLevel::Snapshot,
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::DbPut("k1", "v2"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+            ]
+        }
+    )]
+    #[case::ssi_write_read_conflict(
+        TransactionTestCase {
+            name: "ssi_write_read_conflict",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::DbPut("k1", "v2"),
+                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::GotValue(Some("v2".to_string())),
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
+    #[case::si_write_read_no_conflict(
+        TransactionTestCase {
+            name: "si_write_read_no_conflict",
+            isolation_level: IsolationLevel::Snapshot,
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::DbPut("k1", "v2"),
+                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::GotValue(Some("v2".to_string())),
+                TransactionTestOpResult::Empty,
+            ]
+        }
+    )]
+    #[case::ssi_range_write_conflict(
+        TransactionTestCase {
+            name: "ssi_range_write_conflict",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![("k1", "v1"), ("k2", "v2"), ("k3", "v3"), ("k4", "v4"), ("k5", "v5")],
+            operations: vec![
+                TransactionTestOp::TxnScan("k1", "k5"),
+                TransactionTestOp::DbPut("k3", "v3_new"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::GotValue(Some("scan_results".to_string())),
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
+    #[case::si_range_write_no_conflict(
+        TransactionTestCase {
+            name: "si_range_write_no_conflict",
+            isolation_level: IsolationLevel::Snapshot,
+            initial_data: vec![("k1", "v1"), ("k2", "v2"), ("k3", "v3"), ("k4", "v4"), ("k5", "v5")],
+            operations: vec![
+                TransactionTestOp::TxnScan("k1", "k5"),
+                TransactionTestOp::DbPut("k3", "v3_new"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::GotValue(Some("scan_results".to_string())),
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+            ]
+        }
+    )]
     #[tokio::test]
     async fn test_txn_table_driven(#[case] test_case: TransactionTestCase) {
         execute_transaction_test(test_case).await;
