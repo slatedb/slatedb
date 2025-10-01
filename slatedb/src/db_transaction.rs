@@ -764,11 +764,13 @@ mod tests {
             initial_data: vec![("k1", "v1")],
             operations: vec![
                 TransactionTestOp::TxnGet("k1"),
-                TransactionTestOp::DbPut("k1", "v2"),
+                TransactionTestOp::DbPut("k1", "v1"),
+                TransactionTestOp::TxnPut("k2", "v2.1"),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Conflicted,
             ]
