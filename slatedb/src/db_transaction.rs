@@ -513,72 +513,69 @@ mod tests {
     // Table-driven tests using rstest
     #[rstest]
     #[case::si_basic_visibility(
-        "si_basic_visibility",
-        vec![("k1", "v1")],
-        vec![
-            TransactionTestOp::TxnGet("k1"),
-            TransactionTestOp::Commit,
-        ],
-        vec![
-            TransactionTestOpResult::GotValue(Some("v1".to_string())),
-            TransactionTestOpResult::Empty,
-        ]
+        TransactionTestCase {
+            name: "si_basic_visibility",
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Empty,
+            ]
+        }
     )]
     #[case::si_write_visibility_in_txn(
-        "si_write_visibility_in_txn",
-        vec![("k1", "v1")],
-        vec![
-            TransactionTestOp::TxnPut("k1", "v2"),
-            TransactionTestOp::TxnGet("k1"),
-            TransactionTestOp::Commit,
-        ],
-        vec![
-            TransactionTestOpResult::Empty,
-            TransactionTestOpResult::GotValue(Some("v2".to_string())),
-            TransactionTestOpResult::Empty,
-        ]
+        TransactionTestCase {
+            name: "si_write_visibility_in_txn",
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::TxnPut("k1", "v2"),
+                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::GotValue(Some("v2".to_string())),
+                TransactionTestOpResult::Empty,
+            ]
+        }
     )]
     #[case::si_delete_visibility_in_txn(
-        "si_delete_visibility_in_txn",
-        vec![("k1", "v1")],
-        vec![
-            TransactionTestOp::TxnDelete("k1"),
-            TransactionTestOp::TxnGet("k1"),
-            TransactionTestOp::Commit,
-        ],
-        vec![
-            TransactionTestOpResult::Empty,
-            TransactionTestOpResult::GotValue(None),
-            TransactionTestOpResult::Empty,
-        ]
+        TransactionTestCase {
+            name: "si_delete_visibility_in_txn",
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::TxnDelete("k1"),
+                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::Commit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::GotValue(None),
+                TransactionTestOpResult::Empty,
+            ]
+        }
     )]
     #[case::si_rollback_visibility(
-        "si_rollback_visibility",
-        vec![("k1", "v1")],
-        vec![
-            TransactionTestOp::TxnPut("k1", "v2"),
-            TransactionTestOp::Rollback,
-            TransactionTestOp::DbGet("k1"),
-        ],
-        vec![
-            TransactionTestOpResult::Empty,
-            TransactionTestOpResult::Empty,
-            TransactionTestOpResult::GotValue(Some("v1".to_string())),
-        ]
+        TransactionTestCase {
+            name: "si_rollback_visibility",
+            initial_data: vec![("k1", "v1")],
+            operations: vec![
+                TransactionTestOp::TxnPut("k1", "v2"),
+                TransactionTestOp::Rollback,
+                TransactionTestOp::DbGet("k1"),
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+            ]
+        }
     )]
     #[tokio::test]
-    async fn test_si_table_driven(
-        #[case] test_name: &'static str,
-        #[case] initial_data: Vec<(&'static str, &'static str)>,
-        #[case] operations: Vec<TransactionTestOp>,
-        #[case] expected_results: Vec<TransactionTestOpResult>,
-    ) {
-        let test_case = TransactionTestCase {
-            name: test_name,
-            initial_data,
-            operations,
-            expected_results,
-        };
+    async fn test_si_table_driven(#[case] test_case: TransactionTestCase) {
         execute_transaction_test(test_case).await;
     }
 }
