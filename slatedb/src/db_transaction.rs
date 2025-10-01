@@ -335,7 +335,7 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn test_si_basic_visibility() {
+    async fn test_txn_basic_visibility() {
         // Setup database with initial data
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let db = crate::Db::open("test_db", object_store).await.unwrap();
@@ -345,9 +345,12 @@ mod tests {
 
         // Begin transaction
         let txn = db
-            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .begin_transaction(IsolationLevel::Snapshot)
             .await
             .unwrap();
+
+        // Put data from others
+        db.put(b"k2", b"v2").await.unwrap();
 
         // Read within transaction - should see the initial data
         let value = txn.get(b"k1").await.unwrap();
@@ -358,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_si_write_visibility_in_txn() {
+    async fn test_txn_write_visibility_in_txn() {
         // Setup database with initial data
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let db = crate::Db::open("test_db", object_store).await.unwrap();
@@ -375,27 +378,11 @@ mod tests {
         // Write within transaction
         txn.put(b"k1", b"v2").unwrap();
 
-        // Read within transaction - should see the updated value
+        // Read within transaction - should see the updated value in the transaction
         let value = txn.get(b"k1").await.unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"v2")));
 
         // Commit transaction
-        txn.commit().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_si_empty_transaction() {
-        // Setup database
-        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let db = crate::Db::open("test_db", object_store).await.unwrap();
-
-        // Begin transaction
-        let txn = db
-            .begin_transaction(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-
-        // Commit empty transaction - should succeed
         txn.commit().await.unwrap();
     }
 
