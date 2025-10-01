@@ -455,6 +455,50 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test]
+    async fn test_txn_ssi_commit_conflit_with_ranges() {
+        // Setup database with initial data
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Put initial data
+        db.put(b"k1", b"v1").await.unwrap();
+        db.put(b"k2", b"v2.1").await.unwrap();
+        db.put(b"k3", b"v3").await.unwrap();
+
+        // Begin first transaction
+        let mut txn1 = db
+            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+
+        // Begin second transaction
+        let mut txn2 = db
+            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+
+        // Transaction 2 scans k2..k3
+        {
+            let mut iter = txn2.scan(&b"k2"[..]..=&b"k3"[..]).await.unwrap();
+            while let Some(_kv) = iter.next().await.unwrap() {
+                // Just iterate through the range to track it
+            }
+        }
+
+        // Transaction 1 writes within the range that transaction 2 scanned
+        txn1.put(b"k2", b"v2.2").unwrap();
+        txn1.commit().await.unwrap();
+
+        // Transaction 2 tries to write something
+        txn2.put(b"k4", b"v4").unwrap();
+
+        // Commit second transaction - should fail due to phantom conflict
+        // because it read a range that was modified by transaction 1
+        let result = txn2.commit().await;
+        assert!(result.is_err());
+    }
+
     // Transaction test structures for table-driven tests
     #[derive(Debug, Clone)]
     struct TransactionTestCase {
