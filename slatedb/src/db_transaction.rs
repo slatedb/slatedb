@@ -519,6 +519,7 @@ mod tests {
     #[allow(dead_code)]
     enum TransactionTestOp {
         TxnGet(&'static str),
+        TxnScan(&'static [u8], &'static [u8]),
         TxnPut(&'static str, &'static str),
         TxnDelete(&'static str),
         DbPut(&'static str, &'static str),
@@ -530,6 +531,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     enum TransactionTestOpResult {
         GotValue(Option<String>),
+        Scanned(Vec<Bytes>),
         Empty,
         Conflicted,
         Invalid,
@@ -559,6 +561,18 @@ mod tests {
                         TransactionTestOpResult::GotValue(
                             val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
                         )
+                    }
+                    TransactionTestOp::TxnScan(start, end) => {
+                        let txn = txn_opt.as_ref().unwrap();
+                        let mut iter = txn
+                            .scan(&Bytes::from_static(*start)[..]..=&Bytes::from_static(end)[..])
+                            .await
+                            .unwrap();
+                        let mut scanned_keys = Vec::new();
+                        while let Some(kv) = iter.next().await.unwrap() {
+                            scanned_keys.push(kv.key);
+                        }
+                        TransactionTestOpResult::Scanned(scanned_keys)
                     }
                     TransactionTestOp::TxnPut(key, value) => {
                         let txn = txn_opt.as_mut().unwrap();
@@ -793,7 +807,7 @@ mod tests {
             isolation_level: IsolationLevel::SerializableSnapshot,
             initial_data: vec![("k1", "v1"), ("k2", "v2"), ("k3", "v3"), ("k4", "v4"), ("k5", "v5")],
             operations: vec![
-                TransactionTestOp::TxnScan("k1", "k5"),
+                TransactionTestOp::TxnScan(b"k1", b"k5"),
                 TransactionTestOp::DbPut("k3", "v3_new"),
                 TransactionTestOp::Commit,
             ],
@@ -810,7 +824,7 @@ mod tests {
             isolation_level: IsolationLevel::Snapshot,
             initial_data: vec![("k1", "v1"), ("k2", "v2"), ("k3", "v3"), ("k4", "v4"), ("k5", "v5")],
             operations: vec![
-                TransactionTestOp::TxnScan("k1", "k5"),
+                TransactionTestOp::TxnScan(b"k1", b"k5"),
                 TransactionTestOp::DbPut("k3", "v3_new"),
                 TransactionTestOp::Commit,
             ],
