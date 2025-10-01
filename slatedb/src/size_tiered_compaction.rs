@@ -734,8 +734,7 @@ mod tests {
         l0_sst.push_front(last_sst.unwrap());
         // when:
         let compaction = create_l0_compaction(l0_sst.make_contiguous(), 0);
-        let result = scheduler
-            .validate_compaction(&state, &compaction);
+        let result = scheduler.validate_compaction(&state, &compaction);
 
         // then:
         assert!(result.is_err());
@@ -754,8 +753,7 @@ mod tests {
         l0_sst.pop_back();
         // when:
         let compaction = create_l0_compaction(l0_sst.make_contiguous(), 0);
-        let result = scheduler
-            .validate_compaction(&state, &compaction);
+        let result = scheduler.validate_compaction(&state, &compaction);
 
         // then:
         assert!(result.is_err());
@@ -772,8 +770,7 @@ mod tests {
         let mut compaction = create_l0_compaction(l0.make_contiguous(), 0);
         compaction.sources.push(SourceId::SortedRun(5));
         // when:
-        let result = scheduler
-            .validate_compaction(&state, &compaction);
+        let result = scheduler.validate_compaction(&state, &compaction);
 
         // then:
         assert!(result.is_err());
