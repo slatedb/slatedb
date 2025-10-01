@@ -735,7 +735,9 @@ mod tests {
         l0_sst.push_front(last_sst.unwrap());
         // when:
         let compaction = create_l0_compaction(l0_sst.make_contiguous(), 0);
-        let result = scheduler.validate_compaction(&state, &compaction).map_err(|_e|SlateDBError::InvalidCompaction);
+        let result = scheduler
+            .validate_compaction(&state, &compaction)
+            .map_err(|_e| SlateDBError::InvalidCompaction);
 
         // then:
         assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
@@ -754,7 +756,9 @@ mod tests {
         l0_sst.pop_back();
         // when:
         let compaction = create_l0_compaction(l0_sst.make_contiguous(), 0);
-        let result = scheduler.validate_compaction(&state, &compaction).map_err(|_e|SlateDBError::InvalidCompaction);
+        let result = scheduler
+            .validate_compaction(&state, &compaction)
+            .map_err(|_e| SlateDBError::InvalidCompaction);
 
         // then:
         assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
@@ -771,7 +775,9 @@ mod tests {
         let mut compaction = create_l0_compaction(l0.make_contiguous(), 0);
         compaction.sources.push(SourceId::SortedRun(5));
         // when:
-        let result = scheduler.validate_compaction(&state, &compaction).map_err(|_e|SlateDBError::InvalidCompaction);
+        let result = scheduler
+            .validate_compaction(&state, &compaction)
+            .map_err(|_e| SlateDBError::InvalidCompaction);
 
         // then:
         assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
