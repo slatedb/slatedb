@@ -127,20 +127,7 @@ impl DbInner {
         let commit_seq = self.oracle.last_seq.next();
         let txn_id = batch.txn_id;
 
-        let entries = self.extract_row_entries(batch, commit_seq, now);
-        let conflict_keys = entries
-            .iter()
-            .map(|entry| entry.key.clone())
-            .collect::<HashSet<_>>();
-
-        // check if there's any conflict if this write batch is bound with a txn.
-        if let Some(txn_id) = &txn_id {
-            // TODO: this might better to be moved into the `commit()`` method of `DbTransaction`.
-            self.txn_manager.track_write_keys(txn_id, &conflict_keys);
-            if self.txn_manager.check_has_conflict(txn_id) {
-                return Err(SlateDBError::TransactionConflict);
-            }
-        }
+        let entries = self.extract_row_entries(&batch, commit_seq, now);
 
         let durable_watcher = if self.wal_enabled {
             // WAL entries must be appended to the wal buffer atomically. Otherwise,
@@ -177,8 +164,9 @@ impl DbInner {
             self.txn_manager
                 .track_recent_committed_txn(txn_id, commit_seq);
         } else {
+            let write_keys = batch.keys().collect::<HashSet<_>>();
             self.txn_manager
-                .track_recent_committed_write_batch(&conflict_keys, commit_seq);
+                .track_recent_committed_write_batch(&write_keys, commit_seq);
         }
 
         // update the last_committed_seq, so the writes will be visible to the readers.
@@ -207,11 +195,11 @@ impl DbInner {
     }
 
     /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set.
-    fn extract_row_entries(&self, batch: WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
+    fn extract_row_entries(&self, batch: &WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
         batch
             .ops
-            .into_values()
-            .map(|op| {
+            .iter()
+            .map(|(_, op)| {
                 let expire_ts = match &op {
                     WriteOp::Put(_, _, opts) => opts.expire_ts_from(self.settings.default_ttl, now),
                     WriteOp::Delete(_) => None,

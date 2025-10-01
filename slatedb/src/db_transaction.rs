@@ -277,6 +277,10 @@ impl DBTransaction {
             }
         }
 
+        // Track the write keys from write batch
+        let write_keys = self.write_batch.keys().collect::<HashSet<_>>();
+        self.txn_manager.track_write_keys(&self.txn_id, &write_keys);
+
         // Check for conflicts before committing
         if self.txn_manager.check_has_conflict(&self.txn_id) {
             return Err(crate::Error::from(SlateDBError::TransactionConflict));

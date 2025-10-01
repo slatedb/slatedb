@@ -200,6 +200,10 @@ impl WriteBatch {
     ) -> WriteBatchIterator<'a> {
         WriteBatchIterator::new(self, range, IterationOrder::Ascending)
     }
+
+    pub(crate) fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
+        self.ops.keys().cloned()
+    }
 }
 
 /// Iterator over WriteBatch entries
