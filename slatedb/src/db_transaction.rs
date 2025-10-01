@@ -386,6 +386,37 @@ mod tests {
         txn.commit().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn test_txn_si_commit_conflict() {
+        // Setup database with initial data
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Put initial data
+        db.put(b"k1", b"v1").await.unwrap();
+
+        // Begin first transaction
+        let mut txn1 = db
+            .begin_transaction(IsolationLevel::Snapshot)
+            .await
+            .unwrap();
+        txn1.put(b"k1", b"v2").unwrap();
+
+        // Begin second transaction
+        let mut txn2 = db
+            .begin_transaction(IsolationLevel::Snapshot)
+            .await
+            .unwrap();
+        txn2.put(b"k1", b"v3").unwrap();
+
+        // Commit first transaction - should succeed
+        txn1.commit().await.unwrap();
+
+        // Commit second transaction - should fail due to conflict
+        let result = txn2.commit().await;
+        assert!(result.is_err());
+    }
+
     // Transaction test structures for table-driven tests
     #[derive(Debug, Clone)]
     struct TransactionTestCase {
