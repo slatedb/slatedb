@@ -427,6 +427,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_txn_si_commit_conflict_with_db_writes() {
+        // Setup database with initial data
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Put initial data
+        db.put(b"k1", b"v1").await.unwrap();
+
+        // Begin first transaction
+        let mut txn1 = db
+            .begin_transaction(IsolationLevel::Snapshot)
+            .await
+            .unwrap();
+        txn1.put(b"k1", b"v2").unwrap();
+
+        // DB put on the same key
+        db.put(b"k1", b"v3").await.unwrap();
+
+        // Commit transaction - should conflict
+        let result = txn1.commit().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn test_txn_ssi_commit_conflict() {
         // Setup database with initial data
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
