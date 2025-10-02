@@ -131,6 +131,13 @@ impl WriteBatch {
         }
     }
 
+    pub(crate) fn with_txn_id(self, txn_id: Uuid) -> Self {
+        Self {
+            ops: self.ops,
+            txn_id: Some(txn_id),
+        }
+    }
+
     /// Put a key-value pair into the batch. Keys must not be empty.
     ///
     /// # Panics
@@ -193,7 +200,6 @@ impl WriteBatch {
     }
 
     /// Create an iterator over the WriteBatch entries in the given range
-    #[allow(unused)]
     pub(crate) fn iter_range<'a>(
         &'a self,
         range: impl RangeBounds<Bytes>,

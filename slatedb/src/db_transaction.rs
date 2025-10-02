@@ -10,7 +10,6 @@ use crate::bytes_range::BytesRange;
 use crate::config::{PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
-use crate::error::SlateDBError;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::DbRead;
 
@@ -76,7 +75,7 @@ impl DBTransaction {
             txn_id,
             started_seq: seq,
             txn_manager,
-            write_batch: WriteBatch::new(),
+            write_batch: WriteBatch::new().with_txn_id(txn_id),
             db_inner,
             isolation_level,
             range_trackers: Mutex::new(Vec::new()),
@@ -259,10 +258,21 @@ impl DBTransaction {
         Ok(())
     }
 
-    /// Commit the transaction by writing all buffered operations to the database.
+    /// Commit the transaction by applying all buffered operations to the database.
+    ///
+    /// This method finalizes the transaction by writing all pending puts, deletes, and other
+    /// operations from the write batch to persistent storage. The actual conflict detection
+    /// (including read-write and write-write conflicts) is deferred to the task that processes
+    /// the WriteBatch, which ensures the atomicity of transactions.
+    ///
+    /// If the transaction's write batch is empty, this operation is a no-op and returns `Ok(())`
+    /// immediately without any database interaction. Since it's impossible to have read-write
+    /// conflict, neither write-write conflict for an empty write batch.
     ///
     /// ## Errors
-    /// - `Error`: if there was an error committing the transaction
+    /// - Returns `Error` if the commit operation fails, which could be due to:
+    ///   - Database I/O errors
+    ///   - Concurrency conflicts detected during WriteBatch processing
     pub async fn commit(self) -> Result<(), crate::Error> {
         // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
         // conflict, neither write-write conflict.
@@ -285,12 +295,10 @@ impl DBTransaction {
         let write_keys = self.write_batch.keys().collect::<HashSet<_>>();
         self.txn_manager.track_write_keys(&self.txn_id, &write_keys);
 
-        // Check for conflicts before committing
-        if self.txn_manager.check_has_conflict(&self.txn_id) {
-            return Err(crate::Error::from(SlateDBError::TransactionConflict));
-        }
-
-        // Write the transaction's batch to the database
+        // Submit the WriteBatch to the database for processing. The batch is sent to a
+        // dedicated background task (in batch_write.rs) that processes all WriteBatches
+        // sequentially, ensuring no concurrent writes. Both conflict checking & persisting
+        // are handled there.
         self.db_inner
             .write_with_options(self.write_batch.clone(), &WriteOptions::default())
             .await

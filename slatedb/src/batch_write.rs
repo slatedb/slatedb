@@ -125,7 +125,14 @@ impl DbInner {
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         let now = self.mono_clock.now().await?;
         let commit_seq = self.oracle.last_seq.next();
-        let txn_id = batch.txn_id;
+
+        // Check for transaction conflicts before proceeding with the write batch
+        // if this batch is part of a transaction.
+        if let Some(txn_id) = batch.txn_id.as_ref() {
+            if self.txn_manager.check_has_conflict(txn_id) {
+                return Err(SlateDBError::TransactionConflict);
+            }
+        }
 
         let entries = self.extract_row_entries(&batch, commit_seq, now);
 
@@ -160,7 +167,7 @@ impl DbInner {
 
         // track the recent committed txn for conflict check. if txn_id is not supplied,
         // we still consider this as an transaction commit.
-        if let Some(txn_id) = &txn_id {
+        if let Some(txn_id) = &batch.txn_id {
             self.txn_manager
                 .track_recent_committed_txn(txn_id, commit_seq);
         } else {
