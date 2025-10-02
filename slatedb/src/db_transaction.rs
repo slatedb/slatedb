@@ -544,7 +544,7 @@ mod tests {
     struct TransactionTestCase {
         name: &'static str,
         isolation_level: IsolationLevel,
-        initial_data: Vec<(&'static str, &'static str)>,
+        initial_data: Vec<(Bytes, Bytes)>,
         operations: Vec<TransactionTestOp>,
         expected_results: Vec<TransactionTestOpResult>,
     }
@@ -552,12 +552,12 @@ mod tests {
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
     enum TransactionTestOp {
-        TxnGet(&'static str),
-        TxnScan(&'static [u8], &'static [u8]),
-        TxnPut(&'static str, &'static str),
-        TxnDelete(&'static str),
-        DbPut(&'static str, &'static str),
-        DbGet(&'static str),
+        TxnGet(Bytes),
+        TxnScan(Bytes, Bytes),
+        TxnPut(Bytes, Bytes),
+        TxnDelete(Bytes),
+        DbPut(Bytes, Bytes),
+        DbGet(Bytes),
         Commit,
         Rollback,
     }
@@ -598,10 +598,7 @@ mod tests {
                     }
                     TransactionTestOp::TxnScan(start, end) => {
                         let txn = txn_opt.as_ref().unwrap();
-                        let mut iter = txn
-                            .scan(&Bytes::from_static(start)[..]..=&Bytes::from_static(end)[..])
-                            .await
-                            .unwrap();
+                        let mut iter = txn.scan(&start[..]..=&end[..]).await.unwrap();
                         let mut scanned_keys = Vec::new();
                         while let Some(kv) = iter.next().await.unwrap() {
                             scanned_keys.push(kv.key);
@@ -668,9 +665,9 @@ mod tests {
         TransactionTestCase {
             name: "ssi_basic_visibility",
             isolation_level: IsolationLevel::SerializableSnapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::TxnGet(Bytes::from("k1")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -683,10 +680,10 @@ mod tests {
         TransactionTestCase {
             name: "ssi_write_visibility_in_txn",
             isolation_level: IsolationLevel::SerializableSnapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::TxnPut("k1", "v2"),
-                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::TxnPut(Bytes::from("k1"), Bytes::from("v2")),
+                TransactionTestOp::TxnGet(Bytes::from("k1")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -700,10 +697,10 @@ mod tests {
         TransactionTestCase {
             name: "ssi_delete_visibility_in_txn",
             isolation_level: IsolationLevel::SerializableSnapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::TxnDelete("k1"),
-                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::TxnDelete(Bytes::from("k1")),
+                TransactionTestOp::TxnGet(Bytes::from("k1")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -717,11 +714,11 @@ mod tests {
         TransactionTestCase {
             name: "ssi_rollback_visibility",
             isolation_level: IsolationLevel::SerializableSnapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::TxnPut("k1", "v2"),
+                TransactionTestOp::TxnPut(Bytes::from("k1"), Bytes::from("v2")),
                 TransactionTestOp::Rollback,
-                TransactionTestOp::DbGet("k1"),
+                TransactionTestOp::DbGet(Bytes::from("k1")),
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
@@ -734,10 +731,10 @@ mod tests {
         TransactionTestCase {
             name: "ssi_concurrent_read_snapshot",
             isolation_level: IsolationLevel::SerializableSnapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::DbPut("k1", "v2"),
-                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
+                TransactionTestOp::TxnGet(Bytes::from("k1")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -751,10 +748,10 @@ mod tests {
         TransactionTestCase {
             name: "ssi_write_write_conflict",
             isolation_level: IsolationLevel::SerializableSnapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::TxnPut("k1", "v2"),
-                TransactionTestOp::DbPut("k1", "v3"),
+                TransactionTestOp::TxnPut(Bytes::from("k1"), Bytes::from("v2")),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v3")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -768,11 +765,11 @@ mod tests {
         TransactionTestCase {
             name: "ssi_read_write_conflict",
             isolation_level: IsolationLevel::SerializableSnapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::TxnGet("k1"),
-                TransactionTestOp::DbPut("k1", "v1"),
-                TransactionTestOp::TxnPut("k2", "v2.1"),
+                TransactionTestOp::TxnGet(Bytes::from("k1")),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v1")),
+                TransactionTestOp::TxnPut(Bytes::from("k2"), Bytes::from("v2.1")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -787,10 +784,10 @@ mod tests {
         TransactionTestCase {
             name: "si_read_write_no_conflict",
             isolation_level: IsolationLevel::Snapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::TxnGet("k1"),
-                TransactionTestOp::DbPut("k1", "v2"),
+                TransactionTestOp::TxnGet(Bytes::from("k1")),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -804,11 +801,11 @@ mod tests {
         TransactionTestCase {
             name: "ssi_write_read_conflict",
             isolation_level: IsolationLevel::SerializableSnapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::DbPut("k1", "v2"),
-                TransactionTestOp::TxnGet("k1"),
-                TransactionTestOp::TxnPut("k3", "v3"),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
+                TransactionTestOp::TxnGet(Bytes::from("k1")),
+                TransactionTestOp::TxnPut(Bytes::from("k3"), Bytes::from("v3")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -823,10 +820,10 @@ mod tests {
         TransactionTestCase {
             name: "si_write_read_no_conflict",
             isolation_level: IsolationLevel::Snapshot,
-            initial_data: vec![("k1", "v1")],
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
-                TransactionTestOp::DbPut("k1", "v2"),
-                TransactionTestOp::TxnGet("k1"),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
+                TransactionTestOp::TxnGet(Bytes::from("k1")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -840,11 +837,17 @@ mod tests {
         TransactionTestCase {
             name: "ssi_range_write_conflict",
             isolation_level: IsolationLevel::SerializableSnapshot,
-            initial_data: vec![("k1", "v1"), ("k2", "v2"), ("k3", "v3"), ("k4", "v4"), ("k5", "v5")],
+            initial_data: vec![
+                (Bytes::from("k1"), Bytes::from("v1")),
+                (Bytes::from("k2"), Bytes::from("v2")),
+                (Bytes::from("k3"), Bytes::from("v3")),
+                (Bytes::from("k4"), Bytes::from("v4")),
+                (Bytes::from("k5"), Bytes::from("v5"))
+            ],
             operations: vec![
-                TransactionTestOp::TxnScan(b"k1", b"k5"),
-                TransactionTestOp::DbPut("k3", "v3_new"),
-                TransactionTestOp::TxnPut("k100", "v100"),
+                TransactionTestOp::TxnScan(Bytes::from("k1"), Bytes::from("k5")),
+                TransactionTestOp::DbPut(Bytes::from("k3"), Bytes::from("v3_new")),
+                TransactionTestOp::TxnPut(Bytes::from("k100"), Bytes::from("v100")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -859,11 +862,17 @@ mod tests {
         TransactionTestCase {
             name: "si_range_write_no_conflict",
             isolation_level: IsolationLevel::Snapshot,
-            initial_data: vec![("k1", "v1"), ("k2", "v2"), ("k3", "v3"), ("k4", "v4"), ("k5", "v5")],
+            initial_data: vec![
+                (Bytes::from("k1"), Bytes::from("v1")),
+                (Bytes::from("k2"), Bytes::from("v2")),
+                (Bytes::from("k3"), Bytes::from("v3")),
+                (Bytes::from("k4"), Bytes::from("v4")),
+                (Bytes::from("k5"), Bytes::from("v5"))
+            ],
             operations: vec![
-                TransactionTestOp::TxnScan(b"k1", b"k5"),
-                TransactionTestOp::DbPut("k3", "v3_new"),
-                TransactionTestOp::TxnPut("k100", "v100"),
+                TransactionTestOp::TxnScan(Bytes::from("k1"), Bytes::from("k5")),
+                TransactionTestOp::DbPut(Bytes::from("k3"), Bytes::from("v3_new")),
+                TransactionTestOp::TxnPut(Bytes::from("k100"), Bytes::from("v100")),
                 TransactionTestOp::Commit,
             ],
             expected_results: vec![
@@ -879,11 +888,7 @@ mod tests {
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let db = crate::Db::open(test_case.name, object_store).await.unwrap();
 
-        let initial_data_bytes: Vec<(Bytes, Bytes)> = test_case
-            .initial_data
-            .iter()
-            .map(|(k, v)| (Bytes::from(k.as_bytes()), Bytes::from(v.as_bytes())))
-            .collect();
+        let initial_data_bytes: Vec<(Bytes, Bytes)> = test_case.initial_data.clone();
 
         let results = execute_transaction_test_ops(
             db,
