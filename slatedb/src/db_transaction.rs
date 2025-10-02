@@ -556,15 +556,15 @@ mod tests {
         TxnScan(Bytes, Bytes),
         TxnPut(Bytes, Bytes),
         TxnDelete(Bytes),
+        TxnCommit,
+        TxnRollback,
         DbPut(Bytes, Bytes),
         DbGet(Bytes),
-        Commit,
-        Rollback,
     }
 
     #[derive(Debug, Clone, PartialEq)]
     enum TransactionTestOpResult {
-        GotValue(Option<String>),
+        Got(Option<Bytes>),
         Scanned(Vec<Bytes>),
         Empty,
         Conflicted,
@@ -590,9 +590,7 @@ mod tests {
                 // Transaction operations with active transaction
                 (Some(txn), TransactionTestOp::TxnGet(key)) => {
                     let val = txn.get(key).await.unwrap();
-                    TransactionTestOpResult::GotValue(
-                        val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
-                    )
+                    TransactionTestOpResult::Got(val)
                 }
                 (Some(txn), TransactionTestOp::TxnScan(start, end)) => {
                     let mut iter = txn.scan(&start[..]..=&end[..]).await.unwrap();
@@ -610,29 +608,27 @@ mod tests {
                     txn.delete(key).unwrap();
                     TransactionTestOpResult::Empty
                 }
-                (Some(_txn), TransactionTestOp::Commit) => {
+                (Some(_txn), TransactionTestOp::TxnCommit) => {
                     let txn = txn_opt.take().unwrap();
                     match txn.commit().await {
                         Ok(_) => TransactionTestOpResult::Empty,
                         Err(_) => TransactionTestOpResult::Conflicted,
                     }
                 }
-                (Some(_txn), TransactionTestOp::Rollback) => {
+                (Some(_txn), TransactionTestOp::TxnRollback) => {
                     let txn = txn_opt.take().unwrap();
                     txn.rollback();
                     TransactionTestOpResult::Empty
                 }
 
-                // Database operations (work with or without active transaction)
+                // Database operations
                 (_, TransactionTestOp::DbPut(key, value)) => {
                     db.put(key, value).await.unwrap();
                     TransactionTestOpResult::Empty
                 }
                 (_, TransactionTestOp::DbGet(key)) => {
                     let val = db.get(key).await.unwrap();
-                    TransactionTestOpResult::GotValue(
-                        val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
-                    )
+                    TransactionTestOpResult::Got(val)
                 }
 
                 // Invalid operations (transaction operations without active transaction)
@@ -640,8 +636,8 @@ mod tests {
                 | (None, TransactionTestOp::TxnScan(_, _))
                 | (None, TransactionTestOp::TxnPut(_, _))
                 | (None, TransactionTestOp::TxnDelete(_))
-                | (None, TransactionTestOp::Commit)
-                | (None, TransactionTestOp::Rollback) => TransactionTestOpResult::Invalid,
+                | (None, TransactionTestOp::TxnCommit)
+                | (None, TransactionTestOp::TxnRollback) => TransactionTestOpResult::Invalid,
             };
 
             results.push(result);
@@ -659,10 +655,10 @@ mod tests {
             initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
                 TransactionTestOp::TxnGet(Bytes::from("k1")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
-                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Got(Some(Bytes::from("v1"))),
                 TransactionTestOpResult::Empty,
             ]
         }
@@ -675,11 +671,11 @@ mod tests {
             operations: vec![
                 TransactionTestOp::TxnPut(Bytes::from("k1"), Bytes::from("v2")),
                 TransactionTestOp::TxnGet(Bytes::from("k1")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
-                TransactionTestOpResult::GotValue(Some("v2".to_string())),
+                TransactionTestOpResult::Got(Some(Bytes::from("v2"))),
                 TransactionTestOpResult::Empty,
             ]
         }
@@ -692,11 +688,11 @@ mod tests {
             operations: vec![
                 TransactionTestOp::TxnDelete(Bytes::from("k1")),
                 TransactionTestOp::TxnGet(Bytes::from("k1")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
-                TransactionTestOpResult::GotValue(None),
+                TransactionTestOpResult::Got(None),
                 TransactionTestOpResult::Empty,
             ]
         }
@@ -708,13 +704,13 @@ mod tests {
             initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
             operations: vec![
                 TransactionTestOp::TxnPut(Bytes::from("k1"), Bytes::from("v2")),
-                TransactionTestOp::Rollback,
+                TransactionTestOp::TxnRollback,
                 TransactionTestOp::DbGet(Bytes::from("k1")),
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Empty,
-                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Got(Some(Bytes::from("v1"))),
             ]
         }
     )]
@@ -726,11 +722,11 @@ mod tests {
             operations: vec![
                 TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
                 TransactionTestOp::TxnGet(Bytes::from("k1")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
-                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Got(Some(Bytes::from("v1"))),
                 TransactionTestOpResult::Empty,
             ]
         }
@@ -743,7 +739,7 @@ mod tests {
             operations: vec![
                 TransactionTestOp::TxnPut(Bytes::from("k1"), Bytes::from("v2")),
                 TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v3")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
@@ -761,10 +757,10 @@ mod tests {
                 TransactionTestOp::TxnGet(Bytes::from("k1")),
                 TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v1")),
                 TransactionTestOp::TxnPut(Bytes::from("k2"), Bytes::from("v2.1")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
-                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Got(Some(Bytes::from("v1"))),
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Conflicted,
@@ -779,10 +775,10 @@ mod tests {
             operations: vec![
                 TransactionTestOp::TxnGet(Bytes::from("k1")),
                 TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
-                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Got(Some(Bytes::from("v1"))),
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Empty,
             ]
@@ -797,11 +793,11 @@ mod tests {
                 TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
                 TransactionTestOp::TxnGet(Bytes::from("k1")),
                 TransactionTestOp::TxnPut(Bytes::from("k3"), Bytes::from("v3")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
-                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Got(Some(Bytes::from("v1"))),
                 TransactionTestOpResult::Empty,
                 TransactionTestOpResult::Conflicted,
             ]
@@ -815,11 +811,11 @@ mod tests {
             operations: vec![
                 TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
                 TransactionTestOp::TxnGet(Bytes::from("k1")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Empty,
-                TransactionTestOpResult::GotValue(Some("v1".to_string())),
+                TransactionTestOpResult::Got(Some(Bytes::from("v1"))),
                 TransactionTestOpResult::Empty,
             ]
         }
@@ -839,7 +835,7 @@ mod tests {
                 TransactionTestOp::TxnScan(Bytes::from("k1"), Bytes::from("k5")),
                 TransactionTestOp::DbPut(Bytes::from("k3"), Bytes::from("v3_new")),
                 TransactionTestOp::TxnPut(Bytes::from("k100"), Bytes::from("v100")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Scanned(vec![Bytes::from("k1"), Bytes::from("k2"), Bytes::from("k3"), Bytes::from("k4"), Bytes::from("k5")]),
@@ -864,7 +860,7 @@ mod tests {
                 TransactionTestOp::TxnScan(Bytes::from("k1"), Bytes::from("k5")),
                 TransactionTestOp::DbPut(Bytes::from("k3"), Bytes::from("v3_new")),
                 TransactionTestOp::TxnPut(Bytes::from("k100"), Bytes::from("v100")),
-                TransactionTestOp::Commit,
+                TransactionTestOp::TxnCommit,
             ],
             expected_results: vec![
                 TransactionTestOpResult::Scanned(vec![Bytes::from("k1"), Bytes::from("k2"), Bytes::from("k3"), Bytes::from("k4"), Bytes::from("k5")]),
