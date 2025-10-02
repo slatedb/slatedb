@@ -571,24 +571,21 @@ mod tests {
         Invalid,
     }
 
-    // TODO: let this method take a db, an ops list, return vec of results. this method might
-    // be useful to be reused in proptest.
-    async fn execute_transaction_test(test_case: TransactionTestCase) {
-        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let db = crate::Db::open(test_case.name, object_store).await.unwrap();
-
+    async fn execute_transaction_test_ops(
+        db: crate::Db,
+        operations: Vec<TransactionTestOp>,
+        initial_data: Vec<(Bytes, Bytes)>,
+        isolation_level: IsolationLevel,
+    ) -> Vec<TransactionTestOpResult> {
         // Setup initial data
-        for (key, value) in test_case.initial_data {
+        for (key, value) in initial_data {
             db.put(key, value).await.unwrap();
         }
 
-        let mut txn_opt = Some(
-            db.begin_transaction(test_case.isolation_level)
-                .await
-                .unwrap(),
-        );
+        let mut txn_opt = Some(db.begin_transaction(isolation_level).await.unwrap());
 
-        for (i, operation) in test_case.operations.iter().enumerate() {
+        let mut results = Vec::new();
+        for operation in operations.iter() {
             // TODO: use match (Some(txn), TxnGet), etc.
             let result = match txn_opt.as_ref() {
                 Some(_) => match operation {
@@ -659,13 +656,10 @@ mod tests {
                 },
             };
 
-            let expected = &test_case.expected_results[i];
-            assert_eq!(
-                result, *expected,
-                "Test '{}' failed at operation {}: expected {:?}, got {:?}",
-                test_case.name, i, expected, result
-            );
+            results.push(result);
         }
+
+        results
     }
 
     // Table-driven tests using rstest
@@ -882,6 +876,33 @@ mod tests {
     )]
     #[tokio::test]
     async fn test_txn_table_driven(#[case] test_case: TransactionTestCase) {
-        execute_transaction_test(test_case).await;
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open(test_case.name, object_store).await.unwrap();
+
+        let initial_data_bytes: Vec<(Bytes, Bytes)> = test_case
+            .initial_data
+            .iter()
+            .map(|(k, v)| (Bytes::from(k.as_bytes()), Bytes::from(v.as_bytes())))
+            .collect();
+
+        let results = execute_transaction_test_ops(
+            db,
+            test_case.operations,
+            initial_data_bytes,
+            test_case.isolation_level,
+        )
+        .await;
+
+        for (i, (result, expected)) in results
+            .iter()
+            .zip(test_case.expected_results.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                result, expected,
+                "Test '{}' failed at operation {}: expected {:?}, got {:?}",
+                test_case.name, i, expected, result
+            );
+        }
     }
 }
