@@ -212,7 +212,8 @@ impl DBTransaction {
     /// - `value`: the value to write
     ///
     /// ## Errors
-    /// - `Error`: if there was an error buffering the write
+    /// - It's not really possible to have error here, since the write operation is
+    ///   buffered in the write batch.
     pub fn put<K, V>(&mut self, key: K, value: V) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
@@ -230,7 +231,8 @@ impl DBTransaction {
     /// - `options`: the put options to use
     ///
     /// ## Errors
-    /// - `Error`: if there was an error buffering the write
+    /// - It's not really possible to have error here, since the write operation is
+    ///   buffered in the write batch.
     pub fn put_with_options<K, V>(
         &mut self,
         key: K,
@@ -252,7 +254,8 @@ impl DBTransaction {
     /// - `key`: the key to delete
     ///
     /// ## Errors
-    /// - `Error`: if there was an error buffering the delete
+    /// - It's not really possible to have error here, since the delete operation is
+    ///   buffered in the write batch.
     pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), crate::Error> {
         self.write_batch.delete(key);
         Ok(())
