@@ -199,14 +199,6 @@ impl WriteBatch {
         self.ops.get(key)
     }
 
-    /// Create an iterator over the WriteBatch entries in the given range
-    pub(crate) fn iter_range<'a>(
-        &'a self,
-        range: impl RangeBounds<Bytes>,
-    ) -> WriteBatchIterator<'a> {
-        WriteBatchIterator::new(self, range, IterationOrder::Ascending)
-    }
-
     pub(crate) fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
         self.ops.keys().cloned()
     }
