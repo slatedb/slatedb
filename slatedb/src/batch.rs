@@ -281,6 +281,7 @@ impl<'a> KeyValueIterator for WriteBatchIterator<'a> {
 
 #[cfg(test)]
 mod tests {
+    use criterion::BatchSize;
     use rstest::rstest;
 
     use super::*;
@@ -531,7 +532,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.delete(b"key4");
 
-        let mut iter = batch.iter_range(..);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -583,9 +584,11 @@ mod tests {
         batch.put(b"key5", b"value5");
 
         // Range [key2, key4) should include tombstones
-        let mut iter = batch.iter_range(BytesRange::from(
-            Bytes::from_static(b"key2")..Bytes::from_static(b"key4"),
-        ));
+        let mut iter = WriteBatchIterator::new(
+            &batch,
+            BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
+            IterationOrder::Ascending,
+        );
 
         let expected = vec![
             RowEntry::new(

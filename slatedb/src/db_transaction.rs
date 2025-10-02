@@ -586,71 +586,62 @@ mod tests {
 
         let mut results = Vec::new();
         for operation in operations.iter() {
-            // TODO: use match (Some(txn), TxnGet), etc.
-            let result = match txn_opt.as_ref() {
-                Some(_) => match operation {
-                    TransactionTestOp::TxnGet(key) => {
-                        let txn = txn_opt.as_ref().unwrap();
-                        let val = txn.get(key).await.unwrap();
-                        TransactionTestOpResult::GotValue(
-                            val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
-                        )
+            let result = match (txn_opt.as_mut(), operation) {
+                // Transaction operations with active transaction
+                (Some(txn), TransactionTestOp::TxnGet(key)) => {
+                    let val = txn.get(key).await.unwrap();
+                    TransactionTestOpResult::GotValue(
+                        val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
+                    )
+                }
+                (Some(txn), TransactionTestOp::TxnScan(start, end)) => {
+                    let mut iter = txn.scan(&start[..]..=&end[..]).await.unwrap();
+                    let mut scanned_keys = Vec::new();
+                    while let Some(kv) = iter.next().await.unwrap() {
+                        scanned_keys.push(kv.key);
                     }
-                    TransactionTestOp::TxnScan(start, end) => {
-                        let txn = txn_opt.as_ref().unwrap();
-                        let mut iter = txn.scan(&start[..]..=&end[..]).await.unwrap();
-                        let mut scanned_keys = Vec::new();
-                        while let Some(kv) = iter.next().await.unwrap() {
-                            scanned_keys.push(kv.key);
-                        }
-                        TransactionTestOpResult::Scanned(scanned_keys)
+                    TransactionTestOpResult::Scanned(scanned_keys)
+                }
+                (Some(txn), TransactionTestOp::TxnPut(key, value)) => {
+                    txn.put(key, value).unwrap();
+                    TransactionTestOpResult::Empty
+                }
+                (Some(txn), TransactionTestOp::TxnDelete(key)) => {
+                    txn.delete(key).unwrap();
+                    TransactionTestOpResult::Empty
+                }
+                (Some(_txn), TransactionTestOp::Commit) => {
+                    let txn = txn_opt.take().unwrap();
+                    match txn.commit().await {
+                        Ok(_) => TransactionTestOpResult::Empty,
+                        Err(_) => TransactionTestOpResult::Conflicted,
                     }
-                    TransactionTestOp::TxnPut(key, value) => {
-                        let txn = txn_opt.as_mut().unwrap();
-                        txn.put(key, value).unwrap();
-                        TransactionTestOpResult::Empty
-                    }
-                    TransactionTestOp::TxnDelete(key) => {
-                        let txn = txn_opt.as_mut().unwrap();
-                        txn.delete(key).unwrap();
-                        TransactionTestOpResult::Empty
-                    }
-                    TransactionTestOp::Commit => {
-                        let txn = txn_opt.take().unwrap();
-                        match txn.commit().await {
-                            Ok(_) => TransactionTestOpResult::Empty,
-                            Err(_) => TransactionTestOpResult::Conflicted,
-                        }
-                    }
-                    TransactionTestOp::Rollback => {
-                        let txn = txn_opt.take().unwrap();
-                        txn.rollback();
-                        TransactionTestOpResult::Empty
-                    }
-                    TransactionTestOp::DbPut(key, value) => {
-                        db.put(key, value).await.unwrap();
-                        TransactionTestOpResult::Empty
-                    }
-                    TransactionTestOp::DbGet(key) => {
-                        let val = db.get(key).await.unwrap();
-                        TransactionTestOpResult::GotValue(
-                            val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
-                        )
-                    }
-                },
-                None => match operation {
-                    TransactionTestOp::DbPut(key, value) => {
-                        db.put(key, value).await.unwrap();
-                        TransactionTestOpResult::Empty
-                    }
-                    TransactionTestOp::DbGet(key) => {
-                        let val = db.get(key).await.unwrap();
-                        TransactionTestOpResult::GotValue(
-                            val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
-                        )
-                    }
-                    _ => TransactionTestOpResult::Invalid,
-                },
+                }
+                (Some(_txn), TransactionTestOp::Rollback) => {
+                    let txn = txn_opt.take().unwrap();
+                    txn.rollback();
+                    TransactionTestOpResult::Empty
+                }
+
+                // Database operations (work with or without active transaction)
+                (_, TransactionTestOp::DbPut(key, value)) => {
+                    db.put(key, value).await.unwrap();
+                    TransactionTestOpResult::Empty
+                }
+                (_, TransactionTestOp::DbGet(key)) => {
+                    let val = db.get(key).await.unwrap();
+                    TransactionTestOpResult::GotValue(
+                        val.and_then(|b| String::from_utf8(b.to_vec()).ok()),
+                    )
+                }
+
+                // Invalid operations (transaction operations without active transaction)
+                (None, TransactionTestOp::TxnGet(_))
+                | (None, TransactionTestOp::TxnScan(_, _))
+                | (None, TransactionTestOp::TxnPut(_, _))
+                | (None, TransactionTestOp::TxnDelete(_))
+                | (None, TransactionTestOp::Commit)
+                | (None, TransactionTestOp::Rollback) => TransactionTestOpResult::Invalid,
             };
 
             results.push(result);
