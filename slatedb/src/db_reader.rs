@@ -1192,7 +1192,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let result = reader.get(b"key").await.unwrap_err();
         dbg!(&result);
-        assert_eq!(result.to_string(), "System error: io error (oops)");
+        assert_eq!(result.to_string(), "I/O error: io error (oops)");
     }
 
     struct TestProvider {
