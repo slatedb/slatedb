@@ -291,7 +291,7 @@ impl<R: RngCore> IdGenerator for R {
 /// Arguments:
 /// - `clock`: The clock to use for the timeout.
 /// - `duration`: The duration to wait for the future to complete.
-/// - `op`: The name of the operation that will time out, for logging purposes.
+/// - `operation`: The name of the operation that will time out, for logging purposes.
 /// - `future`: The future to timeout
 ///
 /// Returns:
@@ -300,15 +300,14 @@ impl<R: RngCore> IdGenerator for R {
 pub async fn timeout<T>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
-    op: &'static str,
+    operation: &'static str,
     future: impl Future<Output = Result<T, SlateDBError>> + Send,
 ) -> Result<T, SlateDBError> {
     tokio::select! {
         biased;
         res = future => res,
         _ = clock.sleep(duration) => Err(SlateDBError::Timeout {
-            op,
-            backoff: duration,
+            operation,
         })
     }
 }

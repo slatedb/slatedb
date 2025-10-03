@@ -11,7 +11,7 @@ impl From<DstError> for Error {
     fn from(err: DstError) -> Self {
         let msg = err.to_string();
         match err {
-            DstError::SQLiteStateError(e) => Error::operation(msg).with_source(Box::new(e)),
+            DstError::SQLiteStateError(e) => Error::internal(msg).with_source(Box::new(e)),
         }
     }
 }

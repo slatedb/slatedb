@@ -131,8 +131,8 @@ pub(crate) enum SlateDBError {
     #[cfg(feature = "foyer")]
     FoyerCacheReadingError(#[from] Arc<anyhow::Error>),
 
-    #[error("operation timed out. operation=`{op}`")]
-    Timeout { op: &'static str, backoff: Duration },
+    #[error("operation timed out. operation=`{operation}`")]
+    Timeout { operation: &'static str },
 
     #[error("wal buffer already started")]
     WalBufferAlreadyStarted,
@@ -216,50 +216,45 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub enum ErrorKind {
-    /// The database attempted to use an invalid configuration.
-    Configuration,
-
-    /// The database attempted an invalid operation or an operation with an
-    /// invalid parameter (including misconfiguration).
-    Operation,
-
-    /// Unexpected internal error. This error is fatal (i.e. the database must be closed).
-    System,
-
-    /// Invalid persistent state (e.g. corrupted data files). The state must
-    /// be repaired before the database can be restarted.
-    PersistentState,
-
-    /// Failed access database resources (e.g. remote storage) due to some
-    /// kind of authentication or authorization error. The operation can be
-    /// retried after the permission issue is resolved.
-    Permission,
-
-    /// The current instance has been fenced by a new writer and is no longer usable.
-    /// The operation cannot be retried and a new instance should be opened.
+    /// The current instance has been fenced. The instance is no longer usable.
     Fenced,
 
-    /// The operation failed due to a transient error (such as IO unavailability).
-    /// The operation can be retried after backing off.
-    Transient(Duration),
+    /// A transaction conflict occurred. The transaction must be retried or dropped.
+    Transaction,
+
+    /// The database has been shutdown cleanly. The instance is no longer usable.
+    Closed,
+
+    /// An I/O error occurred. The operation must be retried or dropped.
+    Io,
+
+    /// The user supplied invalid configuration. The user must correct the configuration
+    /// and create a new instance.
+    Configuration,
+
+    /// The user supplied an illegal argument in a method call. The user must correct the argument
+    /// and retry, or drop the operation.
+    Argument,
+
+    /// An internal error occurred.
+    Internal,
 }
 
 impl std::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ErrorKind::Configuration => write!(f, "Configuration error"),
-            ErrorKind::Operation => write!(f, "Operation error"),
-            ErrorKind::System => write!(f, "System error"),
-            ErrorKind::PersistentState => write!(f, "Persistent state error"),
-            ErrorKind::Permission => write!(f, "Permission error"),
             ErrorKind::Fenced => write!(f, "Fencing error"),
-            ErrorKind::Transient(backoff) => {
-                write!(f, "Transient error (retry after: {backoff:?})")
-            }
+            ErrorKind::Transaction => write!(f, "Transaction error"),
+            ErrorKind::Closed => write!(f, "Closed error"),
+            ErrorKind::Io => write!(f, "I/O error"),
+            ErrorKind::Configuration => write!(f, "Configuration error"),
+            ErrorKind::Argument => write!(f, "Argument error"),
+            ErrorKind::Internal => write!(f, "Internal error"),
         }
     }
 }
 
+#[non_exhaustive]
 /// Represents a public error that can be returned to the user.
 #[derive(Debug)]
 pub struct Error {
@@ -287,51 +282,6 @@ impl std::error::Error for Error {
 }
 
 impl Error {
-    /// Creates a new public configuration error.
-    pub fn configuration(msg: String) -> Self {
-        Self {
-            msg,
-            kind: ErrorKind::Configuration,
-            source: None,
-        }
-    }
-
-    /// Creates a new public operation error.
-    pub fn operation(msg: String) -> Self {
-        Self {
-            msg,
-            kind: ErrorKind::Operation,
-            source: None,
-        }
-    }
-
-    /// Creates a new public system error.
-    pub fn system(msg: String) -> Self {
-        Self {
-            msg,
-            kind: ErrorKind::System,
-            source: None,
-        }
-    }
-
-    /// Creates a new public persistent state error.
-    pub fn persistent_state(msg: String) -> Self {
-        Self {
-            msg,
-            kind: ErrorKind::PersistentState,
-            source: None,
-        }
-    }
-
-    /// Creates a new public permission error.
-    pub fn permission(msg: String) -> Self {
-        Self {
-            msg,
-            kind: ErrorKind::Permission,
-            source: None,
-        }
-    }
-
     /// Creates a new fencing error.
     pub fn fenced(msg: String) -> Self {
         Self {
@@ -341,11 +291,56 @@ impl Error {
         }
     }
 
-    /// Creates a new public transient error.
-    pub fn transient(msg: String, backoff: Duration) -> Self {
+    /// Creates a new fencing error.
+    pub fn transaction(msg: String) -> Self {
         Self {
             msg,
-            kind: ErrorKind::Transient(backoff),
+            kind: ErrorKind::Transaction,
+            source: None,
+        }
+    }
+
+    /// Creates a new fencing error.
+    pub fn closed(msg: String) -> Self {
+        Self {
+            msg,
+            kind: ErrorKind::Closed,
+            source: None,
+        }
+    }
+
+    /// Creates a new I/O error.
+    pub fn io(msg: String) -> Self {
+        Self {
+            msg,
+            kind: ErrorKind::Io,
+            source: None,
+        }
+    }
+
+    /// Creates a new configuration error.
+    pub fn configuration(msg: String) -> Self {
+        Self {
+            msg,
+            kind: ErrorKind::Configuration,
+            source: None,
+        }
+    }
+
+    /// Creates a new argument error.
+    pub fn argument(msg: String) -> Self {
+        Self {
+            msg,
+            kind: ErrorKind::Argument,
+            source: None,
+        }
+    }
+
+    /// Creates a new internal error.
+    pub fn internal(msg: String) -> Self {
+        Self {
+            msg,
+            kind: ErrorKind::Internal,
             source: None,
         }
     }
@@ -356,6 +351,7 @@ impl Error {
         self
     }
 
+    /// Returns the error kind.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
@@ -365,78 +361,87 @@ impl From<SlateDBError> for Error {
     fn from(err: SlateDBError) -> Self {
         let msg = err.to_string();
         match err {
-            SlateDBError::IoError(err) => Error::system(msg).with_source(Box::new(err)),
-            SlateDBError::ObjectStoreError(err) => Error::operation(msg).with_source(Box::new(err)),
-            SlateDBError::InvalidFlatbuffer(err) => {
-                Error::persistent_state(msg).with_source(Box::new(err))
-            }
-            SlateDBError::InvalidDeletion => Error::operation(msg),
-            SlateDBError::InvalidDBState => Error::persistent_state(msg),
-            SlateDBError::InvalidCompaction => Error::operation(msg),
-            SlateDBError::CompactionExecutorFailed => Error::system(msg),
-            SlateDBError::InvalidClockTick { .. } => Error::operation(msg),
+            // Fenced, transaction, and closed errors
             SlateDBError::Fenced => Error::fenced(msg),
-            SlateDBError::InvalidCachePartSize => Error::operation(msg),
-            SlateDBError::InvalidCompressionCodec => Error::operation(msg),
+            SlateDBError::TransactionConflict => Error::transaction(msg),
+
+            // Closed
+            SlateDBError::Closed => Error::closed(msg),
+            SlateDBError::ReadChannelError(err) => Error::closed(msg).with_source(Box::new(err)),
+
+            // Io errors
+            SlateDBError::IoError(err) => Error::io(msg).with_source(Box::new(err)),
+            SlateDBError::ObjectStoreError(err) => Error::io(msg).with_source(Box::new(err)),
+            #[cfg(feature = "foyer")]
+            SlateDBError::FoyerCacheReadingError(err) => {
+                Error::io(msg).with_source(Box::new(AnyhowError(err)))
+            }
+
+            // Configuration errors
+            SlateDBError::InvalidCachePartSize => Error::configuration(msg),
+            SlateDBError::InvalidCompressionCodec => Error::configuration(msg),
+            SlateDBError::Unsupported(_) => Error::configuration(msg),
+            SlateDBError::InvalidConfigurationFormat(err) => {
+                Error::configuration(msg).with_source(Box::new(err))
+            }
+            SlateDBError::InvalidObjectStoreURL(_, err) => {
+                Error::configuration(msg).with_source(Box::new(err))
+            }
+            SlateDBError::UnknownConfigurationFormat(_) => Error::configuration(msg),
+            SlateDBError::InvalidSSTBatchSize(_) => Error::configuration(msg),
+            SlateDBError::InvalidCheckpointLifetime(_) => Error::configuration(msg),
+            SlateDBError::InvalidManifestPollInterval(_) => Error::configuration(msg),
+            SlateDBError::CheckpointLifetimeTooShort { .. } => Error::configuration(msg),
+
+            // Argument errors
+            SlateDBError::InvalidatedIterator(err) => {
+                Error::argument(msg).with_source(Box::new(err))
+            }
+            SlateDBError::SeekKeyOutOfRange { .. } => Error::argument(msg),
+            SlateDBError::SeekKeyLessThanLastReturnedKey => Error::argument(msg),
+            SlateDBError::IdenticalClonePaths { .. } => Error::argument(msg),
+            SlateDBError::WalDisabled => Error::argument(msg),
+
+            // Internal errors
+            SlateDBError::Timeout { .. } => Error::internal(msg),
+            SlateDBError::InvalidFlatbuffer(err) => Error::internal(msg).with_source(Box::new(err)),
+            SlateDBError::InvalidDeletion => Error::internal(msg),
+            SlateDBError::InvalidDBState => Error::internal(msg),
+            SlateDBError::InvalidCompaction => Error::internal(msg),
+            SlateDBError::CompactionExecutorFailed => Error::internal(msg),
+            SlateDBError::InvalidClockTick { .. } => Error::internal(msg),
             #[cfg(any(
                 feature = "snappy",
                 feature = "zlib",
                 feature = "lz4",
                 feature = "zstd"
             ))]
-            SlateDBError::BlockDecompressionError => Error::operation(msg),
+            SlateDBError::BlockDecompressionError => Error::internal(msg),
             #[cfg(any(feature = "snappy", feature = "zlib", feature = "zstd"))]
-            SlateDBError::BlockCompressionError => Error::operation(msg),
-            SlateDBError::InvalidRowFlags { .. } => Error::operation(msg),
-            SlateDBError::ReadChannelError(err) => Error::system(msg).with_source(Box::new(err)),
-            SlateDBError::InvalidatedIterator(err) => {
-                Error::operation(msg).with_source(Box::new(err))
-            }
+            SlateDBError::BlockCompressionError => Error::internal(msg),
+            SlateDBError::InvalidRowFlags { .. } => Error::internal(msg),
             SlateDBError::BackgroundTaskPanic(err) => {
-                Error::system(msg).with_source(Box::new(PanicError(err)))
+                Error::internal(msg).with_source(Box::new(PanicError(err)))
             }
-            SlateDBError::Closed => Error::system(msg),
             SlateDBError::MergeOperatorError(err) => {
-                Error::operation(msg).with_source(Box::new(err))
+                Error::internal(msg).with_source(Box::new(err))
             }
-            SlateDBError::CheckpointMissing(_) => Error::persistent_state(msg),
-            SlateDBError::InvalidVersion { .. } => Error::persistent_state(msg),
-            #[cfg(feature = "foyer")]
-            SlateDBError::FoyerCacheReadingError(err) => {
-                Error::persistent_state(msg).with_source(Box::new(AnyhowError(err)))
-            }
-            SlateDBError::Timeout { backoff, .. } => Error::transient(msg, backoff),
-            SlateDBError::WalBufferAlreadyStarted => Error::system(msg),
-            SlateDBError::ManifestMissing(_) => Error::persistent_state(msg),
-            SlateDBError::LatestManifestMissing => Error::persistent_state(msg),
-            SlateDBError::ManifestVersionExists => Error::persistent_state(msg),
-            SlateDBError::EmptyManifest => Error::persistent_state(msg),
-            SlateDBError::EmptyBlock => Error::persistent_state(msg),
-            SlateDBError::EmptyBlockMeta => Error::persistent_state(msg),
-            SlateDBError::EmptySSTable => Error::persistent_state(msg),
-            SlateDBError::Unsupported(_) => Error::operation(msg),
-            SlateDBError::ChecksumMismatch => Error::persistent_state(msg),
-            SlateDBError::SeekKeyOutOfRange { .. } => Error::operation(msg),
-            SlateDBError::SeekKeyLessThanLastReturnedKey => Error::operation(msg),
-            SlateDBError::IdenticalClonePaths { .. } => Error::operation(msg),
-            SlateDBError::InvalidCheckpointLifetime(_) => Error::operation(msg),
-            SlateDBError::InvalidManifestPollInterval(_) => Error::operation(msg),
-            SlateDBError::CheckpointLifetimeTooShort { .. } => Error::operation(msg),
-            SlateDBError::InvalidSSTBatchSize(_) => Error::operation(msg),
-            SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::operation(msg),
-            SlateDBError::CloneExternalDbMissing => Error::persistent_state(msg),
-            SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::persistent_state(msg),
-            SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::persistent_state(msg),
-            SlateDBError::UnknownConfigurationFormat(_) => Error::configuration(msg),
-            SlateDBError::InvalidConfigurationFormat(err) => {
-                Error::configuration(msg).with_source(Box::new(err))
-            }
-            SlateDBError::WalDisabled => Error::operation(msg),
-            SlateDBError::InvalidObjectStoreURL(_, err) => {
-                Error::configuration(msg).with_source(Box::new(err))
-            }
-            SlateDBError::TransactionConflict => Error::operation(msg),
-            SlateDBError::FileVersionExists => Error::persistent_state(msg),
+            SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::argument(msg),
+            SlateDBError::CheckpointMissing(_) => Error::internal(msg),
+            SlateDBError::InvalidVersion { .. } => Error::internal(msg),
+            SlateDBError::WalBufferAlreadyStarted => Error::internal(msg),
+            SlateDBError::ManifestMissing(_) => Error::internal(msg),
+            SlateDBError::LatestManifestMissing => Error::internal(msg),
+            SlateDBError::ManifestVersionExists => Error::internal(msg),
+            SlateDBError::EmptyManifest => Error::internal(msg),
+            SlateDBError::EmptyBlock => Error::internal(msg),
+            SlateDBError::EmptyBlockMeta => Error::internal(msg),
+            SlateDBError::EmptySSTable => Error::internal(msg),
+            SlateDBError::ChecksumMismatch => Error::internal(msg),
+            SlateDBError::CloneExternalDbMissing => Error::internal(msg),
+            SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::internal(msg),
+            SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::internal(msg),
+            SlateDBError::FileVersionExists => Error::internal(msg),
         }
     }
 }
