@@ -803,6 +803,9 @@ mod tests {
             Arc::new(DbRand::default()),
         )
         .await;
-        assert!(matches!(result, Err(SlateDBError::Unsupported(..))));
+        assert!(matches!(
+            result,
+            Err(SlateDBError::WalStoreReconfigurationError)
+        ));
     }
 }

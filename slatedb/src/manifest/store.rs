@@ -619,9 +619,7 @@ impl ManifestStore {
     pub(crate) async fn validate_no_wal_object_store_configured(&self) -> Result<(), SlateDBError> {
         let (_, manifest) = self.read_latest_manifest().await?;
         if manifest.core.wal_object_store_uri.is_some() {
-            return Err(SlateDBError::Unsupported(
-                "dedicated WAL object store is not supported".into(),
-            ));
+            return Err(SlateDBError::WalStoreReconfigurationError);
         }
         Ok(())
     }
