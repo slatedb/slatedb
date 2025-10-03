@@ -467,7 +467,7 @@ impl CompactorEventHandler {
                 break;
             }
             // Validate the candidate compaction; skip invalid ones
-            match self.validate_compaction(&compaction) {
+            match self.validate_compaction(compaction) {
                 Err(e) => {
                     warn!("invalid compaction [error={:?}]", e);
                     continue;
