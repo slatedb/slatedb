@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
+use crate::compactor_state::SourceId;
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
@@ -421,6 +422,38 @@ impl CompactorEventHandler {
         }
     }
 
+    fn validate_compaction(&self, compaction: &Compaction) -> Result<(), SlateDBError> {
+        // Validate compaction sources exist
+        if compaction.sources.is_empty() {
+            warn!("submitted compaction is empty: {:?}", compaction.sources);
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+        let has_only_l0 = compaction
+            .sources
+            .iter()
+            .all(|s| matches!(s, SourceId::Sst(_)));
+
+        if has_only_l0 {
+            // L0-only: must create new SR with id > highest_existing
+            let highest_id = self
+                .state
+                .db_state()
+                .compacted
+                .first()
+                .map_or(0, |sr| sr.id + 1);
+            if compaction.destination < highest_id {
+                warn!("compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
+                compaction.destination, highest_id);
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        }
+
+        self.scheduler
+            .validate_compaction(&self.state, compaction)
+            .map_err(|_e| SlateDBError::InvalidCompaction)
+    }
+
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
         let compactions = self.scheduler.maybe_schedule_compaction(&self.state);
         for compaction in compactions.iter() {
@@ -433,10 +466,14 @@ impl CompactorEventHandler {
                 );
                 break;
             }
-            self.scheduler
-                .validate_compaction(&self.state, compaction)
-                .map_err(|_e| SlateDBError::InvalidCompaction)?;
-            self.submit_compaction(compaction.clone()).await?;
+            // Validate the candidate compaction; skip invalid ones
+            match self.validate_compaction(&compaction) {
+                Err(e) => {
+                    warn!("invalid compaction [error={:?}]", e);
+                    continue;
+                }
+                Ok(_) => self.submit_compaction(compaction.clone()).await?,
+            }
         }
         Ok(())
     }
