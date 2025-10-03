@@ -173,10 +173,6 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
             },
         )
         .await
-        .map_err(|_| SlateDBError::Timeout {
-            op: "record update",
-            backoff: Duration::from_secs(1),
-        })
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
