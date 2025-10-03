@@ -91,8 +91,7 @@ pub(crate) enum SlateDBError {
     #[error("error compressing block")]
     BlockCompressionError,
 
-    #[error("Invalid RowFlags. #{message}. encoded_bits=`{encoded_bits:#b}`, known_bits=`{known_bits:#b}`"
-    )]
+    #[error("Invalid RowFlags. #{message}. encoded_bits=`{encoded_bits:#b}`, known_bits=`{known_bits:#b}`")]
     InvalidRowFlags {
         encoded_bits: u8,
         known_bits: u8,
@@ -127,9 +126,9 @@ pub(crate) enum SlateDBError {
         actual_version: u16,
     },
 
-    #[error("foyer cache reading error")]
+    #[error("foyer error")]
     #[cfg(feature = "foyer")]
-    FoyerCacheReadingError(#[from] Arc<anyhow::Error>),
+    FoyerError(#[from] Arc<foyer::Error>),
 
     #[error("operation timed out. operation=`{operation}`")]
     Timeout { operation: &'static str },
@@ -207,6 +206,12 @@ impl From<std::io::Error> for SlateDBError {
 impl From<object_store::Error> for SlateDBError {
     fn from(value: object_store::Error) -> Self {
         Self::ObjectStoreError(Arc::new(value))
+    }
+}
+
+impl From<foyer::Error> for SlateDBError {
+    fn from(value: foyer::Error) -> Self {
+        Self::FoyerError(Arc::new(value))
     }
 }
 
@@ -373,9 +378,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::IoError(err) => Error::io(msg).with_source(Box::new(err)),
             SlateDBError::ObjectStoreError(err) => Error::io(msg).with_source(Box::new(err)),
             #[cfg(feature = "foyer")]
-            SlateDBError::FoyerCacheReadingError(err) => {
-                Error::io(msg).with_source(Box::new(AnyhowError(err)))
-            }
+            SlateDBError::FoyerError(err) => Error::io(msg).with_source(Box::new(err)),
 
             // Configuration errors
             SlateDBError::InvalidCachePartSize => Error::configuration(msg),
@@ -462,17 +465,5 @@ impl std::fmt::Display for PanicError {
             write!(f, "irrecoverable panic")?;
         }
         Ok(())
-    }
-}
-
-#[derive(Debug)]
-#[cfg(feature = "foyer")]
-struct AnyhowError(Arc<anyhow::Error>);
-#[cfg(feature = "foyer")]
-impl std::error::Error for AnyhowError {}
-#[cfg(feature = "foyer")]
-impl std::fmt::Display for AnyhowError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
