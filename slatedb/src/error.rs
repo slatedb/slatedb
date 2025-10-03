@@ -55,8 +55,8 @@ pub(crate) enum SlateDBError {
     #[error("invalid DB state error")]
     InvalidDBState,
 
-    #[error("unsupported operation. operation=`{0}`")]
-    Unsupported(String),
+    #[error("wal store reconfiguration unsupported")]
+    WalStoreReconfigurationError,
 
     #[error("invalid compaction")]
     InvalidCompaction,
@@ -383,7 +383,7 @@ impl From<SlateDBError> for Error {
             // Configuration errors
             SlateDBError::InvalidCachePartSize => Error::configuration(msg),
             SlateDBError::InvalidCompressionCodec => Error::configuration(msg),
-            SlateDBError::Unsupported(_) => Error::configuration(msg),
+            SlateDBError::WalStoreReconfigurationError => Error::configuration(msg),
             SlateDBError::InvalidConfigurationFormat(err) => {
                 Error::configuration(msg).with_source(Box::new(err))
             }

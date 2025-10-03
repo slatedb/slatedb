@@ -1004,7 +1004,7 @@ mod tests {
         let res: Result<VecDeque<usize>, SlateDBError> =
             build_concurrent(inputs, 3, |x| async move {
                 if x == 5 {
-                    Err(SlateDBError::Unsupported("boom".into()))
+                    Err(SlateDBError::Fenced)
                 } else {
                     Ok(Some(x))
                 }
