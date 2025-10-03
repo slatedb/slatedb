@@ -101,9 +101,6 @@ pub(crate) enum SlateDBError {
     #[error("read channel error")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 
-    #[error("iterator invalidated after unexpected error")]
-    InvalidatedIterator(#[from] Box<SlateDBError>),
-
     #[error("background task panic'd")]
     // we need to wrap the panic args in an Arc so SlateDbError is Clone
     // we need to wrap the panic args in a mutex so that SlateDbError is Sync
@@ -397,9 +394,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::CheckpointLifetimeTooShort { .. } => Error::configuration(msg),
 
             // Argument errors
-            SlateDBError::InvalidatedIterator(err) => {
-                Error::argument(msg).with_source(Box::new(err))
-            }
             SlateDBError::SeekKeyOutOfRange { .. } => Error::argument(msg),
             SlateDBError::SeekKeyLessThanLastReturnedKey => Error::argument(msg),
             SlateDBError::IdenticalClonePaths { .. } => Error::argument(msg),
