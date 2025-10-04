@@ -16,11 +16,12 @@ use uuid::Uuid;
 use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
+use crate::compactor_state::SourceId;
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
-use crate::error::SlateDBError;
+use crate::error::{Error, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::rand::DbRand;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -37,6 +38,13 @@ pub trait CompactionSchedulerSupplier: Send + Sync {
 
 pub trait CompactionScheduler: Send + Sync {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
+    fn validate_compaction(
+        &self,
+        _state: &CompactorState,
+        _compaction: &Compaction,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// Tracks progress of various compactions. Progress is updated from the executor with
@@ -414,6 +422,38 @@ impl CompactorEventHandler {
         }
     }
 
+    fn validate_compaction(&self, compaction: &Compaction) -> Result<(), SlateDBError> {
+        // Validate compaction sources exist
+        if compaction.sources.is_empty() {
+            warn!("submitted compaction is empty: {:?}", compaction.sources);
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+        let has_only_l0 = compaction
+            .sources
+            .iter()
+            .all(|s| matches!(s, SourceId::Sst(_)));
+
+        if has_only_l0 {
+            // L0-only: must create new SR with id > highest_existing
+            let highest_id = self
+                .state
+                .db_state()
+                .compacted
+                .first()
+                .map_or(0, |sr| sr.id + 1);
+            if compaction.destination < highest_id {
+                warn!("compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
+                compaction.destination, highest_id);
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        }
+
+        self.scheduler
+            .validate_compaction(&self.state, compaction)
+            .map_err(|_e| SlateDBError::InvalidCompaction)
+    }
+
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
         let compactions = self.scheduler.maybe_schedule_compaction(&self.state);
         for compaction in compactions.iter() {
@@ -522,6 +562,12 @@ impl CompactorEventHandler {
 
     #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
     async fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
+        // Validate the candidate compaction; skip invalid ones
+        if let Err(e) = self.validate_compaction(&compaction) {
+            warn!("invalid compaction [error={:?}]", e);
+            return Ok(());
+        }
+
         let id = self.rand.rng().gen_uuid();
         tracing::Span::current().record("id", tracing::field::display(&id));
         let result = self.state.submit_compaction(id, compaction.clone());
@@ -1237,6 +1283,79 @@ mod tests {
         let bytes_compacted = metrics.lookup(BYTES_COMPACTED).unwrap().get();
 
         assert!(bytes_compacted > 0, "bytes_compacted: {}", bytes_compacted);
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_empty_sources_rejected() {
+        let fixture = CompactorEventHandlerTestFixture::new().await;
+        let c = Compaction::new(Vec::new(), 0);
+        let err = fixture.handler.validate_compaction(&c).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_l0_only_ok_when_no_sr() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        // ensure at least one L0 exists
+        fixture.write_l0().await;
+        let c = fixture.build_l0_compaction().await;
+        fixture.handler.validate_compaction(&c).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_l0_only_rejects_when_dest_below_highest_sr() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        // write L0 and compact to create SR id 0
+        fixture.write_l0().await;
+        let c1 = fixture.build_l0_compaction().await;
+        fixture.scheduler.inject_compaction(c1.clone());
+        fixture.handler.handle_ticker().await;
+        fixture.assert_and_forward_compactions(1);
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            fixture.real_executor_rx.recv(),
+        )
+        .await
+        .unwrap()
+        .expect("timeout waiting compaction msg");
+        fixture.handler.handle(msg).await.unwrap();
+
+        // now highest_id should be 1; build L0-only compaction with dest 0 (below highest)
+        fixture.write_l0().await;
+        let c2 = fixture.build_l0_compaction().await; // destination 0
+        let err = fixture.handler.validate_compaction(&c2).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_mixed_l0_and_sr_deferred_to_scheduler() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        // create one SR so we can reference its id
+        fixture.write_l0().await;
+        let c1 = fixture.build_l0_compaction().await;
+        fixture.scheduler.inject_compaction(c1.clone());
+        fixture.handler.handle_ticker().await;
+        fixture.assert_and_forward_compactions(1);
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            fixture.real_executor_rx.recv(),
+        )
+        .await
+        .unwrap()
+        .expect("timeout waiting compaction msg");
+        fixture.handler.handle(msg).await.unwrap();
+
+        // prepare a mixed compaction: one SR source and one L0 source
+        fixture.write_l0().await;
+        let state = fixture.latest_db_state().await;
+        let sr_id = state.compacted.first().unwrap().id;
+        let l0_ulid = state.l0.front().unwrap().id.unwrap_compacted_id();
+        let mixed = Compaction::new(
+            vec![SourceId::SortedRun(sr_id), SourceId::Sst(l0_ulid)],
+            sr_id,
+        );
+        // Compactor-level validation should not reject (scheduler default validate returns Ok(()))
+        fixture.handler.validate_compaction(&mixed).unwrap();
     }
 
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>
