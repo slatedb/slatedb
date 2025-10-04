@@ -275,10 +275,7 @@ mod tests {
     }
 
     fn assert_invalidated_iterator_error(err: crate::Error) {
-        assert_eq!(
-            err.to_string(),
-            "Internal error: checksum mismatch"
-        );
+        assert_eq!(err.to_string(), "Internal error: checksum mismatch");
     }
 
     #[tokio::test]

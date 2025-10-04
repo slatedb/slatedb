@@ -300,15 +300,13 @@ impl<R: RngCore> IdGenerator for R {
 pub async fn timeout<T>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
-    operation: &'static str,
+    error_fn: impl FnOnce() -> SlateDBError,
     future: impl Future<Output = Result<T, SlateDBError>> + Send,
 ) -> Result<T, SlateDBError> {
     tokio::select! {
         biased;
         res = future => res,
-        _ = clock.sleep(duration) => Err(SlateDBError::Timeout {
-            operation,
-        })
+        _ = clock.sleep(duration) => Err(error_fn())
     }
 }
 
@@ -776,7 +774,12 @@ mod tests {
 
         // When: we execute a future with a timeout
         let completed_future = async { Ok::<_, SlateDBError>(42) };
-        let timeout_future = timeout(clock, Duration::from_millis(100), "test", completed_future);
+        let timeout_future = timeout(
+            clock,
+            Duration::from_millis(100),
+            || unreachable!(),
+            completed_future,
+        );
 
         // Then: the future should complete successfully with the expected value
         let result = timeout_future.await;
@@ -794,12 +797,15 @@ mod tests {
         // Given: a mock clock and a future that will never complete
         let clock = Arc::new(MockSystemClock::new());
         let never_completes = std::future::pending::<Result<(), SlateDBError>>();
+        let timeout_duration = Duration::from_millis(100);
 
         // When: we execute the future with a timeout and advance the clock past the timeout duration
         let timeout_future = timeout(
             clock.clone(),
-            Duration::from_millis(100),
-            "test",
+            timeout_duration,
+            || SlateDBError::ManifestUpdateTimeout {
+                timeout: timeout_duration,
+            },
             never_completes,
         );
         let done = Arc::new(AtomicBool::new(false));
@@ -817,7 +823,10 @@ mod tests {
         // Then: the future should complete with a timeout error
         let result = timeout_future.await;
         done.store(true, SeqCst);
-        assert!(matches!(result, Err(SlateDBError::Timeout { .. })));
+        assert!(matches!(
+            result,
+            Err(SlateDBError::ManifestUpdateTimeout { .. })
+        ));
     }
 
     #[tokio::test]
@@ -833,7 +842,7 @@ mod tests {
         let timeout_future = timeout(
             clock,
             Duration::from_millis(100),
-            "test",
+            || unreachable!(),
             completes_immediately,
         );
 

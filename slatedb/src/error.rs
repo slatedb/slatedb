@@ -127,8 +127,8 @@ pub(crate) enum SlateDBError {
     #[cfg(feature = "foyer")]
     FoyerError(#[from] Arc<foyer::Error>),
 
-    #[error("operation timed out. operation=`{operation}`")]
-    Timeout { operation: &'static str },
+    #[error("manifest update timeout after {timeout:?}")]
+    ManifestUpdateTimeout { timeout: Duration },
 
     #[error("wal buffer already started")]
     WalBufferAlreadyStarted,
@@ -400,7 +400,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::WalDisabled => Error::argument(msg),
 
             // Internal errors
-            SlateDBError::Timeout { .. } => Error::internal(msg),
+            SlateDBError::ManifestUpdateTimeout { .. } => Error::internal(msg),
             SlateDBError::InvalidFlatbuffer(err) => Error::internal(msg).with_source(Box::new(err)),
             SlateDBError::InvalidDeletion => Error::internal(msg),
             SlateDBError::InvalidDBState => Error::internal(msg),
