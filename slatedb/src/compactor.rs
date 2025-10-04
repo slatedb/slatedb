@@ -466,14 +466,7 @@ impl CompactorEventHandler {
                 );
                 break;
             }
-            // Validate the candidate compaction; skip invalid ones
-            match self.validate_compaction(compaction) {
-                Err(e) => {
-                    warn!("invalid compaction [error={:?}]", e);
-                    continue;
-                }
-                Ok(_) => self.submit_compaction(compaction.clone()).await?,
-            }
+            self.submit_compaction(compaction.clone()).await?
         }
         Ok(())
     }
@@ -569,6 +562,12 @@ impl CompactorEventHandler {
 
     #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
     async fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
+        // Validate the candidate compaction; skip invalid ones
+        if let Err(e) = self.validate_compaction(&compaction) {
+            warn!("invalid compaction [error={:?}]", e);
+            return Ok(());
+        }
+
         let id = self.rand.rng().gen_uuid();
         tracing::Span::current().record("id", tracing::field::display(&id));
         let result = self.state.submit_compaction(id, compaction.clone());
