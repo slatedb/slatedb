@@ -3,16 +3,18 @@ use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::BackgroundTaskPanic;
+use crate::error::SlateDBError::TaskPanic;
 use crate::types::RowEntry;
+use crate::TaskKind;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use rand::{Rng, RngCore};
+use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
@@ -77,6 +79,7 @@ impl<T: Clone> WatchableOnceCellReader<T> {
 /// result. If the task panics, the cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_task<F, T, C>(
     handle: &tokio::runtime::Handle,
+    kind: TaskKind,
     cleanup_fn: C,
     future: F,
 ) -> tokio::task::JoinHandle<Result<T, SlateDBError>>
@@ -95,7 +98,10 @@ where
         let result = match outcome {
             Ok(Ok(val)) => Ok(val),
             Ok(Err(e)) => Err(e),
-            Err(panic) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic)))),
+            Err(panic) => Err(TaskPanic {
+                message: panic_string(panic),
+                task: kind,
+            }),
         };
         cleanup_fn(&result);
         result
@@ -499,19 +505,47 @@ where
     Ok(out)
 }
 
+/// Returns a string representation of a panic. The following panic types are
+/// converted to their string representation:
+///
+/// - SlateDBError
+/// - Box<dyn std::error::Error>
+/// - String
+/// - &'static str
+///
+/// Other panic types are handled by printing a generic message with the type name.
+pub fn panic_string(panic: Box<dyn Any + Send>) -> String {
+    if let Some(err) = panic.downcast_ref::<SlateDBError>() {
+        err.to_string()
+    } else if let Some(err) = panic.downcast_ref::<Box<dyn std::error::Error>>() {
+        err.to_string()
+    } else if let Some(err) = panic.downcast_ref::<String>() {
+        err.clone()
+    } else if let Some(err) = panic.downcast_ref::<&'static str>() {
+        err.to_string()
+    } else {
+        format!(
+            "task panicked with unknown type [type_id=`{:?}`]",
+            (*panic).type_id()
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
 
     use crate::clock::MonotonicClock;
+    use crate::dispatcher::TaskKind;
     use crate::error::SlateDBError;
     use crate::test_utils::TestClock;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
+        compute_max_parallel, panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
+    use std::any::Any;
     use std::collections::VecDeque;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -588,9 +622,12 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
-        let task = spawn_bg_task(&handle, move |err| captor2.capture(err), async {
-            Err(SlateDBError::Fenced)
-        });
+        let task = spawn_bg_task(
+            &handle,
+            TaskKind::Test,
+            move |err| captor2.capture(err),
+            async { Err(SlateDBError::Fenced) },
+        );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
         assert!(matches!(result, Err(SlateDBError::Fenced)));
@@ -606,14 +643,26 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
-        let task = spawn_bg_task(&handle, move |err| captor2.capture(err), monitored);
+        let task = spawn_bg_task(
+            &handle,
+            TaskKind::Test,
+            move |err| captor2.capture(err),
+            monitored,
+        );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
-        assert!(matches!(
-            captor.captured(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
-        ));
+        if let Err(SlateDBError::TaskPanic { message, task }) = result {
+            assert_eq!(message, "oops");
+            assert_eq!(task, TaskKind::Test);
+        } else {
+            panic!("expected task panic");
+        }
+        if let Err(SlateDBError::TaskPanic { message, task }) = captor.captured().unwrap() {
+            assert_eq!(message, "oops");
+            assert_eq!(task, TaskKind::Test);
+        } else {
+            panic!("expected task panic");
+        }
     }
 
     #[tokio::test]
@@ -622,7 +671,12 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
-        let task = spawn_bg_task(&handle, move |err| captor2.capture(err), async { Ok(()) });
+        let task = spawn_bg_task(
+            &handle,
+            TaskKind::Test,
+            move |err| captor2.capture(err),
+            async { Ok(()) },
+        );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
         assert!(matches!(result, Ok(())));
@@ -1056,5 +1110,54 @@ mod tests {
             observed_peak,
             max_parallel
         );
+    }
+
+    #[test]
+    fn panic_string_handles_slatedb_error() {
+        // Given a SlateDBError payload
+        let err = SlateDBError::InvalidDBState;
+        let payload: Box<dyn Any + Send> = Box::new(err.clone());
+
+        // When
+        let msg = panic_string(payload);
+
+        // Then: it should stringify the exact error
+        assert_eq!(msg, err.to_string());
+    }
+
+    #[test]
+    fn panic_string_handles_string() {
+        let s = String::from("hello");
+        let msg = panic_string(Box::new(s.clone()));
+        assert_eq!(msg, s);
+    }
+
+    #[test]
+    fn panic_string_handles_static_str() {
+        let s: &'static str = "boom";
+        let msg = panic_string(Box::new(s));
+        assert_eq!(msg, s);
+    }
+
+    #[test]
+    fn panic_string_falls_back_for_boxed_error_trait_object() {
+        // The function attempts to downcast to `Box<dyn std::error::Error>`.
+        // However, because `panic_string` requires `Send`, a realistic panic payload
+        // would be `Box<dyn std::error::Error + Send + Sync>`, which does not
+        // match the downcast target exactly and therefore takes the fallback path.
+        let err_box: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(std::io::Error::new(std::io::ErrorKind::Other, "oh no"));
+
+        let msg = panic_string(Box::new(err_box));
+        assert!(msg.contains("task panicked with unknown type"));
+    }
+
+    #[test]
+    fn panic_string_falls_back_for_unknown_type() {
+        #[derive(Clone, Debug)]
+        struct MyType;
+
+        let msg = panic_string(Box::new(MyType));
+        assert!(msg.contains("task panicked with unknown type"));
     }
 }

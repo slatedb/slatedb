@@ -20,6 +20,7 @@ use crate::garbage_collector::stats::GcStats;
 use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::TaskKind;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -123,6 +124,10 @@ impl MessageHandler<GcMessage> for GarbageCollector {
         info!("garbage collector shutdown");
         self.log_stats();
         Ok(())
+    }
+
+    fn kind(&self) -> TaskKind {
+        TaskKind::GarbageCollector
     }
 }
 

@@ -42,6 +42,7 @@ use crate::config::WriteOptions;
 use crate::dispatcher::{MessageDispatcher, MessageHandler};
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
+use crate::TaskKind;
 use crate::{
     batch::{WriteBatch, WriteOp},
     db::DbInner,
@@ -113,6 +114,10 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
             self.handle(msg).await?;
         }
         Ok(())
+    }
+
+    fn kind(&self) -> TaskKind {
+        TaskKind::Writer
     }
 }
 

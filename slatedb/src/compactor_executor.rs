@@ -25,6 +25,7 @@ use crate::tablestore::TableStore;
 
 use crate::compactor::stats::CompactionStats;
 use crate::utils::{build_concurrent, compute_max_parallel, spawn_bg_task, IdGenerator};
+use crate::TaskKind;
 use log::{debug, error};
 use tracing::instrument;
 use uuid::Uuid;
@@ -277,6 +278,7 @@ impl TokioCompactionExecutorInner {
         let this_cleanup = self.clone();
         let task = spawn_bg_task(
             &self.handle,
+            TaskKind::Compactor,
             move |result| {
                 let result = result.clone();
                 {

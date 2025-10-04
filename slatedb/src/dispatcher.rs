@@ -85,14 +85,8 @@
 //! # }
 //! ```
 
-use std::{
-    any::Any,
-    future::Future,
-    panic::AssertUnwindSafe,
-    pin::Pin,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use core::panic;
+use std::{any::Any, future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use fail_parallel::{fail_point, FailPointRegistry};
@@ -100,18 +94,46 @@ use futures::{
     stream::{BoxStream, FuturesUnordered},
     FutureExt, StreamExt,
 };
-use log::warn;
+use log::{error, warn};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     clock::{SystemClock, SystemClockTicker},
     error::SlateDBError,
-    utils::WatchableOnceCell,
+    utils::{panic_string, WatchableOnceCell},
 };
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
 pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
+
+/// The kind of task that a [MessageDispatcher] is running.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum TaskKind {
+    Compactor,
+    GarbageCollector,
+    ManifestPoller,
+    MemTableFlusher,
+    WalWriter,
+    Writer,
+    #[cfg(test)]
+    Test,
+}
+
+impl std::fmt::Display for TaskKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskKind::Compactor => write!(f, "compactor"),
+            TaskKind::GarbageCollector => write!(f, "garbage collector"),
+            TaskKind::ManifestPoller => write!(f, "manifest poller"),
+            TaskKind::MemTableFlusher => write!(f, "mem table flusher"),
+            TaskKind::WalWriter => write!(f, "wal writer"),
+            TaskKind::Writer => write!(f, "writer"),
+            #[cfg(test)]
+            TaskKind::Test => write!(f, "test"),
+        }
+    }
+}
 
 /// A dispatcher that invokes [MessageHandler] callbacks when events occur.
 ///
@@ -218,7 +240,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         let result = AssertUnwindSafe(self.run_loop())
             .catch_unwind()
             .await
-            .unwrap_or_else(Self::handle_panic);
+            .unwrap_or_else(|p| self.handle_panic(p));
         let result = self.handle_result(result);
         if let Err(e) = self.cleanup(result.clone()).await {
             warn!("failed to cleanup dispatcher on shutdown [error={:?}]", e);
@@ -320,10 +342,14 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// ## Returns
     ///
     /// A [Result] containing [SlateDBError::BackgroundTaskPanic], which wraps the panic.
-    fn handle_panic(panic: Box<dyn Any + Send>) -> Result<(), SlateDBError> {
-        Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
-            panic,
-        ))))
+    fn handle_panic(&self, panic: Box<dyn Any + Send>) -> Result<(), SlateDBError> {
+        let task = self.handler.kind();
+        let message = panic_string(panic);
+        error!(
+            "background task panicked [task={:?}, message={:?}]",
+            task, message
+        );
+        Err(SlateDBError::TaskPanic { message, task })
     }
 
     /// Tells the handler to clean up any resources.
@@ -455,6 +481,9 @@ pub(crate) trait MessageHandler<T: Send>: Send {
         messages: BoxStream<'async_trait, T>,
         result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError>;
+
+    /// Returns the task kind.
+    fn kind(&self) -> TaskKind;
 }
 
 #[cfg(all(test, feature = "test-util"))]
@@ -464,6 +493,7 @@ mod test {
     use crate::dispatcher::MessageFactory;
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
+    use crate::TaskKind;
     use fail_parallel::FailPointRegistry;
     use futures::stream::BoxStream;
     use futures::StreamExt;
@@ -553,6 +583,10 @@ mod test {
                 self.log.lock().unwrap().push((Phase::Cleanup, m));
             }
             Ok(())
+        }
+
+        fn kind(&self) -> TaskKind {
+            TaskKind::Test
         }
     }
 
@@ -1059,6 +1093,10 @@ mod test {
                 while messages.next().await.is_some() {}
                 Ok(())
             }
+
+            fn kind(&self) -> TaskKind {
+                TaskKind::Test
+            }
         }
 
         let cleanup_called = WatchableOnceCell::new();
@@ -1090,14 +1128,14 @@ mod test {
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        assert!(matches!(result, Err(SlateDBError::TaskPanic { .. })));
         assert!(matches!(
             error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskPanic(_))
+            Some(SlateDBError::TaskPanic { .. })
         ));
         assert!(matches!(
             cleanup_reader.read(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
+            Some(Err(SlateDBError::TaskPanic { .. }))
         ));
     }
 }

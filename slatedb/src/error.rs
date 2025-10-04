@@ -1,15 +1,19 @@
 use object_store::path::Path;
-use std::any::Any;
 use std::ops::Bound;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error as ThisError;
+use tokio::task::JoinError;
 use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
+use crate::dispatcher::TaskKind;
 use crate::merge_operator::MergeOperatorError;
 
+/// [SlateDBError]s are used to signal to the internal codebase that an error has occurred.
+///
+/// These errors are supposed to be very specific and less prescriptive. SlateDB developers
+/// must decide how to proceed. Adding new [SlateDBError]s is common and allowed without an RFC.
 #[non_exhaustive]
 #[derive(Clone, Debug, ThisError)]
 pub(crate) enum SlateDBError {
@@ -91,7 +95,7 @@ pub(crate) enum SlateDBError {
     #[error("error compressing block")]
     BlockCompressionError,
 
-    #[error("Invalid RowFlags. #{message}. encoded_bits=`{encoded_bits:#b}`, known_bits=`{known_bits:#b}`")]
+    #[error("invalid row flags. message=`{message}`, encoded_bits=`{encoded_bits:#b}`, known_bits=`{known_bits:#b}`")]
     InvalidRowFlags {
         encoded_bits: u8,
         known_bits: u8,
@@ -101,10 +105,8 @@ pub(crate) enum SlateDBError {
     #[error("read channel error")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 
-    #[error("background task panic'd")]
-    // we need to wrap the panic args in an Arc so SlateDbError is Clone
-    // we need to wrap the panic args in a mutex so that SlateDbError is Sync
-    BackgroundTaskPanic(Arc<Mutex<Box<dyn Any + Send>>>),
+    #[error("background task panicked. task=`{task}`. message=`{message}`")]
+    TaskPanic { message: String, task: TaskKind },
 
     #[error("db is closed")]
     Closed,
@@ -192,6 +194,9 @@ pub(crate) enum SlateDBError {
 
     #[error("transaction conflict")]
     TransactionConflict,
+
+    #[error("failed to replay WALs")]
+    WalReplayFailed(#[source] Arc<JoinError>),
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -215,6 +220,10 @@ impl From<foyer::Error> for SlateDBError {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Represents the kind of public errors that can be returned to the user.
+///
+/// These are less specific and more prescriptive. Application developers or operators must
+/// decide how to proceed. Adding new [ErrorKind]s requires an RFC, and should happen very
+/// infrequently.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub enum ErrorKind {
@@ -238,7 +247,25 @@ pub enum ErrorKind {
     /// and retry, or drop the operation.
     Argument,
 
-    /// An internal error occurred.
+    /// A background task panicked. The database is in a degraded state. The effects of the
+    /// panic depends on the task kind.
+    ///
+    /// - [`TaskKind::MemTableFlusher`]: MemTable writes will no longer go to object
+    ///   storage. Backpressure will eventually be applied.
+    /// - [`TaskKind::Compactor`]: The compactor is no longer running. Backpressure
+    ///   will eventually be applied.
+    /// - [`TaskKind::WalWriter`]: WAL writes will no longer go to object storage.
+    ///   Backpressure will eventually be applied.
+    /// - [`TaskKind::GarbageCollector`]: The garbage collector is no longer running.
+    ///   The database will operate as normal, but deleted files will no longer be
+    ///   removed from object storage.
+    /// - [`TaskKind::Writer`]: Writes will no longer be sent to the WAL and MemTable,
+    ///   and will not be visible to read. Backpressure will eventually be applied.
+    /// - [`TaskKind::ManifestPoller`]: The manifest poller is no longer running.
+    ///   Reads will be stale and fencing might not be detected for extended periods.
+    Panic(TaskKind),
+
+    /// An unexpected internal error occurred.
     Internal,
 }
 
@@ -251,6 +278,7 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::Io => write!(f, "I/O error"),
             ErrorKind::Configuration => write!(f, "Configuration error"),
             ErrorKind::Argument => write!(f, "Argument error"),
+            ErrorKind::Panic(_) => write!(f, "Task panic error"),
             ErrorKind::Internal => write!(f, "Internal error"),
         }
     }
@@ -338,6 +366,15 @@ impl Error {
         }
     }
 
+    /// Creates a new panic error.
+    pub fn panic(msg: String, task: TaskKind) -> Self {
+        Self {
+            msg,
+            kind: ErrorKind::Panic(task),
+            source: None,
+        }
+    }
+
     /// Creates a new internal error.
     pub fn internal(msg: String) -> Self {
         Self {
@@ -363,9 +400,10 @@ impl From<SlateDBError> for Error {
     fn from(err: SlateDBError) -> Self {
         let msg = err.to_string();
         match err {
-            // Fenced, transaction, and closed errors
+            // Fenced, transaction, and panic errors
             SlateDBError::Fenced => Error::fenced(msg),
             SlateDBError::TransactionConflict => Error::transaction(msg),
+            SlateDBError::TaskPanic { task, .. } => Error::panic(msg, task),
 
             // Closed
             SlateDBError::Closed => Error::closed(msg),
@@ -417,9 +455,6 @@ impl From<SlateDBError> for Error {
             #[cfg(any(feature = "snappy", feature = "zlib", feature = "zstd"))]
             SlateDBError::BlockCompressionError => Error::internal(msg),
             SlateDBError::InvalidRowFlags { .. } => Error::internal(msg),
-            SlateDBError::BackgroundTaskPanic(err) => {
-                Error::internal(msg).with_source(Box::new(PanicError(err)))
-            }
             SlateDBError::MergeOperatorError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
@@ -439,25 +474,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::internal(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::internal(msg),
             SlateDBError::FileVersionExists => Error::internal(msg),
+            SlateDBError::WalReplayFailed(err) => Error::internal(msg).with_source(Box::new(err)),
         }
-    }
-}
-
-#[derive(Debug)]
-struct PanicError(Arc<Mutex<Box<dyn Any + Send>>>);
-impl std::error::Error for PanicError {}
-impl std::fmt::Display for PanicError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let guard = self.0.lock().expect("Failed to lock panic error");
-        if let Some(err) = guard.downcast_ref::<SlateDBError>() {
-            write!(f, "{err}")?;
-        } else if let Some(err) = guard.downcast_ref::<Box<dyn std::error::Error>>() {
-            write!(f, "{err}")?;
-        } else if let Some(err) = guard.downcast_ref::<String>() {
-            write!(f, "{err}")?;
-        } else {
-            write!(f, "irrecoverable panic")?;
-        }
-        Ok(())
     }
 }

@@ -3483,7 +3483,7 @@ mod tests {
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
         let result = db.put(b"foo", b"bar").await.unwrap_err();
-        assert!(result.to_string().contains("background task panic'd"));
+        assert_eq!(result.to_string(), "Task panic error: background task panicked. task=`wal writer`. message=`failpoint write-wal-sst-io-error panic`");
     }
 
     #[tokio::test]
@@ -3506,7 +3506,7 @@ mod tests {
         let result = db.put(b"foo", b"bar").await.unwrap_err();
         assert_eq!(
             result.to_string(),
-            "Internal error: background task panic'd (failpoint write-wal-sst-io-error panic)"
+            "Task panic error: background task panicked. task=`wal writer`. message=`failpoint write-wal-sst-io-error panic`"
         );
 
         // Close, which flushes the latest manifest to the object store

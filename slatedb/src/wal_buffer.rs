@@ -29,6 +29,7 @@ use crate::{
     types::RowEntry,
     utils::SendSafely,
     wal_id::WalIdStore,
+    TaskKind,
 };
 
 /// [`WalBufferManager`] buffers write operations in memory before flushing them to persistent storage.
@@ -494,6 +495,10 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
             wal.notify_durable(Err(fatal_or_shutdown.clone()));
         }
         Ok(())
+    }
+
+    fn kind(&self) -> TaskKind {
+        TaskKind::WalWriter
     }
 }
 

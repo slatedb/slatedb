@@ -20,7 +20,7 @@ use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
 use crate::utils::{IdGenerator, MonotonicSeq, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use crate::{Checkpoint, DbIterator};
+use crate::{Checkpoint, DbIterator, TaskKind};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -497,6 +497,10 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
             manifest.delete_checkpoint(checkpoint_id).await?;
         }
         Ok(())
+    }
+
+    fn kind(&self) -> TaskKind {
+        TaskKind::ManifestPoller
     }
 }
 

@@ -42,6 +42,7 @@ pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
 pub use db_read::DbRead;
 pub use db_reader::DbReader;
+pub use dispatcher::TaskKind;
 pub use error::{Error, ErrorKind};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};

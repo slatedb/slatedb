@@ -27,6 +27,7 @@ pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::TaskKind;
 
 pub trait CompactionSchedulerSupplier: Send + Sync {
     fn compaction_scheduler(
@@ -297,6 +298,10 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
         // shutdown the executor
         self.stop_executor().await?;
         Ok(())
+    }
+
+    fn kind(&self) -> TaskKind {
+        TaskKind::Compactor
     }
 }
 

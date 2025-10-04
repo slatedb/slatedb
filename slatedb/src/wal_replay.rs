@@ -7,7 +7,7 @@ use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::task;
 use tokio::task::JoinHandle;
 
@@ -172,13 +172,7 @@ impl WalReplayIterator<'_> {
             match join_handle.await {
                 Ok(Ok(sst_iter)) => sst_iter,
                 Ok(Err(slate_err)) => return Err(slate_err),
-                Err(join_err) => {
-                    return Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
-                        join_err.try_into_panic().unwrap_or_else(|_| {
-                            Box::new("Load of SST iterator panicked or was cancelled")
-                        }),
-                    ))))
-                }
+                Err(join_err) => return Err(SlateDBError::WalReplayFailed(Arc::new(join_err))),
             }
         } else {
             None

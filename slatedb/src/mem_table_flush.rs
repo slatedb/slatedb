@@ -6,6 +6,7 @@ use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::IdGenerator;
+use crate::TaskKind;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -279,6 +280,10 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
             imm_table.table().notify_durable(Err(error.clone()));
         }
         Ok(())
+    }
+
+    fn kind(&self) -> TaskKind {
+        TaskKind::MemTableFlusher
     }
 }
 
