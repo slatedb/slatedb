@@ -281,7 +281,6 @@ impl<'a> KeyValueIterator for WriteBatchIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use criterion::BatchSize;
     use rstest::rstest;
 
     use super::*;
@@ -382,7 +381,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.delete(b"key4");
 
-        let mut iter = batch.iter_range(..);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -408,9 +407,11 @@ mod tests {
         batch.put(b"key5", b"value5");
 
         // Test range [key2, key4)
-        let mut iter = batch.iter_range(BytesRange::from(
-            Bytes::from_static(b"key2")..Bytes::from_static(b"key4"),
-        ));
+        let mut iter = WriteBatchIterator::new(
+            &batch,
+            BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
+            IterationOrder::Ascending,
+        );
 
         let expected = vec![RowEntry::new_value(b"key3", b"value3", u64::MAX)];
 
@@ -480,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn test_writebatch_iterator_empty_batch() {
         let batch = WriteBatch::new();
-        let mut iter = batch.iter_range(..);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let result = iter.next_entry().await.unwrap();
         assert!(result.is_none());
