@@ -14,6 +14,20 @@ use parking_lot::Mutex;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
+/// [`DbIteratorRangeTracker'] is used to track the range of keys accessed by a [`DbIterator`].  For
+/// Serializable Snapshot Isolation, we need to track the read keys during the transaction to detect
+/// read-write conflicts with recent committed transactions.
+///
+/// A naive implementation is to maintain a set of read keys, but this may suffers phantom read conflicts.
+/// For example, if transaction A reads a range `["key01", "key10"]` and transaction B writes to `"key05"`
+/// which falls within that range, we cannot detect this conflict and abort one of the transactions to
+/// maintain serializability.
+///
+/// To mitigate this, we could use a range tracker to track the range of keys accessed by the iterator,
+/// and check if the write key falls within the range.
+///
+/// A [`DbIteratorRangeTracker`] can be passed to [`DbIterator`] optionally. If it's passed, you can retrieve
+/// the range of keys scanned by [`DbIterator`] from it.
 #[derive(Debug)]
 pub struct DbIteratorRangeTracker {
     inner: Mutex<DbIteratorRangeTrackerInner>,
