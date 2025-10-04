@@ -466,7 +466,7 @@ impl CompactorEventHandler {
                 );
                 break;
             }
-            self.submit_compaction(compaction.clone()).await?
+            self.submit_compaction(compaction.clone()).await?;
         }
         Ok(())
     }
