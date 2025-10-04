@@ -1286,6 +1286,79 @@ mod tests {
         assert!(bytes_compacted > 0, "bytes_compacted: {}", bytes_compacted);
     }
 
+    #[tokio::test]
+    async fn test_validate_compaction_empty_sources_rejected() {
+        let fixture = CompactorEventHandlerTestFixture::new().await;
+        let c = Compaction::new(Vec::new(), 0);
+        let err = fixture.handler.validate_compaction(&c).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_l0_only_ok_when_no_sr() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        // ensure at least one L0 exists
+        fixture.write_l0().await;
+        let c = fixture.build_l0_compaction().await;
+        fixture.handler.validate_compaction(&c).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_l0_only_rejects_when_dest_below_highest_sr() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        // write L0 and compact to create SR id 0
+        fixture.write_l0().await;
+        let c1 = fixture.build_l0_compaction().await;
+        fixture.scheduler.inject_compaction(c1.clone());
+        fixture.handler.handle_ticker().await;
+        fixture.assert_and_forward_compactions(1);
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            fixture.real_executor_rx.recv(),
+        )
+        .await
+        .unwrap()
+        .expect("timeout waiting compaction msg");
+        fixture.handler.handle(msg).await.unwrap();
+
+        // now highest_id should be 1; build L0-only compaction with dest 0 (below highest)
+        fixture.write_l0().await;
+        let c2 = fixture.build_l0_compaction().await; // destination 0
+        let err = fixture.handler.validate_compaction(&c2).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_mixed_l0_and_sr_deferred_to_scheduler() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        // create one SR so we can reference its id
+        fixture.write_l0().await;
+        let c1 = fixture.build_l0_compaction().await;
+        fixture.scheduler.inject_compaction(c1.clone());
+        fixture.handler.handle_ticker().await;
+        fixture.assert_and_forward_compactions(1);
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            fixture.real_executor_rx.recv(),
+        )
+        .await
+        .unwrap()
+        .expect("timeout waiting compaction msg");
+        fixture.handler.handle(msg).await.unwrap();
+
+        // prepare a mixed compaction: one SR source and one L0 source
+        fixture.write_l0().await;
+        let state = fixture.latest_db_state().await;
+        let sr_id = state.compacted.first().unwrap().id;
+        let l0_ulid = state.l0.front().unwrap().id.unwrap_compacted_id();
+        let mixed = Compaction::new(
+            vec![SourceId::SortedRun(sr_id), SourceId::Sst(l0_ulid)],
+            sr_id,
+        );
+        // Compactor-level validation should not reject (scheduler default validate returns Ok(()))
+        fixture.handler.validate_compaction(&mixed).unwrap();
+    }
+
     async fn run_for<T, F>(duration: Duration, f: impl Fn() -> F) -> Option<T>
     where
         F: Future<Output = Option<T>>,

@@ -222,12 +222,6 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             )
             .collect();
 
-        // Validate compaction sources exist
-        if compaction.sources.is_empty() {
-            warn!("submitted compaction is empty: {:?}", compaction.sources);
-            return Err(Error::operation("empty compaction".to_string()));
-        }
-
         // Validate if the compaction sources are strictly consecutive elements in the db_state sources
         if !sources_logical_order
             .windows(compaction.sources.len())
@@ -260,18 +254,6 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
                 );
                 return Err(Error::operation(
                     "destination not the lowest-id SR among sources".to_string(),
-                ));
-            }
-        } else {
-            // L0-only: must create new SR with id > highest_existing
-            let highest_id = state.db_state().compacted.first().map_or(0, |sr| sr.id + 1);
-            if compaction.destination < highest_id {
-                warn!(
-                    "compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
-                    compaction.destination, highest_id
-                );
-                return Err(Error::operation(
-                    "L0-only destination lower than expected".to_string(),
                 ));
             }
         }
@@ -769,6 +751,24 @@ mod tests {
         let mut l0 = state.db_state().l0.clone();
         let mut compaction = create_l0_compaction(l0.make_contiguous(), 0);
         compaction.sources.push(SourceId::SortedRun(5));
+        // when:
+        let result = scheduler.validate_compaction(&state, &compaction);
+
+        // then:
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_should_submit_valid_compaction_with_srs() {
+        // given:
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let state = create_compactor_state(create_db_state(
+            VecDeque::new(),
+            vec![create_sr2(0, 2), create_sr2(1, 2)],
+        ));
+
+        let srs = state.db_state().compacted.clone();
+        let compaction = create_sr_compaction(srs.iter().map(|sr| sr.id).collect());
         // when:
         let result = scheduler.validate_compaction(&state, &compaction);
 
