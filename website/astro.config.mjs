@@ -194,6 +194,10 @@ export default defineConfig({
 							link: '/docs/tutorials/s3/',
 						},
 						{
+							label: 'Connect to Google Cloud Storage',
+							link: '/docs/tutorials/gcs/',
+						},
+						{
 							label: 'Checkpoint & Restore',
 							link: '/docs/tutorials/checkpoint/',
 						}
