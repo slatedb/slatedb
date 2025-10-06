@@ -69,9 +69,15 @@ path = "src/tracing_subscriber.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "google-cloud-storage"
+path = "src/google_cloud_storage.rs"
+test = false
+bench = false
+
 [dependencies]
 anyhow.workspace = true
-object_store = { workspace = true, features = ["azure"] }
+object_store = { workspace = true, features = ["azure", "gcp"] }
 slatedb.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 tracing-subscriber.workspace = true
