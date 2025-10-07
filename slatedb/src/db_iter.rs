@@ -10,13 +10,90 @@ use crate::sst_iter::SstIterator;
 use crate::types::KeyValue;
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 use std::ops::RangeBounds;
+use std::sync::Arc;
+
+/// [`DbIteratorRangeTracker'] is used to track the range of keys accessed by a [`DbIterator`].  For
+/// Serializable Snapshot Isolation, we need to track the read keys during the transaction to detect
+/// read-write conflicts with recent committed transactions.
+///
+/// A naive implementation is to maintain a set of read keys, but this may suffers phantom read conflicts.
+/// For example, if transaction A reads a range `["key01", "key10"]` and transaction B writes to `"key05"`
+/// which falls within that range, we cannot detect this conflict and abort one of the transactions to
+/// maintain serializability.
+///
+/// To mitigate this, we could use a range tracker to track the range of keys accessed by the iterator,
+/// and check if the write key falls within the range.
+///
+/// A [`DbIteratorRangeTracker`] can be passed to [`DbIterator`] optionally. If it's passed, you can retrieve
+/// the range of keys scanned by [`DbIterator`] from it.
+#[derive(Debug)]
+pub struct DbIteratorRangeTracker {
+    inner: Mutex<DbIteratorRangeTrackerInner>,
+}
+
+#[derive(Debug)]
+struct DbIteratorRangeTrackerInner {
+    first_key: Option<Bytes>,
+    last_key: Option<Bytes>,
+    has_data: bool,
+}
+
+impl DbIteratorRangeTracker {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(DbIteratorRangeTrackerInner {
+                first_key: None,
+                last_key: None,
+                has_data: false,
+            }),
+        }
+    }
+
+    pub fn track_key(&self, key: &Bytes) {
+        let mut inner = self.inner.lock();
+
+        inner.first_key = Some(match &inner.first_key {
+            Some(first) if key < first => key.clone(),
+            Some(first) => first.clone(),
+            None => key.clone(),
+        });
+
+        inner.last_key = Some(match &inner.last_key {
+            Some(last) if key > last => key.clone(),
+            Some(last) => last.clone(),
+            None => key.clone(),
+        });
+
+        inner.has_data = true;
+    }
+
+    pub fn get_range(&self) -> Option<BytesRange> {
+        let inner = self.inner.lock();
+        match (&inner.first_key, &inner.last_key) {
+            (Some(first), Some(last)) => {
+                use std::ops::Bound;
+                Some(BytesRange::from((
+                    Bound::Included(first.clone()),
+                    Bound::Included(last.clone()),
+                )))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn has_data(&self) -> bool {
+        self.inner.lock().has_data
+    }
+}
 
 pub struct DbIterator<'a> {
     range: BytesRange,
     iter: MergeIterator<'a>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
+    range_tracker: Option<Arc<DbIteratorRangeTracker>>,
 }
 
 impl<'a> DbIterator<'a> {
@@ -27,6 +104,7 @@ impl<'a> DbIterator<'a> {
         l0_iters: impl IntoIterator<Item = SstIterator<'a>>,
         sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
+        range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<Self, SlateDBError> {
         let iters: Vec<Box<dyn KeyValueIterator>> = {
             // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
@@ -69,6 +147,7 @@ impl<'a> DbIterator<'a> {
             iter,
             invalidated_error: None,
             last_key: None,
+            range_tracker,
         })
     }
 
@@ -99,6 +178,10 @@ impl<'a> DbIterator<'a> {
             let result = self.maybe_invalidate(result);
             if let Ok(Some(ref kv)) = &result {
                 self.last_key = Some(kv.key.clone());
+                // Track the key in range tracker if present
+                if let Some(tracker) = &self.range_tracker {
+                    tracker.track_key(&kv.key);
+                }
             }
             result.map_err(Into::into)
         }
@@ -177,6 +260,7 @@ mod tests {
             VecDeque::new(),
             VecDeque::new(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -219,6 +303,7 @@ mod tests {
             VecDeque::new(),
             VecDeque::new(),
             Some(100),
+            None,
         )
         .await
         .unwrap();
@@ -248,6 +333,7 @@ mod tests {
             vec![mem_iter],
             VecDeque::new(),
             VecDeque::new(),
+            None,
             None,
         )
         .await
@@ -295,6 +381,7 @@ mod tests {
             mem_iters,
             VecDeque::new(),
             VecDeque::new(),
+            None,
             None,
         )
         .await

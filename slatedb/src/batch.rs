@@ -131,6 +131,13 @@ impl WriteBatch {
         }
     }
 
+    pub(crate) fn with_txn_id(self, txn_id: Uuid) -> Self {
+        Self {
+            ops: self.ops,
+            txn_id: Some(txn_id),
+        }
+    }
+
     /// Put a key-value pair into the batch. Keys must not be empty.
     ///
     /// # Panics
@@ -192,13 +199,12 @@ impl WriteBatch {
         self.ops.get(key)
     }
 
-    /// Create an iterator over the WriteBatch entries in the given range
-    #[allow(unused)]
-    pub(crate) fn iter_range<'a>(
-        &'a self,
-        range: impl RangeBounds<Bytes>,
-    ) -> WriteBatchIterator<'a> {
-        WriteBatchIterator::new(self, range, IterationOrder::Ascending)
+    pub(crate) fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
+        self.ops.keys().cloned()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.ops.is_empty()
     }
 }
 
@@ -375,7 +381,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.delete(b"key4");
 
-        let mut iter = batch.iter_range(..);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -401,9 +407,11 @@ mod tests {
         batch.put(b"key5", b"value5");
 
         // Test range [key2, key4)
-        let mut iter = batch.iter_range(BytesRange::from(
-            Bytes::from_static(b"key2")..Bytes::from_static(b"key4"),
-        ));
+        let mut iter = WriteBatchIterator::new(
+            &batch,
+            BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
+            IterationOrder::Ascending,
+        );
 
         let expected = vec![RowEntry::new_value(b"key3", b"value3", u64::MAX)];
 
@@ -473,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn test_writebatch_iterator_empty_batch() {
         let batch = WriteBatch::new();
-        let mut iter = batch.iter_range(..);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let result = iter.next_entry().await.unwrap();
         assert!(result.is_none());
@@ -525,7 +533,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.delete(b"key4");
 
-        let mut iter = batch.iter_range(..);
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -577,9 +585,11 @@ mod tests {
         batch.put(b"key5", b"value5");
 
         // Range [key2, key4) should include tombstones
-        let mut iter = batch.iter_range(BytesRange::from(
-            Bytes::from_static(b"key2")..Bytes::from_static(b"key4"),
-        ));
+        let mut iter = WriteBatchIterator::new(
+            &batch,
+            BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
+            IterationOrder::Ascending,
+        );
 
         let expected = vec![
             RowEntry::new(
