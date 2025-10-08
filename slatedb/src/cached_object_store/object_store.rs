@@ -647,6 +647,11 @@ mod tests {
             entry.read_part(2, 0..part_size).await?,
             Some(payload.slice(2048..3072))
         );
+        // check that the unaligned part was also cached
+        assert_eq!(
+            entry.read_part(3, 0..32).await?,
+            Some(payload.slice(3072..3104))
+        );
 
         // delete part 2, known_cache_size is still known
         let evict_part_path =
