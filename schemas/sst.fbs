@@ -38,3 +38,19 @@ table BlockMeta {
 table SsTableIndex {
     block_meta: [BlockMeta] (required);
 }
+
+table CompactedSstId {
+    high: uint64;
+    low: uint64;
+}
+
+table CompactedSsTable {
+    id: CompactedSstId (required);
+    info: SsTableInfo (required);
+    visible_range: BytesRange;
+}
+
+table SortedRun {
+    id: uint32;
+    ssts: [CompactedSsTable] (required);
+}

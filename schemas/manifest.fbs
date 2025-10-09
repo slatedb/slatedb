@@ -1,9 +1,5 @@
 include "sst.fbs";
-
-table Uuid {
-    high: uint64;
-    low: uint64;
-}
+include "common.fbs";
 
 // Reference to an external database.
 table ExternalDb {
@@ -20,24 +16,6 @@ table ExternalDb {
 
     // Compacted SST IDs belonging to external DB that are currently being referenced.
     sst_ids: [CompactedSstId] (required);
-}
-
-enum BoundType : byte { Unknown = 0, Unbounded, Included, Excluded }
-
-table BytesBound {
-    // Key that represenents the boundary. Might be empty if type is Unbounded.
-    key: [ubyte];
-
-    // Whether the bound is inclusive, exclusive or unbounded.
-    bound_type: BoundType;
-}
-
-table BytesRange {
-    // Start bound of the range.
-    start_bound: BytesBound (required);
-
-    // End bound of the range.
-    end_bound: BytesBound (required);
 }
 
 // Manifest to persist state of DB.
@@ -98,22 +76,6 @@ table ManifestV1 {
 
     // Serialized sequence tracker data as defined in RFC-0012.
     sequence_tracker: [ubyte];
-}
-
-table CompactedSstId {
-    high: uint64;
-    low: uint64;
-}
-
-table CompactedSsTable {
-    id: CompactedSstId (required);
-    info: SsTableInfo (required);
-    visible_range: BytesRange;
-}
-
-table SortedRun {
-    id: uint32;
-    ssts: [CompactedSsTable] (required);
 }
 
 table WriterCheckpoint {
