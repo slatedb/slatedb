@@ -1,1 +1,6 @@
+<<<<<<< HEAD
 include "manifest.fbs";
+=======
+include "manifest.fbs";
+include "compactor.fbs";
+>>>>>>> c69edae (Generated root.fbs file)
