@@ -8,6 +8,7 @@ use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use rand::{Rng, RngCore};
+use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
@@ -499,6 +500,33 @@ where
     Ok(out)
 }
 
+/// Returns a string representation of a panic. The following panic types are
+/// converted to their string representation:
+///
+/// - SlateDBError
+/// - Box<dyn std::error::Error>
+/// - String
+/// - &'static str
+///
+/// Other panic types are handled by printing a generic message with the type name.
+#[allow(dead_code)]
+pub fn panic_string(panic: &(dyn Any + Send)) -> String {
+    if let Some(err) = panic.downcast_ref::<SlateDBError>() {
+        err.to_string()
+    } else if let Some(err) = panic.downcast_ref::<Box<dyn std::error::Error>>() {
+        err.to_string()
+    } else if let Some(err) = panic.downcast_ref::<String>() {
+        err.clone()
+    } else if let Some(err) = panic.downcast_ref::<&'static str>() {
+        err.to_string()
+    } else {
+        format!(
+            "task panicked with unknown type [type_id=`{:?}`]",
+            panic.type_id()
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -508,7 +536,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
+        compute_max_parallel, panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -1056,5 +1084,54 @@ mod tests {
             observed_peak,
             max_parallel
         );
+    }
+
+    #[test]
+    fn panic_string_handles_slatedb_error() {
+        // Given a SlateDBError payload
+        let err = SlateDBError::InvalidDBState;
+        let payload = err.clone();
+
+        // When
+        let msg = panic_string(&payload);
+
+        // Then: it should stringify the exact error
+        assert_eq!(msg, err.to_string());
+    }
+
+    #[test]
+    fn panic_string_handles_string() {
+        let s = String::from("hello");
+        let msg = panic_string(&s);
+        assert_eq!(msg, s);
+    }
+
+    #[test]
+    fn panic_string_handles_static_str() {
+        let s: &'static str = "boom";
+        let msg = panic_string(&s);
+        assert_eq!(msg, s);
+    }
+
+    #[test]
+    fn panic_string_falls_back_for_boxed_error_trait_object() {
+        // The function attempts to downcast to `Box<dyn std::error::Error>`.
+        // However, because `panic_string` requires `Send`, a realistic panic payload
+        // would be `Box<dyn std::error::Error + Send + Sync>`, which does not
+        // match the downcast target exactly and therefore takes the fallback path.
+        let err_box: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(std::io::Error::new(std::io::ErrorKind::Other, "oh no"));
+
+        let msg = panic_string(&err_box);
+        assert!(msg.contains("task panicked with unknown type"));
+    }
+
+    #[test]
+    fn panic_string_falls_back_for_unknown_type() {
+        #[derive(Clone, Debug)]
+        struct MyType;
+
+        let msg = panic_string(&MyType);
+        assert!(msg.contains("task panicked with unknown type"));
     }
 }
