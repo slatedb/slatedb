@@ -275,7 +275,7 @@ mod tests {
     }
 
     fn assert_invalidated_iterator_error(err: crate::Error) {
-        assert_eq!(err.to_string(), "Internal error: checksum mismatch");
+        assert_eq!(err.to_string(), "Data error: checksum mismatch");
     }
 
     #[tokio::test]
@@ -342,13 +342,13 @@ mod tests {
         let err = iter.seek(b"key1").await.unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Argument error: cannot seek to a key less than the last returned key"
+            "Invalid error: cannot seek to a key less than the last returned key"
         );
 
         let err = iter.seek(b"key0").await.unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Argument error: cannot seek to a key less than the last returned key"
+            "Invalid error: cannot seek to a key less than the last returned key"
         );
 
         // Seeking forward succeeds and allows reading the next key

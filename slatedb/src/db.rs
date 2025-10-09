@@ -3764,7 +3764,7 @@ mod tests {
 
         // assert that db1 can no longer write.
         let err = do_put(&db1, b"1", b"1").await.unwrap_err();
-        assert_eq!(err.to_string(), "Fencing error: detected newer DB client");
+        assert_eq!(err.to_string(), "Closed error: detected newer DB client");
 
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
@@ -3794,7 +3794,7 @@ mod tests {
         clock.ticker.store(5, Ordering::SeqCst);
         match db.put(b"1", b"1").await {
             Ok(_) => panic!("expected an error on inserting backwards time"),
-            Err(e) => assert_eq!(e.to_string(), "Internal error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
+            Err(e) => assert_eq!(e.to_string(), "Invalid error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
     }
 
@@ -3827,7 +3827,7 @@ mod tests {
         clock.ticker.store(5, Ordering::SeqCst);
         match db2.put(b"1", b"1").await {
             Ok(_) => panic!("expected an error on inserting backwards time"),
-            Err(e) => assert_eq!(e.to_string(), "Internal error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
+            Err(e) => assert_eq!(e.to_string(), "Invalid error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
     }
 
