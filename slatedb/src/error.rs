@@ -46,6 +46,9 @@ pub(crate) enum SlateDBError {
     #[error("failed to find latest manifest")]
     LatestManifestMissing,
 
+    #[error("failed to find latest record")]
+    LatestRecordMissing,
+
     #[error("invalid deletion")]
     InvalidDeletion,
 

@@ -751,10 +751,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 let sst_ids: Vec<WIPOffset<CompactedSstId>> = completed_input_sst_ids
                     .iter()
                     .map(|ulid| {
-                        let v = ulid.0;
-                        let high = (v >> 64) as u64;
-                        let low = (v & 0xFFFF_FFFF_FFFF_FFFF) as u64;
-                        CompactedSstId::create(&mut self.builder, &CompactedSstIdArgs { high, low })
+                        self.add_compacted_sst_id(ulid)
                     })
                     .collect();
                 let ssts = self.builder.create_vector(sst_ids.as_ref());
