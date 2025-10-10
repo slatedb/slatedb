@@ -1120,7 +1120,7 @@ mod tests {
         // would be `Box<dyn std::error::Error + Send + Sync>`, which does not
         // match the downcast target exactly and therefore takes the fallback path.
         let err_box: Box<dyn std::error::Error + Send + Sync> =
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, "oh no"));
+            Box::new(std::io::Error::other("oh no"));
 
         let msg = panic_string(&err_box);
         assert!(msg.contains("task panicked with unknown type"));
