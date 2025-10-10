@@ -1,16 +1,42 @@
 include "sst.fbs";
 include "common.fbs";
 
-enum CompactionType : byte { Internal = 0, External, }
+enum CompactionType : byte { Internal, External, }
 
 enum CompactionStatus : byte {
-    Submitted = 0,  // Waiting to be scheduled
+    Submitted,      // Waiting to be scheduled
     InProgress,     // Currently executing
     Completed,      // Successfully finished
     Failed,         // Failed with error
 }
 
-union CompactionJobSpec { LinearCompactionJob }
+union CompactionJobSpec { LinearCompactionJob /*, ParallelCompactionJob */ }
+
+/*
+table ParallelCompactionJob {
+    shards: [SubCompactionJob]
+}
+
+table SubCompactionJob {
+    // Sub CompactionJob ID(Ulid)
+    sub_job_id: Ulid;
+
+    // InputSSTables completed before the job started
+    completed_input_sst_ids:[CompactedSstId];
+
+    // InputSortedRuns completed before the job started
+    completed_input_sr_ids:[uint32];
+
+    // Subset of InputSSTables to be compacted
+    input_sst:[CompactedSsTable];
+
+    // Subset of InputSortedRuns to be compacted
+    input_sr:[SortedRun];
+
+    // Output SR of the subset Input SSTs and SortedRuns
+    output_sr:SortedRun;
+}
+*/
 
 table LinearCompactionJob {
     // InputSSTables completed before the job started

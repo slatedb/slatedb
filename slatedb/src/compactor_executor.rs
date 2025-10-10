@@ -27,22 +27,34 @@ use crate::compactor::stats::CompactionStats;
 use crate::utils::{build_concurrent, compute_max_parallel, spawn_bg_task, IdGenerator};
 use log::{debug, error};
 use tracing::instrument;
-use uuid::Uuid;
+use ulid::Ulid;
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CompactionJobSpec {
+    LinearCompactionJob {
+        completed_input_sst_ids: Vec<Ulid>,
+        completed_input_sr_ids: Vec<u32>,
+    },
+}
+
+#[derive(Clone, PartialEq)]
 pub(crate) struct CompactionJob {
-    pub(crate) id: Uuid,
+    pub(crate) id: Ulid,
+    pub(crate) compaction_id: Ulid,
     pub(crate) destination: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
     pub(crate) sorted_runs: Vec<SortedRun>,
     pub(crate) compaction_ts: i64,
     pub(crate) is_dest_last_run: bool,
     pub(crate) retention_min_seq: Option<u64>,
+    pub(crate) spec: CompactionJobSpec,
 }
 
 impl std::fmt::Debug for CompactionJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompactionJob")
             .field("id", &self.id)
+            .field("compaction_id", &self.compaction_id)
             .field("destination", &self.destination)
             .field("ssts", &self.ssts)
             .field("sorted_runs", &self.sorted_runs)
@@ -50,6 +62,7 @@ impl std::fmt::Debug for CompactionJob {
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("estimated_source_bytes", &self.estimated_source_bytes())
             .field("retention_min_seq", &self.retention_min_seq)
+            .field("spec", &self.spec)
             .finish()
     }
 }
