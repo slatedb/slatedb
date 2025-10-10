@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(
             result.to_string(),
             format!(
-                "Persistent state error: checkpoint missing. checkpoint_id=`{}`",
+                "Data error: checkpoint missing. checkpoint_id=`{}`",
                 source_checkpoint_id
             )
         );
@@ -236,7 +236,7 @@ mod tests {
 
         assert_eq!(
             result.to_string(),
-            "Persistent state error: failed to find latest manifest"
+            "Data error: failed to find latest manifest"
         );
     }
 
@@ -304,10 +304,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(
-            result.to_string(),
-            "Persistent state error: invalid DB state error"
-        );
+        assert_eq!(result.to_string(), "Data error: invalid DB state error");
     }
 
     #[tokio::test]

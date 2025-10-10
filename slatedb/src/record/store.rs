@@ -146,7 +146,9 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
         utils::timeout(
             system_clock.clone(),
             record_update_timeout,
-            "record update",
+            || SlateDBError::ManifestUpdateTimeout {
+                timeout: record_update_timeout,
+            },
             async {
                 loop {
                     let local_epoch = get_epoch(stored.record()) + 1;
@@ -173,10 +175,6 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
             },
         )
         .await
-        .map_err(|_| SlateDBError::Timeout {
-            op: "record update",
-            backoff: Duration::from_secs(1),
-        })
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

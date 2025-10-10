@@ -229,7 +229,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         {
             warn!("submitted compaction is not a consecutive series of sources from db state: {:?} {:?}",
             compaction.sources, sources_logical_order);
-            return Err(Error::operation(
+            return Err(Error::invalid(
                 "non-consecutive compaction sources".to_string(),
             ));
         }
@@ -252,7 +252,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
                     "destination does not match lowest-id SR among sources: {:?} {:?}",
                     compaction.destination, min_sr
                 );
-                return Err(Error::operation(
+                return Err(Error::invalid(
                     "destination not the lowest-id SR among sources".to_string(),
                 ));
             }

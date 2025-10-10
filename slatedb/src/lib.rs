@@ -44,7 +44,7 @@ pub use db_read::DbRead;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DBTransaction;
-pub use error::{Error, ErrorKind};
+pub use error::{CloseReason, Error, ErrorKind};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;

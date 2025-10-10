@@ -387,10 +387,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Validate WAL object store configuration
         if let Some(latest_manifest) = &latest_manifest {
             if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
-                return Err(SlateDBError::Unsupported(String::from(
-                    "WAL object store reconfiguration is not supported",
-                ))
-                .into());
+                return Err(SlateDBError::WalStoreReconfigurationError.into());
             }
         }
 
