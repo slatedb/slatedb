@@ -214,6 +214,7 @@ impl From<foyer::Error> for SlateDBError {
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Represents the reason that a database instance has been closed.
 #[derive(Debug, Clone, Copy)]
 pub enum CloseReason {
     /// The database has been shutdown cleanly.
