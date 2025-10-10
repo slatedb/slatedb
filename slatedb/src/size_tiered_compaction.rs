@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter::Peekable;
 use std::slice::Iter;
 
+use ulid::Ulid;
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{Compaction, CompactorState, SourceId};
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
@@ -501,9 +502,12 @@ mod tests {
         // then:
         assert_eq!(compactions.len(), 1);
         let compaction = compactions.first().unwrap();
+        let mut expected_compaction = create_sr_compaction(vec![4, 3, 2, 1, 0]);
+        expected_compaction.id = compaction.id;
+
         assert_eq!(
             compaction.clone(),
-            create_sr_compaction(vec![4, 3, 2, 1, 0])
+            expected_compaction,
         )
     }
 
@@ -527,8 +531,11 @@ mod tests {
 
         // then:
         assert_eq!(compactions.len(), 1);
+
         let compaction = compactions.first().unwrap();
-        assert_eq!(compaction.clone(), create_sr_compaction(vec![4, 3, 2, 1]))
+        let mut expected_compaction = create_sr_compaction(vec![4, 3, 2, 1]);
+        expected_compaction.id = compaction.id;
+        assert_eq!(compaction.clone(), expected_compaction)
     }
 
     #[test]
@@ -596,12 +603,15 @@ mod tests {
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
+        let mut expected_compaction = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
+
+        expected_compaction.id = compactions.first().unwrap().id;
 
         // then:
         assert_eq!(compactions.len(), 1);
         assert_eq!(
             compactions.first().unwrap(),
-            &create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0])
+            &expected_compaction,
         );
     }
 
@@ -697,11 +707,17 @@ mod tests {
         // then:
         assert_eq!(compactions.len(), 3);
         let compaction = compactions.first().unwrap();
-        assert_eq!(compaction, &create_l0_compaction(&l0, 11));
+        let mut expected_l0_compaction = create_l0_compaction(&l0, 11);
+        expected_l0_compaction.id = compaction.id;
+        assert_eq!(compaction.clone(), expected_l0_compaction);
         let compaction = compactions.get(1).unwrap();
-        assert_eq!(compaction, &create_sr_compaction(vec![10, 9, 8, 7]));
+        let mut expected_sr0_compaction = create_sr_compaction(vec![10, 9, 8, 7]);
+        expected_sr0_compaction.id = compaction.id;
+        assert_eq!(compaction.clone(), expected_sr0_compaction);
         let compaction = compactions.get(2).unwrap();
-        assert_eq!(compaction, &create_sr_compaction(vec![3, 2, 1, 0]));
+        let mut expected_sr1_compaction = create_sr_compaction(vec![3, 2, 1, 0]);
+        expected_sr1_compaction.id = compaction.id;
+        assert_eq!(compaction.clone(), expected_sr1_compaction);
     }
 
     #[test]

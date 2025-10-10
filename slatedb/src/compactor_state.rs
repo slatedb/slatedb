@@ -340,7 +340,7 @@ mod tests {
         // when:
         state
             .submit_compaction(
-                uuid::Uuid::new_v4(),
+                ulid::Ulid::new(),
                 build_l0_compaction(&state.db_state().l0, 0),
             )
             .unwrap();
@@ -358,7 +358,7 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
         let id = state
-            .submit_compaction(uuid::Uuid::new_v4(), compaction)
+            .submit_compaction(ulid::Ulid::new(), compaction)
             .unwrap();
 
         // when:
@@ -405,7 +405,7 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
         let id = state
-            .submit_compaction(uuid::Uuid::new_v4(), compaction)
+            .submit_compaction(ulid::Ulid::new(), compaction)
             .unwrap();
 
         // when:
@@ -461,7 +461,7 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let id = state
             .submit_compaction(
-                uuid::Uuid::new_v4(),
+                ulid::Ulid::new(),
                 Compaction::new(
                     vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
                     0,
@@ -527,7 +527,7 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let id = state
             .submit_compaction(
-                uuid::Uuid::new_v4(),
+                ulid::Ulid::new(),
                 Compaction::new(
                     original_l0s
                         .iter()
@@ -603,7 +603,7 @@ mod tests {
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         let result = state.submit_compaction(
-            uuid::Uuid::new_v4(),
+            ulid::Ulid::new(),
             Compaction::new(
                 original_l0s
                     .iter()
