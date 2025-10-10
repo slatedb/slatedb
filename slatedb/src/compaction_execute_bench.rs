@@ -31,7 +31,6 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
-use crate::utils::IdGenerator;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -246,7 +245,12 @@ impl CompactionExecuteBench {
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
         Ok(CompactionJob {
-            id: rand.rng().gen_uuid(),
+            id: ulid::Ulid::new(),
+            compaction_id: ulid::Ulid::new(),
+            spec: crate::compactor_executor::CompactionJobSpec::LinearCompactionJob {
+                completed_input_sst_ids: ssts.iter().map(|h| h.id.unwrap_compacted_id()).collect(),
+                completed_input_sr_ids: vec![],
+            },
             destination: 0,
             ssts,
             sorted_runs: vec![],
@@ -280,7 +284,12 @@ impl CompactionExecuteBench {
             .collect();
         info!("loaded compaction job");
         CompactionJob {
-            id: rand.rng().gen_uuid(),
+            id: ulid::Ulid::new(),
+            compaction_id: ulid::Ulid::new(),
+            spec: crate::compactor_executor::CompactionJobSpec::LinearCompactionJob {
+                completed_input_sst_ids: vec![],
+                completed_input_sr_ids: srs.iter().map(|sr| sr.id).collect(),
+            },
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,

@@ -11,11 +11,10 @@ use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use ulid::Ulid;
-use uuid::Uuid;
 
 use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
-use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
+use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor, CompactionJobSpec};
 use crate::compactor_state::SourceId;
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
@@ -56,7 +55,7 @@ pub(crate) struct CompactionProgressTracker {
     /// for each compaction job. Can be an estimate.
     ///
     /// (processed_bytes, total_bytes)
-    processed_bytes: SkipMap<Uuid, (u64, u64)>,
+    processed_bytes: SkipMap<Ulid, (u64, u64)>,
 }
 
 impl CompactionProgressTracker {
@@ -71,7 +70,7 @@ impl CompactionProgressTracker {
     /// # Arguments
     /// * `id` - The ID of the compaction job.
     /// * `total_bytes` - The total number of bytes to be processed for the compaction job.
-    pub fn add_job(&mut self, id: Uuid, total_bytes: u64) {
+    pub fn add_job(&mut self, id: Ulid, total_bytes: u64) {
         self.processed_bytes.insert(id, (0, total_bytes));
     }
 
@@ -79,7 +78,7 @@ impl CompactionProgressTracker {
     ///
     /// # Arguments
     /// * `id` - The ID of the compaction job.
-    pub fn remove_job(&mut self, id: Uuid) {
+    pub fn remove_job(&mut self, id: Ulid) {
         self.processed_bytes.remove(&id);
     }
 
@@ -88,7 +87,7 @@ impl CompactionProgressTracker {
     /// # Arguments
     /// * `id` - The ID of the compaction job.
     /// * `bytes_processed` - The total number of bytes processed so far.
-    pub fn update_progress(&mut self, id: Uuid, bytes_processed: u64) {
+    pub fn update_progress(&mut self, id: Ulid, bytes_processed: u64) {
         if let Some((_, total_bytes)) = self.processed_bytes.get(&id).map(|entry| *entry.value()) {
             self.processed_bytes
                 .insert(id, (bytes_processed, total_bytes));
@@ -118,13 +117,13 @@ impl CompactionProgressTracker {
 #[derive(Debug)]
 pub(crate) enum CompactorMessage {
     CompactionFinished {
-        id: Uuid,
+        id: Ulid,
         result: Result<SortedRun, SlateDBError>,
     },
     /// Sent when an [`CompactionExecutor`] wishes to alert the compactor of progress. This
     /// information is only used for reporting purposes, and can be an estimate.
     CompactionProgress {
-        id: Uuid,
+        id: Ulid,
         /// The total number of bytes processed so far.
         bytes_processed: u64,
     },
@@ -473,7 +472,7 @@ impl CompactorEventHandler {
 
     async fn start_compaction(
         &mut self,
-        id: Uuid,
+        id: Ulid,
         compaction: Compaction,
     ) -> Result<(), SlateDBError> {
         self.log_compaction_state();
@@ -507,12 +506,18 @@ impl CompactorEventHandler {
                 .is_some_and(|sr| compaction.destination == sr.id);
         let job = CompactionJob {
             id,
+            compaction_id: compaction.id,
             destination: compaction.destination,
             ssts,
             sorted_runs,
             compaction_ts: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
+            // Todo update this to hold completed ssts and sorted runs
+            spec: CompactionJobSpec::LinearCompactionJob {
+                completed_input_sst_ids: vec![],
+                completed_input_sr_ids: vec![],
+            },
         };
         self.progress_tracker
             .add_job(id, job.estimated_source_bytes());
@@ -538,7 +543,7 @@ impl CompactorEventHandler {
     }
 
     // state writers
-    fn finish_failed_compaction(&mut self, id: Uuid) {
+    fn finish_failed_compaction(&mut self, id: Ulid) {
         self.state.finish_failed_compaction(id);
         self.progress_tracker.remove_job(id);
     }
@@ -546,7 +551,7 @@ impl CompactorEventHandler {
     #[instrument(level = "debug", skip_all, fields(id = %id))]
     async fn finish_compaction(
         &mut self,
-        id: Uuid,
+        id: Ulid,
         output_sr: SortedRun,
     ) -> Result<(), SlateDBError> {
         self.state.finish_compaction(id, output_sr);
@@ -568,7 +573,7 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
-        let id = self.rand.rng().gen_uuid();
+        let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
         tracing::Span::current().record("id", tracing::field::display(&id));
         let result = self.state.submit_compaction(id, compaction.clone());
         match result {
