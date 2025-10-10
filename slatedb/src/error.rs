@@ -206,6 +206,7 @@ impl From<object_store::Error> for SlateDBError {
     }
 }
 
+#[cfg(feature = "foyer")]
 impl From<foyer::Error> for SlateDBError {
     fn from(value: foyer::Error) -> Self {
         Self::FoyerError(Arc::new(value))
