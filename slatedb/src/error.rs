@@ -215,7 +215,7 @@ impl From<foyer::Error> for SlateDBError {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Clone, Copy)]
-pub enum ClosedKind {
+pub enum CloseReason {
     /// The database has been shutdown cleanly.
     Clean,
 
@@ -239,7 +239,7 @@ pub enum ErrorKind {
 
     /// The database has been shutdown. The instance is no longer usable. The user must
     /// create a new instance to continue using the database.
-    Closed(ClosedKind),
+    Closed(CloseReason),
 
     /// A storage or network service is unavailable. The user must retry or drop the
     /// operation.
@@ -323,10 +323,10 @@ impl Error {
     }
 
     /// Creates a new fencing error.
-    pub fn closed(msg: String, kind: ClosedKind) -> Self {
+    pub fn closed(msg: String, reason: CloseReason) -> Self {
         Self {
             msg,
-            kind: ErrorKind::Closed(kind),
+            kind: ErrorKind::Closed(reason),
             source: None,
         }
     }
@@ -387,8 +387,8 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionConflict => Error::transaction(msg),
 
             // Closed
-            SlateDBError::Closed => Error::closed(msg, ClosedKind::Clean),
-            SlateDBError::Fenced => Error::closed(msg, ClosedKind::Fenced),
+            SlateDBError::Closed => Error::closed(msg, CloseReason::Clean),
+            SlateDBError::Fenced => Error::closed(msg, CloseReason::Fenced),
 
             // Unavailable errors
             SlateDBError::IoError(err) => Error::unavailable(msg).with_source(Box::new(err)),
