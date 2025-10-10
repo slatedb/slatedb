@@ -134,7 +134,6 @@ impl CompactionState {
 
 pub struct CompactorState {
     manifest: DirtyManifest,
-    compaction_state: DirtyRecord<CompactionState>,
     compactions: HashMap<Ulid, Compaction>,
 }
 
@@ -157,11 +156,9 @@ impl CompactorState {
 
     pub(crate) fn new(
         manifest: DirtyManifest,
-        compaction_state: DirtyRecord<CompactionState>,
     ) -> Self {
         Self {
             manifest,
-            compaction_state,
             compactions: HashMap::<Ulid, Compaction>::new(),
         }
     }
