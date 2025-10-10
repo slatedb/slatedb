@@ -123,6 +123,7 @@ use crate::clock::LogicalClock;
 use crate::clock::SystemClock;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
+use crate::compactor_state::CompactionState;
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
@@ -136,11 +137,13 @@ use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::CoreDbState;
 use crate::dispatcher::MessageDispatcher;
 use crate::error::SlateDBError;
+use crate::flatbuffer_types::FlatBufferCompactionStateCodec;
 use crate::garbage_collector::GarbageCollector;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
+use crate::record::store::RecordStore;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
@@ -510,7 +513,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
-                .unwrap_or_else(default_compaction_scheduler_supplier);
+                .unwrap_or_else(default_compaction_scheduler_supplier); 
             let compactor = Compactor::new(
                 manifest_store.clone(),
                 uncached_table_store.clone(),
@@ -799,6 +802,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             retrying_main_object_store.clone(),
             self.system_clock.clone(),
         ));
+
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store.clone(), None),
             SsTableFormat::default(), // read only SSTs can use default
