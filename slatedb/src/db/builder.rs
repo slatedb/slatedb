@@ -127,6 +127,7 @@ use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::TokioCompactionExecutor;
 use crate::compactor_stats::CompactionStats;
+use crate::compactor_state::CompactionState;
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
@@ -140,6 +141,7 @@ use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::CoreDbState;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::flatbuffer_types::FlatBufferCompactionStateCodec;
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -148,6 +150,7 @@ use crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
+use crate::record::store::RecordStore;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
@@ -807,6 +810,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             retrying_main_object_store.clone(),
             self.system_clock.clone(),
         ));
+
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store.clone(), None),
             SsTableFormat::default(), // read only SSTs can use default

@@ -4,8 +4,8 @@ use std::fmt::{Display, Formatter};
 use log::info;
 use ulid::Ulid;
 
-use crate::compactor_state::CompactionStatus::Submitted;
 use crate::compactor_executor::CompactionJob;
+use crate::compactor_state::CompactionStatus::Submitted;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
@@ -66,7 +66,7 @@ pub(crate) enum CompactionStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CompactionType {
     Internal,
-    External
+    External,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,7 +120,7 @@ impl Compaction {
 pub(crate) struct CompactionState {
     pub(crate) compactor_epoch: u64,
     // active_compactions queued, in-progress and completed
-    pub(crate)compactions: HashMap<Ulid, Compaction>,
+    pub(crate) compactions: HashMap<Ulid, Compaction>,
 }
 
 impl CompactionState {
@@ -155,7 +155,10 @@ impl CompactorState {
         self.compactions.values().cloned().collect()
     }
 
-    pub(crate) fn new(manifest: DirtyManifest) -> Self {
+    pub(crate) fn new(
+        manifest: DirtyManifest,
+        compaction_state: DirtyRecord<CompactionState>,
+    ) -> Self {
         Self {
             manifest,
             compaction_state,

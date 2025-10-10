@@ -1,9 +1,11 @@
-use std::collections::{VecDeque, HashMap};
+use std::collections::{HashMap, VecDeque};
 use std::ops::{Bound, RangeBounds};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use chrono::{DateTime, Utc};
-use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset, UnionWIPOffset};
+use flatbuffers::{
+    FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, UnionWIPOffset, Vector, WIPOffset,
+};
 use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
@@ -16,29 +18,30 @@ use crate::db_state::{CoreDbState, SsTableHandle};
 #[rustfmt::skip]
 mod root_generated;
 pub use root_generated::{
-    BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo as FbSsTableInfo, SsTableInfoArgs, CompactionState as FbCompactionState, 
-    Compaction as FbCompaction, CompactionSpec as FbCompactionSpec, CompactionJob as FbCompactionJob, CompactionType as FbCompactionType,
-    CompactionJobSpec as FbCompactionJobSpec, LinearCompactionJob,
+    BlockMeta, BlockMetaArgs, Compaction as FbCompaction, CompactionJob as FbCompactionJob,
+    CompactionJobSpec as FbCompactionJobSpec, CompactionSpec as FbCompactionSpec,
+    CompactionState as FbCompactionState, CompactionType as FbCompactionType, LinearCompactionJob,
+    ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs, SsTableInfo as FbSsTableInfo,
+    SsTableInfoArgs,
 };
 
+use crate::compactor_state::{Compaction, CompactionSpec};
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
-    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun,
-    SortedRunArgs, Uuid, UuidArgs, Ulid as FbUlid, UlidArgs, LinearCompactionJobArgs,
-    CompactionArgs, CompactionStateArgs, CompactionBuilder,CompactionJobBuilder,
-    CompactionStatus as FbCompactionStatus, SortedRunCompaction, SortedRunCompactionArgs,
+    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompactionBuilder,
+    CompactionJobBuilder, CompactionStateArgs, CompactionStatus as FbCompactionStatus,
+    CompressionFormat, LinearCompactionJobArgs, SortedRun, SortedRunArgs, SortedRunCompaction,
+    SortedRunCompactionArgs, Ulid as FbUlid, UlidArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::record::RecordCodec;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
-use crate::compactor_state::{Compaction, CompactionSpec};
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
 
@@ -284,8 +287,8 @@ impl RecordCodec<CompactionState> for FlatBufferCompactionStateCodec {
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<CompactionState, SlateDBError> {
-       let fb_compaction_state = flatbuffers::root::<FbCompactionState>(bytes.as_ref())?;
-       Ok(Self::compaction_state(&fb_compaction_state))
+        let fb_compaction_state = flatbuffers::root::<FbCompactionState>(bytes.as_ref())?;
+        Ok(Self::compaction_state(&fb_compaction_state))
     }
 }
 
@@ -294,23 +297,23 @@ impl FlatBufferCompactionStateCodec {
         CompactionState {
             compactor_epoch: fb_compaction_state.compactor_epoch(),
             compactions: fb_compaction_state
-            .recent_compactions()
-            .iter()
-            .map(|c| {
-                let fb_ulid = c.compaction_id().expect("compaction_id missing");
-                let key = Ulid::from((fb_ulid.high(), fb_ulid.low()));
-                let comp = Compaction {
-                id: key,
-                status: Self::get_status(c.status()),
-                sources: Self::get_sources(&c),
-                destination: c.destination(),
-                compaction_type: Self::get_compaction_type(c.compaction_type()),
-                job_attempts: Self:: get_job_attempts(c.job_attempts()),
-                spec: Self::get_spec(c.spec_type()),
-            };
-            (key, comp)
-            })
-            .collect(),
+                .recent_compactions()
+                .iter()
+                .map(|c| {
+                    let fb_ulid = c.compaction_id().expect("compaction_id missing");
+                    let key = Ulid::from((fb_ulid.high(), fb_ulid.low()));
+                    let comp = Compaction {
+                        id: key,
+                        status: Self::get_status(c.status()),
+                        sources: Self::get_sources(&c),
+                        destination: c.destination(),
+                        compaction_type: Self::get_compaction_type(c.compaction_type()),
+                        job_attempts: Self::get_job_attempts(c.job_attempts()),
+                        spec: Self::get_spec(c.spec_type()),
+                    };
+                    (key, comp)
+                })
+                .collect(),
         }
     }
 
@@ -351,14 +354,19 @@ impl FlatBufferCompactionStateCodec {
         }
     }
 
-    fn get_job_attempts(_jobs: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<FbCompactionJob<'_>>>) -> Vec<CompactionJob> {
+    fn get_job_attempts(
+        _jobs: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<FbCompactionJob<'_>>>,
+    ) -> Vec<CompactionJob> {
         // Minimal decode for now; fill in from FB if/when needed.
         Vec::new()
     }
 
     fn get_spec(_spec: FbCompactionSpec) -> CompactionSpec {
         // Minimal decode: return empty sources; extend as needed
-        CompactionSpec::SortedRunCompaction { ssts: Vec::new(), sorted_runs: Vec::new() }
+        CompactionSpec::SortedRunCompaction {
+            ssts: Vec::new(),
+            sorted_runs: Vec::new(),
+        }
     }
 
     fn create_compaction_state(compaction_state: &CompactionState) -> Bytes {
@@ -634,8 +642,12 @@ impl<'b> DbFlatBufferBuilder<'b> {
         bytes.into()
     }
 
-    fn add_compactions(&mut self, compactions: &HashMap<Ulid, Compaction>) -> WIPOffset<Vector<'b, ForwardsUOffset<FbCompaction<'b>>>> { 
-        let mut compactions_fb_vec: Vec<WIPOffset<FbCompaction>> = Vec::<WIPOffset<FbCompaction>>::with_capacity(compactions.len());
+    fn add_compactions(
+        &mut self,
+        compactions: &HashMap<Ulid, Compaction>,
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbCompaction<'b>>>> {
+        let mut compactions_fb_vec: Vec<WIPOffset<FbCompaction>> =
+            Vec::<WIPOffset<FbCompaction>>::with_capacity(compactions.len());
         for compaction in compactions.values() {
             compactions_fb_vec.push(self.add_compaction(compaction));
         }
@@ -644,15 +656,23 @@ impl<'b> DbFlatBufferBuilder<'b> {
 
     fn add_compaction(&mut self, compaction: &Compaction) -> WIPOffset<FbCompaction<'b>> {
         let compaction_id = self.add_ulid(compaction.id);
-        let ssts = self.builder.create_vector::<WIPOffset<CompactedSsTable<'b>>>(&[]);
-        let output_sorted_run = SortedRun::create(&mut self.builder, &SortedRunArgs { id: compaction.destination, ssts: Some(ssts) });
+        let ssts = self
+            .builder
+            .create_vector::<WIPOffset<CompactedSsTable<'b>>>(&[]);
+        let output_sorted_run = SortedRun::create(
+            &mut self.builder,
+            &SortedRunArgs {
+                id: compaction.destination,
+                ssts: Some(ssts),
+            },
+        );
         let compaction_type = match compaction.compaction_type {
             CompactionType::Internal => FbCompactionType::Internal,
             CompactionType::External => FbCompactionType::External,
         };
         let job_attempts = self.add_job_attempts(&compaction.job_attempts);
         let (spec_type, spec) = self.add_compaction_spec(&compaction.spec);
-        
+
         let mut builder = CompactionBuilder::new(&mut self.builder);
         builder.add_compaction_id(compaction_id);
         builder.add_compaction_type(compaction_type);
@@ -671,9 +691,14 @@ impl<'b> DbFlatBufferBuilder<'b> {
         builder.finish()
     }
 
-    fn add_job_attempts(&mut self, job_attempts: &[CompactionJob]) -> WIPOffset<Vector<'b, ForwardsUOffset<FbCompactionJob<'b>>>> {
-        let job_attempts_fb_vec: Vec<WIPOffset<FbCompactionJob>> =
-            job_attempts.iter().map(|job_attempt| self.add_job_attempt(job_attempt)).collect();
+    fn add_job_attempts(
+        &mut self,
+        job_attempts: &[CompactionJob],
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbCompactionJob<'b>>>> {
+        let job_attempts_fb_vec: Vec<WIPOffset<FbCompactionJob>> = job_attempts
+            .iter()
+            .map(|job_attempt| self.add_job_attempt(job_attempt))
+            .collect();
         self.builder.create_vector(job_attempts_fb_vec.as_ref())
     }
 
@@ -690,23 +715,38 @@ impl<'b> DbFlatBufferBuilder<'b> {
         builder.finish()
     }
 
-    fn add_compaction_spec(&mut self, spec: &CompactionSpec) -> (FbCompactionSpec, WIPOffset<UnionWIPOffset>) {
+    fn add_compaction_spec(
+        &mut self,
+        spec: &CompactionSpec,
+    ) -> (FbCompactionSpec, WIPOffset<UnionWIPOffset>) {
         match spec {
             CompactionSpec::SortedRunCompaction { ssts, sorted_runs } => {
                 let ssts = self.add_compacted_ssts(ssts.iter());
                 let sorted_runs = self.add_sorted_runs(sorted_runs);
                 let table = SortedRunCompaction::create(
                     &mut self.builder,
-                    &SortedRunCompactionArgs { ssts: Some(ssts), sorted_runs: Some(sorted_runs) },
+                    &SortedRunCompactionArgs {
+                        ssts: Some(ssts),
+                        sorted_runs: Some(sorted_runs),
+                    },
                 );
-                (FbCompactionSpec::SortedRunCompaction, WIPOffset::new(table.value()))
+                (
+                    FbCompactionSpec::SortedRunCompaction,
+                    WIPOffset::new(table.value()),
+                )
             }
         }
     }
 
-    fn add_compaction_job_spec(&mut self, spec: &CompactionJobSpec) -> (FbCompactionJobSpec, WIPOffset<UnionWIPOffset>) {
+    fn add_compaction_job_spec(
+        &mut self,
+        spec: &CompactionJobSpec,
+    ) -> (FbCompactionJobSpec, WIPOffset<UnionWIPOffset>) {
         match spec {
-            CompactionJobSpec::LinearCompactionJob { completed_input_sst_ids, completed_input_sr_ids } => {
+            CompactionJobSpec::LinearCompactionJob {
+                completed_input_sst_ids,
+                completed_input_sr_ids,
+            } => {
                 // Build CompactedSstId directly from Ulids
                 let sst_ids: Vec<WIPOffset<CompactedSstId>> = completed_input_sst_ids
                     .iter()
@@ -718,7 +758,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
                     })
                     .collect();
                 let ssts = self.builder.create_vector(sst_ids.as_ref());
-                let sr_ids = self.builder.create_vector::<u32>(completed_input_sr_ids.as_slice());
+                let sr_ids = self
+                    .builder
+                    .create_vector::<u32>(completed_input_sr_ids.as_slice());
                 let table = LinearCompactionJob::create(
                     &mut self.builder,
                     &LinearCompactionJobArgs {
@@ -726,7 +768,10 @@ impl<'b> DbFlatBufferBuilder<'b> {
                         completed_input_sr_ids: Some(sr_ids),
                     },
                 );
-                (FbCompactionJobSpec::LinearCompactionJob, WIPOffset::new(table.value()))
+                (
+                    FbCompactionJobSpec::LinearCompactionJob,
+                    WIPOffset::new(table.value()),
+                )
             }
         }
     }
