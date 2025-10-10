@@ -46,6 +46,9 @@ pub(crate) enum SlateDBError {
     #[error("failed to find latest manifest")]
     LatestManifestMissing,
 
+    #[error("failed to find latest record")]
+    LatestRecordMissing,
+
     #[error("invalid deletion")]
     InvalidDeletion,
 
@@ -456,11 +459,51 @@ impl From<SlateDBError> for Error {
             // Internal errors
             SlateDBError::CompactionExecutorFailed => Error::internal(msg),
             SlateDBError::BackgroundTaskPanic(err) => {
-                Error::internal(msg).with_source(Box::new(PanicError(err)))
+                Error::system(msg).with_source(Box::new(PanicError(err)))
             }
-            SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),
-            SlateDBError::WalBufferAlreadyStarted => Error::internal(msg),
-            SlateDBError::ReadChannelError(err) => Error::internal(msg).with_source(Box::new(err)),
+            SlateDBError::Closed => Error::system(msg),
+            SlateDBError::MergeOperatorError(err) => {
+                Error::operation(msg).with_source(Box::new(err))
+            }
+            SlateDBError::CheckpointMissing(_) => Error::persistent_state(msg),
+            SlateDBError::InvalidVersion { .. } => Error::persistent_state(msg),
+            #[cfg(feature = "foyer")]
+            SlateDBError::FoyerCacheReadingError(err) => {
+                Error::persistent_state(msg).with_source(Box::new(AnyhowError(err)))
+            }
+            SlateDBError::Timeout { backoff, .. } => Error::transient(msg, backoff),
+            SlateDBError::WalBufferAlreadyStarted => Error::system(msg),
+            SlateDBError::ManifestMissing(_) => Error::persistent_state(msg),
+            SlateDBError::LatestManifestMissing => Error::persistent_state(msg),
+            SlateDBError::LatestRecordMissing => Error::persistent_state(msg),
+            SlateDBError::ManifestVersionExists => Error::persistent_state(msg),
+            SlateDBError::EmptyManifest => Error::persistent_state(msg),
+            SlateDBError::EmptyBlock => Error::persistent_state(msg),
+            SlateDBError::EmptyBlockMeta => Error::persistent_state(msg),
+            SlateDBError::EmptySSTable => Error::persistent_state(msg),
+            SlateDBError::Unsupported(_) => Error::operation(msg),
+            SlateDBError::ChecksumMismatch => Error::persistent_state(msg),
+            SlateDBError::SeekKeyOutOfRange { .. } => Error::operation(msg),
+            SlateDBError::SeekKeyLessThanLastReturnedKey => Error::operation(msg),
+            SlateDBError::IdenticalClonePaths { .. } => Error::operation(msg),
+            SlateDBError::InvalidCheckpointLifetime(_) => Error::operation(msg),
+            SlateDBError::InvalidManifestPollInterval(_) => Error::operation(msg),
+            SlateDBError::CheckpointLifetimeTooShort { .. } => Error::operation(msg),
+            SlateDBError::InvalidSSTBatchSize(_) => Error::operation(msg),
+            SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::operation(msg),
+            SlateDBError::CloneExternalDbMissing => Error::persistent_state(msg),
+            SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::persistent_state(msg),
+            SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::persistent_state(msg),
+            SlateDBError::UnknownConfigurationFormat(_) => Error::configuration(msg),
+            SlateDBError::InvalidConfigurationFormat(err) => {
+                Error::configuration(msg).with_source(Box::new(err))
+            }
+            SlateDBError::WalDisabled => Error::operation(msg),
+            SlateDBError::InvalidObjectStoreURL(_, err) => {
+                Error::configuration(msg).with_source(Box::new(err))
+            }
+            SlateDBError::TransactionConflict => Error::operation(msg),
+            SlateDBError::FileVersionExists => Error::persistent_state(msg),
         }
     }
 }
