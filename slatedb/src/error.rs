@@ -421,18 +421,18 @@ impl From<SlateDBError> for Error {
             SlateDBError::WalDisabled => Error::invalid(msg),
             SlateDBError::InvalidCompaction => Error::invalid(msg),
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
-            #[cfg(any(
-                feature = "snappy",
-                feature = "zlib",
-                feature = "lz4",
-                feature = "zstd"
-            ))]
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),
             SlateDBError::InvalidDBState => Error::data(msg),
+            #[cfg(any(
+                feature = "snappy",
+                feature = "zlib",
+                feature = "lz4",
+                feature = "zstd"
+            ))]
             SlateDBError::BlockDecompressionError => Error::data(msg),
             #[cfg(any(feature = "snappy", feature = "zlib", feature = "zstd"))]
             SlateDBError::BlockCompressionError => Error::data(msg),
