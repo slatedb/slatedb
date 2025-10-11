@@ -1,33 +1,44 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::{Bound, RangeBounds};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use chrono::{DateTime, Utc};
-use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
+use flatbuffers::{
+    FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, UnionWIPOffset, Vector, WIPOffset,
+};
 use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
 use crate::checkpoint;
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
-use crate::db_state::{CoreDbState, SsTableHandle};
+use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 
-#[path = "./generated/manifest_generated.rs"]
+use crate::compactor_executor::{CompactionJob, CompactionJobSpec};
+use crate::compactor_state::{CompactionState, CompactionStatus, CompactionType, SourceId};
+
+#[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
 #[rustfmt::skip]
-mod manifest_generated;
-pub use manifest_generated::{
-    BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
-    SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
+mod root_generated;
+pub use root_generated::{
+    BlockMeta, BlockMetaArgs, Compaction as FbCompaction, CompactionJob as FbCompactionJob,
+    CompactionJobSpec as FbCompactionJobSpec, CompactionSpec as FbCompactionSpec,
+    CompactionState as FbCompactionState, CompactionType as FbCompactionType, LinearCompactionJob,
+    ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs, SsTableInfo as FbSsTableInfo,
+    SsTableInfoArgs,
 };
 
+use crate::compactor_state::{Compaction, CompactionSpec};
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
-use crate::flatbuffer_types::manifest_generated::{
+use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
-    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun,
-    SortedRunArgs, Uuid, UuidArgs,
+    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompactionBuilder,
+    CompactionJobBuilder, CompactionStateArgs, CompactionStatus as FbCompactionStatus,
+    CompressionFormat, LinearCompactionJobArgs, SortedRun as FbSortedRun, SortedRunArgs,
+    SortedRunCompaction, SortedRunCompactionArgs, Ulid as FbUlid, UlidArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
@@ -149,13 +160,13 @@ impl FlatBufferManifestCodec {
         uuid::Uuid::from_u64_pair(uuid.high(), uuid.low())
     }
 
-    fn decode_bytes_range(range: manifest_generated::BytesRange) -> BytesRange {
+    fn decode_bytes_range(range: root_generated::BytesRange) -> BytesRange {
         let start_key = Self::decode_bytes_bound(range.start_bound());
         let end_key = Self::decode_bytes_bound(range.end_bound());
         BytesRange::new(start_key, end_key)
     }
 
-    fn decode_bytes_bound(bound: manifest_generated::BytesBound) -> Bound<Bytes> {
+    fn decode_bytes_bound(bound: root_generated::BytesBound) -> Bound<Bytes> {
         match (bound.bound_type(), bound.key()) {
             (BoundType::Included, Some(key)) => {
                 Bound::Included(Bytes::copy_from_slice(key.bytes()))
@@ -271,8 +282,209 @@ impl FlatBufferManifestCodec {
     }
 }
 
+pub(crate) struct FlatBufferCompactionStateCodec {}
+
+impl RecordCodec<CompactionState> for FlatBufferCompactionStateCodec {
+    fn encode(&self, compaction_state: &CompactionState) -> Bytes {
+        Self::create_compaction_state(compaction_state)
+    }
+
+    fn decode(&self, bytes: &Bytes) -> Result<CompactionState, SlateDBError> {
+        let fb_compaction_state = flatbuffers::root::<FbCompactionState>(bytes.as_ref())?;
+        Ok(Self::compaction_state(&fb_compaction_state))
+    }
+}
+
+impl FlatBufferCompactionStateCodec {
+    pub fn compaction_state(fb_compaction_state: &FbCompactionState) -> CompactionState {
+        CompactionState {
+            compactor_epoch: fb_compaction_state.compactor_epoch(),
+            compactions: fb_compaction_state
+                .recent_compactions()
+                .iter()
+                .map(|c| {
+                    let fb_ulid = c.compaction_id();
+                    let key = fb_ulid.to_ulid();
+                    let comp = Compaction {
+                        id: key,
+                        status: Self::get_status(c.status()),
+                        sources: Self::get_sources(&c),
+                        destination: c.destination(),
+                        compaction_type: Self::get_compaction_type(c.compaction_type()),
+                        job_attempts: Self::get_job_attempts(&c),
+                        spec: Self::get_spec(&c),
+                    };
+                    (key, comp)
+                })
+                .collect(),
+        }
+    }
+
+    fn get_status(status: FbCompactionStatus) -> CompactionStatus {
+        match status {
+            FbCompactionStatus::Submitted => CompactionStatus::Submitted,
+            FbCompactionStatus::InProgress => CompactionStatus::InProgress,
+            FbCompactionStatus::Completed => CompactionStatus::Completed,
+            _ => CompactionStatus::Failed,
+        }
+    }
+
+    fn get_sources(compaction: &FbCompaction) -> Vec<SourceId> {
+        if compaction.spec_type() == FbCompactionSpec::SortedRunCompaction {
+            if let Some(s) = compaction.spec_as_sorted_run_compaction() {
+                let mut sources = Vec::new();
+                if let Some(ssts) = s.ssts() {
+                    for sst in ssts {
+                        sources.push(SourceId::Sst(sst.id().ulid()));
+                    }
+                }
+                if let Some(srs) = s.sorted_runs() {
+                    for sr in srs {
+                        sources.push(SourceId::SortedRun(sr.id()));
+                    }
+                }
+                return sources;
+            }
+        }
+        Vec::new()
+    }
+
+    fn get_compaction_type(compaction_type: FbCompactionType) -> CompactionType {
+        match compaction_type {
+            FbCompactionType::Internal => CompactionType::Internal,
+            FbCompactionType::External => CompactionType::External,
+            _ => CompactionType::Internal,
+        }
+    }
+
+    fn get_job_attempts(compaction: &FbCompaction) -> Vec<CompactionJob> {
+        let compaction_spec = Self::get_spec(compaction);
+        compaction
+            .job_attempts()
+            .iter()
+            .map(|job| {
+                let id: Ulid = job.job_id().to_ulid();
+                let compaction_id: Ulid = job.compaction_id().to_ulid();
+
+                let spec: CompactionJobSpec = match job.spec_type() {
+                    FbCompactionJobSpec::LinearCompactionJob => {
+                        let fb_compaction_job_spec = job
+                            .spec_as_linear_compaction_job()
+                            .expect("union value is missing for LinearCompactionJob");
+
+                        let completed_input_sst_ids: Vec<Ulid> =
+                            if let Some(v) = fb_compaction_job_spec.completed_input_sst_ids() {
+                                v.iter().map(|id_fb| id_fb.ulid()).collect()
+                            } else {
+                                Vec::new()
+                            };
+
+                        let completed_input_sr_ids: Vec<u32> =
+                            if let Some(v) = fb_compaction_job_spec.completed_input_sr_ids() {
+                                v.iter().collect()
+                            } else {
+                                Vec::new()
+                            };
+
+                        CompactionJobSpec::LinearCompactionJob {
+                            completed_input_sst_ids,
+                            completed_input_sr_ids,
+                        }
+                    }
+                    _ => unreachable!(
+                        "Unsupported compaction job spec type: {:?}",
+                        job.spec_type()
+                    ),
+                };
+
+                let (ssts, sorted_runs) = match &compaction_spec {
+                    CompactionSpec::SortedRunCompaction { ssts, sorted_runs } => {
+                        (ssts.clone(), sorted_runs.clone())
+                    }
+                };
+
+                CompactionJob {
+                    id,
+                    compaction_id,
+                    destination: compaction.destination(),
+                    ssts,
+                    sorted_runs,
+                    spec,
+                    // The fields below need to be updated while starting the compaction
+                    compaction_ts: 0,
+                    is_dest_last_run: false,
+                    retention_min_seq: None,
+                }
+            })
+            .collect()
+    }
+
+    fn get_spec(compaction: &FbCompaction) -> CompactionSpec {
+        match compaction.spec_type() {
+            FbCompactionSpec::SortedRunCompaction => {
+                let sorted_run_compaction = compaction
+                    .spec_as_sorted_run_compaction()
+                    .expect("union value missing for SortedRunCompaction");
+
+                // Top-level ssts
+                let mut ssts = Vec::new();
+                if let Some(v) = sorted_run_compaction.ssts() {
+                    for s in v.iter() {
+                        let id = SsTableId::Compacted(s.id().ulid());
+                        let info = FlatBufferSsTableInfoCodec::sst_info(&s.info());
+                        let vis = s
+                            .visible_range()
+                            .map(FlatBufferManifestCodec::decode_bytes_range);
+                        ssts.push(SsTableHandle::new_compacted(id, info, vis));
+                    }
+                }
+
+                // Nested sorted runs
+                let mut sorted_runs = Vec::new();
+                if let Some(v) = sorted_run_compaction.sorted_runs() {
+                    for sr in v.iter() {
+                        let mut inner = Vec::new();
+                        for s in sr.ssts().iter() {
+                            let id = SsTableId::Compacted(s.id().ulid());
+                            let info = FlatBufferSsTableInfoCodec::sst_info(&s.info());
+                            let vis = s
+                                .visible_range()
+                                .map(FlatBufferManifestCodec::decode_bytes_range);
+                            inner.push(SsTableHandle::new_compacted(id, info, vis));
+                        }
+
+                        sorted_runs.push(SortedRun {
+                            id: sr.id(),
+                            ssts: inner,
+                        });
+                    }
+                }
+
+                CompactionSpec::SortedRunCompaction { ssts, sorted_runs }
+            }
+            _ => CompactionSpec::SortedRunCompaction {
+                ssts: vec![],
+                sorted_runs: vec![],
+            },
+        }
+    }
+
+    pub fn create_compaction_state(compaction_state: &CompactionState) -> Bytes {
+        let builder = FlatBufferBuilder::new();
+        let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
+        db_fb_builder.create_compaction_state(compaction_state)
+    }
+}
+
 impl CompactedSstId<'_> {
     pub(crate) fn ulid(&self) -> Ulid {
+        Ulid::from((self.high(), self.low()))
+    }
+}
+
+impl<'a> FbUlid<'a> {
+    #[inline]
+    pub(crate) fn to_ulid(&self) -> Ulid {
         Ulid::from((self.high(), self.low()))
     }
 }
@@ -306,9 +518,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
     }
 
     fn add_compacted_sst_id(&mut self, ulid: &Ulid) -> WIPOffset<CompactedSstId<'b>> {
-        let uidu128 = ulid.0;
-        let high = (uidu128 >> 64) as u64;
-        let low = ((uidu128 << 64) >> 64) as u64;
+        let (high, low) = Self::ulid_parts(ulid);
         CompactedSstId::create(&mut self.builder, &CompactedSstIdArgs { high, low })
     }
 
@@ -361,9 +571,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(compacted_ssts.as_ref())
     }
 
-    fn add_sorted_run(&mut self, sorted_run: &db_state::SortedRun) -> WIPOffset<SortedRun<'b>> {
+    fn add_sorted_run(&mut self, sorted_run: &db_state::SortedRun) -> WIPOffset<FbSortedRun<'b>> {
         let ssts = self.add_compacted_ssts(sorted_run.ssts.iter());
-        SortedRun::create(
+        FbSortedRun::create(
             &mut self.builder,
             &SortedRunArgs {
                 id: sorted_run.id,
@@ -375,8 +585,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn add_sorted_runs(
         &mut self,
         sorted_runs: &[db_state::SortedRun],
-    ) -> WIPOffset<Vector<'b, ForwardsUOffset<SortedRun<'b>>>> {
-        let sorted_runs_fbs: Vec<WIPOffset<SortedRun>> = sorted_runs
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbSortedRun<'b>>>> {
+        let sorted_runs_fbs: Vec<WIPOffset<FbSortedRun>> = sorted_runs
             .iter()
             .map(|sr| self.add_sorted_run(sr))
             .collect();
@@ -386,6 +596,17 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn add_uuid(&mut self, uuid: uuid::Uuid) -> WIPOffset<Uuid<'b>> {
         let (high, low) = uuid.as_u64_pair();
         Uuid::create(&mut self.builder, &UuidArgs { high, low })
+    }
+
+    #[inline]
+    fn ulid_parts(u: &ulid::Ulid) -> (u64, u64) {
+        let v = u.0;
+        ((v >> 64) as u64, (v & 0xFFFF_FFFF_FFFF_FFFF) as u64)
+    }
+
+    fn add_ulid(&mut self, ulid: ulid::Ulid) -> WIPOffset<FbUlid<'b>> {
+        let (high, low) = Self::ulid_parts(&ulid);
+        FbUlid::create(&mut self.builder, &UlidArgs { high, low })
     }
 
     fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
@@ -415,15 +636,12 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(checkpoints_fb_vec.as_ref())
     }
 
-    fn add_bytes_range(
-        &mut self,
-        range: &BytesRange,
-    ) -> WIPOffset<manifest_generated::BytesRange<'b>> {
+    fn add_bytes_range(&mut self, range: &BytesRange) -> WIPOffset<root_generated::BytesRange<'b>> {
         let start_bound = self.add_bytes_bound(range.start_bound());
         let end_bound = self.add_bytes_bound(range.end_bound());
-        manifest_generated::BytesRange::create(
+        root_generated::BytesRange::create(
             &mut self.builder,
-            &manifest_generated::BytesRangeArgs {
+            &root_generated::BytesRangeArgs {
                 start_bound: Some(start_bound),
                 end_bound: Some(end_bound),
             },
@@ -433,15 +651,15 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn add_bytes_bound(
         &mut self,
         bound: Bound<&Bytes>,
-    ) -> WIPOffset<manifest_generated::BytesBound<'b>> {
+    ) -> WIPOffset<root_generated::BytesBound<'b>> {
         let (bound_type, key) = match bound {
             Bound::Included(key) => (BoundType::Included, Some(self.builder.create_vector(key))),
             Bound::Excluded(key) => (BoundType::Excluded, Some(self.builder.create_vector(key))),
             Bound::Unbounded => (BoundType::Unbounded, None),
         };
-        manifest_generated::BytesBound::create(
+        root_generated::BytesBound::create(
             &mut self.builder,
-            &manifest_generated::BytesBoundArgs { key, bound_type },
+            &root_generated::BytesBoundArgs { key, bound_type },
         )
     }
 
@@ -457,11 +675,11 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let external_dbs = if manifest.external_dbs.is_empty() {
             None
         } else {
-            let external_dbs: Vec<WIPOffset<manifest_generated::ExternalDb>> = manifest
+            let external_dbs: Vec<WIPOffset<root_generated::ExternalDb>> = manifest
                 .external_dbs
                 .iter()
                 .map(|external_db| {
-                    let db_external_db_args = manifest_generated::ExternalDbArgs {
+                    let db_external_db_args = root_generated::ExternalDbArgs {
                         path: Some(self.builder.create_string(&external_db.path)),
                         source_checkpoint_id: Some(self.add_uuid(external_db.source_checkpoint_id)),
                         final_checkpoint_id: external_db
@@ -469,7 +687,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                             .map(|id| self.add_uuid(id)),
                         sst_ids: Some(self.add_compacted_sst_ids(external_db.sst_ids.iter())),
                     };
-                    manifest_generated::ExternalDb::create(&mut self.builder, &db_external_db_args)
+                    root_generated::ExternalDb::create(&mut self.builder, &db_external_db_args)
                 })
                 .collect();
             Some(self.builder.create_vector(external_dbs.as_ref()))
@@ -514,6 +732,150 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let copy = self.add_sst_info(info);
         self.builder.finish(copy, None);
         Bytes::copy_from_slice(self.builder.finished_data())
+    }
+
+    fn create_compaction_state(&mut self, compaction_state: &CompactionState) -> Bytes {
+        let compactions = self.add_compactions(&compaction_state.compactions);
+        let compaction_state = FbCompactionState::create(
+            &mut self.builder,
+            &CompactionStateArgs {
+                compactor_epoch: compaction_state.compactor_epoch,
+                recent_compactions: Some(compactions),
+            },
+        );
+        self.builder.finish(compaction_state, None);
+        let mut bytes = BytesMut::new();
+        bytes.put_slice(self.builder.finished_data());
+        bytes.into()
+    }
+
+    fn add_compactions(
+        &mut self,
+        compactions: &HashMap<Ulid, Compaction>,
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbCompaction<'b>>>> {
+        let mut compactions_fb_vec: Vec<WIPOffset<FbCompaction>> =
+            Vec::<WIPOffset<FbCompaction>>::with_capacity(compactions.len());
+        for compaction in compactions.values() {
+            compactions_fb_vec.push(self.add_compaction(compaction));
+        }
+        self.builder.create_vector(compactions_fb_vec.as_ref())
+    }
+
+    fn add_compaction(&mut self, compaction: &Compaction) -> WIPOffset<FbCompaction<'b>> {
+        let compaction_id = self.add_ulid(compaction.id);
+        let ssts = self
+            .builder
+            .create_vector::<WIPOffset<CompactedSsTable<'b>>>(&[]);
+        let output_sorted_run = FbSortedRun::create(
+            &mut self.builder,
+            &SortedRunArgs {
+                id: compaction.destination,
+                ssts: Some(ssts),
+            },
+        );
+        let compaction_type = match compaction.compaction_type {
+            CompactionType::Internal => FbCompactionType::Internal,
+            CompactionType::External => FbCompactionType::External,
+        };
+        let job_attempts = self.add_job_attempts(&compaction.job_attempts);
+        let (spec_type, spec) = self.add_compaction_spec(&compaction.spec);
+
+        let mut builder = CompactionBuilder::new(&mut self.builder);
+        builder.add_compaction_id(compaction_id);
+        builder.add_compaction_type(compaction_type);
+        let fb_status = match compaction.status {
+            CompactionStatus::Submitted => FbCompactionStatus::Submitted,
+            CompactionStatus::InProgress => FbCompactionStatus::InProgress,
+            CompactionStatus::Completed => FbCompactionStatus::Completed,
+            CompactionStatus::Failed => FbCompactionStatus::Failed,
+        };
+        builder.add_status(fb_status);
+        builder.add_destination(compaction.destination);
+        builder.add_output_sorted_run(output_sorted_run);
+        builder.add_job_attempts(job_attempts);
+        builder.add_spec_type(spec_type);
+        builder.add_spec(spec);
+        builder.finish()
+    }
+
+    fn add_job_attempts(
+        &mut self,
+        job_attempts: &[CompactionJob],
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbCompactionJob<'b>>>> {
+        let job_attempts_fb_vec: Vec<WIPOffset<FbCompactionJob>> = job_attempts
+            .iter()
+            .map(|job_attempt| self.add_job_attempt(job_attempt))
+            .collect();
+        self.builder.create_vector(job_attempts_fb_vec.as_ref())
+    }
+
+    fn add_job_attempt(&mut self, job_attempt: &CompactionJob) -> WIPOffset<FbCompactionJob<'b>> {
+        let job_id = self.add_ulid(job_attempt.id);
+        let compaction_id = self.add_ulid(job_attempt.compaction_id);
+        let (spec_type, spec) = self.add_compaction_job_spec(&job_attempt.spec);
+
+        let mut builder = CompactionJobBuilder::new(&mut self.builder);
+        builder.add_job_id(job_id);
+        builder.add_compaction_id(compaction_id);
+        builder.add_spec_type(spec_type);
+        builder.add_spec(spec);
+        builder.finish()
+    }
+
+    fn add_compaction_spec(
+        &mut self,
+        spec: &CompactionSpec,
+    ) -> (FbCompactionSpec, WIPOffset<UnionWIPOffset>) {
+        match spec {
+            CompactionSpec::SortedRunCompaction { ssts, sorted_runs } => {
+                let ssts = self.add_compacted_ssts(ssts.iter());
+                let sorted_runs = self.add_sorted_runs(sorted_runs);
+                let table = SortedRunCompaction::create(
+                    &mut self.builder,
+                    &SortedRunCompactionArgs {
+                        ssts: Some(ssts),
+                        sorted_runs: Some(sorted_runs),
+                    },
+                );
+                (
+                    FbCompactionSpec::SortedRunCompaction,
+                    WIPOffset::new(table.value()),
+                )
+            }
+        }
+    }
+
+    fn add_compaction_job_spec(
+        &mut self,
+        spec: &CompactionJobSpec,
+    ) -> (FbCompactionJobSpec, WIPOffset<UnionWIPOffset>) {
+        match spec {
+            CompactionJobSpec::LinearCompactionJob {
+                completed_input_sst_ids,
+                completed_input_sr_ids,
+            } => {
+                // Build CompactedSstId directly from Ulids
+                let sst_ids: Vec<WIPOffset<CompactedSstId>> = completed_input_sst_ids
+                    .iter()
+                    .map(|ulid| self.add_compacted_sst_id(ulid))
+                    .collect();
+                let ssts = self.builder.create_vector(sst_ids.as_ref());
+                let sr_ids = self
+                    .builder
+                    .create_vector::<u32>(completed_input_sr_ids.as_slice());
+                let table = LinearCompactionJob::create(
+                    &mut self.builder,
+                    &LinearCompactionJobArgs {
+                        completed_input_sst_ids: Some(ssts),
+                        completed_input_sr_ids: Some(sr_ids),
+                    },
+                );
+                (
+                    FbCompactionJobSpec::LinearCompactionJob,
+                    WIPOffset::new(table.value()),
+                )
+            }
+        }
     }
 }
 
@@ -564,8 +926,14 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
+    use crate::compactor_state::{
+        Compaction, CompactionSpec, CompactionState, CompactionStatus, CompactionType, SourceId,
+    };
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
-    use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
+    use crate::flatbuffer_types::{
+        FbCompactionState, FlatBufferCompactionStateCodec, FlatBufferManifestCodec,
+        SsTableIndexOwned,
+    };
     use crate::manifest::{ExternalDb, Manifest};
     use crate::record::RecordCodec;
     use crate::{checkpoint, error::SlateDBError};
@@ -577,7 +945,7 @@ mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
     use chrono::{DateTime, Utc};
 
-    use super::{manifest_generated, MANIFEST_FORMAT_VERSION};
+    use super::{root_generated, MANIFEST_FORMAT_VERSION};
 
     #[test]
     fn test_should_encode_decode_manifest_checkpoints() {
@@ -715,9 +1083,9 @@ mod tests {
         let compacted = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
         let checkpoints = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
 
-        let manifest = manifest_generated::ManifestV1::create(
+        let manifest = root_generated::ManifestV1::create(
             &mut fbb,
-            &manifest_generated::ManifestV1Args {
+            &root_generated::ManifestV1Args {
                 manifest_id: 0,
                 external_dbs: None,
                 initialized: false,
@@ -800,5 +1168,63 @@ mod tests {
         let decoded_none = codec.decode(&bytes_none).unwrap();
 
         assert_eq!(decoded_none.core.recent_snapshot_min_seq, 0);
+    }
+
+    #[test]
+    fn test_should_encode_decode_compaction_state() {
+        let mut compaction_state: CompactionState = CompactionState::initial();
+        // mutate epoch to verify roundtrip of a non-default value
+        compaction_state.compactor_epoch = 42;
+
+        // encode to FlatBuffers bytes
+        let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&compaction_state);
+
+        // decode back
+        let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref())
+            .expect("invalid FB");
+        let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
+
+        assert_eq!(decoded.compactor_epoch, 42);
+        assert_eq!(decoded.compactions.len(), 0);
+    }
+
+    #[test]
+    fn test_should_encode_decode_compaction_state_with_compactions() {
+        let mut compaction_state: CompactionState = CompactionState::initial();
+        // mutate epoch to verify roundtrip of a non-default value
+        compaction_state.compactor_epoch = 42;
+        compaction_state.compactions.insert(
+            ulid::Ulid::new(),
+            Compaction::new(vec![SourceId::SortedRun(0)], 0),
+        );
+
+        // encode to FlatBuffers bytes
+        let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&compaction_state);
+
+        // decode back
+        let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref())
+            .expect("invalid FB");
+        let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
+
+        let decoded_compaction = decoded
+            .compactions
+            .values()
+            .next()
+            .expect("Compaction should be present");
+
+        assert_eq!(decoded.compactor_epoch, 42);
+        assert_eq!(decoded.compactions.len(), 1);
+        assert_eq!(decoded_compaction.status, CompactionStatus::Submitted);
+        assert_eq!(decoded_compaction.sources, vec![SourceId::SortedRun(0)]);
+        assert_eq!(decoded_compaction.destination, 0);
+        assert_eq!(decoded_compaction.compaction_type, CompactionType::Internal);
+        assert_eq!(decoded_compaction.job_attempts.len(), 0);
+        assert_eq!(
+            decoded_compaction.spec,
+            CompactionSpec::SortedRunCompaction {
+                ssts: vec![],
+                sorted_runs: vec![]
+            }
+        );
     }
 }

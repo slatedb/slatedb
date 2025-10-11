@@ -3,8 +3,8 @@ use std::fmt::{Display, Formatter};
 
 use log::info;
 use ulid::Ulid;
-use uuid::Uuid;
 
+use crate::compactor_executor::CompactionJob;
 use crate::compactor_state::CompactionStatus::Submitted;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
@@ -57,13 +57,35 @@ pub(crate) enum CompactionStatus {
     Submitted,
     #[allow(dead_code)]
     InProgress,
+    #[allow(dead_code)]
+    Completed,
+    #[allow(dead_code)]
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CompactionType {
+    Internal,
+    External,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CompactionSpec {
+    SortedRunCompaction {
+        ssts: Vec<SsTableHandle>,
+        sorted_runs: Vec<SortedRun>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Compaction {
+    pub(crate) id: Ulid,
     pub(crate) status: CompactionStatus,
     pub(crate) sources: Vec<SourceId>,
     pub(crate) destination: u32,
+    pub(crate) compaction_type: CompactionType,
+    pub(crate) job_attempts: Vec<CompactionJob>,
+    pub(crate) spec: CompactionSpec,
 }
 
 impl Display for Compaction {
@@ -78,18 +100,66 @@ impl Display for Compaction {
 }
 
 impl Compaction {
-    pub(crate) fn new(sources: Vec<SourceId>, destination: u32) -> Self {
+    pub(crate) fn new(sources: Vec<SourceId>, spec: CompactionSpec, destination: u32) -> Self {
         Self {
+            id: Ulid::new(),
             status: Submitted,
             sources,
             destination,
+            compaction_type: CompactionType::Internal,
+            job_attempts: Vec::new(),
+            spec,
+        }
+    }
+
+    pub(crate) fn get_sorted_runs(
+        db_state: &CoreDbState,
+        sources: &Vec<SourceId>,
+    ) -> Vec<SortedRun> {
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
+
+        sources
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sorted_run())
+            .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
+            .collect()
+    }
+
+    pub(crate) fn get_ssts(db_state: &CoreDbState, sources: &Vec<SourceId>) -> Vec<SsTableHandle> {
+        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
+            .l0
+            .iter()
+            .map(|sst| (sst.id.unwrap_compacted_id(), sst))
+            .collect();
+
+        sources
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sst())
+            .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
+            .collect()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CompactionState {
+    pub(crate) compactor_epoch: u64,
+    // active_compactions queued, in-progress and completed
+    pub(crate) compactions: HashMap<Ulid, Compaction>,
+}
+
+impl CompactionState {
+    pub(crate) fn initial() -> Self {
+        Self {
+            compactor_epoch: 0,
+            compactions: HashMap::new(),
         }
     }
 }
 
 pub struct CompactorState {
     manifest: DirtyManifest,
-    compactions: HashMap<Uuid, Compaction>,
+    compactions: HashMap<Ulid, Compaction>,
 }
 
 impl CompactorState {
@@ -112,15 +182,15 @@ impl CompactorState {
     pub(crate) fn new(manifest: DirtyManifest) -> Self {
         Self {
             manifest,
-            compactions: HashMap::<Uuid, Compaction>::new(),
+            compactions: HashMap::<Ulid, Compaction>::new(),
         }
     }
 
     pub(crate) fn submit_compaction(
         &mut self,
-        id: Uuid,
+        id: Ulid,
         compaction: Compaction,
-    ) -> Result<Uuid, SlateDBError> {
+    ) -> Result<Ulid, SlateDBError> {
         if self
             .compactions
             .values()
@@ -188,11 +258,11 @@ impl CompactorState {
         self.manifest = remote_manifest;
     }
 
-    pub(crate) fn finish_failed_compaction(&mut self, id: Uuid) {
+    pub(crate) fn finish_failed_compaction(&mut self, id: Ulid) {
         self.compactions.remove(&id);
     }
 
-    pub(crate) fn finish_compaction(&mut self, id: Uuid, output_sr: SortedRun) {
+    pub(crate) fn finish_compaction(&mut self, id: Ulid, output_sr: SortedRun) {
         if let Some(compaction) = self.compactions.get(&id) {
             info!("finished compaction [compaction={}]", compaction);
             // reconstruct l0
@@ -293,7 +363,7 @@ mod tests {
         // when:
         state
             .submit_compaction(
-                uuid::Uuid::new_v4(),
+                ulid::Ulid::new(),
                 build_l0_compaction(&state.db_state().l0, 0),
             )
             .unwrap();
@@ -311,7 +381,7 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
         let id = state
-            .submit_compaction(uuid::Uuid::new_v4(), compaction)
+            .submit_compaction(ulid::Ulid::new(), compaction)
             .unwrap();
 
         // when:
@@ -358,7 +428,7 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
         let id = state
-            .submit_compaction(uuid::Uuid::new_v4(), compaction)
+            .submit_compaction(ulid::Ulid::new(), compaction)
             .unwrap();
 
         // when:
@@ -414,7 +484,7 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let id = state
             .submit_compaction(
-                uuid::Uuid::new_v4(),
+                ulid::Ulid::new(),
                 Compaction::new(
                     vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
                     0,
@@ -480,7 +550,7 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let id = state
             .submit_compaction(
-                uuid::Uuid::new_v4(),
+                ulid::Ulid::new(),
                 Compaction::new(
                     original_l0s
                         .iter()
@@ -556,7 +626,7 @@ mod tests {
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         let result = state.submit_compaction(
-            uuid::Uuid::new_v4(),
+            ulid::Ulid::new(),
             Compaction::new(
                 original_l0s
                     .iter()
@@ -593,7 +663,7 @@ mod tests {
 
         // If you need both:
         let sources: Vec<SourceId> = l0_sources.chain(sr_sources).collect();
-        let result = state.submit_compaction(uuid::Uuid::new_v4(), Compaction::new(sources, 0));
+        let result = state.submit_compaction(ulid::Ulid::new(), Compaction::new(sources, 0));
 
         // or simply:
         assert!(result.is_ok());
