@@ -2824,18 +2824,18 @@ impl<'a> CompactionJob<'a> {
 
 
   #[inline]
-  pub fn job_id(&self) -> Option<Ulid<'a>> {
+  pub fn job_id(&self) -> Ulid<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactionJob::VT_JOB_ID, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactionJob::VT_JOB_ID, None).unwrap()}
   }
   #[inline]
-  pub fn compaction_id(&self) -> Option<Ulid<'a>> {
+  pub fn compaction_id(&self) -> Ulid<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactionJob::VT_COMPACTION_ID, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(CompactionJob::VT_COMPACTION_ID, None).unwrap()}
   }
   #[inline]
   pub fn spec_type(&self) -> CompactionJobSpec {
@@ -2874,8 +2874,8 @@ impl flatbuffers::Verifiable for CompactionJob<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("job_id", Self::VT_JOB_ID, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("compaction_id", Self::VT_COMPACTION_ID, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("job_id", Self::VT_JOB_ID, true)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("compaction_id", Self::VT_COMPACTION_ID, true)?
      .visit_union::<CompactionJobSpec, _>("spec_type", Self::VT_SPEC_TYPE, "spec", Self::VT_SPEC, true, |key, v, pos| {
         match key {
           CompactionJobSpec::LinearCompactionJob => v.verify_union_variant::<flatbuffers::ForwardsUOffset<LinearCompactionJob>>("CompactionJobSpec::LinearCompactionJob", pos),
@@ -2896,8 +2896,8 @@ impl<'a> Default for CompactionJobArgs<'a> {
   #[inline]
   fn default() -> Self {
     CompactionJobArgs {
-      job_id: None,
-      compaction_id: None,
+      job_id: None, // required field
+      compaction_id: None, // required field
       spec_type: CompactionJobSpec::NONE,
       spec: None, // required field
     }
@@ -2936,6 +2936,8 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionJobBuilder<'a, 'b, A>
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<CompactionJob<'a>> {
     let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, CompactionJob::VT_JOB_ID,"job_id");
+    self.fbb_.required(o, CompactionJob::VT_COMPACTION_ID,"compaction_id");
     self.fbb_.required(o, CompactionJob::VT_SPEC,"spec");
     flatbuffers::WIPOffset::new(o.value())
   }
@@ -3146,11 +3148,11 @@ impl<'a> Compaction<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<SortedRun>>(Compaction::VT_OUTPUT_SORTED_RUN, None)}
   }
   #[inline]
-  pub fn compaction_id(&self) -> Option<Ulid<'a>> {
+  pub fn compaction_id(&self) -> Ulid<'a> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(Compaction::VT_COMPACTION_ID, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<Ulid>>(Compaction::VT_COMPACTION_ID, None).unwrap()}
   }
   #[inline]
   pub fn compaction_type(&self) -> CompactionType {
@@ -3206,7 +3208,7 @@ impl flatbuffers::Verifiable for Compaction<'_> {
      .visit_field::<CompactionStatus>("status", Self::VT_STATUS, false)?
      .visit_field::<u32>("destination", Self::VT_DESTINATION, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<SortedRun>>("output_sorted_run", Self::VT_OUTPUT_SORTED_RUN, false)?
-     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("compaction_id", Self::VT_COMPACTION_ID, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<Ulid>>("compaction_id", Self::VT_COMPACTION_ID, true)?
      .visit_field::<CompactionType>("compaction_type", Self::VT_COMPACTION_TYPE, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactionJob>>>>("job_attempts", Self::VT_JOB_ATTEMPTS, true)?
      .visit_union::<CompactionSpec, _>("spec_type", Self::VT_SPEC_TYPE, "spec", Self::VT_SPEC, true, |key, v, pos| {
@@ -3236,7 +3238,7 @@ impl<'a> Default for CompactionArgs<'a> {
       status: CompactionStatus::Submitted,
       destination: 0,
       output_sorted_run: None,
-      compaction_id: None,
+      compaction_id: None, // required field
       compaction_type: CompactionType::Internal,
       job_attempts: None, // required field
       spec_type: CompactionSpec::NONE,
@@ -3293,6 +3295,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionBuilder<'a, 'b, A> {
   #[inline]
   pub fn finish(self) -> flatbuffers::WIPOffset<Compaction<'a>> {
     let o = self.fbb_.end_table(self.start_);
+    self.fbb_.required(o, Compaction::VT_COMPACTION_ID,"compaction_id");
     self.fbb_.required(o, Compaction::VT_JOB_ATTEMPTS,"job_attempts");
     self.fbb_.required(o, Compaction::VT_SPEC,"spec");
     flatbuffers::WIPOffset::new(o.value())

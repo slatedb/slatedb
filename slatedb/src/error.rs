@@ -46,9 +46,6 @@ pub(crate) enum SlateDBError {
     #[error("failed to find latest manifest")]
     LatestManifestMissing,
 
-    #[error("failed to find latest record")]
-    LatestRecordMissing,
-
     #[error("invalid deletion")]
     InvalidDeletion,
 
@@ -475,7 +472,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::WalBufferAlreadyStarted => Error::system(msg),
             SlateDBError::ManifestMissing(_) => Error::persistent_state(msg),
             SlateDBError::LatestManifestMissing => Error::persistent_state(msg),
-            SlateDBError::LatestRecordMissing => Error::persistent_state(msg),
             SlateDBError::ManifestVersionExists => Error::persistent_state(msg),
             SlateDBError::EmptyManifest => Error::persistent_state(msg),
             SlateDBError::EmptyBlock => Error::persistent_state(msg),
