@@ -4,7 +4,7 @@ use std::iter::Peekable;
 use std::slice::Iter;
 
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
-use crate::compactor_state::{Compaction, CompactorState, SourceId, CompactionSpec};
+use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use crate::db_state::CoreDbState;
 use ulid::Ulid;
@@ -332,13 +332,18 @@ impl SizeTieredCompactionScheduler {
         sources
     }
 
-    fn create_compaction(&self, db_state: &CoreDbState, sources: VecDeque<CompactionSource>, dst: u32) -> Compaction {
+    fn create_compaction(
+        &self,
+        db_state: &CoreDbState,
+        sources: VecDeque<CompactionSource>,
+        dst: u32,
+    ) -> Compaction {
         let sources: Vec<SourceId> = sources.iter().map(|src| src.source.clone()).collect();
         let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
             ssts: Compaction::get_ssts(db_state, &sources),
             sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
         };
-        Compaction::new(sources, spec,dst)
+        Compaction::new(sources, spec, dst)
     }
 
     // looks for a series of sorted runs with similar sizes and assemble to a vecdequeue,

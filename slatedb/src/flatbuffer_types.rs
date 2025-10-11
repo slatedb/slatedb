@@ -11,7 +11,7 @@ use ulid::Ulid;
 use crate::bytes_range::BytesRange;
 use crate::checkpoint;
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
-use crate::db_state::{CoreDbState, SsTableHandle, SortedRun};
+use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 
 #[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
@@ -34,8 +34,8 @@ use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
     CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompactionBuilder,
     CompactionJobBuilder, CompactionStateArgs, CompactionStatus as FbCompactionStatus,
-    CompressionFormat, LinearCompactionJobArgs, SortedRun as FbSortedRun, SortedRunArgs, SortedRunCompaction,
-    SortedRunCompactionArgs, Ulid as FbUlid, UlidArgs, Uuid, UuidArgs,
+    CompressionFormat, LinearCompactionJobArgs, SortedRun as FbSortedRun, SortedRunArgs,
+    SortedRunCompaction, SortedRunCompactionArgs, Ulid as FbUlid, UlidArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
@@ -369,13 +369,15 @@ impl FlatBufferCompactionStateCodec {
                             .spec_as_linear_compaction_job()
                             .expect("union value is missing for LinearCompactionJob");
 
-                            let completed_input_sst_ids: Vec<Ulid> = if let Some(v) = fb_compaction_job_spec.completed_input_sst_ids() {
+                        let completed_input_sst_ids: Vec<Ulid> =
+                            if let Some(v) = fb_compaction_job_spec.completed_input_sst_ids() {
                                 v.iter().map(|id_fb| id_fb.ulid()).collect()
                             } else {
                                 Vec::new()
                             };
-                            
-                            let completed_input_sr_ids: Vec<u32> = if let Some(v) = fb_compaction_job_spec.completed_input_sr_ids() {
+
+                        let completed_input_sr_ids: Vec<u32> =
+                            if let Some(v) = fb_compaction_job_spec.completed_input_sr_ids() {
                                 v.iter().collect()
                             } else {
                                 Vec::new()
@@ -420,18 +422,20 @@ impl FlatBufferCompactionStateCodec {
                 let sorted_run_compaction = compaction
                     .spec_as_sorted_run_compaction()
                     .expect("union value missing for SortedRunCompaction");
-    
+
                 // Top-level ssts
                 let mut ssts = Vec::new();
                 if let Some(v) = sorted_run_compaction.ssts() {
                     for s in v.iter() {
                         let id = SsTableId::Compacted(s.id().ulid());
                         let info = FlatBufferSsTableInfoCodec::sst_info(&s.info());
-                        let vis = s.visible_range().map(FlatBufferManifestCodec::decode_bytes_range);
+                        let vis = s
+                            .visible_range()
+                            .map(FlatBufferManifestCodec::decode_bytes_range);
                         ssts.push(SsTableHandle::new_compacted(id, info, vis));
                     }
                 }
-    
+
                 // Nested sorted runs
                 let mut sorted_runs = Vec::new();
                 if let Some(v) = sorted_run_compaction.sorted_runs() {
@@ -440,17 +444,25 @@ impl FlatBufferCompactionStateCodec {
                         for s in sr.ssts().iter() {
                             let id = SsTableId::Compacted(s.id().ulid());
                             let info = FlatBufferSsTableInfoCodec::sst_info(&s.info());
-                            let vis = s.visible_range().map(FlatBufferManifestCodec::decode_bytes_range);
+                            let vis = s
+                                .visible_range()
+                                .map(FlatBufferManifestCodec::decode_bytes_range);
                             inner.push(SsTableHandle::new_compacted(id, info, vis));
                         }
-                        
-                        sorted_runs.push(SortedRun { id: sr.id(), ssts: inner });
+
+                        sorted_runs.push(SortedRun {
+                            id: sr.id(),
+                            ssts: inner,
+                        });
                     }
                 }
-    
+
                 CompactionSpec::SortedRunCompaction { ssts, sorted_runs }
             }
-            _ => CompactionSpec::SortedRunCompaction { ssts: vec![], sorted_runs: vec![] },
+            _ => CompactionSpec::SortedRunCompaction {
+                ssts: vec![],
+                sorted_runs: vec![],
+            },
         }
     }
 
@@ -911,12 +923,17 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
+    use crate::compactor_state::{
+        Compaction, CompactionSpec, CompactionState, CompactionStatus, CompactionType, SourceId,
+    };
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
-    use crate::flatbuffer_types::{FlatBufferManifestCodec, FlatBufferCompactionStateCodec, SsTableIndexOwned, FbCompactionState};
+    use crate::flatbuffer_types::{
+        FbCompactionState, FlatBufferCompactionStateCodec, FlatBufferManifestCodec,
+        SsTableIndexOwned,
+    };
     use crate::manifest::{ExternalDb, Manifest};
     use crate::record::RecordCodec;
     use crate::{checkpoint, error::SlateDBError};
-    use crate::compactor_state::{CompactionState, Compaction, CompactionType, CompactionStatus, SourceId, CompactionSpec};
     use std::collections::VecDeque;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
@@ -1152,47 +1169,59 @@ mod tests {
 
     #[test]
     fn test_should_encode_decode_compaction_state() {
-    let mut compaction_state: CompactionState = CompactionState::initial();
-    // mutate epoch to verify roundtrip of a non-default value
-    compaction_state.compactor_epoch = 42;
+        let mut compaction_state: CompactionState = CompactionState::initial();
+        // mutate epoch to verify roundtrip of a non-default value
+        compaction_state.compactor_epoch = 42;
 
-    // encode to FlatBuffers bytes
-    let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&compaction_state);
+        // encode to FlatBuffers bytes
+        let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&compaction_state);
 
-    // decode back
-    let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref()).expect("invalid FB");
-    let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
+        // decode back
+        let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref())
+            .expect("invalid FB");
+        let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
 
-    assert_eq!(decoded.compactor_epoch, 42);
-    assert_eq!(decoded.compactions.len(), 0);
+        assert_eq!(decoded.compactor_epoch, 42);
+        assert_eq!(decoded.compactions.len(), 0);
     }
 
     #[test]
     fn test_should_encode_decode_compaction_state_with_compactions() {
-    let mut compaction_state: CompactionState = CompactionState::initial();
-    // mutate epoch to verify roundtrip of a non-default value
-    compaction_state.compactor_epoch = 42;
-    compaction_state.compactions.insert(ulid::Ulid::new(), Compaction::new(vec![SourceId::SortedRun(0)], 0));
+        let mut compaction_state: CompactionState = CompactionState::initial();
+        // mutate epoch to verify roundtrip of a non-default value
+        compaction_state.compactor_epoch = 42;
+        compaction_state.compactions.insert(
+            ulid::Ulid::new(),
+            Compaction::new(vec![SourceId::SortedRun(0)], 0),
+        );
 
-    // encode to FlatBuffers bytes
-    let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&compaction_state);
+        // encode to FlatBuffers bytes
+        let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&compaction_state);
 
-    // decode back
-    let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref()).expect("invalid FB");
-    let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
+        // decode back
+        let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref())
+            .expect("invalid FB");
+        let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
 
-    let decoded_compaction = decoded.compactions.values().next().expect("Compaction should be present");;
+        let decoded_compaction = decoded
+            .compactions
+            .values()
+            .next()
+            .expect("Compaction should be present");
 
-    assert_eq!(decoded.compactor_epoch, 42);
-    assert_eq!(decoded.compactions.len(), 1);
-    assert_eq!(decoded_compaction.status, CompactionStatus::Submitted);
-    assert_eq!(decoded_compaction.sources, vec![SourceId::SortedRun(0)]);
-    assert_eq!(decoded_compaction.destination, 0);
-    assert_eq!(decoded_compaction.compaction_type, CompactionType::Internal);
-    assert_eq!(decoded_compaction.job_attempts.len(), 0);
-    assert_eq!(
-        decoded_compaction.spec,
-        CompactionSpec::SortedRunCompaction { ssts: vec![], sorted_runs: vec![] }
-    );
+        assert_eq!(decoded.compactor_epoch, 42);
+        assert_eq!(decoded.compactions.len(), 1);
+        assert_eq!(decoded_compaction.status, CompactionStatus::Submitted);
+        assert_eq!(decoded_compaction.sources, vec![SourceId::SortedRun(0)]);
+        assert_eq!(decoded_compaction.destination, 0);
+        assert_eq!(decoded_compaction.compaction_type, CompactionType::Internal);
+        assert_eq!(decoded_compaction.job_attempts.len(), 0);
+        assert_eq!(
+            decoded_compaction.spec,
+            CompactionSpec::SortedRunCompaction {
+                ssts: vec![],
+                sorted_runs: vec![]
+            }
+        );
     }
 }
