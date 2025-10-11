@@ -19,7 +19,7 @@ use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
-use crate::compactor_state::{Compaction, SourceId, CompactionSpec};
+use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -344,18 +344,18 @@ impl CompactionExecuteBench {
         let manifest = StoredManifest::load(manifest_store).await?;
         let db_state = manifest.db_state();
 
-        let sources: Vec<SourceId> = source_sr_ids.clone().unwrap_or_default().into_iter().map(SourceId::SortedRun).collect();
+        let sources: Vec<SourceId> = source_sr_ids
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(SourceId::SortedRun)
+            .collect();
         let spec = CompactionSpec::SortedRunCompaction {
             ssts: vec![],
             sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
         };
-        let compaction = source_sr_ids.map(|source_sr_ids| {
-            Compaction::new(
-                sources,
-                spec,
-                destination_sr_id,
-            )
-        });
+        let compaction =
+            source_sr_ids.map(|source_sr_ids| Compaction::new(sources, spec, destination_sr_id));
 
         info!("load compaction job");
         let job = match &compaction {

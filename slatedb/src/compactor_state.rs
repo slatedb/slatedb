@@ -112,18 +112,18 @@ impl Compaction {
         }
     }
 
-    pub(crate) fn get_sorted_runs(db_state: &CoreDbState, sources: &Vec<SourceId>) -> Vec<SortedRun> {
-        let srs_by_id: HashMap<u32, &SortedRun> = db_state
-        .compacted
-        .iter()
-        .map(|sr| (sr.id, sr))
-        .collect();
+    pub(crate) fn get_sorted_runs(
+        db_state: &CoreDbState,
+        sources: &Vec<SourceId>,
+    ) -> Vec<SortedRun> {
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
         sources
-        .iter()
-        .filter_map(|s| s.maybe_unwrap_sorted_run())
-        .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
-        .collect()
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sorted_run())
+            .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
+            .collect()
     }
 
     pub(crate) fn get_ssts(db_state: &CoreDbState, sources: &Vec<SourceId>) -> Vec<SsTableHandle> {
