@@ -3,11 +3,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter::Peekable;
 use std::slice::Iter;
 
-use ulid::Ulid;
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
-use crate::compactor_state::{Compaction, CompactorState, SourceId};
+use crate::compactor_state::{Compaction, CompactorState, SourceId, CompactionSpec};
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use crate::db_state::CoreDbState;
+use ulid::Ulid;
 
 use crate::error::Error;
 use log::warn;
@@ -181,8 +181,9 @@ impl Default for SizeTieredCompactionScheduler {
 impl CompactionScheduler for SizeTieredCompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction> {
         let mut compactions = Vec::new();
+        let db_state = state.db_state();
 
-        let (l0, srs) = self.compaction_sources(state.db_state());
+        let (l0, srs) = self.compaction_sources(db_state);
 
         let conflict_checker = ConflictChecker::new(&state.compactions());
         let backpressure_checker = BackpressureChecker::new(
@@ -193,7 +194,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         let mut checker = CompactionChecker::new(conflict_checker, backpressure_checker);
 
         while state.compactions().len() + compactions.len() < self.max_concurrent_compactions {
-            let Some(compaction) = self.pick_next_compaction(&l0, &srs, &checker) else {
+            let Some(compaction) = self.pick_next_compaction(db_state, &l0, &srs, &checker) else {
                 break;
             };
             checker.conflict_checker.add_compaction(&compaction);
@@ -276,6 +277,7 @@ impl SizeTieredCompactionScheduler {
 
     fn pick_next_compaction(
         &self,
+        db_state: &CoreDbState,
         l0: &[CompactionSource],
         srs: &[CompactionSource],
         checker: &CompactionChecker,
@@ -289,7 +291,7 @@ impl SizeTieredCompactionScheduler {
                 .map_or(0, |sr| sr.source.unwrap_sorted_run() + 1);
             let next_sr = srs.first();
             if checker.check_compaction(&l0_candidates, dst, next_sr) {
-                return Some(self.create_compaction(l0_candidates, dst));
+                return Some(self.create_compaction(db_state, l0_candidates, dst));
             }
         }
 
@@ -309,7 +311,7 @@ impl SizeTieredCompactionScheduler {
                     .expect("expected non-empty compactable run")
                     .source
                     .unwrap_sorted_run();
-                return Some(self.create_compaction(compactable_run, dst));
+                return Some(self.create_compaction(db_state, compactable_run, dst));
             }
             srs_iter.next();
         }
@@ -330,9 +332,13 @@ impl SizeTieredCompactionScheduler {
         sources
     }
 
-    fn create_compaction(&self, sources: VecDeque<CompactionSource>, dst: u32) -> Compaction {
+    fn create_compaction(&self, db_state: &CoreDbState, sources: VecDeque<CompactionSource>, dst: u32) -> Compaction {
         let sources: Vec<SourceId> = sources.iter().map(|src| src.source.clone()).collect();
-        Compaction::new(sources, dst)
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: Compaction::get_ssts(db_state, &sources),
+            sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
+        };
+        Compaction::new(sources, spec,dst)
     }
 
     // looks for a series of sorted runs with similar sizes and assemble to a vecdequeue,
@@ -505,10 +511,7 @@ mod tests {
         let mut expected_compaction = create_sr_compaction(vec![4, 3, 2, 1, 0]);
         expected_compaction.id = compaction.id;
 
-        assert_eq!(
-            compaction.clone(),
-            expected_compaction,
-        )
+        assert_eq!(compaction.clone(), expected_compaction,)
     }
 
     #[test]
@@ -609,10 +612,7 @@ mod tests {
 
         // then:
         assert_eq!(compactions.len(), 1);
-        assert_eq!(
-            compactions.first().unwrap(),
-            &expected_compaction,
-        );
+        assert_eq!(compactions.first().unwrap(), &expected_compaction,);
     }
 
     #[test]

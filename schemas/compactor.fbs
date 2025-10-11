@@ -48,10 +48,10 @@ table LinearCompactionJob {
 
 table CompactionJob {
     // CompactionJob ID(Ulid)
-    job_id: Ulid;
+    job_id: Ulid (required);
 
     // Reference to the compaction to which this job belongs
-    compaction_id: Ulid;
+    compaction_id: Ulid (required);
 
     spec: CompactionJobSpec (required);
 }
@@ -80,7 +80,7 @@ table Compaction {
     // Ulid can be used get the human readable timestamp:
     // https://docs.rs/ulid/latest/ulid/struct.Ulid.html#method.timestamp_ms
     // Can also be a replacement from created_ts
-    compaction_id: Ulid;
+    compaction_id: Ulid (required);
 
     // Compaction Type to distinguish between internal or external
     compaction_type: CompactionType = Internal;

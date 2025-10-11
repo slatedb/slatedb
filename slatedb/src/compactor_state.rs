@@ -100,7 +100,7 @@ impl Display for Compaction {
 }
 
 impl Compaction {
-    pub(crate) fn new(sources: Vec<SourceId>, destination: u32) -> Self {
+    pub(crate) fn new(sources: Vec<SourceId>, spec: CompactionSpec, destination: u32) -> Self {
         Self {
             id: Ulid::new(),
             status: Submitted,
@@ -108,11 +108,36 @@ impl Compaction {
             destination,
             compaction_type: CompactionType::Internal,
             job_attempts: Vec::new(),
-            spec: CompactionSpec::SortedRunCompaction {
-                ssts: Vec::new(),
-                sorted_runs: Vec::new(),
-            },
+            spec,
         }
+    }
+
+    pub(crate) fn get_sorted_runs(db_state: &CoreDbState, sources: &Vec<SourceId>) -> Vec<SortedRun> {
+        let srs_by_id: HashMap<u32, &SortedRun> = db_state
+        .compacted
+        .iter()
+        .map(|sr| (sr.id, sr))
+        .collect();
+
+        sources
+        .iter()
+        .filter_map(|s| s.maybe_unwrap_sorted_run())
+        .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
+        .collect()
+    }
+
+    pub(crate) fn get_ssts(db_state: &CoreDbState, sources: &Vec<SourceId>) -> Vec<SsTableHandle> {
+        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
+            .l0
+            .iter()
+            .map(|sst| (sst.id.unwrap_compacted_id(), sst))
+            .collect();
+
+        sources
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sst())
+            .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
+            .collect()
     }
 }
 
@@ -154,9 +179,7 @@ impl CompactorState {
         self.compactions.values().cloned().collect()
     }
 
-    pub(crate) fn new(
-        manifest: DirtyManifest,
-    ) -> Self {
+    pub(crate) fn new(manifest: DirtyManifest) -> Self {
         Self {
             manifest,
             compactions: HashMap::<Ulid, Compaction>::new(),

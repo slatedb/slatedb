@@ -19,7 +19,7 @@ use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
-use crate::compactor_state::{Compaction, SourceId};
+use crate::compactor_state::{Compaction, SourceId, CompactionSpec};
 use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -310,18 +310,14 @@ impl CompactionExecuteBench {
             compression_codec,
             ..SsTableFormat::default()
         };
+
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(self.object_store.clone(), None),
             sst_format,
             self.path.clone(),
             None,
         ));
-        let compaction = source_sr_ids.map(|source_sr_ids| {
-            Compaction::new(
-                source_sr_ids.into_iter().map(SourceId::SortedRun).collect(),
-                destination_sr_id,
-            )
-        });
+
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();
         let registry = Arc::new(StatRegistry::new());
@@ -345,8 +341,23 @@ impl CompactionExecuteBench {
             manifest_store.clone(),
         );
 
-        info!("load compaction job");
         let manifest = StoredManifest::load(manifest_store).await?;
+        let db_state = manifest.db_state();
+
+        let sources: Vec<SourceId> = source_sr_ids.clone().unwrap_or_default().into_iter().map(SourceId::SortedRun).collect();
+        let spec = CompactionSpec::SortedRunCompaction {
+            ssts: vec![],
+            sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
+        };
+        let compaction = source_sr_ids.map(|source_sr_ids| {
+            Compaction::new(
+                sources,
+                spec,
+                destination_sr_id,
+            )
+        });
+
+        info!("load compaction job");
         let job = match &compaction {
             Some(compaction) => {
                 info!("load job from existing compaction");

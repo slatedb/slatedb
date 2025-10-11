@@ -26,7 +26,7 @@ use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::rand::DbRand;
-use crate::record::store::{FenceableRecord, RecordStore, StoredRecord};
+
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
