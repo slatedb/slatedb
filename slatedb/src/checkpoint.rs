@@ -17,7 +17,7 @@ pub struct Checkpoint {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CheckpointCreateResult {
     /// The id of the created checkpoint.
     pub id: Uuid,

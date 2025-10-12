@@ -66,7 +66,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn exec_read_manifest(admin: &Admin, id: Option<u64>) -> Result<(), Box<dyn Error>> {
     match admin.read_manifest(id).await? {
         None => {
-            println!("no manifest file found")
+            let result = serde_json::json!({
+                "result": "not_found",
+                "message": "no manifest file found"
+            });
+            println!("{}", serde_json::to_string(&result)?);
         }
         Some(manifest) => {
             println!("{}", manifest);
@@ -99,7 +103,8 @@ async fn exec_create_checkpoint(
     let result = admin
         .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
         .await?;
-    println!("{:?}", result);
+    let result_json = serde_json::to_string(&result)?;
+    println!("{}", result_json);
     Ok(())
 }
 
@@ -108,12 +113,24 @@ async fn exec_refresh_checkpoint(
     id: Uuid,
     lifetime: Option<Duration>,
 ) -> Result<(), Box<dyn Error>> {
-    println!("{:?}", admin.refresh_checkpoint(id, lifetime).await?);
+    admin.refresh_checkpoint(id, lifetime).await?;
+    let result = serde_json::json!({
+        "result": "success",
+        "checkpoint_id": id,
+        "message": "checkpoint refreshed successfully"
+    });
+    println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
 
 async fn exec_delete_checkpoint(admin: &Admin, id: Uuid) -> Result<(), Box<dyn Error>> {
-    println!("{:?}", admin.delete_checkpoint(id).await?);
+    admin.delete_checkpoint(id).await?;
+    let result = serde_json::json!({
+        "result": "success",
+        "checkpoint_id": id,
+        "message": "checkpoint deleted successfully"
+    });
+    println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
 
@@ -135,6 +152,11 @@ async fn exec_gc_once(
             min_age,
         })
     }
+    let resource_name = match resource {
+        GcResource::Manifest => "manifest",
+        GcResource::Wal => "wal",
+        GcResource::Compacted => "compacted",
+    };
     let gc_opts = match resource {
         GcResource::Manifest => GarbageCollectorOptions {
             manifest_options: create_gc_dir_opts(min_age),
@@ -153,6 +175,13 @@ async fn exec_gc_once(
         },
     };
     admin.run_gc_once(gc_opts).await?;
+    let result = serde_json::json!({
+        "result": "success",
+        "resource": resource_name,
+        "min_age_seconds": min_age.as_secs(),
+        "message": "garbage collection completed successfully"
+    });
+    println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
 
