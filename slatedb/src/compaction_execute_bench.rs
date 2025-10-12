@@ -208,7 +208,7 @@ impl CompactionExecuteBench {
         num_ssts: usize,
         table_store: &Arc<TableStore>,
         is_dest_last_run: bool,
-        rand: Arc<DbRand>,
+        _rand: Arc<DbRand>,
     ) -> Result<CompactionJob, SlateDBError> {
         let sst_ids: Vec<SsTableId> = (0u32..num_ssts as u32)
             .map(CompactionExecuteBench::sst_id)
@@ -264,7 +264,7 @@ impl CompactionExecuteBench {
         manifest: &StoredManifest,
         compaction: &Compaction,
         is_dest_last_run: bool,
-        rand: Arc<DbRand>,
+        _rand: Arc<DbRand>,
     ) -> CompactionJob {
         let state = manifest.db_state();
         let srs_by_id: HashMap<_, _> = state
@@ -354,8 +354,7 @@ impl CompactionExecuteBench {
             ssts: vec![],
             sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
         };
-        let compaction =
-            source_sr_ids.map(|source_sr_ids| Compaction::new(sources, spec, destination_sr_id));
+        let compaction = Some(Compaction::new(sources, spec, destination_sr_id));
 
         info!("load compaction job");
         let job = match &compaction {
