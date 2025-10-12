@@ -7,7 +7,6 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use crate::db_state::CoreDbState;
-use ulid::Ulid;
 
 use crate::error::Error;
 use log::warn;

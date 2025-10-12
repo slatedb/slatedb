@@ -13,6 +13,10 @@ use crate::checkpoint;
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 
+use crate::compactor_executor::{CompactionJob, CompactionJobSpec};
+use crate::compactor_state::{CompactionState, CompactionStatus, CompactionType, SourceId};
+use crate::record::RecordCodec;
+
 #[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
 #[rustfmt::skip]
@@ -39,7 +43,6 @@ use crate::flatbuffer_types::root_generated::{
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
-use crate::record::RecordCodec;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
 
@@ -279,6 +282,7 @@ impl FlatBufferManifestCodec {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) struct FlatBufferCompactionStateCodec {}
 
 impl RecordCodec<CompactionState> for FlatBufferCompactionStateCodec {
@@ -292,6 +296,7 @@ impl RecordCodec<CompactionState> for FlatBufferCompactionStateCodec {
     }
 }
 
+#[allow(dead_code)]
 impl FlatBufferCompactionStateCodec {
     pub fn compaction_state(fb_compaction_state: &FbCompactionState) -> CompactionState {
         CompactionState {
@@ -479,6 +484,7 @@ impl CompactedSstId<'_> {
     }
 }
 
+#[allow(dead_code)]
 impl<'a> FbUlid<'a> {
     #[inline]
     pub(crate) fn to_ulid(&self) -> Ulid {
@@ -928,12 +934,14 @@ mod tests {
     };
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{
-        FbCompactionState, FlatBufferCompactionStateCodec, FlatBufferManifestCodec,
-        SsTableIndexOwned,
+        CompactionJob, CompactionJobSpec, DbFlatBufferBuilder, FbCompactionState, FbUlid,
+        FlatBufferBuilder, FlatBufferCompactionStateCodec, FlatBufferManifestCodec,
+        SsTableIndexOwned, UlidArgs,
     };
     use crate::manifest::{ExternalDb, Manifest};
     use crate::record::RecordCodec;
     use crate::{checkpoint, error::SlateDBError};
+    use std::collections::HashMap;
     use std::collections::VecDeque;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
@@ -1227,4 +1235,102 @@ mod tests {
     //         }
     //     );
     // }
+
+    #[test]
+    fn test_use_fb_builder_helpers_and_ulid_conversion() {
+        // Construct a minimal Compaction with a spec and a job attempt
+        let sst_info = SsTableInfo::default();
+        let sst_handle = SsTableHandle::new_compacted(
+            SsTableId::Compacted(ulid::Ulid::new()),
+            sst_info.clone(),
+            None,
+        );
+        let sorted_run = SortedRun {
+            id: 0,
+            ssts: vec![sst_handle.clone()],
+        };
+        let spec = CompactionSpec::SortedRunCompaction {
+            ssts: vec![sst_handle.clone()],
+            sorted_runs: vec![sorted_run.clone()],
+        };
+        let compaction = Compaction::new(vec![SourceId::Sst(ulid::Ulid::new())], spec, 0);
+
+        // Build a LinearCompactionJob with empty inputs
+        let job = CompactionJob {
+            id: ulid::Ulid::new(),
+            compaction_id: compaction.id,
+            destination: compaction.destination,
+            ssts: vec![sst_handle.clone()],
+            sorted_runs: vec![sorted_run.clone()],
+            compaction_ts: 0,
+            is_dest_last_run: false,
+            retention_min_seq: None,
+            spec: CompactionJobSpec::LinearCompactionJob {
+                completed_input_sst_ids: vec![],
+                completed_input_sr_ids: vec![],
+            },
+        };
+
+        // Exercise DbFlatBufferBuilder helper methods
+        let builder = FlatBufferBuilder::new();
+        let mut db = DbFlatBufferBuilder::new(builder);
+        let _u = db.add_ulid(ulid::Ulid::new());
+        let _sst_id_vec =
+            db.add_compacted_sst_ids([SsTableId::Compacted(ulid::Ulid::new())].iter());
+        let _sst = db.add_compacted_sst(&sst_handle);
+        let _sr = db.add_sorted_run(&sorted_run);
+
+        // Compaction spec helpers
+        let (_ty, _val) = db.add_compaction_spec(&compaction.spec);
+        let (_jty, _jval) = db.add_compaction_job_spec(&job.spec);
+
+        // Compaction and compactions vector
+        let _fb_comp = db.add_compaction(&compaction);
+        let mut map = std::collections::HashMap::new();
+        map.insert(compaction.id, compaction);
+        let _fb_vec = db.add_compactions(&map);
+
+        // Compaction job helpers
+        let _fb_job = db.add_job_attempt(&job);
+        let _fb_jobs = db.add_job_attempts(&[job]);
+
+        // Create compaction state buffer
+        let state = CompactionState {
+            compactor_epoch: 1,
+            compactions: map,
+        };
+        let _bytes = db.create_compaction_state(&state);
+
+        // Construct a FbUlid flatbuffer and convert to ulid via to_ulid()
+        let mut fbb = flatbuffers::FlatBufferBuilder::new();
+        let u = ulid::Ulid::new();
+        let high_low = ((u.0 >> 64) as u64, (u.0 & 0xFFFF_FFFF_FFFF_FFFF) as u64);
+        let off = FbUlid::create(
+            &mut fbb,
+            &UlidArgs {
+                high: high_low.0,
+                low: high_low.1,
+            },
+        );
+        fbb.finish(off, None);
+        let fb_ulid = flatbuffers::root::<FbUlid>(fbb.finished_data()).expect("ulid root");
+        let round = fb_ulid.to_ulid();
+        assert_eq!(round.0, u.0);
+
+        // Instantiate the codec to mark the struct as constructed
+        let _codec = FlatBufferCompactionStateCodec {};
+    }
+
+    #[test]
+    fn test_compaction_state_codec_trait_obj() {
+        let mut st = CompactionState::initial();
+        st.compactor_epoch = 7;
+
+        let codec: Box<dyn RecordCodec<CompactionState>> =
+            Box::new(FlatBufferCompactionStateCodec {});
+        let bytes = codec.encode(&st);
+        let decoded = codec.decode(&bytes).expect("decode");
+
+        assert_eq!(decoded.compactor_epoch, 7);
+    }
 }

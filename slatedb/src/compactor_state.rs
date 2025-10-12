@@ -66,6 +66,7 @@ pub(crate) enum CompactionStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CompactionType {
     Internal,
+    #[allow(dead_code)]
     External,
 }
 
@@ -143,12 +144,15 @@ impl Compaction {
 
 #[derive(Clone)]
 pub(crate) struct CompactionState {
+    #[allow(dead_code)]
     pub(crate) compactor_epoch: u64,
     // active_compactions queued, in-progress and completed
+    #[allow(dead_code)]
     pub(crate) compactions: HashMap<Ulid, Compaction>,
 }
 
 impl CompactionState {
+    #[allow(dead_code)]
     pub(crate) fn initial() -> Self {
         Self {
             compactor_epoch: 0,

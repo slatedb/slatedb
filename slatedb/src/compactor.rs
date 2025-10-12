@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,9 +15,7 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, CompactionJob, CompactionJobSpec, TokioCompactionExecutor,
 };
-use crate::compactor_state::{
-    Compaction, CompactionSpec, CompactionState, CompactorState, SourceId,
-};
+use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -636,6 +633,7 @@ pub mod stats {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::future::Future;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
