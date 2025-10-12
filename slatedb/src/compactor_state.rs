@@ -482,11 +482,16 @@ mod tests {
         let (os, mut sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: original_l0s.clone().into(),
+            sorted_runs: vec![],
+        };
         let id = state
             .submit_compaction(
                 ulid::Ulid::new(),
                 Compaction::new(
                     vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
+                    spec,
                     0,
                 ),
             )
@@ -548,6 +553,10 @@ mod tests {
         let (os, mut sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: original_l0s.clone().into(),
+            sorted_runs: vec![],
+        };
         let id = state
             .submit_compaction(
                 ulid::Ulid::new(),
@@ -556,6 +565,7 @@ mod tests {
                         .iter()
                         .map(|h| Sst(h.id.unwrap_compacted_id()))
                         .collect(),
+                    spec,
                     0,
                 ),
             )
@@ -625,6 +635,10 @@ mod tests {
         let (_os, mut _sm, mut state) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: original_l0s.clone().into(),
+            sorted_runs: vec![],
+        };
         let result = state.submit_compaction(
             ulid::Ulid::new(),
             Compaction::new(
@@ -634,6 +648,7 @@ mod tests {
                     .filter(|(i, _e)| i > &2usize)
                     .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
                     .collect::<Vec<SourceId>>(),
+                spec,
                 0,
             ),
         );
@@ -663,7 +678,11 @@ mod tests {
 
         // If you need both:
         let sources: Vec<SourceId> = l0_sources.chain(sr_sources).collect();
-        let result = state.submit_compaction(ulid::Ulid::new(), Compaction::new(sources, 0));
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: original_l0s.clone().into(),
+            sorted_runs: original_srs.clone(),
+        };
+        let result = state.submit_compaction(ulid::Ulid::new(), Compaction::new(sources, spec, 0));
 
         // or simply:
         assert!(result.is_ok());
@@ -737,7 +756,11 @@ mod tests {
             .iter()
             .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
             .collect();
-        Compaction::new(sources, dst)
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: ssts.clone().into(),
+            sorted_runs: vec![],
+        };
+        Compaction::new(sources, spec, dst)
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {

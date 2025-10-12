@@ -430,7 +430,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::compactor::CompactionScheduler;
-    use crate::compactor_state::{Compaction, CompactorState, SourceId};
+    use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
 
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -513,7 +513,7 @@ mod tests {
         // then:
         assert_eq!(compactions.len(), 1);
         let compaction = compactions.first().unwrap();
-        let mut expected_compaction = create_sr_compaction(vec![4, 3, 2, 1, 0]);
+        let mut expected_compaction = create_sr_compaction(&state.db_state(), vec![4, 3, 2, 1, 0]);
         expected_compaction.id = compaction.id;
 
         assert_eq!(compaction.clone(), expected_compaction,)
@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(compactions.len(), 1);
 
         let compaction = compactions.first().unwrap();
-        let mut expected_compaction = create_sr_compaction(vec![4, 3, 2, 1]);
+        let mut expected_compaction = create_sr_compaction(&state.db_state(), vec![4, 3, 2, 1]);
         expected_compaction.id = compaction.id;
         assert_eq!(compaction.clone(), expected_compaction)
     }
@@ -561,7 +561,10 @@ mod tests {
             ],
         ));
         state
-            .submit_compaction(ulid::Ulid::new(), create_sr_compaction(vec![3, 2, 1, 0]))
+            .submit_compaction(
+                ulid::Ulid::new(),
+                create_sr_compaction(&state.db_state(), vec![3, 2, 1, 0]),
+            )
             .unwrap();
 
         // when:
@@ -611,7 +614,8 @@ mod tests {
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
-        let mut expected_compaction = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
+        let mut expected_compaction =
+            create_sr_compaction(&state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]);
 
         expected_compaction.id = compactions.first().unwrap().id;
 
@@ -644,7 +648,7 @@ mod tests {
         state
             .submit_compaction(
                 ulid::Ulid::new(),
-                create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
+                create_sr_compaction(&state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]),
             )
             .unwrap();
 
@@ -676,7 +680,7 @@ mod tests {
         state
             .submit_compaction(
                 ulid::Ulid::new(),
-                create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
+                create_sr_compaction(&state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]),
             )
             .unwrap();
 
@@ -716,11 +720,12 @@ mod tests {
         expected_l0_compaction.id = compaction.id;
         assert_eq!(compaction.clone(), expected_l0_compaction);
         let compaction = compactions.get(1).unwrap();
-        let mut expected_sr0_compaction = create_sr_compaction(vec![10, 9, 8, 7]);
+        let mut expected_sr0_compaction =
+            create_sr_compaction(&state.db_state(), vec![10, 9, 8, 7]);
         expected_sr0_compaction.id = compaction.id;
         assert_eq!(compaction.clone(), expected_sr0_compaction);
         let compaction = compactions.get(2).unwrap();
-        let mut expected_sr1_compaction = create_sr_compaction(vec![3, 2, 1, 0]);
+        let mut expected_sr1_compaction = create_sr_compaction(&state.db_state(), vec![3, 2, 1, 0]);
         expected_sr1_compaction.id = compaction.id;
         assert_eq!(compaction.clone(), expected_sr1_compaction);
     }
@@ -789,7 +794,8 @@ mod tests {
         ));
 
         let srs = state.db_state().compacted.clone();
-        let compaction = create_sr_compaction(srs.iter().map(|sr| sr.id).collect());
+        let compaction =
+            create_sr_compaction(&state.db_state(), srs.iter().map(|sr| sr.id).collect());
         // when:
         let result = scheduler.validate_compaction(&state, &compaction);
 
@@ -846,18 +852,25 @@ mod tests {
     }
 
     fn create_l0_compaction(l0: &[SsTableHandle], dst: u32) -> Compaction {
-        Compaction::new(
-            l0.iter()
-                .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
-                .collect(),
-            dst,
-        )
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: l0.to_vec(),
+            sorted_runs: vec![],
+        };
+
+        let sources: Vec<SourceId> = l0
+            .iter()
+            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .collect();
+
+        Compaction::new(sources, spec, dst)
     }
 
-    fn create_sr_compaction(srs: Vec<u32>) -> Compaction {
-        Compaction::new(
-            srs.iter().map(|sr| SourceId::SortedRun(*sr)).collect(),
-            *srs.last().unwrap(),
-        )
+    fn create_sr_compaction(db_state: &CoreDbState, srs: Vec<u32>) -> Compaction {
+        let sources: Vec<SourceId> = srs.iter().map(|sr| SourceId::SortedRun(*sr)).collect();
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: vec![],
+            sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
+        };
+        Compaction::new(sources, spec, *srs.last().unwrap())
     }
 }

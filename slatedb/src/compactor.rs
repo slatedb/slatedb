@@ -17,9 +17,9 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, CompactionJob, CompactionJobSpec, TokioCompactionExecutor,
 };
-use crate::compactor_state::CompactionState;
-use crate::compactor_state::SourceId;
-use crate::compactor_state::{Compaction, CompactorState};
+use crate::compactor_state::{
+    Compaction, CompactionSpec, CompactionState, CompactorState, SourceId,
+};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
@@ -481,27 +481,9 @@ impl CompactorEventHandler {
     ) -> Result<(), SlateDBError> {
         self.log_compaction_state();
         let db_state = self.state.db_state();
-        let compacted_sst_iter = db_state.compacted.iter().flat_map(|sr| sr.ssts.iter());
-        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
-            .l0
-            .iter()
-            .chain(compacted_sst_iter)
-            .map(|sst| (sst.id.unwrap_compacted_id(), sst))
-            .collect();
-        let srs_by_id: HashMap<u32, &SortedRun> =
-            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
-        let ssts: Vec<SsTableHandle> = compaction
-            .sources
-            .iter()
-            .filter_map(|s| s.maybe_unwrap_sst())
-            .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
-            .collect();
-        let sorted_runs: Vec<SortedRun> = compaction
-            .sources
-            .iter()
-            .filter_map(|s| s.maybe_unwrap_sorted_run())
-            .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
-            .collect();
+        let (ssts, sorted_runs) = match compaction.spec {
+            CompactionSpec::SortedRunCompaction { ssts, sorted_runs } => (ssts, sorted_runs),
+        };
         // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
         let is_dest_last_run = db_state.compacted.is_empty()
             || db_state
@@ -1049,14 +1031,17 @@ mod tests {
         }
 
         async fn build_l0_compaction(&mut self) -> Compaction {
-            let l0_ids_to_compact: Vec<SourceId> = self
-                .latest_db_state()
-                .await
+            let db_state = self.latest_db_state().await;
+            let l0_ids_to_compact: Vec<SourceId> = db_state
                 .l0
                 .iter()
                 .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
                 .collect();
-            Compaction::new(l0_ids_to_compact, 0)
+            let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+                ssts: Compaction::get_ssts(&db_state, &l0_ids_to_compact),
+                sorted_runs: vec![],
+            };
+            Compaction::new(l0_ids_to_compact, spec, 0)
         }
 
         fn assert_started_compaction(&self, num: usize) -> Vec<CompactionJob> {
@@ -1297,7 +1282,14 @@ mod tests {
     #[tokio::test]
     async fn test_validate_compaction_empty_sources_rejected() {
         let fixture = CompactorEventHandlerTestFixture::new().await;
-        let c = Compaction::new(Vec::new(), 0);
+        let c = Compaction::new(
+            Vec::new(),
+            CompactionSpec::SortedRunCompaction {
+                ssts: vec![],
+                sorted_runs: vec![],
+            },
+            0,
+        );
         let err = fixture.handler.validate_compaction(&c).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
@@ -1359,8 +1351,13 @@ mod tests {
         let state = fixture.latest_db_state().await;
         let sr_id = state.compacted.first().unwrap().id;
         let l0_ulid = state.l0.front().unwrap().id.unwrap_compacted_id();
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: Compaction::get_ssts(&state, &vec![SourceId::Sst(l0_ulid)]),
+            sorted_runs: Compaction::get_sorted_runs(&state, &vec![SourceId::SortedRun(sr_id)]),
+        };
         let mixed = Compaction::new(
             vec![SourceId::SortedRun(sr_id), SourceId::Sst(l0_ulid)],
+            spec,
             sr_id,
         );
         // Compactor-level validation should not reject (scheduler default validate returns Ok(()))
