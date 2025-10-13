@@ -250,7 +250,7 @@ impl CompactionExecuteBench {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: rand.rng().gen_ulid(system_clock.as_ref()),
             spec: crate::compactor_executor::CompactionJobSpec::LinearCompactionJob {
-                completed_input_sst_ids: ssts.iter().map(|h| h.id.unwrap_compacted_id()).collect(),
+                completed_input_sst_ids: vec![],
                 completed_input_sr_ids: vec![],
             },
             destination: 0,
@@ -291,7 +291,7 @@ impl CompactionExecuteBench {
             compaction_id: compaction.id,
             spec: crate::compactor_executor::CompactionJobSpec::LinearCompactionJob {
                 completed_input_sst_ids: vec![],
-                completed_input_sr_ids: srs.iter().map(|sr| sr.id).collect(),
+                completed_input_sr_ids: vec![],
             },
             destination: 0,
             ssts: vec![],
@@ -357,13 +357,16 @@ impl CompactionExecuteBench {
             ssts: vec![],
             sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
         };
-        let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-        let compaction = Some(Compaction::new_with_id(
-            id,
-            sources,
-            spec,
-            destination_sr_id,
-        ));
+
+        let compaction = source_sr_ids.map(|source_sr_ids| {
+            let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
+            Compaction::new_with_id(
+                id,
+                source_sr_ids.into_iter().map(SourceId::SortedRun).collect(),
+                spec,
+                destination_sr_id,
+            )
+        });
 
         info!("load compaction job");
         let job = match &compaction {
