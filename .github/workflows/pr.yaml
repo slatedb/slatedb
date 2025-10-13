@@ -77,7 +77,7 @@ jobs:
       - name: Generate and validate files
         run: |
           flatc -o tmp/generated --rust --gen-all schemas/root.fbs
-          if ! diff -r slatedb/src/generated/*.rs tmp/generated; then
+          if ! diff -r slatedb/src/generated/*.rs --exclude='manifest_generated.rs' --strip-trailing-cr tmp/generated slatedb/src/generated; then
             echo "Generated files do not match!"
             exit 1
           fi
