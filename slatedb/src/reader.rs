@@ -627,17 +627,49 @@ mod tests {
     use super::*;
     use crate::batch::{WriteBatch, WriteOp};
     use crate::config::PutOptions;
+    use crate::db_state::{SortedRun, SsTableId};
+    use crate::mem_table::WritableKVTable;
     use crate::object_stores::ObjectStores;
+    use crate::stats::ReadableStat;
     use crate::{sst::SsTableFormat, stats::StatRegistry, types::ValueDeletable};
     use object_store::{memory::InMemory, path::Path};
     use rstest::rstest;
 
-    struct MockReadDbState {
+    /// A mock DbState for testing that can represent any combination of:
+    /// - memtable
+    /// - immutable memtables
+    /// - L0 SSTs and compacted sorted runs (via CoreDbState)
+    struct MockDbState {
         memtable: Arc<KVTable>,
         imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
+        core: CoreDbState,
     }
 
-    impl DbStateReader for MockReadDbState {
+    impl MockDbState {
+        /// Create an empty mock db state (useful for tests that don't need L0/compacted)
+        fn new() -> Self {
+            Self {
+                memtable: Arc::new(KVTable::new()),
+                imm_memtable: VecDeque::new(),
+                core: CoreDbState::new(),
+            }
+        }
+
+        /// Create a mock db state with all levels populated
+        fn with_all_levels(
+            memtable: Arc<KVTable>,
+            imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
+            core: CoreDbState,
+        ) -> Self {
+            Self {
+                memtable,
+                imm_memtable,
+                core,
+            }
+        }
+    }
+
+    impl DbStateReader for MockDbState {
         fn memtable(&self) -> Arc<KVTable> {
             self.memtable.clone()
         }
@@ -647,14 +679,7 @@ mod tests {
         }
 
         fn core(&self) -> &CoreDbState {
-            todo!()
-        }
-    }
-
-    fn mock_db_state() -> MockReadDbState {
-        MockReadDbState {
-            memtable: Arc::new(KVTable::new()),
-            imm_memtable: VecDeque::new(),
+            &self.core
         }
     }
 
@@ -809,7 +834,7 @@ mod tests {
     async fn test_level_get_handles_expire(
         #[case] test_case: LevelGetExpireTestCase,
     ) -> Result<(), SlateDBError> {
-        let mock_read_db_state = mock_db_state();
+        let mock_read_db_state = MockDbState::new();
         let stat_registry = StatRegistry::new();
         let get = LevelGet {
             key: b"key",
@@ -947,7 +972,7 @@ mod tests {
     async fn test_level_get_with_writebatch(
         #[case] test_case: LevelGetWriteBatchTestCase,
     ) -> Result<(), SlateDBError> {
-        let mock_read_db_state = mock_db_state();
+        let mock_read_db_state = MockDbState::new();
         let stat_registry = StatRegistry::new();
 
         // Create WriteBatch from provided operations
@@ -1008,5 +1033,622 @@ mod tests {
         assert_eq!(options.max_fetch_tasks, 4);
         assert!(options.cache_blocks);
         assert_eq!(options.read_ahead_bytes, 1024);
+    }
+
+    // Helper to create an SST with specific keys
+    async fn create_test_sst(
+        table_store: &Arc<TableStore>,
+        keys_and_values: Vec<(&[u8], &[u8])>,
+    ) -> Result<SsTableHandle, SlateDBError> {
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let mut builder = table_store.table_builder();
+        
+        for (key, value) in keys_and_values {
+            let entry = RowEntry::new_value(key, value, 1);
+            builder.add(entry)?;
+        }
+        
+        let sst = builder.build()?;
+        let handle = table_store.write_sst(&id, sst, true).await?;
+        Ok(handle)
+    }
+
+    // Helper to create a sorted run with specific SSTs
+    fn create_test_sorted_run(ssts: Vec<SsTableHandle>) -> SortedRun {
+        SortedRun {
+            id: 0,
+            ssts,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_l0_iterator_finds_key_in_first_sst() -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Create SST with key "key1"
+        let sst1 = create_test_sst(&table_store, vec![(b"key1", b"value1")]).await?;
+        let mut l0 = VecDeque::new();
+        l0.push_back(sst1);
+
+        let bloom_filter = BloomFilter {
+            table_store: table_store.clone(),
+            db_stats: DbStats::new(&stat_registry),
+        };
+
+        let key = b"key1";
+        let key_hash = filter::filter_hash(key);
+        let mut iterator = L0KeyValueIterator::new(
+            table_store.clone(),
+            bloom_filter,
+            l0,
+            key,
+            key_hash,
+            None,
+        );
+
+        let result = iterator.next_entry().await?;
+        assert!(result.is_some());
+        let entry = result.unwrap();
+        assert_eq!(entry.key, Bytes::from_static(b"key1"));
+        assert_eq!(entry.value, ValueDeletable::Value(Bytes::from_static(b"value1")));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_l0_iterator_key_not_in_range() -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Create SST with keys "key2" and "key3"
+        let sst1 = create_test_sst(&table_store, vec![(b"key2", b"value2"), (b"key3", b"value3")]).await?;
+        let mut l0 = VecDeque::new();
+        l0.push_back(sst1);
+
+        let bloom_filter = BloomFilter {
+            table_store: table_store.clone(),
+            db_stats: DbStats::new(&stat_registry),
+        };
+
+        // Look for "key1" which is before the range of the SST
+        let key = b"key1";
+        let key_hash = filter::filter_hash(key);
+        let mut iterator = L0KeyValueIterator::new(
+            table_store.clone(),
+            bloom_filter.clone(),
+            l0,
+            key,
+            key_hash,
+            None,
+        );
+
+        let result = iterator.next_entry().await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_l0_iterator_searches_multiple_ssts() -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Create first SST with "key1"
+        let sst1 = create_test_sst(&table_store, vec![(b"key1", b"value1")]).await?;
+        // Create second SST with "key2"
+        let sst2 = create_test_sst(&table_store, vec![(b"key2", b"value2")]).await?;
+        
+        let mut l0 = VecDeque::new();
+        l0.push_back(sst1);
+        l0.push_back(sst2);
+
+        let bloom_filter = BloomFilter {
+            table_store: table_store.clone(),
+            db_stats: DbStats::new(&stat_registry),
+        };
+
+        // Look for "key2" which is in the second SST
+        let key = b"key2";
+        let key_hash = filter::filter_hash(key);
+        let mut iterator = L0KeyValueIterator::new(
+            table_store.clone(),
+            bloom_filter,
+            l0,
+            key,
+            key_hash,
+            None,
+        );
+
+        let result = iterator.next_entry().await?;
+        assert!(result.is_some());
+        let entry = result.unwrap();
+        assert_eq!(entry.key, Bytes::from_static(b"key2"));
+        assert_eq!(entry.value, ValueDeletable::Value(Bytes::from_static(b"value2")));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_l0_iterator_respects_max_seq() -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Create SST with entry at seq 10
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let mut builder = table_store.table_builder();
+        let entry = RowEntry::new_value(b"key1", b"value1", 10);
+        builder.add(entry)?;
+        let sst = builder.build()?;
+        let handle = table_store.write_sst(&id, sst, true).await?;
+
+        let mut l0 = VecDeque::new();
+        l0.push_back(handle);
+
+        let bloom_filter = BloomFilter {
+            table_store: table_store.clone(),
+            db_stats: DbStats::new(&stat_registry),
+        };
+
+        let key = b"key1";
+        let key_hash = filter::filter_hash(key);
+        
+        // Try to read with max_seq = 5 (should not find the entry)
+        let mut iterator = L0KeyValueIterator::new(
+            table_store.clone(),
+            bloom_filter,
+            l0.clone(),
+            key,
+            key_hash,
+            Some(5),
+        );
+
+        let result = iterator.next_entry().await?;
+        assert!(result.is_none(), "Should not find entry with seq 10 when max_seq is 5");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compacted_iterator_finds_key_in_sorted_run() -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Create SST with key "key1"
+        let sst1 = create_test_sst(&table_store, vec![(b"key1", b"value1")]).await?;
+        let sr = create_test_sorted_run(vec![sst1]);
+
+        let bloom_filter = BloomFilter {
+            table_store: table_store.clone(),
+            db_stats: DbStats::new(&stat_registry),
+        };
+
+        let key = b"key1";
+        let key_hash = filter::filter_hash(key);
+        let mut iterator = CompactedKeyValueIterator::new(
+            vec![sr],
+            key,
+            key_hash,
+            None,
+            bloom_filter,
+            table_store.clone(),
+        );
+
+        let result = iterator.next_entry().await?;
+        assert!(result.is_some());
+        let entry = result.unwrap();
+        assert_eq!(entry.key, Bytes::from_static(b"key1"));
+        assert_eq!(entry.value, ValueDeletable::Value(Bytes::from_static(b"value1")));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compacted_iterator_key_not_in_range() -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Create SST with keys "key2" and "key3"
+        let sst1 = create_test_sst(&table_store, vec![(b"key2", b"value2"), (b"key3", b"value3")]).await?;
+        let sr = create_test_sorted_run(vec![sst1]);
+
+        let bloom_filter = BloomFilter {
+            table_store: table_store.clone(),
+            db_stats: DbStats::new(&stat_registry),
+        };
+
+        // Look for "key1" which is before the range of the SST
+        let key = b"key1";
+        let key_hash = filter::filter_hash(key);
+        let mut iterator = CompactedKeyValueIterator::new(
+            vec![sr],
+            key,
+            key_hash,
+            None,
+            bloom_filter,
+            table_store.clone(),
+        );
+
+        let result = iterator.next_entry().await?;
+        assert!(result.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compacted_iterator_searches_multiple_sorted_runs() -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Create first sorted run with "key1"
+        let sst1 = create_test_sst(&table_store, vec![(b"key1", b"value1")]).await?;
+        let sr1 = create_test_sorted_run(vec![sst1]);
+
+        // Create second sorted run with "key2"
+        let sst2 = create_test_sst(&table_store, vec![(b"key2", b"value2")]).await?;
+        let sr2 = create_test_sorted_run(vec![sst2]);
+
+        let bloom_filter = BloomFilter {
+            table_store: table_store.clone(),
+            db_stats: DbStats::new(&stat_registry),
+        };
+
+        // Look for "key2" which is in the second sorted run
+        let key = b"key2";
+        let key_hash = filter::filter_hash(key);
+        let mut iterator = CompactedKeyValueIterator::new(
+            vec![sr1, sr2],
+            key,
+            key_hash,
+            None,
+            bloom_filter,
+            table_store.clone(),
+        );
+
+        let result = iterator.next_entry().await?;
+        assert!(result.is_some());
+        let entry = result.unwrap();
+        assert_eq!(entry.key, Bytes::from_static(b"key2"));
+        assert_eq!(entry.value, ValueDeletable::Value(Bytes::from_static(b"value2")));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_compacted_iterator_respects_max_seq() -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Create SST with entry at seq 10
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let mut builder = table_store.table_builder();
+        let entry = RowEntry::new_value(b"key1", b"value1", 10);
+        builder.add(entry)?;
+        let sst = builder.build()?;
+        let handle = table_store.write_sst(&id, sst, true).await?;
+
+        let sr = create_test_sorted_run(vec![handle]);
+
+        let bloom_filter = BloomFilter {
+            table_store: table_store.clone(),
+            db_stats: DbStats::new(&stat_registry),
+        };
+
+        let key = b"key1";
+        let key_hash = filter::filter_hash(key);
+
+        // Try to read with max_seq = 5 (should not find the entry)
+        let mut iterator = CompactedKeyValueIterator::new(
+            vec![sr],
+            key,
+            key_hash,
+            Some(5),
+            bloom_filter,
+            table_store.clone(),
+        );
+
+        let result = iterator.next_entry().await?;
+        assert!(result.is_none(), "Should not find entry with seq 10 when max_seq is 5");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_bloom_filter_stats_recorded() -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Create SST with key "key1"
+        let sst1 = create_test_sst(&table_store, vec![(b"key1", b"value1")]).await?;
+        let mut l0 = VecDeque::new();
+        l0.push_back(sst1);
+
+        let db_stats = DbStats::new(&stat_registry);
+        let bloom_filter = BloomFilter {
+            table_store: table_store.clone(),
+            db_stats: db_stats.clone(),
+        };
+
+        let key = b"key1";
+        let key_hash = filter::filter_hash(key);
+        let mut iterator = L0KeyValueIterator::new(
+            table_store.clone(),
+            bloom_filter,
+            l0,
+            key,
+            key_hash,
+            None,
+        );
+
+        let initial_positives = db_stats.sst_filter_positives.get();
+        iterator.next_entry().await?;
+        
+        // Should have recorded at least one filter positive (either RangePositive or FilterPositive)
+        assert!(db_stats.sst_filter_positives.get() > initial_positives);
+
+        Ok(())
+    }
+
+    // Test data structure for multi-level LevelGet tests
+    struct LevelGetMultiLevelTestCase {
+        name: &'static str,
+        write_batch_value: Option<&'static [u8]>,
+        memtable_value: Option<&'static [u8]>,
+        imm_memtable_value: Option<&'static [u8]>,
+        l0_value: Option<&'static [u8]>,
+        compacted_value: Option<&'static [u8]>,
+        expected: Option<&'static [u8]>,
+    }
+
+    async fn setup_multi_level_db_state(
+        table_store: &Arc<TableStore>,
+        test_case: &LevelGetMultiLevelTestCase,
+    ) -> Result<(CoreDbState, Arc<KVTable>, VecDeque<Arc<ImmutableMemtable>>), SlateDBError> {
+        let mut core = CoreDbState::new();
+
+        // Create L0 SST if needed
+        if let Some(value) = test_case.l0_value {
+            let sst = create_test_sst(table_store, vec![(b"test_key", value)]).await?;
+            core.l0.push_back(sst);
+        }
+
+        // Create compacted SST if needed
+        if let Some(value) = test_case.compacted_value {
+            let sst = create_test_sst(table_store, vec![(b"test_key", value)]).await?;
+            let sr = create_test_sorted_run(vec![sst]);
+            core.compacted.push(sr);
+        }
+
+        // Create memtable
+        let memtable = Arc::new(KVTable::new());
+        if let Some(value) = test_case.memtable_value {
+            let entry = RowEntry::new_value(b"test_key", value, 1);
+            memtable.put(entry);
+        }
+
+        // Create immutable memtable
+        let mut imm_memtable = VecDeque::new();
+        if let Some(value) = test_case.imm_memtable_value {
+            let writable = WritableKVTable::new();
+            let entry = RowEntry::new_value(b"test_key", value, 1);
+            writable.put(entry);
+            imm_memtable.push_back(Arc::new(ImmutableMemtable::new(writable, 1)));
+        }
+
+        Ok((core, memtable, imm_memtable))
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "key_in_write_batch_only",
+        write_batch_value: Some(b"wb_value"),
+        memtable_value: None,
+        imm_memtable_value: None,
+        l0_value: None,
+        compacted_value: None,
+        expected: Some(b"wb_value"),
+    })]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "key_in_memtable_only",
+        write_batch_value: None,
+        memtable_value: Some(b"mem_value"),
+        imm_memtable_value: None,
+        l0_value: None,
+        compacted_value: None,
+        expected: Some(b"mem_value"),
+    })]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "key_in_imm_memtable_only",
+        write_batch_value: None,
+        memtable_value: None,
+        imm_memtable_value: Some(b"imm_value"),
+        l0_value: None,
+        compacted_value: None,
+        expected: Some(b"imm_value"),
+    })]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "key_in_l0_only",
+        write_batch_value: None,
+        memtable_value: None,
+        imm_memtable_value: None,
+        l0_value: Some(b"l0_value"),
+        compacted_value: None,
+        expected: Some(b"l0_value"),
+    })]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "key_in_compacted_only",
+        write_batch_value: None,
+        memtable_value: None,
+        imm_memtable_value: None,
+        l0_value: None,
+        compacted_value: Some(b"compacted_value"),
+        expected: Some(b"compacted_value"),
+    })]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "write_batch_overrides_all",
+        write_batch_value: Some(b"wb_value"),
+        memtable_value: Some(b"mem_value"),
+        imm_memtable_value: Some(b"imm_value"),
+        l0_value: Some(b"l0_value"),
+        compacted_value: Some(b"compacted_value"),
+        expected: Some(b"wb_value"),
+    })]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "memtable_overrides_lower_levels",
+        write_batch_value: None,
+        memtable_value: Some(b"mem_value"),
+        imm_memtable_value: Some(b"imm_value"),
+        l0_value: Some(b"l0_value"),
+        compacted_value: Some(b"compacted_value"),
+        expected: Some(b"mem_value"),
+    })]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "imm_memtable_overrides_sst_levels",
+        write_batch_value: None,
+        memtable_value: None,
+        imm_memtable_value: Some(b"imm_value"),
+        l0_value: Some(b"l0_value"),
+        compacted_value: Some(b"compacted_value"),
+        expected: Some(b"imm_value"),
+    })]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "l0_overrides_compacted",
+        write_batch_value: None,
+        memtable_value: None,
+        imm_memtable_value: None,
+        l0_value: Some(b"l0_value"),
+        compacted_value: Some(b"compacted_value"),
+        expected: Some(b"l0_value"),
+    })]
+    #[case(LevelGetMultiLevelTestCase {
+        name: "key_not_found_anywhere",
+        write_batch_value: None,
+        memtable_value: None,
+        imm_memtable_value: None,
+        l0_value: None,
+        compacted_value: None,
+        expected: None,
+    })]
+    async fn test_level_get_multi_level(
+        #[case] test_case: LevelGetMultiLevelTestCase,
+    ) -> Result<(), SlateDBError> {
+        let os = Arc::new(InMemory::new());
+        let stat_registry = StatRegistry::new();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(os, None),
+            SsTableFormat::default(),
+            Path::from("/test"),
+            None,
+        ));
+
+        // Setup all levels
+        let (core, memtable, imm_memtable) = setup_multi_level_db_state(&table_store, &test_case).await?;
+        
+        let db_state = MockDbState::with_all_levels(memtable, imm_memtable, core);
+
+        // Setup WriteBatch if needed
+        let write_batch = test_case.write_batch_value.map(|value| {
+            let mut batch = WriteBatch::new();
+            batch.put(b"test_key", value);
+            batch
+        });
+
+        let get = LevelGet {
+            key: b"test_key",
+            max_seq: None,
+            db_state: &db_state,
+            table_store: table_store.clone(),
+            db_stats: DbStats::new(&stat_registry),
+            write_batch: write_batch.as_ref(),
+            now: 10000,
+        };
+
+        let result = get.get().await?;
+
+        // Verify the result matches expectations
+        match (result, test_case.expected) {
+            (Some(actual), Some(expected)) => {
+                assert_eq!(
+                    actual,
+                    Bytes::from_static(expected),
+                    "Test case '{}' failed: expected {:?}, got {:?}",
+                    test_case.name,
+                    expected,
+                    actual
+                );
+            }
+            (None, None) => {
+                // Both None, test passes
+            }
+            (Some(actual), None) => {
+                panic!(
+                    "Test case '{}' failed: expected None, got {:?}",
+                    test_case.name, actual
+                );
+            }
+            (None, Some(expected)) => {
+                panic!(
+                    "Test case '{}' failed: expected {:?}, got None",
+                    test_case.name, expected
+                );
+            }
+        }
+
+        Ok(())
     }
 }
