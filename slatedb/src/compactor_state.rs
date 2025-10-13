@@ -114,6 +114,7 @@ impl Compaction {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new_with_id(
         id: Ulid,
         sources: Vec<SourceId>,
