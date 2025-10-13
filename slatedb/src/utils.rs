@@ -8,6 +8,7 @@ use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use rand::{Rng, RngCore};
+use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
@@ -291,7 +292,7 @@ impl<R: RngCore> IdGenerator for R {
 /// Arguments:
 /// - `clock`: The clock to use for the timeout.
 /// - `duration`: The duration to wait for the future to complete.
-/// - `op`: The name of the operation that will time out, for logging purposes.
+/// - `operation`: The name of the operation that will time out, for logging purposes.
 /// - `future`: The future to timeout
 ///
 /// Returns:
@@ -300,16 +301,13 @@ impl<R: RngCore> IdGenerator for R {
 pub async fn timeout<T>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
-    op: &'static str,
+    error_fn: impl FnOnce() -> SlateDBError,
     future: impl Future<Output = Result<T, SlateDBError>> + Send,
 ) -> Result<T, SlateDBError> {
     tokio::select! {
         biased;
         res = future => res,
-        _ = clock.sleep(duration) => Err(SlateDBError::Timeout {
-            op,
-            backoff: duration,
-        })
+        _ = clock.sleep(duration) => Err(error_fn())
     }
 }
 
@@ -502,6 +500,33 @@ where
     Ok(out)
 }
 
+/// Returns a string representation of a panic. The following panic types are
+/// converted to their string representation:
+///
+/// - SlateDBError
+/// - Box<dyn std::error::Error>
+/// - String
+/// - &'static str
+///
+/// Other panic types are handled by printing a generic message with the type name.
+#[allow(dead_code)]
+pub fn panic_string(panic: &(dyn Any + Send)) -> String {
+    if let Some(err) = panic.downcast_ref::<SlateDBError>() {
+        err.to_string()
+    } else if let Some(err) = panic.downcast_ref::<Box<dyn std::error::Error>>() {
+        err.to_string()
+    } else if let Some(err) = panic.downcast_ref::<String>() {
+        err.clone()
+    } else if let Some(err) = panic.downcast_ref::<&'static str>() {
+        err.to_string()
+    } else {
+        format!(
+            "task panicked with unknown type [type_id=`{:?}`]",
+            panic.type_id()
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -511,7 +536,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
+        compute_max_parallel, panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -777,7 +802,12 @@ mod tests {
 
         // When: we execute a future with a timeout
         let completed_future = async { Ok::<_, SlateDBError>(42) };
-        let timeout_future = timeout(clock, Duration::from_millis(100), "test", completed_future);
+        let timeout_future = timeout(
+            clock,
+            Duration::from_millis(100),
+            || unreachable!(),
+            completed_future,
+        );
 
         // Then: the future should complete successfully with the expected value
         let result = timeout_future.await;
@@ -795,12 +825,15 @@ mod tests {
         // Given: a mock clock and a future that will never complete
         let clock = Arc::new(MockSystemClock::new());
         let never_completes = std::future::pending::<Result<(), SlateDBError>>();
+        let timeout_duration = Duration::from_millis(100);
 
         // When: we execute the future with a timeout and advance the clock past the timeout duration
         let timeout_future = timeout(
             clock.clone(),
-            Duration::from_millis(100),
-            "test",
+            timeout_duration,
+            || SlateDBError::ManifestUpdateTimeout {
+                timeout: timeout_duration,
+            },
             never_completes,
         );
         let done = Arc::new(AtomicBool::new(false));
@@ -818,7 +851,10 @@ mod tests {
         // Then: the future should complete with a timeout error
         let result = timeout_future.await;
         done.store(true, SeqCst);
-        assert!(matches!(result, Err(SlateDBError::Timeout { .. })));
+        assert!(matches!(
+            result,
+            Err(SlateDBError::ManifestUpdateTimeout { .. })
+        ));
     }
 
     #[tokio::test]
@@ -834,7 +870,7 @@ mod tests {
         let timeout_future = timeout(
             clock,
             Duration::from_millis(100),
-            "test",
+            || unreachable!(),
             completes_immediately,
         );
 
@@ -1005,7 +1041,7 @@ mod tests {
         let res: Result<VecDeque<usize>, SlateDBError> =
             build_concurrent(inputs, 3, |x| async move {
                 if x == 5 {
-                    Err(SlateDBError::Unsupported("boom".into()))
+                    Err(SlateDBError::Fenced)
                 } else {
                     Ok(Some(x))
                 }
@@ -1048,5 +1084,54 @@ mod tests {
             observed_peak,
             max_parallel
         );
+    }
+
+    #[test]
+    fn panic_string_handles_slatedb_error() {
+        // Given a SlateDBError payload
+        let err = SlateDBError::InvalidDBState;
+        let payload = err.clone();
+
+        // When
+        let msg = panic_string(&payload);
+
+        // Then: it should stringify the exact error
+        assert_eq!(msg, err.to_string());
+    }
+
+    #[test]
+    fn panic_string_handles_string() {
+        let s = String::from("hello");
+        let msg = panic_string(&s);
+        assert_eq!(msg, s);
+    }
+
+    #[test]
+    fn panic_string_handles_static_str() {
+        let s: &'static str = "boom";
+        let msg = panic_string(&s);
+        assert_eq!(msg, s);
+    }
+
+    #[test]
+    fn panic_string_falls_back_for_boxed_error_trait_object() {
+        // The function attempts to downcast to `Box<dyn std::error::Error>`.
+        // However, because `panic_string` requires `Send`, a realistic panic payload
+        // would be `Box<dyn std::error::Error + Send + Sync>`, which does not
+        // match the downcast target exactly and therefore takes the fallback path.
+        let err_box: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(std::io::Error::other("oh no"));
+
+        let msg = panic_string(&err_box);
+        assert!(msg.contains("task panicked with unknown type"));
+    }
+
+    #[test]
+    fn panic_string_falls_back_for_unknown_type() {
+        #[derive(Clone, Debug)]
+        struct MyType;
+
+        let msg = panic_string(&MyType);
+        assert!(msg.contains("task panicked with unknown type"));
     }
 }
