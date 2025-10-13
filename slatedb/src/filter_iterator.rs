@@ -20,7 +20,6 @@ impl<T: KeyValueIterator> FilterIterator<T> {
         }
     }
 
-    #[allow(unused)]
     pub(crate) fn new_with_ttl_now(iterator: T, ttl_now: i64) -> Self {
         let predicate = Box::new(move |entry: &RowEntry| is_not_expired(entry, ttl_now));
         Self::new(iterator, predicate)

@@ -1778,6 +1778,341 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scan_with_default_ttl_and_read_uncommitted() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
+            .with_logical_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // insert keys at t=0
+        kv_store.put(b"key1", b"value1").await.unwrap();
+        kv_store.put(b"key2", b"value2").await.unwrap();
+        kv_store.put(b"key3", b"value3").await.unwrap();
+
+        // advance clock to t=99 --> still returned
+        clock.ticker.store(99, Ordering::SeqCst);
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key4"[..],
+                &ScanOptions::new().with_durability_filter(Memory),
+            )
+            .await
+            .unwrap();
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key1");
+        assert_eq!(kv.value.as_ref(), b"value1");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key2");
+        assert_eq!(kv.value.as_ref(), b"value2");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key3");
+        assert_eq!(kv.value.as_ref(), b"value3");
+
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // advance clock to t=100 --> no longer returned
+        clock.ticker.store(100, Ordering::SeqCst);
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key4"[..],
+                &ScanOptions::new().with_durability_filter(Memory),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_row_override_ttl_and_read_uncommitted() {
+        let clock = Arc::new(TestClock::new());
+        let default_ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
+            .with_logical_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // insert keys at t=0 with different TTL overrides
+        kv_store
+            .put_with_options(
+                b"key1",
+                b"value1",
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(50),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(75),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key3",
+                b"value3",
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(100),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        // advance clock to t=49 --> all still returned
+        clock.ticker.store(49, Ordering::SeqCst);
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key4"[..],
+                &ScanOptions::new().with_durability_filter(Memory),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key1");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key2");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key3");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // advance clock to t=50 --> key1 expired, key2 and key3 still returned
+        clock.ticker.store(50, Ordering::SeqCst);
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key4"[..],
+                &ScanOptions::new().with_durability_filter(Memory),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key2");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key3");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // advance clock to t=75 --> key1 and key2 expired, only key3 returned
+        clock.ticker.store(75, Ordering::SeqCst);
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key4"[..],
+                &ScanOptions::new().with_durability_filter(Memory),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key3");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // advance clock to t=100 --> all expired
+        clock.ticker.store(100, Ordering::SeqCst);
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key4"[..],
+                &ScanOptions::new().with_durability_filter(Memory),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_default_ttl_and_read_committed() {
+        let clock = Arc::new(TestClock::new());
+        let ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
+            .with_logical_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let key_other = b"time_advancing_key";
+
+        // insert keys at t=0
+        kv_store.put(b"key1", b"value1").await.unwrap();
+        kv_store.put(b"key2", b"value2").await.unwrap();
+        kv_store.put(b"key3", b"value3").await.unwrap();
+
+        // advance clock to t=99 --> still returned
+        clock.ticker.store(99, Ordering::SeqCst);
+        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key4"[..],
+                &ScanOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key1");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key2");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key3");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // advance clock to t=100 without flushing --> still returned
+        clock.ticker.store(100, Ordering::SeqCst);
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key4"[..],
+                &ScanOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key1");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key2");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key3");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // advance durable clock time to t=100 by flushing -- no longer returned
+        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key4"[..],
+                &ScanOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_with_row_override_ttl_and_read_committed() {
+        let clock = Arc::new(TestClock::new());
+        let default_ttl = 100;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_kv_store", object_store)
+            .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
+            .with_logical_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let key_other = b"time_advancing_key";
+
+        // insert keys at t=0 with row-level TTL overrides
+        kv_store
+            .put_with_options(
+                b"key1",
+                b"value1",
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(50),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &PutOptions {
+                    ttl: Ttl::ExpireAfter(75),
+                },
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        // advance clock to t=49 --> all still returned
+        clock.ticker.store(49, Ordering::SeqCst);
+        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key3"[..],
+                &ScanOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key1");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key2");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // advance clock to t=50 without flushing --> still returned (durable clock hasn't advanced)
+        clock.ticker.store(50, Ordering::SeqCst);
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key3"[..],
+                &ScanOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key1");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key2");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // advance durable clock time to t=50 by flushing -- key1 expired
+        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key3"[..],
+                &ScanOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key2");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // advance durable clock time to t=75 by flushing -- both keys expired
+        clock.ticker.store(75, Ordering::SeqCst);
+        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store.flush().await.unwrap();
+
+        let mut iter = kv_store
+            .scan_with_options(
+                &b"key1"[..]..&b"key3"[..],
+                &ScanOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_get_with_object_store_cache_metrics() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut opts = test_db_options(0, 1024, None);
