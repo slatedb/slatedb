@@ -568,6 +568,7 @@ impl CompactorEventHandler {
 
         let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
         tracing::Span::current().record("id", tracing::field::display(&id));
+        // Compaction id would be set by the compactor state
         let result = self.state.submit_compaction(id, compaction.clone());
         match result {
             Ok(_) => {
@@ -1364,8 +1365,8 @@ mod tests {
         let sr_id = state.compacted.first().unwrap().id;
         let l0_ulid = state.l0.front().unwrap().id.unwrap_compacted_id();
         let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
-            ssts: Compaction::get_ssts(&state, &vec![SourceId::Sst(l0_ulid)]),
-            sorted_runs: Compaction::get_sorted_runs(&state, &vec![SourceId::SortedRun(sr_id)]),
+            ssts: Compaction::get_ssts(&state, &[SourceId::Sst(l0_ulid)]),
+            sorted_runs: Compaction::get_sorted_runs(&state, &[SourceId::SortedRun(sr_id)]),
         };
         let mixed = Compaction::new(
             vec![SourceId::SortedRun(sr_id), SourceId::Sst(l0_ulid)],
