@@ -678,6 +678,8 @@ mod tests {
         let result = state.submit_compaction(id, compaction);
         // then:
         assert!(result.is_ok());
+        let result_id = result.unwrap();
+        assert_eq!(result_id, id);
     }
 
     #[test]
