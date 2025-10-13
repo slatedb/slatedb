@@ -19,9 +19,9 @@ use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::utils::{get_now_for_read, is_not_expired};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, filter, DbIterator};
 
+use async_trait::async_trait;
 use bytes::Bytes;
-use futures::future::{join, BoxFuture};
-use futures::FutureExt;
+use futures::future::join;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -257,48 +257,62 @@ struct LevelGet<'a> {
 }
 
 impl<'a> LevelGet<'a> {
-    fn get_write_batch(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
-        async move {
-            let batch = match self.write_batch {
-                Some(batch) => batch,
-                None => return Ok(None),
-            };
-
-            match batch.get_op(self.key) {
-                None => Ok(None),
-                Some(op) => {
-                    // place a highest seq number as the placeholder.
-                    let entry = op.to_row_entry(u64::MAX, None, None);
-                    Ok(Some(entry))
-                }
-            }
-        }
-        .boxed()
-    }
-
     async fn get(&'a self) -> Result<Option<Bytes>, SlateDBError> {
-        let mut getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> = vec![];
+        let mut getters: Vec<Box<dyn KeyValueIterator + 'a>> = vec![];
 
         // WriteBatch has highest priority
-        if self.write_batch.is_some() {
-            getters.push(self.get_write_batch());
+        if let Some(write_batch) = self.write_batch {
+            getters.push(Box::new(WriteBatchKeyValueIterator {
+                write_batch,
+                key: self.key,
+            }));
         }
 
+        let bloom_filter = BloomFilter {
+            table_store: self.table_store.clone(),
+            db_stats: self.db_stats.clone(),
+        };
+
+        let l0 = self.db_state.core().l0.clone();
+        let compacted = self.db_state.core().compacted.clone();
+        let key_hash = filter::filter_hash(self.key);
+
         getters.extend(vec![
-            self.get_memtable(),
-            self.get_l0(),
-            self.get_compacted(),
+            Box::new(MemtableKeyValueIterator::new(
+                self.db_state,
+                self.key,
+                self.max_seq,
+            )) as Box<dyn KeyValueIterator>,
+
+            Box::new(L0KeyValueIterator::new(
+                self.table_store.clone(),
+                bloom_filter.clone(),
+                l0,
+                self.key,
+                key_hash,
+                self.max_seq,
+            )) as Box<dyn KeyValueIterator>,
+
+            Box::new(CompactedKeyValueIterator::new(
+                compacted,
+                self.key,
+                key_hash,
+                self.max_seq,
+                bloom_filter,
+                self.table_store.clone(),
+            )) as Box<dyn KeyValueIterator>,
         ]);
 
-        self.get_inner(getters).await
+        self.get_inner(getters.into()).await
     }
 
     async fn get_inner(
         &'a self,
-        getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>>,
+        mut getters: VecDeque<Box<dyn KeyValueIterator + 'a>>,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        for getter in getters {
-            let result = match getter.await? {
+        while let Some(mut getter) = getters.pop_front() {
+            getter.seek(self.key).await?;
+            let result = match getter.as_mut().next_entry().await? {
                 Some(result) => result,
                 None => continue,
             };
@@ -313,103 +327,78 @@ impl<'a> LevelGet<'a> {
         }
         Ok(None)
     }
+}
 
-    fn get_memtable(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
-        async move {
-            let maybe_val = std::iter::once(self.db_state.memtable())
-                .chain(self.db_state.imm_memtable().iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(self.key, self.max_seq));
-            if let Some(val) = maybe_val {
+struct WriteBatchKeyValueIterator<'a> {
+    write_batch: &'a WriteBatch,
+    key: &'a [u8],
+}
+
+#[async_trait]
+impl<'a> KeyValueIterator for WriteBatchKeyValueIterator<'a> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        match self.write_batch.get_op(&self.key) {
+            Some(op) => {
+                let entry = op.to_row_entry(u64::MAX, None, None);
+                Ok(Some(entry))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+}
+
+struct MemtableKeyValueIterator<'a> {
+    memtables: VecDeque<Arc<KVTable>>,
+    key: &'a [u8],
+    max_seq: Option<u64>,
+}
+
+impl<'a> MemtableKeyValueIterator<'a> {
+    fn new(
+        db_state: &'a (dyn DbStateReader + Sync + Send),
+        key: &'a [u8],
+        max_seq: Option<u64>,
+    ) -> Self {
+        let memtables = std::iter::once(db_state.memtable())
+            .chain(db_state.imm_memtable().iter().map(|imm| imm.table()))
+            .collect();
+
+        Self {
+            memtables,
+            key,
+            max_seq,
+        }
+    }
+}
+
+#[async_trait]
+impl<'a> KeyValueIterator for MemtableKeyValueIterator<'a> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        while let Some(table) = self.memtables.pop_front() {
+            if let Some(val) = table.get(self.key, self.max_seq) {
                 return Ok(Some(val));
             }
-
-            Ok(None)
         }
-        .boxed()
+
+        Ok(None)
     }
 
-    fn get_l0(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
-        async move {
-            // cache blocks that are being read
-            let sst_iter_options = SstIteratorOptions {
-                cache_blocks: true,
-                eager_spawn: true,
-                ..SstIteratorOptions::default()
-            };
-
-            let key_hash = filter::filter_hash(self.key);
-
-            for sst in &self.db_state.core().l0 {
-                let filter_result = self.sst_might_include_key(sst, self.key, key_hash).await?;
-                self.record_filter_result(&filter_result);
-
-                if filter_result.might_contain_key() {
-                    let maybe_iter = SstIterator::for_key(
-                        sst,
-                        self.key,
-                        self.table_store.clone(),
-                        sst_iter_options,
-                    )
-                    .await?;
-
-                    if let Some(iter) = maybe_iter {
-                        let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
-                        if let Some(entry) = iter.next_entry().await? {
-                            if entry.key == self.key {
-                                return Ok(Some(entry));
-                            }
-                        }
-                    }
-
-                    if matches!(filter_result, FilterPositive) {
-                        self.db_stats.sst_filter_false_positives.inc();
-                    }
-                }
-            }
-            Ok(None)
-        }
-        .boxed()
+    async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
+        Ok(())
     }
+}
 
-    fn get_compacted(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
-        async move {
-            // cache blocks that are being read
-            let sst_iter_options = SstIteratorOptions {
-                cache_blocks: true,
-                eager_spawn: true,
-                ..SstIteratorOptions::default()
-            };
-            let key_hash = filter::filter_hash(self.key);
+#[derive(Clone)]
+struct BloomFilter {
+    table_store: Arc<TableStore>,
+    db_stats: DbStats,
+}
 
-            for sr in &self.db_state.core().compacted {
-                let filter_result = self.sr_might_include_key(sr, self.key, key_hash).await?;
-                self.record_filter_result(&filter_result);
-
-                if filter_result.might_contain_key() {
-                    let iter = SortedRunIterator::for_key(
-                        sr,
-                        self.key,
-                        self.table_store.clone(),
-                        sst_iter_options,
-                    )
-                    .await?;
-
-                    let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
-                    if let Some(entry) = iter.next_entry().await? {
-                        if entry.key == self.key {
-                            return Ok(Some(entry));
-                        }
-                    }
-                    if matches!(filter_result, FilterPositive) {
-                        self.db_stats.sst_filter_false_positives.inc();
-                    }
-                }
-            }
-            Ok(None)
-        }
-        .boxed()
-    }
-
+impl BloomFilter {
     /// Check if the given key might be in the range of the SST. Checks if the key is
     /// in the range of the sst and if the filter might contain the key.
     /// ## Arguments
@@ -473,6 +462,164 @@ impl<'a> LevelGet<'a> {
             self.db_stats.sst_filter_negatives.inc();
         }
     }
+
+    fn record_false_positive(&self) {
+        self.db_stats.sst_filter_false_positives.inc();
+    }
+}
+
+fn default_sst_iter_options() -> SstIteratorOptions {
+    SstIteratorOptions {
+        cache_blocks: true,
+        eager_spawn: true,
+        ..SstIteratorOptions::default()
+    }
+}
+
+struct L0KeyValueIterator<'a> {
+    table_store: Arc<TableStore>,
+    bloom_filter: BloomFilter,
+    l0: VecDeque<SsTableHandle>,
+    key: &'a [u8],
+    key_hash: u64,
+    max_seq: Option<u64>,
+    current_sst: usize,
+}
+
+impl<'a> L0KeyValueIterator<'a> {
+    fn new(
+        table_store: Arc<TableStore>,
+        bloom_filter: BloomFilter,
+        l0: VecDeque<SsTableHandle>,
+        key: &'a [u8],
+        key_hash: u64,
+        max_seq: Option<u64>,
+    ) -> Self {
+        Self {
+            table_store,
+            bloom_filter,
+            l0,
+            key,
+            key_hash,
+            max_seq,
+            current_sst: 0,
+        }
+    }
+}
+
+#[async_trait]
+impl<'a> KeyValueIterator for L0KeyValueIterator<'a> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        while let Some(sst) = self.l0.get(self.current_sst) {
+            let filter_result = self
+                .bloom_filter
+                .sst_might_include_key(sst, self.key, self.key_hash)
+                .await?;
+            self.bloom_filter.record_filter_result(&filter_result);
+
+            if filter_result.might_contain_key() {
+                let maybe_iter = SstIterator::for_key(
+                    sst,
+                    self.key,
+                    self.table_store.clone(),
+                    default_sst_iter_options(),
+                )
+                .await?;
+
+                if let Some(iter) = maybe_iter {
+                    let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
+                    if let Some(entry) = iter.next_entry().await? {
+                        if entry.key == self.key {
+                            return Ok(Some(entry));
+                        }
+                    }
+                }
+
+                if matches!(filter_result, FilterPositive) {
+                    self.bloom_filter.record_false_positive();
+                }
+            }
+
+            self.current_sst += 1;
+        }
+
+        Ok(None)
+    }
+
+    async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+}
+
+struct CompactedKeyValueIterator<'a> {
+    compacted: Vec<SortedRun>,
+    key: &'a [u8],
+    key_hash: u64,
+    max_seq: Option<u64>,
+    current_sr: usize,
+    bloom_filter: BloomFilter,
+    table_store: Arc<TableStore>,
+}
+
+impl<'a> CompactedKeyValueIterator<'a> {
+    fn new(
+        compacted: Vec<SortedRun>,
+        key: &'a [u8],
+        key_hash: u64,
+        max_seq: Option<u64>,
+        bloom_filter: BloomFilter,
+        table_store: Arc<TableStore>,
+    ) -> Self {
+        Self {
+            compacted,
+            key,
+            key_hash,
+            max_seq,
+            current_sr: 0,
+            bloom_filter,
+            table_store,
+        }
+    }
+}
+
+#[async_trait]
+impl<'a> KeyValueIterator for CompactedKeyValueIterator<'a> {
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        while let Some(sr) = self.compacted.get(self.current_sr) {
+            let filter_result = self
+                .bloom_filter
+                .sr_might_include_key(sr, self.key, self.key_hash)
+                .await?;
+            self.bloom_filter.record_filter_result(&filter_result);
+
+            if filter_result.might_contain_key() {
+                let iter = SortedRunIterator::for_key(
+                    sr,
+                    self.key,
+                    self.table_store.clone(),
+                    default_sst_iter_options(),
+                )
+                .await?;
+                let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
+                if let Some(entry) = iter.next_entry().await? {
+                    if entry.key == self.key {
+                        return Ok(Some(entry));
+                    }
+                }
+
+                if matches!(filter_result, FilterPositive) {
+                    self.bloom_filter.record_false_positive();
+                }
+            }
+
+            self.current_sr += 1;
+        }
+        Ok(None)
+    }
+
+    async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -513,11 +660,32 @@ mod tests {
 
     fn mock_level_getters<'a>(
         row_entries: Vec<Option<RowEntry>>,
-    ) -> Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> {
+    ) -> Vec<Box<dyn KeyValueIterator + 'a>> {
         row_entries
             .into_iter()
-            .map(|entry| async move { Ok(entry) }.boxed())
+            .map(|entry| Box::new(SingleEntryIterator::new(entry) ) as Box<dyn KeyValueIterator + 'a>)
             .collect()
+    }
+
+    struct SingleEntryIterator {
+        entry: Option<RowEntry>,
+    }
+    
+    impl SingleEntryIterator {
+        fn new(entry: Option<RowEntry>) -> Self {
+            Self { entry }
+        }
+    }
+
+    #[async_trait]
+    impl KeyValueIterator for SingleEntryIterator {
+        async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+            Ok(self.entry.take())
+        }
+
+        async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
+            Ok(())
+        }
     }
 
     struct LevelGetExpireTestCase {
@@ -658,7 +826,7 @@ mod tests {
             now: 10000,
         };
 
-        let result = get.get_inner(mock_level_getters(test_case.entries)).await?;
+        let result = get.get_inner(mock_level_getters(test_case.entries).into()).await?;
         assert_eq!(result, test_case.expected);
         Ok(())
     }
@@ -811,17 +979,20 @@ mod tests {
             now: 10000,
         };
 
-        let mut getters: Vec<BoxFuture<'_, Result<Option<RowEntry>, SlateDBError>>> = vec![];
+        let mut getters: Vec<Box<dyn KeyValueIterator>> = vec![];
 
         // Add WriteBatch getter first (highest priority)
-        if let Some(_batch) = write_batch.as_ref() {
-            getters.push(get.get_write_batch());
+        if let Some(batch) = write_batch.as_ref() {
+            getters.push(Box::new(WriteBatchKeyValueIterator {
+                write_batch: batch,
+                key: &test_case.key,
+            }));
         }
 
         // Add provided entries as subsequent getters in order
         getters.extend(mock_level_getters(test_case.entries.clone()));
 
-        let result = get.get_inner(getters).await?;
+        let result = get.get_inner(getters.into()).await?;
         assert_eq!(result, test_case.expected);
         Ok(())
     }
