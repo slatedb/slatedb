@@ -283,7 +283,6 @@ impl<'a> LevelGet<'a> {
                 self.key,
                 self.max_seq,
             )) as Box<dyn KeyValueIterator>,
-
             Box::new(L0KeyValueIterator::new(
                 self.table_store.clone(),
                 bloom_filter.clone(),
@@ -292,7 +291,6 @@ impl<'a> LevelGet<'a> {
                 key_hash,
                 self.max_seq,
             )) as Box<dyn KeyValueIterator>,
-
             Box::new(CompactedKeyValueIterator::new(
                 compacted,
                 self.key,
@@ -337,7 +335,7 @@ struct WriteBatchKeyValueIterator<'a> {
 #[async_trait]
 impl<'a> KeyValueIterator for WriteBatchKeyValueIterator<'a> {
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        match self.write_batch.get_op(&self.key) {
+        match self.write_batch.get_op(self.key) {
             Some(op) => {
                 let entry = op.to_row_entry(u64::MAX, None, None);
                 Ok(Some(entry))
@@ -688,14 +686,16 @@ mod tests {
     ) -> Vec<Box<dyn KeyValueIterator + 'a>> {
         row_entries
             .into_iter()
-            .map(|entry| Box::new(SingleEntryIterator::new(entry) ) as Box<dyn KeyValueIterator + 'a>)
+            .map(|entry| {
+                Box::new(SingleEntryIterator::new(entry)) as Box<dyn KeyValueIterator + 'a>
+            })
             .collect()
     }
 
     struct SingleEntryIterator {
         entry: Option<RowEntry>,
     }
-    
+
     impl SingleEntryIterator {
         fn new(entry: Option<RowEntry>) -> Self {
             Self { entry }
@@ -851,7 +851,9 @@ mod tests {
             now: 10000,
         };
 
-        let result = get.get_inner(mock_level_getters(test_case.entries).into()).await?;
+        let result = get
+            .get_inner(mock_level_getters(test_case.entries).into())
+            .await?;
         assert_eq!(result, test_case.expected);
         Ok(())
     }
@@ -1042,12 +1044,12 @@ mod tests {
     ) -> Result<SsTableHandle, SlateDBError> {
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let mut builder = table_store.table_builder();
-        
+
         for (key, value) in keys_and_values {
             let entry = RowEntry::new_value(key, value, 1);
             builder.add(entry)?;
         }
-        
+
         let sst = builder.build()?;
         let handle = table_store.write_sst(&id, sst, true).await?;
         Ok(handle)
@@ -1055,10 +1057,7 @@ mod tests {
 
     // Helper to create a sorted run with specific SSTs
     fn create_test_sorted_run(ssts: Vec<SsTableHandle>) -> SortedRun {
-        SortedRun {
-            id: 0,
-            ssts,
-        }
+        SortedRun { id: 0, ssts }
     }
 
     #[tokio::test]
@@ -1084,20 +1083,17 @@ mod tests {
 
         let key = b"key1";
         let key_hash = filter::filter_hash(key);
-        let mut iterator = L0KeyValueIterator::new(
-            table_store.clone(),
-            bloom_filter,
-            l0,
-            key,
-            key_hash,
-            None,
-        );
+        let mut iterator =
+            L0KeyValueIterator::new(table_store.clone(), bloom_filter, l0, key, key_hash, None);
 
         let result = iterator.next_entry().await?;
         assert!(result.is_some());
         let entry = result.unwrap();
         assert_eq!(entry.key, Bytes::from_static(b"key1"));
-        assert_eq!(entry.value, ValueDeletable::Value(Bytes::from_static(b"value1")));
+        assert_eq!(
+            entry.value,
+            ValueDeletable::Value(Bytes::from_static(b"value1"))
+        );
 
         Ok(())
     }
@@ -1114,7 +1110,11 @@ mod tests {
         ));
 
         // Create SST with keys "key2" and "key3"
-        let sst1 = create_test_sst(&table_store, vec![(b"key2", b"value2"), (b"key3", b"value3")]).await?;
+        let sst1 = create_test_sst(
+            &table_store,
+            vec![(b"key2", b"value2"), (b"key3", b"value3")],
+        )
+        .await?;
         let mut l0 = VecDeque::new();
         l0.push_back(sst1);
 
@@ -1156,7 +1156,7 @@ mod tests {
         let sst1 = create_test_sst(&table_store, vec![(b"key1", b"value1")]).await?;
         // Create second SST with "key2"
         let sst2 = create_test_sst(&table_store, vec![(b"key2", b"value2")]).await?;
-        
+
         let mut l0 = VecDeque::new();
         l0.push_back(sst1);
         l0.push_back(sst2);
@@ -1169,20 +1169,17 @@ mod tests {
         // Look for "key2" which is in the second SST
         let key = b"key2";
         let key_hash = filter::filter_hash(key);
-        let mut iterator = L0KeyValueIterator::new(
-            table_store.clone(),
-            bloom_filter,
-            l0,
-            key,
-            key_hash,
-            None,
-        );
+        let mut iterator =
+            L0KeyValueIterator::new(table_store.clone(), bloom_filter, l0, key, key_hash, None);
 
         let result = iterator.next_entry().await?;
         assert!(result.is_some());
         let entry = result.unwrap();
         assert_eq!(entry.key, Bytes::from_static(b"key2"));
-        assert_eq!(entry.value, ValueDeletable::Value(Bytes::from_static(b"value2")));
+        assert_eq!(
+            entry.value,
+            ValueDeletable::Value(Bytes::from_static(b"value2"))
+        );
 
         Ok(())
     }
@@ -1216,7 +1213,7 @@ mod tests {
 
         let key = b"key1";
         let key_hash = filter::filter_hash(key);
-        
+
         // Try to read with max_seq = 5 (should not find the entry)
         let mut iterator = L0KeyValueIterator::new(
             table_store.clone(),
@@ -1228,7 +1225,10 @@ mod tests {
         );
 
         let result = iterator.next_entry().await?;
-        assert!(result.is_none(), "Should not find entry with seq 10 when max_seq is 5");
+        assert!(
+            result.is_none(),
+            "Should not find entry with seq 10 when max_seq is 5"
+        );
 
         Ok(())
     }
@@ -1268,7 +1268,10 @@ mod tests {
         assert!(result.is_some());
         let entry = result.unwrap();
         assert_eq!(entry.key, Bytes::from_static(b"key1"));
-        assert_eq!(entry.value, ValueDeletable::Value(Bytes::from_static(b"value1")));
+        assert_eq!(
+            entry.value,
+            ValueDeletable::Value(Bytes::from_static(b"value1"))
+        );
 
         Ok(())
     }
@@ -1285,7 +1288,11 @@ mod tests {
         ));
 
         // Create SST with keys "key2" and "key3"
-        let sst1 = create_test_sst(&table_store, vec![(b"key2", b"value2"), (b"key3", b"value3")]).await?;
+        let sst1 = create_test_sst(
+            &table_store,
+            vec![(b"key2", b"value2"), (b"key3", b"value3")],
+        )
+        .await?;
         let sr = create_test_sorted_run(vec![sst1]);
 
         let bloom_filter = BloomFilter {
@@ -1351,7 +1358,10 @@ mod tests {
         assert!(result.is_some());
         let entry = result.unwrap();
         assert_eq!(entry.key, Bytes::from_static(b"key2"));
-        assert_eq!(entry.value, ValueDeletable::Value(Bytes::from_static(b"value2")));
+        assert_eq!(
+            entry.value,
+            ValueDeletable::Value(Bytes::from_static(b"value2"))
+        );
 
         Ok(())
     }
@@ -1396,7 +1406,10 @@ mod tests {
         );
 
         let result = iterator.next_entry().await?;
-        assert!(result.is_none(), "Should not find entry with seq 10 when max_seq is 5");
+        assert!(
+            result.is_none(),
+            "Should not find entry with seq 10 when max_seq is 5"
+        );
 
         Ok(())
     }
@@ -1425,18 +1438,12 @@ mod tests {
 
         let key = b"key1";
         let key_hash = filter::filter_hash(key);
-        let mut iterator = L0KeyValueIterator::new(
-            table_store.clone(),
-            bloom_filter,
-            l0,
-            key,
-            key_hash,
-            None,
-        );
+        let mut iterator =
+            L0KeyValueIterator::new(table_store.clone(), bloom_filter, l0, key, key_hash, None);
 
         let initial_positives = db_stats.sst_filter_positives.get();
         iterator.next_entry().await?;
-        
+
         // Should have recorded at least one filter positive (either RangePositive or FilterPositive)
         assert!(db_stats.sst_filter_positives.get() > initial_positives);
 
@@ -1597,8 +1604,9 @@ mod tests {
         ));
 
         // Setup all levels
-        let (core, memtable, imm_memtable) = setup_multi_level_db_state(&table_store, &test_case).await?;
-        
+        let (core, memtable, imm_memtable) =
+            setup_multi_level_db_state(&table_store, &test_case).await?;
+
         let db_state = MockDbState::with_all_levels(memtable, imm_memtable, core);
 
         // Setup WriteBatch if needed
