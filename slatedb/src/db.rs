@@ -3359,6 +3359,114 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn test_scan_should_read_only_committed_data() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+        let kv_store = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Write and commit some initial data
+        kv_store
+            .put("key1".as_bytes(), "committed1".as_bytes())
+            .await
+            .unwrap();
+        kv_store
+            .put("key2".as_bytes(), "committed2".as_bytes())
+            .await
+            .unwrap();
+        kv_store
+            .put("key3".as_bytes(), "committed3".as_bytes())
+            .await
+            .unwrap();
+
+        // Pause WAL writes to prevent new writes from being committed
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+
+        // Write uncommitted data
+        kv_store
+            .put_with_options(
+                "key2".as_bytes(),
+                "uncommitted2".as_bytes(),
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                "key4".as_bytes(),
+                "uncommitted4".as_bytes(),
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Scan with Remote filter should only see committed data
+        let mut iter = kv_store
+            .scan_with_options(
+                "key1".as_bytes().."key5".as_bytes(),
+                &ScanOptions::new().with_durability_filter(Remote),
+            )
+            .await
+            .unwrap();
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key1");
+        assert_eq!(kv.value.as_ref(), b"committed1");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key2");
+        assert_eq!(kv.value.as_ref(), b"committed2"); // Old committed value
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key3");
+        assert_eq!(kv.value.as_ref(), b"committed3");
+
+        // key4 should not be visible with Remote filter
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // Scan with Memory filter should see uncommitted data
+        let mut iter = kv_store
+            .scan_with_options(
+                "key1".as_bytes().."key5".as_bytes(),
+                &ScanOptions::new().with_durability_filter(Memory),
+            )
+            .await
+            .unwrap();
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key1");
+        assert_eq!(kv.value.as_ref(), b"committed1");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key2");
+        assert_eq!(kv.value.as_ref(), b"uncommitted2"); // New uncommitted value
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key3");
+        assert_eq!(kv.value.as_ref(), b"committed3");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"key4");
+        assert_eq!(kv.value.as_ref(), b"uncommitted4"); // Uncommitted key visible
+
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        kv_store.close().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_recover_imm_from_wal() {
         let fp_registry = Arc::new(FailPointRegistry::new());
