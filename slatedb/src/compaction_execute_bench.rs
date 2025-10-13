@@ -31,6 +31,7 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
+use crate::utils::IdGenerator;
 
 pub struct CompactionExecuteBench {
     path: Path,
@@ -208,7 +209,8 @@ impl CompactionExecuteBench {
         num_ssts: usize,
         table_store: &Arc<TableStore>,
         is_dest_last_run: bool,
-        _rand: Arc<DbRand>,
+        rand: Arc<DbRand>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<CompactionJob, SlateDBError> {
         let sst_ids: Vec<SsTableId> = (0u32..num_ssts as u32)
             .map(CompactionExecuteBench::sst_id)
@@ -245,8 +247,8 @@ impl CompactionExecuteBench {
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
         Ok(CompactionJob {
-            id: ulid::Ulid::new(),
-            compaction_id: ulid::Ulid::new(),
+            id: rand.rng().gen_ulid(system_clock.as_ref()),
+            compaction_id: rand.rng().gen_ulid(system_clock.as_ref()),
             spec: crate::compactor_executor::CompactionJobSpec::LinearCompactionJob {
                 completed_input_sst_ids: ssts.iter().map(|h| h.id.unwrap_compacted_id()).collect(),
                 completed_input_sr_ids: vec![],
@@ -264,7 +266,8 @@ impl CompactionExecuteBench {
         manifest: &StoredManifest,
         compaction: &Compaction,
         is_dest_last_run: bool,
-        _rand: Arc<DbRand>,
+        rand: Arc<DbRand>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> CompactionJob {
         let state = manifest.db_state();
         let srs_by_id: HashMap<_, _> = state
@@ -284,8 +287,8 @@ impl CompactionExecuteBench {
             .collect();
         info!("loaded compaction job");
         CompactionJob {
-            id: ulid::Ulid::new(),
-            compaction_id: ulid::Ulid::new(),
+            id: rand.rng().gen_ulid(system_clock.as_ref()),
+            compaction_id: compaction.id,
             spec: crate::compactor_executor::CompactionJobSpec::LinearCompactionJob {
                 completed_input_sst_ids: vec![],
                 completed_input_sr_ids: srs.iter().map(|sr| sr.id).collect(),
@@ -354,7 +357,13 @@ impl CompactionExecuteBench {
             ssts: vec![],
             sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
         };
-        let compaction = Some(Compaction::new(sources, spec, destination_sr_id));
+        let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
+        let compaction = Some(Compaction::new_with_id(
+            id,
+            sources,
+            spec,
+            destination_sr_id,
+        ));
 
         info!("load compaction job");
         let job = match &compaction {
@@ -365,6 +374,7 @@ impl CompactionExecuteBench {
                     compaction,
                     false,
                     self.rand.clone(),
+                    self.system_clock.clone(),
                 )
             }
             None => {
@@ -374,6 +384,7 @@ impl CompactionExecuteBench {
                     &table_store,
                     false,
                     self.rand.clone(),
+                    self.system_clock.clone(),
                 )
                 .await?
             }

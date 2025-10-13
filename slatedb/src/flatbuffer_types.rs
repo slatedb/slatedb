@@ -306,9 +306,9 @@ impl FlatBufferCompactionStateCodec {
                 .iter()
                 .map(|c| {
                     let fb_ulid = c.compaction_id();
-                    let key = fb_ulid.to_ulid();
+                    let compaction_id = fb_ulid.to_ulid();
                     let comp = Compaction {
-                        id: key,
+                        id: compaction_id,
                         status: Self::get_status(c.status()),
                         sources: Self::get_sources(&c),
                         destination: c.destination(),
@@ -316,7 +316,7 @@ impl FlatBufferCompactionStateCodec {
                         job_attempts: Self::get_job_attempts(&c),
                         spec: Self::get_spec(&c),
                     };
-                    (key, comp)
+                    (compaction_id, comp)
                 })
                 .collect(),
         }
@@ -487,7 +487,7 @@ impl CompactedSstId<'_> {
 #[allow(dead_code)]
 impl<'a> FbUlid<'a> {
     #[inline]
-    pub(crate) fn to_ulid(&self) -> Ulid {
+    pub(crate) fn to_ulid(self) -> Ulid {
         Ulid::from((self.high(), self.low()))
     }
 }
@@ -929,19 +929,15 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
-    use crate::compactor_state::{
-        Compaction, CompactionSpec, CompactionState, CompactionStatus, CompactionType, SourceId,
-    };
+    use crate::compactor_state::{Compaction, CompactionSpec, CompactionState, SourceId};
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{
-        CompactionJob, CompactionJobSpec, DbFlatBufferBuilder, FbCompactionState, FbUlid,
-        FlatBufferBuilder, FlatBufferCompactionStateCodec, FlatBufferManifestCodec,
-        SsTableIndexOwned, UlidArgs,
+        CompactionJob, CompactionJobSpec, DbFlatBufferBuilder, FbUlid, FlatBufferBuilder,
+        FlatBufferCompactionStateCodec, FlatBufferManifestCodec, SsTableIndexOwned, UlidArgs,
     };
     use crate::manifest::{ExternalDb, Manifest};
     use crate::record::RecordCodec;
     use crate::{checkpoint, error::SlateDBError};
-    use std::collections::HashMap;
     use std::collections::VecDeque;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
@@ -1194,52 +1190,14 @@ mod tests {
     }
 
     // TODO: Add db_state and compaction details for the test
-    // #[test]
-    // fn test_should_encode_decode_compaction_state_with_compactions() {
-    //     let mut compaction_state: CompactionState = CompactionState::initial();
-    //     // mutate epoch to verify roundtrip of a non-default value
-    //     compaction_state.compactor_epoch = 42;
-    //     compaction_state.compactions.insert(
-    //         ulid::Ulid::new(),
-    //         Compaction::new(vec![SourceId::SortedRun(0)],
-    //         CompactionSpec::SortedRunCompaction { ssts: vec![], sorted_runs: vec![] },
-    //         0),
-    //     );
-
-    //     // encode to FlatBuffers bytes
-    //     let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&compaction_state);
-
-    //     // decode back
-    //     let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref())
-    //         .expect("invalid FB");
-    //     let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
-
-    //     let decoded_compaction = decoded
-    //         .compactions
-    //         .values()
-    //         .next()
-    //         .expect("Compaction should be present");
-
-    //     assert_eq!(decoded.compactor_epoch, 42);
-    //     assert_eq!(decoded.compactions.len(), 1);
-    //     assert_eq!(decoded_compaction.status, CompactionStatus::Submitted);
-    //     assert_eq!(decoded_compaction.sources, vec![SourceId::SortedRun(0)]);
-    //     assert_eq!(decoded_compaction.destination, 0);
-    //     assert_eq!(decoded_compaction.compaction_type, CompactionType::Internal);
-    //     assert_eq!(decoded_compaction.job_attempts.len(), 0);
-    //     assert_eq!(
-    //         decoded_compaction.spec,
-    //         CompactionSpec::SortedRunCompaction {
-    //             ssts: vec![],
-    //             sorted_runs: vec![]
-    //         }
-    //     );
-    // }
 
     #[test]
     fn test_use_fb_builder_helpers_and_ulid_conversion() {
         // Construct a minimal Compaction with a spec and a job attempt
-        let sst_info = SsTableInfo::default();
+        let sst_info = SsTableInfo {
+            first_key: Some(Bytes::from_static(b"a")),
+            ..Default::default()
+        };
         let sst_handle = SsTableHandle::new_compacted(
             SsTableId::Compacted(ulid::Ulid::new()),
             sst_info.clone(),
