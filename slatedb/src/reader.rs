@@ -164,6 +164,8 @@ impl Reader {
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator<'a>, SlateDBError> {
+        let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
+
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
         for memtable in db_state.imm_memtable() {
