@@ -165,6 +165,7 @@ impl Reader {
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator<'a>, SlateDBError> {
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
+        let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
 
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
@@ -230,6 +231,7 @@ impl Reader {
             sr_iters,
             max_seq,
             range_tracker,
+            now,
         )
         .await
     }

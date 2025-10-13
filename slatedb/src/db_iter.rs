@@ -97,6 +97,7 @@ pub struct DbIterator<'a> {
 }
 
 impl<'a> DbIterator<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
         range: BytesRange,
         write_batch_iter: Option<WriteBatchIterator<'a>>,
@@ -105,13 +106,14 @@ impl<'a> DbIterator<'a> {
         sr_iters: impl IntoIterator<Item = SortedRunIterator<'a>>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
+        now: i64,
     ) -> Result<Self, SlateDBError> {
-        let iters: Vec<Box<dyn KeyValueIterator>> = {
+        let iters: Vec<Box<dyn KeyValueIterator + 'a>> = {
             // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
             // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
             // not have an real committed sequence number yet.
             let write_batch_iter = write_batch_iter
-                .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator>)
+                .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'a>)
                 .unwrap_or_else(|| Box::new(EmptyIterator::new()));
 
             // Apply the max_seq filter to all the iterators. Please note that we should apply this filter BEFORE
@@ -123,9 +125,9 @@ impl<'a> DbIterator<'a> {
             //
             // If we filter the iterator after merging with max_seq=100, we'll lost the entry with seq=96 from the
             // iterator A. But the element with seq=96 is actually the correct answer for this scan.
-            let mem_iters = Self::apply_max_seq_filter(mem_iters, max_seq);
-            let l0_iters = Self::apply_max_seq_filter(l0_iters, max_seq);
-            let sr_iters = Self::apply_max_seq_filter(sr_iters, max_seq);
+            let mem_iters = Self::apply_filters(mem_iters, max_seq, now);
+            let l0_iters = Self::apply_filters(l0_iters, max_seq, now);
+            let sr_iters = Self::apply_filters(sr_iters, max_seq, now);
             let (mem_iter, l0_iter, sr_iter) = tokio::join!(
                 MergeIterator::new(mem_iters),
                 MergeIterator::new(l0_iters),
@@ -151,17 +153,20 @@ impl<'a> DbIterator<'a> {
         })
     }
 
-    fn apply_max_seq_filter<T>(
+    fn apply_filters<T>(
         iters: impl IntoIterator<Item = T>,
         max_seq: Option<u64>,
-    ) -> Vec<FilterIterator<T>>
+        now: i64,
+    ) -> Vec<Box<dyn KeyValueIterator + 'a>>
     where
         T: KeyValueIterator + 'a,
     {
         iters
             .into_iter()
             .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
-            .collect::<Vec<_>>()
+            .map(|iter| FilterIterator::new_with_ttl_now(iter, now))
+            .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'a>)
+            .collect::<Vec<Box<dyn KeyValueIterator + 'a>>>()
     }
 
     /// Get the next record in the scan.
@@ -259,6 +264,7 @@ mod tests {
             VecDeque::new(),
             None,
             None,
+            0,
         )
         .await
         .unwrap();
@@ -299,6 +305,7 @@ mod tests {
             VecDeque::new(),
             Some(100),
             None,
+            0,
         )
         .await
         .unwrap();
@@ -330,6 +337,7 @@ mod tests {
             VecDeque::new(),
             None,
             None,
+            0,
         )
         .await
         .unwrap();
@@ -378,6 +386,7 @@ mod tests {
             VecDeque::new(),
             None,
             None,
+            0,
         )
         .await
         .unwrap();
@@ -394,5 +403,125 @@ mod tests {
         // Should be done
         let kv3 = iter.next().await.unwrap();
         assert!(kv3.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dbiterator_with_ttl_filtering() {
+        // Create a memtable with entries that have different TTLs
+        let mem = WritableKVTable::new();
+
+        // Entry created at t=0 with TTL of 50
+        let mut entry1 = RowEntry::new_value(b"key1", b"value1", 1);
+        entry1.create_ts = Some(0);
+        entry1.expire_ts = Some(50);
+        mem.put(entry1);
+
+        // Entry created at t=0 with TTL of 100
+        let mut entry2 = RowEntry::new_value(b"key2", b"value2", 2);
+        entry2.create_ts = Some(0);
+        entry2.expire_ts = Some(100);
+        mem.put(entry2);
+
+        // Entry created at t=0 with no TTL
+        let mut entry3 = RowEntry::new_value(b"key3", b"value3", 3);
+        entry3.create_ts = Some(0);
+        entry3.expire_ts = None;
+        mem.put(entry3);
+
+        // Test at t=49 - all entries should be returned
+        let mem_iter = mem.table().range_ascending(BytesRange::from(..));
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            None,
+            vec![mem_iter],
+            VecDeque::new(),
+            VecDeque::new(),
+            None,
+            None,
+            49,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key,
+            Bytes::from_static(b"key1")
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key,
+            Bytes::from_static(b"key2")
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key,
+            Bytes::from_static(b"key3")
+        );
+        assert!(iter.next().await.unwrap().is_none());
+
+        // Test at t=50 - key1 should be expired, key2 and key3 should be returned
+        let mem_iter = mem.table().range_ascending(BytesRange::from(..));
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            None,
+            vec![mem_iter],
+            VecDeque::new(),
+            VecDeque::new(),
+            None,
+            None,
+            50,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key,
+            Bytes::from_static(b"key2")
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key,
+            Bytes::from_static(b"key3")
+        );
+        assert!(iter.next().await.unwrap().is_none());
+
+        // Test at t=100 - key1 and key2 should be expired, only key3 should be returned
+        let mem_iter = mem.table().range_ascending(BytesRange::from(..));
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            None,
+            vec![mem_iter],
+            VecDeque::new(),
+            VecDeque::new(),
+            None,
+            None,
+            100,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key,
+            Bytes::from_static(b"key3")
+        );
+        assert!(iter.next().await.unwrap().is_none());
+
+        // Test at t=200 - only key3 (no TTL) should be returned
+        let mem_iter = mem.table().range_ascending(BytesRange::from(..));
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            None,
+            vec![mem_iter],
+            VecDeque::new(),
+            VecDeque::new(),
+            None,
+            None,
+            200,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key,
+            Bytes::from_static(b"key3")
+        );
+        assert!(iter.next().await.unwrap().is_none());
     }
 }
