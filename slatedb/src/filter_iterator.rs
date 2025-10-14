@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
-use crate::utils::is_not_expired;
 
 pub(crate) type FilterPredicate = Box<dyn Fn(&RowEntry) -> bool + Send + Sync>;
 
@@ -18,11 +17,6 @@ impl<T: KeyValueIterator> FilterIterator<T> {
             predicate,
             iterator,
         }
-    }
-
-    pub(crate) fn new_with_ttl_now(iterator: T, ttl_now: i64) -> Self {
-        let predicate = Box::new(move |entry: &RowEntry| is_not_expired(entry, ttl_now));
-        Self::new(iterator, predicate)
     }
 
     pub(crate) fn new_with_max_seq(iterator: T, max_seq: Option<u64>) -> Self {

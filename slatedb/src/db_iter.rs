@@ -3,6 +3,7 @@ use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::{EmptyIterator, KeyValueIterator};
+use crate::map_iter::MapIterator;
 use crate::mem_table::MemTableIterator;
 use crate::merge_iterator::MergeIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -164,7 +165,7 @@ impl<'a> DbIterator<'a> {
         iters
             .into_iter()
             .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
-            .map(|iter| FilterIterator::new_with_ttl_now(iter, now))
+            .map(|iter| MapIterator::new_with_ttl_now(iter, now))
             .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'a>)
             .collect::<Vec<Box<dyn KeyValueIterator + 'a>>>()
     }
@@ -522,6 +523,45 @@ mod tests {
             iter.next().await.unwrap().unwrap().key,
             Bytes::from_static(b"key3")
         );
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dbiterator_expired_value_hides_older_valid_value() {
+        // Test the case where a newer value is expired and an older value is not expired.
+        // The newer expired value should become a tombstone and hide the older value,
+        // so the iterator should return None for that key.
+        let mem = WritableKVTable::new();
+
+        // Newer entry (seq=100) that expires at t=50
+        let mut newer_entry = RowEntry::new_value(b"key1", b"newer_value", 100);
+        newer_entry.create_ts = Some(0);
+        newer_entry.expire_ts = Some(50);
+        mem.put(newer_entry);
+
+        // Older entry (seq=50) that doesn't expire
+        let mut older_entry = RowEntry::new_value(b"key1", b"older_value", 50);
+        older_entry.create_ts = Some(0);
+        older_entry.expire_ts = None;
+        mem.put(older_entry);
+
+        // Test at t=100 - the newer entry is expired and should hide the older entry
+        let mem_iter = mem.table().range_ascending(BytesRange::from(..));
+        let mut iter = DbIterator::new(
+            BytesRange::from(..),
+            None,
+            vec![mem_iter],
+            VecDeque::new(),
+            VecDeque::new(),
+            None,
+            None,
+            100, // now = 100, so newer_entry with expire_ts=50 is expired
+        )
+        .await
+        .unwrap();
+
+        // Should return None because the newer expired value becomes a tombstone
+        // which hides the older non-expired value
         assert!(iter.next().await.unwrap().is_none());
     }
 }
