@@ -84,6 +84,11 @@ impl TestIterator {
         self.entries.push_back(Ok(entry));
         self
     }
+
+    pub(crate) fn with_row_entry(mut self, entry: RowEntry) -> Self {
+        self.entries.push_back(Ok(entry));
+        self
+    }
 }
 
 #[async_trait]
