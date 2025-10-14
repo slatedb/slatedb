@@ -5,7 +5,6 @@ use crate::iter::KeyValueIterator;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::is_not_expired;
 
-
 /// An iterator adapter that applies a user-provided mapping function to each
 /// [`RowEntry`] yielded by the underlying iterator.
 ///

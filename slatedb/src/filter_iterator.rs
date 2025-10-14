@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::types::RowEntry;
-use crate::utils::is_not_expired;
 
 pub(crate) type FilterPredicate = Box<dyn Fn(&RowEntry) -> bool + Send + Sync>;
 
