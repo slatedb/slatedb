@@ -1390,9 +1390,11 @@ mod tests {
 
         // Collect results
         let mut actual = Vec::new();
-        while let Some(kv) = iter.next().await.map_err(|e| {
-            SlateDBError::IoError(Arc::new(std::io::Error::other(e)))
-        })? {
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+        {
             actual.push((kv.key.to_vec(), kv.value.to_vec()));
         }
 
