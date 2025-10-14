@@ -20,11 +20,6 @@ impl<T: KeyValueIterator> FilterIterator<T> {
         }
     }
 
-    pub(crate) fn new_with_ttl_now(iterator: T, ttl_now: i64) -> Self {
-        let predicate = Box::new(move |entry: &RowEntry| is_not_expired(entry, ttl_now));
-        Self::new(iterator, predicate)
-    }
-
     pub(crate) fn new_with_max_seq(iterator: T, max_seq: Option<u64>) -> Self {
         match max_seq {
             Some(max_seq) => {
