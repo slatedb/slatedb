@@ -48,6 +48,10 @@ impl<T: KeyValueIterator> MapIterator<T> {
 
 #[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for MapIterator<T> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.iterator.init().await
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let next_entry = self.iterator.next_entry().await?;
         if let Some(entry) = next_entry {

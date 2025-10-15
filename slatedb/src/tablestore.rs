@@ -682,7 +682,7 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
+        let mut iter = SstIterator::new_owned_initialized(.., sst, ts.clone(), sst_iter_options)
             .await
             .unwrap()
             .expect("Expected Some(iter) but got None");
@@ -750,7 +750,7 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
+        let mut iter = SstIterator::new_owned_initialized(.., sst, ts.clone(), sst_iter_options)
             .await
             .unwrap()
             .expect("Expected Some(iter) but got None");

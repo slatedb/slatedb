@@ -58,6 +58,7 @@ pub(crate) struct SortedRunIterator<'a> {
     sst_iter_options: SstIteratorOptions,
     view: SortedRunView<'a>,
     current_iter: Option<SstIterator<'a>>,
+    initialized: bool,
 }
 
 impl<'a> SortedRunIterator<'a> {
@@ -71,6 +72,7 @@ impl<'a> SortedRunIterator<'a> {
             sst_iter_options,
             view,
             current_iter: None,
+            initialized: false,
         };
         res.advance_table().await?;
         Ok(res)
@@ -88,6 +90,18 @@ impl<'a> SortedRunIterator<'a> {
         SortedRunIterator::new(view, table_store, sst_iter_options).await
     }
 
+    pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
+        range: T,
+        sorted_run: SortedRun,
+        table_store: Arc<TableStore>,
+        sst_iter_options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        let mut iter =
+            SortedRunIterator::new_owned(range, sorted_run, table_store, sst_iter_options).await?;
+        iter.init().await?;
+        Ok(iter)
+    }
+
     pub(crate) async fn new_borrowed<T: RangeBounds<&'a [u8]>>(
         range: T,
         sorted_run: &'a SortedRun,
@@ -101,6 +115,20 @@ impl<'a> SortedRunIterator<'a> {
         SortedRunIterator::new(view, table_store, sst_iter_options).await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn new_borrowed_initialized<T: RangeBounds<&'a [u8]>>(
+        range: T,
+        sorted_run: &'a SortedRun,
+        table_store: Arc<TableStore>,
+        sst_iter_options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        let mut iter =
+            SortedRunIterator::new_borrowed(range, sorted_run, table_store, sst_iter_options)
+                .await?;
+        iter.init().await?;
+        Ok(iter)
+    }
+
     pub(crate) async fn for_key(
         sorted_run: &'a SortedRun,
         key: &'a [u8],
@@ -110,18 +138,47 @@ impl<'a> SortedRunIterator<'a> {
         Self::new_borrowed(key..=key, sorted_run, table_store, sst_iter_options).await
     }
 
+    pub(crate) async fn for_key_initialized(
+        sorted_run: &'a SortedRun,
+        key: &'a [u8],
+        table_store: Arc<TableStore>,
+        sst_iter_options: SstIteratorOptions,
+    ) -> Result<SortedRunIterator<'a>, SlateDBError> {
+        let mut iter = Self::for_key(sorted_run, key, table_store, sst_iter_options).await?;
+        iter.init().await?;
+        Ok(iter)
+    }
+
     async fn advance_table(&mut self) -> Result<(), SlateDBError> {
         self.current_iter = self
             .view
             .build_next_iter(self.table_store.clone(), self.sst_iter_options)
             .await?;
+        if self.initialized {
+            if let Some(iter) = self.current_iter.as_mut() {
+                iter.init().await?;
+            }
+        }
         Ok(())
     }
 }
 
 #[async_trait]
 impl KeyValueIterator for SortedRunIterator<'_> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        if !self.initialized {
+            if let Some(iter) = self.current_iter.as_mut() {
+                iter.init().await?;
+            }
+            self.initialized = true;
+        }
+        Ok(())
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if !self.initialized {
+            return Err(SlateDBError::IteratorNotInitialized);
+        }
         while let Some(iter) = &mut self.current_iter {
             if let Some(kv) = iter.next_entry().await? {
                 return Ok(Some(kv));
@@ -133,6 +190,9 @@ impl KeyValueIterator for SortedRunIterator<'_> {
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        if !self.initialized {
+            return Err(SlateDBError::IteratorNotInitialized);
+        }
         while let Some(next_table) = self.view.peek_next_table() {
             if next_table.compacted_effective_start_key() < next_key {
                 self.advance_table().await?;
@@ -193,10 +253,14 @@ mod tests {
             ssts: vec![handle],
         };
 
-        let mut iter =
-            SortedRunIterator::new_owned(.., sr, table_store, SstIteratorOptions::default())
-                .await
-                .unwrap();
+        let mut iter = SortedRunIterator::new_owned_initialized(
+            ..,
+            sr,
+            table_store,
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap();
 
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
@@ -241,7 +305,7 @@ mod tests {
             ssts: vec![handle1, handle2],
         };
 
-        let mut iter = SortedRunIterator::new_owned(
+        let mut iter = SortedRunIterator::new_owned_initialized(
             ..,
             sr,
             table_store.clone(),
@@ -288,7 +352,7 @@ mod tests {
             let mut expected_val_gen = test_case_val_gen.clone();
             let from_key = test_case_key_gen.next();
             _ = test_case_val_gen.next();
-            let mut iter = SortedRunIterator::new_borrowed(
+            let mut iter = SortedRunIterator::new_borrowed_initialized(
                 from_key.as_ref()..,
                 &sr,
                 table_store.clone(),
@@ -326,7 +390,7 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let mut expected_val_gen = val_gen.clone();
         let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
-        let mut iter = SortedRunIterator::new_borrowed(
+        let mut iter = SortedRunIterator::new_borrowed_initialized(
             [b'a', 10].as_ref()..,
             &sr,
             table_store.clone(),
@@ -363,7 +427,7 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
         let sr = build_sr_with_ssts(table_store.clone(), 3, 10, key_gen, val_gen).await;
 
-        let mut iter = SortedRunIterator::new_borrowed(
+        let mut iter = SortedRunIterator::new_borrowed_initialized(
             [b'z', 30].as_ref()..,
             &sr,
             table_store.clone(),
@@ -393,7 +457,7 @@ mod tests {
         let sr =
             build_sorted_run_from_table(&table, table_store.clone(), entries_per_sst, &mut rng)
                 .await;
-        let mut sr_iter = SortedRunIterator::new_owned(
+        let mut sr_iter = SortedRunIterator::new_owned_initialized(
             ..,
             sr,
             table_store.clone(),

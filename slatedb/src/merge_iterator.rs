@@ -62,30 +62,32 @@ pub(crate) struct MergeIterator<'a> {
     current: Option<MergeIteratorHeapEntry<'a>>,
     /// Use a heap to perform merge sort.
     iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>,
+    /// Iterators that have not yet been initialized and seeded.
+    pending_iterators: Vec<(usize, Box<dyn KeyValueIterator + 'a>)>,
     /// Whether to deduplicate entries of multiple versions with the same key. It's enabled by
     /// default, but it is useful to disable when we want to have some merge logics during
     /// compaction.
     dedup: bool,
+    /// Tracks whether the iterator has performed its heavy initialization step.
+    initialized: bool,
 }
 
 impl<'a> MergeIterator<'a> {
     pub(crate) async fn new<T: KeyValueIterator + 'a>(
         iterators: impl IntoIterator<Item = T>,
     ) -> Result<Self, SlateDBError> {
-        let mut heap = BinaryHeap::new();
-        for (index, mut iterator) in iterators.into_iter().enumerate() {
-            if let Some(kv) = iterator.next_entry().await? {
-                heap.push(Reverse(MergeIteratorHeapEntry {
-                    next_kv: kv,
-                    index,
-                    iterator: Box::new(iterator),
-                }));
-            }
-        }
         Ok(Self {
-            current: heap.pop().map(|r| r.0),
-            iterators: heap,
+            current: None,
+            iterators: BinaryHeap::new(),
+            pending_iterators: iterators
+                .into_iter()
+                .enumerate()
+                .map(|(index, iterator)| {
+                    (index, Box::new(iterator) as Box<dyn KeyValueIterator + 'a>)
+                })
+                .collect(),
             dedup: true,
+            initialized: false,
         })
     }
 
@@ -94,11 +96,40 @@ impl<'a> MergeIterator<'a> {
         self
     }
 
+    async fn initialize(&mut self) -> Result<(), SlateDBError> {
+        if self.initialized {
+            return Ok(());
+        }
+
+        for (index, mut iterator) in self.pending_iterators.drain(..) {
+            iterator.init().await?;
+            if let Some(next_kv) = iterator.next_entry().await? {
+                self.iterators.push(Reverse(MergeIteratorHeapEntry {
+                    next_kv,
+                    index,
+                    iterator,
+                }));
+            }
+        }
+
+        self.current = self.iterators.pop().map(|r| r.0);
+        self.initialized = true;
+        Ok(())
+    }
+
+    async fn ensure_initialized(&mut self) -> Result<(), SlateDBError> {
+        if !self.initialized {
+            self.initialize().await?;
+        }
+        Ok(())
+    }
+
     fn peek(&self) -> Option<&RowEntry> {
         self.current.as_ref().map(|c| &c.next_kv)
     }
 
     async fn advance(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.ensure_initialized().await?;
         if let Some(mut iterator_state) = self.current.take() {
             let current_kv = iterator_state.next_kv;
             if let Some(kv) = iterator_state.iterator.next_entry().await? {
@@ -114,7 +145,14 @@ impl<'a> MergeIterator<'a> {
 
 #[async_trait]
 impl KeyValueIterator for MergeIterator<'_> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.initialize().await
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if !self.initialized {
+            return Err(SlateDBError::IteratorNotInitialized);
+        }
         if !self.dedup {
             return self.advance().await;
         }
@@ -139,6 +177,10 @@ impl KeyValueIterator for MergeIterator<'_> {
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        if !self.initialized {
+            return Err(SlateDBError::IteratorNotInitialized);
+        }
+        self.ensure_initialized().await?;
         let mut seek_futures = VecDeque::new();
         if let Some(iterator) = self.current.take() {
             seek_futures.push_back(iterator.seek(next_key))
@@ -309,6 +351,7 @@ mod tests {
         );
 
         let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        merge_iter.init().await.unwrap();
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
 
         assert_iterator(
@@ -366,6 +409,7 @@ mod tests {
             .with_entry(b"ee", b"ee2", 7);
 
         let mut merge_iter = MergeIterator::new([iter1, iter2]).await.unwrap();
+        merge_iter.init().await.unwrap();
         merge_iter.seek(b"b".as_ref()).await.unwrap();
 
         assert_iterator(

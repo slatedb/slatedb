@@ -191,7 +191,7 @@ impl Reader {
 
         let l0_iters_futures =
             build_concurrent(db_state.core().l0.iter().cloned(), max_parallel, |sst| {
-                SstIterator::new_owned(
+                SstIterator::new_owned_initialized(
                     range.clone(),
                     sst,
                     self.table_store.clone(),
@@ -204,7 +204,7 @@ impl Reader {
             db_state.core().compacted.iter().cloned(),
             max_parallel,
             |sr| async {
-                SortedRunIterator::new_owned(
+                SortedRunIterator::new_owned_initialized(
                     range.clone(),
                     sr,
                     self.table_store.clone(),
@@ -348,7 +348,7 @@ impl<'a> LevelGet<'a> {
                 self.record_filter_result(&filter_result);
 
                 if filter_result.might_contain_key() {
-                    let maybe_iter = SstIterator::for_key(
+                    let maybe_iter = SstIterator::for_key_initialized(
                         sst,
                         self.key,
                         self.table_store.clone(),
@@ -390,7 +390,7 @@ impl<'a> LevelGet<'a> {
                 self.record_filter_result(&filter_result);
 
                 if filter_result.might_contain_key() {
-                    let iter = SortedRunIterator::for_key(
+                    let iter = SortedRunIterator::for_key_initialized(
                         sr,
                         self.key,
                         self.table_store.clone(),

@@ -192,6 +192,9 @@ pub(crate) enum SlateDBError {
 
     #[error("transaction conflict")]
     TransactionConflict,
+
+    #[error("iterator not initialized")]
+    IteratorNotInitialized,
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -424,6 +427,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
+            SlateDBError::IteratorNotInitialized => Error::invalid(msg),
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),
