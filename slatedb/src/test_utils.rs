@@ -124,6 +124,10 @@ impl TestClock {
             ticker: AtomicI64::new(0),
         }
     }
+
+    pub(crate) fn set(&self, tick: i64) {
+        self.ticker.store(tick, Ordering::SeqCst);
+    }
 }
 
 impl LogicalClock for TestClock {
