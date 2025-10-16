@@ -37,7 +37,6 @@ use crate::transaction_manager::IsolationLevel;
 use parking_lot::RwLock;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio_util::sync::CancellationToken;
 
 use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
@@ -544,7 +543,6 @@ impl DbInner {
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: Arc<MessageHandlerExecutor>,
-    cancellation_token: CancellationToken,
 }
 
 impl Db {
@@ -632,8 +630,6 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        self.cancellation_token.cancel();
-
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);
         }
