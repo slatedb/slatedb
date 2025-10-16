@@ -39,7 +39,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::batch::WriteBatch;
-use crate::batch_write::WriteBatchMessage;
+use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -545,7 +545,6 @@ impl DbInner {
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: MessageHandlerExecutor,
-    write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     cancellation_token: CancellationToken,
 }
@@ -649,19 +648,17 @@ impl Db {
             warn!("failed to shutdown garbage collector task [error={:?}]", e);
         }
 
-        if let Some(write_task) = {
-            let mut write_task = self.write_task.lock();
-            write_task.take()
-        } {
-            let result = write_task.await.expect("failed to join write thread");
-            info!("write task exited [result={:?}]", result);
+        if let Err(e) = self
+            .task_executor
+            .shutdown_task(WRITE_BATCH_TASK_NAME)
+            .await
+        {
+            warn!("failed to shutdown writer task [error={:?}]", e);
         }
 
-        // Shutdown the WAL flush thread.
         let result = self.inner.wal_buffer.close().await;
         info!("wal buffer task exited [result={:?}]", result);
 
-        // Shutdown the memtable flush thread.
         if let Err(e) = self
             .task_executor
             .shutdown_task(MEMTABLE_FLUSHER_TASK_NAME)

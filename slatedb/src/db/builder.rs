@@ -114,6 +114,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::admin::Admin;
+use crate::batch_write::WriteBatchEventHandler;
+use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
@@ -492,8 +494,15 @@ impl<P: Into<Path>> DbBuilder<P> {
                 &tokio_handle,
             )
             .expect("failed to spawn memtable flusher task");
-        let write_task =
-            inner.spawn_write_task(write_rx, &tokio_handle, self.cancellation_token.clone());
+        let write_batch_event_handler = Box::new(WriteBatchEventHandler::new(inner.clone()));
+        task_executor
+            .spawn_on(
+                WRITE_BATCH_TASK_NAME.to_string(),
+                write_batch_event_handler,
+                write_rx,
+                &tokio_handle,
+            )
+            .expect("failed to spawn write batch event handler task");
 
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -572,7 +581,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         Ok(Db {
             inner,
             task_executor,
-            write_task: Mutex::new(write_task),
             compactor_task: Mutex::new(compactor_task),
             cancellation_token: self.cancellation_token,
         })
