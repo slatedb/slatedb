@@ -241,7 +241,7 @@ impl Compactor {
                 COMPACTOR_TASK_NAME.to_string(),
                 Box::new(handler),
                 rx,
-                &self.compactor_runtime,
+                &Handle::current(),
             )
             .expect("failed to spawn compactor task");
         self.task_executor.monitor(&Handle::current());
