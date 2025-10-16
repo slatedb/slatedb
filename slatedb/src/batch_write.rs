@@ -48,6 +48,8 @@ use crate::{
     error::SlateDBError,
 };
 
+pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
+
 pub(crate) struct WriteBatchMessage {
     pub(crate) batch: WriteBatch,
     pub(crate) options: WriteOptions,
@@ -66,7 +68,7 @@ impl std::fmt::Debug for WriteBatchMessage {
     }
 }
 
-struct WriteBatchEventHandler {
+pub(crate) struct WriteBatchEventHandler {
     db_inner: Arc<DbInner>,
     is_first_write: bool,
 }
@@ -214,22 +216,6 @@ impl DbInner {
                 op.to_row_entry(seq, Some(now), expire_ts)
             })
             .collect::<Vec<_>>()
-    }
-
-    pub(crate) fn spawn_write_task(
-        self: &Arc<Self>,
-        rx: tokio::sync::mpsc::UnboundedReceiver<WriteBatchMessage>,
-        tokio_handle: &Handle,
-        cancellation_token: CancellationToken,
-    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
-        let write_batch_event_handler = WriteBatchEventHandler::new(self.clone());
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(write_batch_event_handler),
-            rx,
-            self.system_clock.clone(),
-            cancellation_token,
-        );
-        Some(tokio_handle.spawn(async move { dispatcher.run().await }))
     }
 }
 
