@@ -484,6 +484,11 @@ impl MessageHandlerExecutor {
         }
         Ok(())
     }
+
+    pub(crate) async fn shutdown_task(&self, name: &str) -> Result<(), SlateDBError> {
+        self.cancel_task(name);
+        self.join_task(name).await
+    }
 }
 
 #[cfg(all(test, feature = "test-util"))]

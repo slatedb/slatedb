@@ -30,6 +30,8 @@ use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 
 use crate::db_transaction::DBTransaction;
+use crate::dispatcher::MessageHandlerExecutor;
+use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
 use parking_lot::{Mutex, RwLock};
 use std::time::Duration;
@@ -542,11 +544,10 @@ impl DbInner {
 
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
-    /// The handle for the flush thread.
+    task_executor: MessageHandlerExecutor,
     memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    garbage_collector_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     cancellation_token: CancellationToken,
 }
 
@@ -645,14 +646,8 @@ impl Db {
             info!("compactor task exited [result={:?}]", result);
         }
 
-        if let Some(garbage_collector_task) = {
-            let mut maybe_garbage_collector_task = self.garbage_collector_task.lock();
-            maybe_garbage_collector_task.take()
-        } {
-            let result = garbage_collector_task
-                .await
-                .expect("failed to join garbage collector task");
-            info!("garbage collector task exited [result={:?}]", result);
+        if let Err(e) = self.task_executor.shutdown_task(GC_TASK_NAME).await {
+            warn!("failed to shutdown garbage collector task [error={:?}]", e);
         }
 
         if let Some(write_task) = {
