@@ -482,10 +482,15 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup background tasks
         let tokio_handle = Handle::current();
-        let task_executor =
-            MessageHandlerExecutor::new(inner.clone().state.read().error(), system_clock.clone());
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            inner.clone().state.read().error(),
+            system_clock.clone(),
+        ));
         if inner.wal_enabled {
-            inner.wal_buffer.start_background().await?;
+            inner
+                .wal_buffer
+                .start_background(task_executor.clone())
+                .await?;
         };
         task_executor
             .spawn_on(

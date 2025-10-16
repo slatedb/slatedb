@@ -20,7 +20,7 @@ use crate::{
     clock::{MonotonicClock, SystemClock},
     db_state::{DbState, SsTableId},
     db_stats::DbStats,
-    dispatcher::{MessageDispatcher, MessageFactory, MessageHandler},
+    dispatcher::{MessageDispatcher, MessageFactory, MessageHandler, MessageHandlerExecutor},
     error::SlateDBError,
     iter::KeyValueIterator,
     mem_table::KVTable,
@@ -30,6 +30,8 @@ use crate::{
     utils::SendSafely,
     wal_id::WalIdStore,
 };
+
+pub(crate) const WAL_BUFFER_TASK_NAME: &str = "wal_writer";
 
 /// [`WalBufferManager`] buffers write operations in memory before flushing them to persistent storage.
 /// The flush operation only targets Remote storage right now, later we can add an option to flush to local
@@ -57,7 +59,6 @@ use crate::{
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-    // WAL buffer will call `record_fatal_error` if it fails
     db_state: Arc<RwLock<DbState>>,
     db_stats: DbStats,
     mono_clock: Arc<MonotonicClock>,
@@ -75,8 +76,8 @@ struct WalBufferManagerInner {
     immutable_wals: VecDeque<(u64, Arc<KVTable>)>,
     /// The channel to send the flush work to the background worker.
     flush_tx: Option<mpsc::UnboundedSender<WalFlushWork>>,
-    /// task handle of the background worker.
-    background_task: Option<JoinHandle<Result<(), SlateDBError>>>,
+    /// task executor for the background worker.
+    task_executor: Option<Arc<MessageHandlerExecutor>>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
     /// the immutable wal can be recycled in memory.
     last_applied_seq: Option<u64>,
@@ -108,7 +109,7 @@ impl WalBufferManager {
             last_applied_seq: None,
             recent_flushed_wal_id,
             flush_tx: None,
-            background_task: None,
+            task_executor: None,
             oracle,
         };
         Self {
@@ -125,11 +126,10 @@ impl WalBufferManager {
         }
     }
 
-    pub async fn start_background(self: &Arc<Self>) -> Result<(), SlateDBError> {
-        if self.inner.read().background_task.is_some() {
-            return Err(SlateDBError::WalBufferAlreadyStarted);
-        }
-
+    pub async fn start_background(
+        self: &Arc<Self>,
+        task_executor: Arc<MessageHandlerExecutor>,
+    ) -> Result<(), SlateDBError> {
         let (flush_tx, flush_rx) = mpsc::unbounded_channel();
         {
             let mut inner = self.inner.write();
@@ -139,18 +139,17 @@ impl WalBufferManager {
             max_flush_interval: self.max_flush_interval,
             wal_buffer: self.clone(),
         };
-        let mut dispatcher = MessageDispatcher::new(
+        let result = task_executor.spawn_on(
+            WAL_BUFFER_TASK_NAME.to_string(),
             Box::new(wal_flush_handler),
             flush_rx,
-            self.system_clock.clone(),
-            self.cancellation_token.clone(),
+            &Handle::current(),
         );
-        let task_handle = Handle::current().spawn(async move { dispatcher.run().await });
         {
             let mut inner = self.inner.write();
-            inner.background_task = Some(task_handle);
+            inner.task_executor = Some(task_executor);
         }
-        Ok(())
+        result
     }
 
     #[cfg(test)]
@@ -419,17 +418,13 @@ impl WalBufferManager {
     }
 
     pub async fn close(&self) -> Result<(), SlateDBError> {
-        self.cancellation_token.cancel();
-        if let Some(background_task) = {
-            let mut inner = self.inner.write();
-            inner.background_task.take()
-        } {
-            background_task
-                .await
-                .expect("failed to join wal buffer task")
-        } else {
-            Ok(())
-        }
+        self.inner
+            .read()
+            .task_executor
+            .as_ref()
+            .expect("task executor should be initialized")
+            .shutdown_task(WAL_BUFFER_TASK_NAME)
+            .await
     }
 }
 
@@ -548,17 +543,21 @@ mod tests {
         ))));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
-            db_state,
+            db_state.clone(),
             DbStats::new(&StatRegistry::new()),
             0, // recent_flushed_wal_id
             oracle,
             table_store.clone(),
             mono_clock,
-            system_clock,
+            system_clock.clone(),
             1000,                            // max_wal_bytes_size
             Some(Duration::from_millis(10)), // max_flush_interval
         ));
-        wal_buffer.start_background().await.unwrap();
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            db_state.read().error(),
+            system_clock.clone(),
+        ));
+        wal_buffer.start_background(task_executor).await.unwrap();
         (wal_buffer, table_store, test_clock)
     }
 
