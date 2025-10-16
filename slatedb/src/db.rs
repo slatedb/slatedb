@@ -34,7 +34,7 @@ use crate::db_transaction::DBTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -293,7 +293,7 @@ impl DbInner {
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
             let (wal_size_bytes, imm_memtable_size_bytes) = {
-                let wal_size_bytes = self.wal_buffer.estimated_bytes().await?;
+                let wal_size_bytes = self.wal_buffer.estimated_bytes()?;
                 let imm_memtable_size_bytes = {
                     let guard = self.state.read();
                     // Exclude active memtable to avoid a write lock.
@@ -337,7 +337,7 @@ impl DbInner {
                     guard.state().imm_memtable.back().cloned()
                 };
 
-                let maybe_oldest_unflushed_wal = self.wal_buffer.oldest_unflushed_wal().await;
+                let maybe_oldest_unflushed_wal = self.wal_buffer.oldest_unflushed_wal();
 
                 // There is a window of time after mem_size_bytes is larger than max_unflushed_bytes
                 // but before we get the memtable and wal table. During that time, if the memtable and/or
@@ -1424,17 +1424,11 @@ mod tests {
             .unwrap();
 
         // a sanity check: the wal contains the most recent write
-        assert_ne!(
-            kv_store.inner.wal_buffer.estimated_bytes().await.unwrap(),
-            0
-        );
+        assert_ne!(kv_store.inner.wal_buffer.estimated_bytes().unwrap(), 0);
 
         // and a flush() should clear it
         kv_store.flush().await.unwrap();
-        assert_eq!(
-            kv_store.inner.wal_buffer.estimated_bytes().await.unwrap(),
-            0
-        );
+        assert_eq!(kv_store.inner.wal_buffer.estimated_bytes().unwrap(), 0);
     }
 
     #[tokio::test]
