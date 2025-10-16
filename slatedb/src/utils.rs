@@ -24,7 +24,7 @@ use std::collections::VecDeque;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
     tx: tokio::sync::watch::Sender<Option<T>>,
@@ -524,6 +524,36 @@ pub fn panic_string(panic: &(dyn Any + Send)) -> String {
             "task panicked with unknown type [type_id=`{:?}`]",
             panic.type_id()
         )
+    }
+}
+
+pub(crate) fn unwrap_join(
+    name: String,
+    join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError>,
+) -> Result<(), SlateDBError> {
+    match join_result {
+        Ok(task_result) => task_result,
+        Err(join_error) => {
+            if join_error.is_cancelled() {
+                Err(SlateDBError::BackgroundTaskCancelled(name))
+            } else {
+                Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
+                    Box::new(join_error.into_panic()),
+                ))))
+            }
+        }
+    }
+}
+
+pub(crate) fn unwrap_unwind(
+    name: String,
+    unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>,
+) -> Result<(), SlateDBError> {
+    match unwind_result {
+        Ok(task_result) => task_result,
+        Err(payload) => Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
+            Box::new(payload),
+        )))),
     }
 }
 
