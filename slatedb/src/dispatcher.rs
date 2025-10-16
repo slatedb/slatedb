@@ -85,29 +85,24 @@
 //! # }
 //! ```
 
-use std::{
-    any::Any,
-    future::Future,
-    panic::AssertUnwindSafe,
-    pin::Pin,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use crossbeam_skiplist::SkipMap;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{
     stream::{BoxStream, FuturesUnordered},
     FutureExt, StreamExt,
 };
 use log::warn;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use parking_lot::Mutex;
+use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
+use tokio_util::{sync::CancellationToken, task::JoinMap};
 
 use crate::{
     clock::{SystemClock, SystemClockTicker},
     error::SlateDBError,
-    utils::WatchableOnceCell,
+    utils::{unwrap_join, unwrap_unwind, WatchableOnceCell},
 };
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
@@ -135,7 +130,6 @@ pub(crate) struct MessageDispatcher<T: Send + std::fmt::Debug> {
     rx: mpsc::UnboundedReceiver<T>,
     clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
-    error_state: WatchableOnceCell<SlateDBError>,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
 }
@@ -156,14 +150,12 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
-        error_state: WatchableOnceCell<SlateDBError>,
     ) -> Self {
         Self::new_with_fp_registry(
             handler,
             rx,
             clock,
             cancellation_token,
-            error_state,
             Arc::new(FailPointRegistry::new()),
         )
     }
@@ -185,7 +177,6 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
-        error_state: WatchableOnceCell<SlateDBError>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
         Self {
@@ -193,37 +184,8 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             rx,
             clock,
             cancellation_token,
-            error_state,
             fp_registry,
         }
-    }
-
-    /// Runs the dispatcher. This is the primary entry point for running the dispatcher.
-    /// Run blocks until the dispatcher is shutdown or an error occurs.
-    ///
-    /// [MessageDispatcher::run] is the primary entry point for running the dispatcher;
-    /// it is responsible for:
-    ///
-    /// 1. Running the main event loop ([MessageDispatcher::run_loop]).
-    /// 2. Processing the final result when the event loop exits
-    ///    ([MessageDispatcher::handle_result]).
-    /// 4. Cleaning up resources and processing any remaining messages
-    ///    ([MessageDispatcher::cleanup]).
-    ///
-    /// ## Returns
-    ///
-    /// A [Result] containing the [DbState::error] if it was already set, or the result
-    /// of [MessageDispatcher::handle_result] otherwise.
-    pub(crate) async fn run(&mut self) -> Result<(), SlateDBError> {
-        let result = AssertUnwindSafe(self.run_loop())
-            .catch_unwind()
-            .await
-            .unwrap_or_else(Self::handle_panic);
-        let result = self.handle_result(result);
-        if let Err(e) = self.cleanup(result.clone()).await {
-            warn!("failed to cleanup dispatcher on shutdown [error={:?}]", e);
-        }
-        result
     }
 
     /// Runs the main event loop for the dispatcher. This is where messages and ticker
@@ -244,24 +206,13 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// A [Result] containing [SlateDBError::BackgroundTaskShutdown] on clean shutdown,
     /// or an uncaught error.
-    async fn run_loop(&mut self) -> Result<(), SlateDBError> {
-        let cancellation_token = self.cancellation_token.clone();
-        let mut error_watcher = self.error_state.reader();
+    async fn run(&mut self) -> Result<(), SlateDBError> {
         let mut tickers = self
             .handler
             .tickers()
             .into_iter()
             .map(|(dur, factory)| MessageDispatcherTicker::new(self.clock.ticker(dur), factory))
             .collect::<Vec<_>>();
-        // stop if we're in an error state or cancelled
-        let mut check_shutdown = async move || {
-            tokio::select! {
-                _ = cancellation_token.cancelled() => {},
-                e = error_watcher.await_value() => {
-                    warn!("halting message loop because db is in error state [error={:?}]", e);
-                },
-            }
-        };
         let mut ticker_futures: FuturesUnordered<_> =
             tickers.iter_mut().map(|t| t.tick()).collect();
         loop {
@@ -271,7 +222,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             tokio::select! {
                 biased;
                 // stop the loop if we're in an error state or cancelled
-                _ = check_shutdown() => {
+                _ = self.cancellation_token.cancelled() => {
                     break;
                 }
                 // if no errors, prioritize messages
@@ -286,44 +237,6 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             }
         }
         Ok(())
-    }
-
-    /// Handles the result of [MessageDispatcher::run_loop] using the following logic:
-    ///
-    /// 1. If [DbState::error] is set, return it.
-    /// 2. Else if `result` is an error, set [DbState::error] and return it.
-    /// 3. Else, return `result`.
-    ///
-    /// ## Arguments
-    ///
-    /// * `result`: The result of [MessageDispatcher::run_loop].
-    ///
-    /// ## Returns
-    ///
-    /// A [Result] containing the [DbState::error] if it was already set, or the result
-    /// of [MessageDispatcher::handle_result] otherwise.
-    fn handle_result(&self, result: Result<(), SlateDBError>) -> Result<(), SlateDBError> {
-        // if we failed, notify state (won't overwrite if state is already failed)
-        if let Err(ref e) = result {
-            self.error_state.write(e.clone());
-        }
-        // use the first error that occurred (could be ours, or a previous failure)
-        self.error_state.reader().read().map_or(result, Err)
-    }
-
-    /// Maps panic errors into SlateDBError::BackgroundTaskPanic.
-    ///
-    /// ## Arguments
-    ///
-    /// * `panic`: The panic to map.
-    ///
-    /// ## Returns
-    ///
-    /// A [Result] containing [SlateDBError::BackgroundTaskPanic], which wraps the panic.
-    fn handle_panic(panic: Box<dyn Any + Send>) -> Result<(), SlateDBError> {
-        Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
-            panic,
-        ))))
     }
 
     /// Tells the handler to clean up any resources.
@@ -455,6 +368,124 @@ pub(crate) trait MessageHandler<T: Send>: Send {
         messages: BoxStream<'async_trait, T>,
         result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError>;
+}
+
+#[derive(Debug)]
+pub(crate) struct MessageHandlerExecutor {
+    tasks: Mutex<Option<JoinMap<String, Result<(), SlateDBError>>>>,
+    tokens: SkipMap<String, CancellationToken>,
+    results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
+    error_state: WatchableOnceCell<Result<(), SlateDBError>>,
+    clock: Arc<dyn SystemClock>,
+    #[allow(dead_code)]
+    fp_registry: Arc<FailPointRegistry>,
+}
+
+impl MessageHandlerExecutor {
+    pub(crate) fn new(
+        error_state: WatchableOnceCell<Result<(), SlateDBError>>,
+        clock: Arc<dyn SystemClock>,
+    ) -> Self {
+        Self::new_with_fp_registry(error_state, clock, Arc::new(FailPointRegistry::new()))
+    }
+
+    pub(crate) fn new_with_fp_registry(
+        error_state: WatchableOnceCell<Result<(), SlateDBError>>,
+        clock: Arc<dyn SystemClock>,
+        fp_registry: Arc<FailPointRegistry>,
+    ) -> Self {
+        Self {
+            tasks: Mutex::new(Some(JoinMap::new())),
+            tokens: SkipMap::new(),
+            results: Arc::new(SkipMap::new()),
+            clock,
+            error_state,
+            fp_registry,
+        }
+    }
+
+    pub(crate) fn spawn_on<T: Send + std::fmt::Debug + 'static>(
+        &self,
+        name: String,
+        handler: Box<dyn MessageHandler<T>>,
+        rx: mpsc::UnboundedReceiver<T>,
+        handle: &Handle,
+    ) -> Result<(), SlateDBError> {
+        // hold guard for remainder of method to prevent multiple threads
+        // from starting the same task simultaneously.
+        let mut guard = self.tasks.lock();
+        let tasks = match guard.as_mut() {
+            Some(tasks) if tasks.contains_key(&name) => {
+                return Err(SlateDBError::BackgroundTaskStarted(name))
+            }
+            Some(tasks) => tasks,
+            None => return Err(SlateDBError::BackgroundTaskStarted(name)),
+        };
+        let token = CancellationToken::new();
+        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
+            handler,
+            rx,
+            self.clock.clone(),
+            token.clone(),
+            self.fp_registry.clone(),
+        );
+        self.results.insert(name.clone(), WatchableOnceCell::new());
+        self.tokens.insert(name.clone(), token);
+        let this_error_state = self.error_state.clone();
+        let this_name = name.clone();
+        let task_future = async move {
+            let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
+            let run_result = unwrap_unwind(this_name.clone(), run_unwind_result);
+            if let Err(ref run_error) = run_result {
+                this_error_state.write(Err(run_error.clone()));
+            }
+            let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(run_result.clone()))
+                .catch_unwind()
+                .await;
+            if let Err(cleanup_error) = unwrap_unwind(this_name.clone(), cleanup_unwind_result) {
+                warn!(
+                    "background task failed to clean up on shutdown [name={}, error={:?}",
+                    this_name.clone(),
+                    cleanup_error,
+                );
+            }
+            run_result
+        };
+        tasks.spawn_on(name, task_future, handle);
+        Ok(())
+    }
+
+    pub(crate) fn monitor(&self, handle: &Handle) -> JoinHandle<()> {
+        let mut guard = self.tasks.lock();
+        let mut tasks = guard.take().expect("join map isn't set when expected");
+        let this_results = self.results.clone();
+        let monitor_future = async move {
+            while !tasks.is_empty() {
+                if let Some((name, join_result)) = tasks.join_next().await {
+                    let task_result = unwrap_join(name.clone(), join_result);
+                    let entry = this_results
+                        .get(&name)
+                        .expect("result cell isn't set when expected");
+                    let result_cell = entry.value();
+                    result_cell.write(task_result);
+                }
+            }
+        };
+        handle.spawn(monitor_future)
+    }
+
+    pub(crate) fn cancel_task(&self, name: &str) {
+        if let Some(entry) = self.tokens.get(name) {
+            entry.value().cancel();
+        }
+    }
+
+    pub(crate) async fn join_task(&self, name: &str) -> Result<(), SlateDBError> {
+        if let Some(entry) = self.results.get(name) {
+            return entry.value().reader().await_value().await;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(test, feature = "test-util"))]
