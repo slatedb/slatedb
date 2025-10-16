@@ -236,7 +236,6 @@ impl Compactor {
             rx,
             self.system_clock.clone(),
             self.cancellation_token.clone(),
-            self.error_state.clone(),
         );
         dispatcher.run().await
     }

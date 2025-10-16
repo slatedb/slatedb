@@ -144,7 +144,6 @@ impl WalBufferManager {
             flush_rx,
             self.system_clock.clone(),
             self.cancellation_token.clone(),
-            self.db_state.read().error(),
         );
         let task_handle = Handle::current().spawn(async move { dispatcher.run().await });
         {

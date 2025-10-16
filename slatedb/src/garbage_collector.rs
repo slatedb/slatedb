@@ -1159,13 +1159,11 @@ mod tests {
         );
         let (_, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(DefaultSystemClock::default());
-        let error_state = WatchableOnceCell::new();
         let mut dispatcher = MessageDispatcher::new(
             Box::new(gc),
             rx,
             clock,
             cancellation_token.clone(),
-            error_state,
         );
         let jh = tokio::spawn(async move { dispatcher.run().await });
         cancellation_token.cancel();

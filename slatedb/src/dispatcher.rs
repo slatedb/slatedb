@@ -206,7 +206,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// A [Result] containing [SlateDBError::BackgroundTaskShutdown] on clean shutdown,
     /// or an uncaught error.
-    async fn run(&mut self) -> Result<(), SlateDBError> {
+    pub(crate) async fn run(&mut self) -> Result<(), SlateDBError> {
         let mut tickers = self
             .handler
             .tickers()
@@ -607,13 +607,11 @@ mod test {
             .add_ticker(Duration::from_millis(5), 1)
             .add_clock_schedule(5); // Advance clock by 5ms after first message
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
@@ -634,7 +632,6 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
         assert!(matches!(
             cleanup_called
                 .reader()
@@ -670,7 +667,6 @@ mod test {
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
@@ -736,13 +732,8 @@ mod test {
         let error_state = WatchableOnceCell::new();
         // Pre-set error state to simulate prior failure
         error_state.write(SlateDBError::Fenced);
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(handler),
-            rx,
-            clock,
-            cancellation_token.clone(),
-            error_state.clone(),
-        );
+        let mut dispatcher =
+            MessageDispatcher::new(Box::new(handler), rx, clock, cancellation_token.clone());
         let join = tokio::spawn(async move { dispatcher.run().await });
 
         // Cleanup should start promptly because run_loop exits immediately on existing error
@@ -753,10 +744,6 @@ mod test {
             .expect("dispatcher did not stop in time")
             .expect("join failed");
         assert!(matches!(result, Err(SlateDBError::Fenced)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::Fenced)
-        ));
         assert!(matches!(
             cleanup_reader.read(),
             Some(Err(SlateDBError::Fenced))
@@ -774,14 +761,12 @@ mod test {
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1);
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
@@ -802,7 +787,6 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
         assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
@@ -850,14 +834,12 @@ mod test {
             .add_clock_schedule(5) // 20ms
             .add_clock_schedule(1); // 21ms
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
@@ -892,7 +874,6 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
         assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 9);
     }
@@ -931,14 +912,12 @@ mod test {
             .add_clock_schedule(2) // 12
             .add_clock_schedule(3); // 15
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
@@ -982,7 +961,6 @@ mod test {
             .expect("dispatcher did not stop in time")
             .expect("join failed");
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
         assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 10);
     }
@@ -1012,14 +990,12 @@ mod test {
             .add_clock_schedule(3) // 21
             .add_clock_schedule(0); // 21 (process second)
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
@@ -1058,7 +1034,6 @@ mod test {
             .expect("dispatcher did not stop in time")
             .expect("join failed");
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
         assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 16);
     }
@@ -1104,7 +1079,6 @@ mod test {
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
@@ -1121,14 +1095,17 @@ mod test {
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskPanic(_, _))
+        ));
         assert!(matches!(
             error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskPanic(_))
+            Some(SlateDBError::BackgroundTaskPanic(_, _))
         ));
         assert!(matches!(
             cleanup_reader.read(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
+            Some(Err(SlateDBError::BackgroundTaskPanic(_, _)))
         ));
     }
 }

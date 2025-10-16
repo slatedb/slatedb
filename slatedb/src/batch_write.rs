@@ -228,7 +228,6 @@ impl DbInner {
             rx,
             self.system_clock.clone(),
             cancellation_token,
-            self.state.write().error(),
         );
         Some(tokio_handle.spawn(async move { dispatcher.run().await }))
     }
