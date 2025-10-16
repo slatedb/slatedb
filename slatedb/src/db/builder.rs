@@ -110,7 +110,6 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
@@ -171,7 +170,6 @@ pub struct DbBuilder<P: Into<Path>> {
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     fp_registry: Arc<FailPointRegistry>,
-    cancellation_token: CancellationToken,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
 }
@@ -191,7 +189,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
-            cancellation_token: CancellationToken::new(),
             seed: None,
             sst_block_size: None,
         }
@@ -259,11 +256,6 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Sets the fail point registry to use for the database.
     pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
         self.fp_registry = fp_registry;
-        self
-    }
-
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = cancellation_token;
         self
     }
 
@@ -601,7 +593,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         Ok(Db {
             inner,
             task_executor,
-            cancellation_token: self.cancellation_token,
         })
     }
 }
@@ -747,7 +738,6 @@ pub struct CompactorBuilder<P: Into<Path>> {
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
     error_state: WatchableOnceCell<SlateDBError>,
-    cancellation_token: CancellationToken,
 }
 
 #[allow(unused)]
@@ -763,7 +753,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
             error_state: WatchableOnceCell::new(),
-            cancellation_token: CancellationToken::new(),
         }
     }
 
@@ -790,12 +779,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Sets the system clock to use for the compactor.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
-        self
-    }
-
-    /// Sets the cancellation token to use for the compactor.
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = cancellation_token;
         self
     }
 
