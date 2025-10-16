@@ -8,7 +8,6 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -20,9 +19,7 @@ use crate::compactor_state::SourceId;
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
-use crate::dispatcher::{
-    MessageDispatcher, MessageFactory, MessageHandler, MessageHandlerExecutor,
-};
+use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::rand::DbRand;
@@ -162,6 +159,7 @@ pub(crate) enum CompactorMessage {
 /// sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
 /// is the [`TokioCompactionExecutor`] which runs compaction on a local tokio runtime.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) struct Compactor {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
@@ -213,6 +211,7 @@ impl Compactor {
     ///
     /// ## Returns
     /// * `Result<(), SlateDBError>` - The result of the compaction event loop.
+    #[allow(dead_code)]
     pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
@@ -248,6 +247,7 @@ impl Compactor {
         self.task_executor.join_task(COMPACTOR_TASK_NAME).await
     }
 
+    #[allow(dead_code)]
     pub async fn stop(&self) -> Result<(), SlateDBError> {
         self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await
     }

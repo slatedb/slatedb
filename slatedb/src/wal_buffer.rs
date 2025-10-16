@@ -11,16 +11,14 @@ use tokio::{
         mpsc::{self},
         oneshot,
     },
-    task::JoinHandle,
 };
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use crate::{
-    clock::{MonotonicClock, SystemClock},
+    clock::MonotonicClock,
     db_state::{DbState, SsTableId},
     db_stats::DbStats,
-    dispatcher::{MessageDispatcher, MessageFactory, MessageHandler, MessageHandlerExecutor},
+    dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor},
     error::SlateDBError,
     iter::KeyValueIterator,
     mem_table::KVTable,
@@ -62,11 +60,9 @@ pub(crate) struct WalBufferManager {
     db_state: Arc<RwLock<DbState>>,
     db_stats: DbStats,
     mono_clock: Arc<MonotonicClock>,
-    system_clock: Arc<dyn SystemClock>,
     table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
     max_flush_interval: Option<Duration>,
-    cancellation_token: CancellationToken,
 }
 
 struct WalBufferManagerInner {
@@ -97,7 +93,6 @@ impl WalBufferManager {
         oracle: Arc<Oracle>,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
-        system_clock: Arc<dyn SystemClock>,
         max_wal_bytes_size: usize,
         max_flush_interval: Option<Duration>,
     ) -> Self {
@@ -119,10 +114,8 @@ impl WalBufferManager {
             db_stats,
             table_store,
             mono_clock,
-            system_clock,
             max_wal_bytes_size,
             max_flush_interval,
-            cancellation_token: CancellationToken::new(),
         }
     }
 
@@ -417,14 +410,16 @@ impl WalBufferManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn close(&self) -> Result<(), SlateDBError> {
-        self.inner
-            .read()
-            .task_executor
-            .as_ref()
-            .expect("task executor should be initialized")
-            .shutdown_task(WAL_BUFFER_TASK_NAME)
-            .await
+        let task_executor = {
+            let inner = self.inner.read();
+            inner
+                .task_executor
+                .clone()
+                .expect("task executor should be initialized")
+        };
+        task_executor.shutdown_task(WAL_BUFFER_TASK_NAME).await
     }
 }
 
@@ -549,7 +544,6 @@ mod tests {
             oracle,
             table_store.clone(),
             mono_clock,
-            system_clock.clone(),
             1000,                            // max_wal_bytes_size
             Some(Duration::from_millis(10)), // max_flush_interval
         ));
@@ -557,7 +551,11 @@ mod tests {
             db_state.read().error(),
             system_clock.clone(),
         ));
-        wal_buffer.start_background(task_executor).await.unwrap();
+        wal_buffer
+            .start_background(task_executor.clone())
+            .await
+            .unwrap();
+        task_executor.monitor(&Handle::current());
         (wal_buffer, table_store, test_clock)
     }
 
