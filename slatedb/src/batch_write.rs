@@ -144,8 +144,8 @@ impl DbInner {
             // would violate the guarantee that batches are written atomically. We do
             // this by appending the entire entry batch in a single call to the WAL buffer,
             // which holds a write lock during the append.
-            let wal_watcher = self.wal_buffer.append(&entries).await?.durable_watcher();
-            self.wal_buffer.maybe_trigger_flush().await?;
+            let wal_watcher = self.wal_buffer.append(&entries)?.durable_watcher();
+            self.wal_buffer.maybe_trigger_flush()?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
             self.write_entries_to_memtable(entries);
@@ -157,7 +157,7 @@ impl DbInner {
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
-        self.wal_buffer.track_last_applied_seq(commit_seq).await;
+        self.wal_buffer.track_last_applied_seq(commit_seq);
 
         // insert a fail point for easier to test the case where the last_committed_seq is not updated.
         // this is useful for testing the case where the reader is not able to see the writes.

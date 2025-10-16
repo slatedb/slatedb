@@ -170,14 +170,14 @@ impl WalBufferManager {
         inner.recent_flushed_wal_id
     }
 
-    #[allow(unused)] // used in compactor.rs
+    #[cfg(test)] // used in compactor.rs
     pub fn is_empty(&self) -> bool {
         let inner = self.inner.read();
         inner.current_wal.is_empty() && inner.immutable_wals.is_empty()
     }
 
     /// Returns the total size of all unflushed WALs in bytes.
-    pub async fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
+    pub fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
         let inner = self.inner.read();
         let current_wal_size = self.table_store.estimate_encoded_size(
             inner.current_wal.metadata().entry_num,
@@ -199,7 +199,7 @@ impl WalBufferManager {
 
     /// Append row entries to the current WAL. return the last seq number of the WAL.
     /// TODO: validate the seq number is always increasing.
-    pub async fn append(&self, entries: &[RowEntry]) -> Result<Arc<KVTable>, SlateDBError> {
+    pub fn append(&self, entries: &[RowEntry]) -> Result<Arc<KVTable>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
 
         let inner = self.inner.write();
@@ -213,7 +213,7 @@ impl WalBufferManager {
     /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
-    pub async fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
+    pub fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
         // check the size of the current wal
         let (current_wal, need_flush, flush_tx) = {
             let inner = self.inner.read();
@@ -243,7 +243,7 @@ impl WalBufferManager {
                 )?
         }
 
-        let estimated_bytes = self.estimated_bytes().await?;
+        let estimated_bytes = self.estimated_bytes()?;
         self.db_stats
             .wal_buffer_estimated_bytes
             .set(estimated_bytes as i64);
@@ -255,7 +255,7 @@ impl WalBufferManager {
     /// wait for the current WAL to be flushed. If both are empty, it will
     /// still block on the current WAL to ensure that the WAL buffer is not
     /// empty.
-    pub(crate) async fn oldest_unflushed_wal(&self) -> Option<Arc<KVTable>> {
+    pub(crate) fn oldest_unflushed_wal(&self) -> Option<Arc<KVTable>> {
         let (current_wal, oldest_immutable_wal) = {
             let guard = self.inner.read();
             let current_wal = guard.current_wal.clone();
@@ -308,7 +308,7 @@ impl WalBufferManager {
 
     #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     async fn do_flush(&self) -> Result<(), SlateDBError> {
-        self.freeze_current_wal().await?;
+        self.freeze_current_wal()?;
         let flushing_wals = self.flushing_wals();
 
         if flushing_wals.is_empty() {
@@ -338,7 +338,7 @@ impl WalBufferManager {
             wal.notify_durable(result.clone());
         }
 
-        self.maybe_release_immutable_wals().await;
+        self.maybe_release_immutable_wals();
         Ok(())
     }
 
@@ -360,7 +360,7 @@ impl WalBufferManager {
         Ok(())
     }
 
-    async fn freeze_current_wal(&self) -> Result<(), SlateDBError> {
+    fn freeze_current_wal(&self) -> Result<(), SlateDBError> {
         let is_empty = self.inner.read().current_wal.is_empty();
         if is_empty {
             return Ok(());
@@ -377,16 +377,16 @@ impl WalBufferManager {
     /// This information of the last applied seq is used to determine if the immutable wals can be recycled.
     ///
     /// It's the caller's duty to ensure the seq is monotonically increasing.
-    pub async fn track_last_applied_seq(&self, seq: u64) {
+    pub fn track_last_applied_seq(&self, seq: u64) {
         {
             let mut inner = self.inner.write();
             inner.last_applied_seq = Some(seq);
         }
-        self.maybe_release_immutable_wals().await;
+        self.maybe_release_immutable_wals();
     }
 
     /// Recycle the immutable WALs that are applied to the memtable and flushed to the remote storage.
-    async fn maybe_release_immutable_wals(&self) {
+    fn maybe_release_immutable_wals(&self) {
         let mut inner = self.inner.write();
 
         let last_applied_seq = match inner.last_applied_seq {
@@ -486,7 +486,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::Closed);
 
         // freeze current WAL to notify writers in the subsequent flushing_wals loop
-        self.wal_buffer.freeze_current_wal().await?;
+        self.wal_buffer.freeze_current_wal()?;
 
         let flushing_wals = self.wal_buffer.flushing_wals();
         for (_, wal) in flushing_wals.iter() {
@@ -582,8 +582,8 @@ mod tests {
             None,
         );
 
-        wal_buffer.append(&[entry1.clone()]).await.unwrap();
-        wal_buffer.append(&[entry2.clone()]).await.unwrap();
+        wal_buffer.append(&[entry1.clone()]).unwrap();
+        wal_buffer.append(&[entry2.clone()]).unwrap();
 
         // Flush the buffer
         wal_buffer.flush().await.unwrap();
@@ -622,7 +622,7 @@ mod tests {
 
         // Append entries until we exceed the size threshold
         let mut seq = 1;
-        while wal_buffer.estimated_bytes().await.unwrap() < 115 * 10 {
+        while wal_buffer.estimated_bytes().unwrap() < 115 * 10 {
             let entry = RowEntry::new(
                 Bytes::from(format!("key{}", seq)),
                 ValueDeletable::Value(Bytes::from(format!("value{}", seq))),
@@ -630,10 +630,9 @@ mod tests {
                 None,
                 None,
             );
-            wal_buffer.append(&[entry]).await.unwrap();
+            wal_buffer.append(&[entry]).unwrap();
             wal_buffer
                 .maybe_trigger_flush()
-                .await
                 .unwrap()
                 .await_durable()
                 .await
@@ -659,13 +658,13 @@ mod tests {
                 None,
                 None,
             );
-            wal_buffer.append(&[entry]).await.unwrap();
+            wal_buffer.append(&[entry]).unwrap();
             wal_buffer.flush().await.unwrap();
         }
         assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 100);
 
-        wal_buffer.track_last_applied_seq(50).await;
+        wal_buffer.track_last_applied_seq(50);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
     }
 
@@ -683,10 +682,10 @@ mod tests {
                 None,
                 None,
             );
-            wal_buffer.append(&[entry]).await.unwrap();
+            wal_buffer.append(&[entry]).unwrap();
             wal_buffer.flush().await.unwrap();
         }
-        wal_buffer.track_last_applied_seq(50).await;
+        wal_buffer.track_last_applied_seq(50);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
         assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
 
@@ -695,7 +694,7 @@ mod tests {
             let inner = wal_buffer.inner.write();
             inner.oracle.last_remote_persisted_seq.store(80);
         }
-        wal_buffer.track_last_applied_seq(90).await;
+        wal_buffer.track_last_applied_seq(90);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 20);
     }
 }
