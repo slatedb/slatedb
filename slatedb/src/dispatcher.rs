@@ -145,6 +145,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     /// * `state`: The [DbState] to use for error tracking. If provided, the dispatcher
     ///   will set [DbState::error] when an error is encountered.
+    #[allow(dead_code)]
     pub(crate) fn new(
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
