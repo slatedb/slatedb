@@ -135,7 +135,7 @@ pub(crate) struct SstIterator<'a> {
 }
 
 impl<'a> SstIterator<'a> {
-    pub(crate) async fn new(
+    pub(crate) fn new(
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
@@ -159,7 +159,7 @@ impl<'a> SstIterator<'a> {
         self.view.table_as_ref().id
     }
 
-    pub(crate) async fn new_owned<T: RangeBounds<Bytes>>(
+    pub(crate) fn new_owned<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableHandle,
         table_store: Arc<TableStore>,
@@ -169,7 +169,7 @@ impl<'a> SstIterator<'a> {
             return Ok(None);
         };
         let view = SstView::Owned(Box::new(table), view_range);
-        Ok(Some(Self::new(view, table_store.clone(), options).await?))
+        Ok(Some(Self::new(view, table_store.clone(), options)?))
     }
 
     pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
@@ -178,11 +178,11 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        let iter = Self::new_owned(range, table, table_store, options).await?;
+        let iter = Self::new_owned(range, table, table_store, options)?;
         init_optional_iterator(iter).await
     }
 
-    pub(crate) async fn new_borrowed<T: RangeBounds<Bytes>>(
+    pub(crate) fn new_borrowed<T: RangeBounds<Bytes>>(
         range: T,
         table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
@@ -192,7 +192,7 @@ impl<'a> SstIterator<'a> {
             return Ok(None);
         };
         let view = SstView::Borrowed(table, view_range);
-        Ok(Some(Self::new(view, table_store.clone(), options).await?))
+        Ok(Some(Self::new(view, table_store.clone(), options)?))
     }
 
     #[cfg(test)]
@@ -202,11 +202,11 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        let iter = Self::new_borrowed(range, table, table_store, options).await?;
+        let iter = Self::new_borrowed(range, table, table_store, options)?;
         init_optional_iterator(iter).await
     }
 
-    pub(crate) async fn for_key(
+    pub(crate) fn for_key(
         table: &'a SsTableHandle,
         key: &'a [u8],
         table_store: Arc<TableStore>,
@@ -218,7 +218,6 @@ impl<'a> SstIterator<'a> {
             table_store,
             options,
         )
-        .await
     }
 
     pub(crate) async fn for_key_initialized(
@@ -227,7 +226,7 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        let iter = Self::for_key(table, key, table_store, options).await?;
+        let iter = Self::for_key(table, key, table_store, options)?;
         init_optional_iterator(iter).await
     }
 
