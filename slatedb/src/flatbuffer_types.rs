@@ -14,7 +14,9 @@ use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 
 use crate::compactor_executor::{CompactionJob, CompactionJobSpec};
-use crate::compactor_state::{CompactionState, CompactionStatus, CompactionType, CompactionPlan, SourceId};
+use crate::compactor_state::{
+    CompactionPlan, CompactionState, CompactionStatus, CompactionType, SourceId,
+};
 use crate::record::RecordCodec;
 
 #[path = "./generated/root_generated.rs"]
@@ -934,7 +936,9 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
-    use crate::compactor_state::{Compaction, CompactionSpec, CompactionState, CompactionPlan, CompactionType, SourceId};
+    use crate::compactor_state::{
+        Compaction, CompactionPlan, CompactionSpec, CompactionState, CompactionType, SourceId,
+    };
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{
         CompactionJob, CompactionJobSpec, DbFlatBufferBuilder, FbUlid, FlatBufferBuilder,
@@ -1307,12 +1311,12 @@ mod tests {
             first_key: Some(Bytes::from_static(b"k")),
             ..Default::default()
         };
-        let sst_handle = SsTableHandle::new_compacted(
-            SsTableId::Compacted(ulid::Ulid::new()),
-            sst_info,
-            None,
-        );
-        let sorted_run = SortedRun { id: 7, ssts: vec![sst_handle.clone()] };
+        let sst_handle =
+            SsTableHandle::new_compacted(SsTableId::Compacted(ulid::Ulid::new()), sst_info, None);
+        let sorted_run = SortedRun {
+            id: 7,
+            ssts: vec![sst_handle.clone()],
+        };
 
         // Compaction with both ssts and sorted_runs in spec so sources can be recovered
         let spec = CompactionSpec::SortedRunCompaction {
@@ -1343,7 +1347,10 @@ mod tests {
         let plan = CompactionPlan::new(plan_id, CompactionType::Internal, compaction);
         let mut map = std::collections::HashMap::new();
         map.insert(plan_id, plan);
-        let state = CompactionState { compactor_epoch: 9, compaction_plans: map };
+        let state = CompactionState {
+            compactor_epoch: 9,
+            compaction_plans: map,
+        };
 
         // Encode and decode
         let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&state);
@@ -1354,9 +1361,15 @@ mod tests {
         // Assertions
         assert_eq!(decoded.compactor_epoch, 9);
         assert_eq!(decoded.compaction_plans.len(), 1);
-        let decoded_plan = decoded.compaction_plans.get(&plan_id).expect("plan missing");
+        let decoded_plan = decoded
+            .compaction_plans
+            .get(&plan_id)
+            .expect("plan missing");
         assert_eq!(decoded_plan.id(), plan_id);
-        assert!(matches!(decoded_plan.compaction_type(), CompactionType::Internal));
+        assert!(matches!(
+            decoded_plan.compaction_type(),
+            CompactionType::Internal
+        ));
         let decoded_comp = decoded_plan.compaction();
         assert_eq!(decoded_comp.destination, 3);
         assert_eq!(decoded_comp.job_attempts.len(), 1);
@@ -1364,7 +1377,10 @@ mod tests {
         assert!(decoded_comp.sources.contains(&SourceId::SortedRun(7)));
         // Spec round-trip: one sorted run with one sst
         match decoded_comp.spec {
-            CompactionSpec::SortedRunCompaction { ref ssts, ref sorted_runs } => {
+            CompactionSpec::SortedRunCompaction {
+                ref ssts,
+                ref sorted_runs,
+            } => {
                 assert_eq!(ssts.len(), 1);
                 assert_eq!(sorted_runs.len(), 1);
                 assert_eq!(sorted_runs[0].id, 7);
@@ -1375,7 +1391,10 @@ mod tests {
     #[test]
     fn test_should_map_status_and_type_roundtrip() {
         // Build a compaction marked Completed and External
-        let spec = CompactionSpec::SortedRunCompaction { ssts: vec![], sorted_runs: vec![] };
+        let spec = CompactionSpec::SortedRunCompaction {
+            ssts: vec![],
+            sorted_runs: vec![],
+        };
         let mut compaction = Compaction::new(vec![], spec, 0);
         compaction.status = crate::compactor_state::CompactionStatus::Completed;
 
@@ -1384,16 +1403,28 @@ mod tests {
 
         let mut map = std::collections::HashMap::new();
         map.insert(plan_id, plan);
-        let state = CompactionState { compactor_epoch: 1, compaction_plans: map };
+        let state = CompactionState {
+            compactor_epoch: 1,
+            compaction_plans: map,
+        };
 
         let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&state);
         let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref())
             .expect("invalid FB");
         let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
 
-        let decoded_plan = decoded.compaction_plans.get(&plan_id).expect("plan missing");
-        assert!(matches!(decoded_plan.compaction_type(), CompactionType::External));
+        let decoded_plan = decoded
+            .compaction_plans
+            .get(&plan_id)
+            .expect("plan missing");
+        assert!(matches!(
+            decoded_plan.compaction_type(),
+            CompactionType::External
+        ));
         let decoded_comp = decoded_plan.compaction();
-        assert!(matches!(decoded_comp.status, crate::compactor_state::CompactionStatus::Completed));
+        assert!(matches!(
+            decoded_comp.status,
+            crate::compactor_state::CompactionStatus::Completed
+        ));
     }
 }

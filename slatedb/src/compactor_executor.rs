@@ -275,9 +275,9 @@ impl TokioCompactionExecutorInner {
         let id = compaction.id;
 
         // TODO: Add compaction plan to object store with InProgress status
-        // TODO: Commenting tests fail due to some receiver channel issues. 
+        // TODO: Commenting tests fail due to some receiver channel issues.
         // Would enable it in subsequent PR.
-        
+
         // #[allow(clippy::disallowed_methods)]
         // self.worker_tx
         // .send(CompactorMessage::CompactionStarted {

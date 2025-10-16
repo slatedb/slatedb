@@ -429,7 +429,9 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::compactor::CompactionScheduler;
-    use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, CompactionPlan, CompactionType, SourceId};
+    use crate::compactor_state::{
+        Compaction, CompactionPlan, CompactionSpec, CompactionType, CompactorState, SourceId,
+    };
 
     use crate::clock::DefaultSystemClock;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
@@ -566,15 +568,16 @@ mod tests {
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction_plan = CompactionPlan::new(compaction_id, CompactionType::Internal, create_sr_compaction(state.db_state(), vec![3, 2, 1, 0]));
-        
+        let compaction_plan = CompactionPlan::new(
+            compaction_id,
+            CompactionType::Internal,
+            create_sr_compaction(state.db_state(), vec![3, 2, 1, 0]),
+        );
+
         state.compaction_submitted(compaction_plan.clone());
 
         let id = state
-            .submit_compaction(
-                compaction_job_id,
-                compaction_plan,
-            )
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
 
         assert_eq!(id, compaction_job_id);
@@ -660,13 +663,14 @@ mod tests {
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction_plan = CompactionPlan::new(compaction_id, CompactionType::Internal, create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]));
+        let compaction_plan = CompactionPlan::new(
+            compaction_id,
+            CompactionType::Internal,
+            create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]),
+        );
         state.compaction_submitted(compaction_plan.clone());
         let id = state
-            .submit_compaction(
-                compaction_job_id,
-                compaction_plan,
-            )
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
 
         assert_eq!(id, compaction_job_id);
@@ -701,13 +705,14 @@ mod tests {
 
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction_plan = CompactionPlan::new(compaction_id, CompactionType::Internal, create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]));
+        let compaction_plan = CompactionPlan::new(
+            compaction_id,
+            CompactionType::Internal,
+            create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]),
+        );
         state.compaction_submitted(compaction_plan.clone());
         let id = state
-            .submit_compaction(
-                compaction_job_id,
-                compaction_plan,
-            )
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
 
         assert_eq!(id, compaction_job_id);
