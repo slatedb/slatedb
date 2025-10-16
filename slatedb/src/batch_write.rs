@@ -33,13 +33,11 @@ use log::warn;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use crate::clock::SystemClock;
 use crate::config::WriteOptions;
-use crate::dispatcher::{MessageDispatcher, MessageHandler};
+use crate::dispatcher::MessageHandler;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::{

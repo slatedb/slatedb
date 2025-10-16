@@ -9,7 +9,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
-use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::utils::IdGenerator;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;

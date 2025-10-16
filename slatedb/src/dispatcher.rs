@@ -419,7 +419,7 @@ impl MessageHandlerExecutor {
                 return Err(SlateDBError::BackgroundTaskStarted(name))
             }
             Some(tasks) => tasks,
-            None => return Err(SlateDBError::BackgroundTaskStarted(name)),
+            None => return Err(SlateDBError::BackgroundTaskExecutorStarted),
         };
         let token = CancellationToken::new();
         let mut dispatcher = MessageDispatcher::new_with_fp_registry(

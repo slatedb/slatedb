@@ -139,9 +139,6 @@ pub(crate) enum SlateDBError {
     #[error("manifest update timeout after {timeout:?}")]
     ManifestUpdateTimeout { timeout: Duration },
 
-    #[error("wal buffer already started")]
-    WalBufferAlreadyStarted,
-
     #[error("cannot seek to a key outside the iterator range. key=`{key:?}`, range=`{range:?}`")]
     SeekKeyOutOfRange { key: Vec<u8>, range: BytesRange },
 
@@ -472,7 +469,6 @@ impl From<SlateDBError> for Error {
                 Error::internal(msg).with_source(Box::new(PanicError(err)))
             }
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),
-            SlateDBError::WalBufferAlreadyStarted => Error::internal(msg),
             SlateDBError::ReadChannelError(err) => Error::internal(msg).with_source(Box::new(err)),
             SlateDBError::BackgroundTaskStarted(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskCancelled(_) => Error::internal(msg),

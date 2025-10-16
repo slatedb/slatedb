@@ -67,7 +67,7 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::utils::{MonotonicSeq, SendSafely};
-use crate::wal_buffer::WalBufferManager;
+use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use log::{info, trace, warn};
 
@@ -155,7 +155,6 @@ impl DbInner {
             oracle.clone(),
             table_store.clone(),
             mono_clock.clone(),
-            system_clock.clone(),
             settings.l0_sst_size_bytes,
             settings.flush_interval,
         ));
@@ -652,8 +651,9 @@ impl Db {
             warn!("failed to shutdown writer task [error={:?}]", e);
         }
 
-        let result = self.inner.wal_buffer.close().await;
-        info!("wal buffer task exited [result={:?}]", result);
+        if let Err(e) = self.task_executor.shutdown_task(WAL_BUFFER_TASK_NAME).await {
+            warn!("failed to shutdown wal writer task [error={:?}]", e);
+        }
 
         if let Err(e) = self
             .task_executor
