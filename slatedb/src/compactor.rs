@@ -16,7 +16,9 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, CompactionJob, CompactionJobSpec, TokioCompactionExecutor,
 };
-use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, CompactionPlan, CompactionType, SourceId};
+use crate::compactor_state::{
+    Compaction, CompactionPlan, CompactionSpec, CompactionType, CompactorState, SourceId,
+};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
@@ -474,8 +476,8 @@ impl CompactorEventHandler {
             }
             // Pass compaction plan in here
             let compaction_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let compaction_plan: CompactionPlan = CompactionPlan::new(compaction_id, 
-                CompactionType::Internal, compaction.clone());
+            let compaction_plan: CompactionPlan =
+                CompactionPlan::new(compaction_id, CompactionType::Internal, compaction.clone());
             self.submit_compaction(compaction_plan).await?;
         }
         Ok(())
@@ -490,7 +492,9 @@ impl CompactorEventHandler {
         let db_state = self.state.db_state();
         let compaction = compaction_plan.compaction();
         let (ssts, sorted_runs) = match &compaction.spec {
-            CompactionSpec::SortedRunCompaction { ssts, sorted_runs } => (ssts.to_vec(), sorted_runs.to_vec()),
+            CompactionSpec::SortedRunCompaction { ssts, sorted_runs } => {
+                (ssts.to_vec(), sorted_runs.to_vec())
+            }
         };
         // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
         let is_dest_last_run = db_state.compacted.is_empty()
@@ -516,7 +520,7 @@ impl CompactorEventHandler {
         };
 
         // TODO: Add job attempt to compaction
-        
+
         self.progress_tracker
             .add_job(id, job.estimated_source_bytes());
         let this_executor = self.executor.clone();
@@ -547,8 +551,8 @@ impl CompactorEventHandler {
     }
 
     fn compaction_started(&mut self, id: Ulid) {
-       self.state.compaction_started(id);
-       self.log_compaction_state();
+        self.state.compaction_started(id);
+        self.log_compaction_state();
     }
 
     #[instrument(level = "debug", skip_all, fields(id = %id))]
@@ -580,7 +584,7 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
-        self.state.compaction_submitted(compaction_plan.clone());  
+        self.state.compaction_submitted(compaction_plan.clone());
         // Generate a compactionJob id
         let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
         tracing::Span::current().record("id", tracing::field::display(&id));
@@ -591,7 +595,7 @@ impl CompactorEventHandler {
                 self.start_compaction(id, compaction_plan).await?;
             }
             Err(err) => {
-                 // TODO: Add compaction plan to object store with Failed status
+                // TODO: Add compaction plan to object store with Failed status
                 self.state.remove(&compaction_plan.id());
                 warn!("invalid compaction [error={:?}]", err);
             }

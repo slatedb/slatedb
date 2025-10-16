@@ -19,7 +19,9 @@ use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
-use crate::compactor_state::{Compaction, CompactionSpec, SourceId, CompactionPlan, CompactionType};
+use crate::compactor_state::{
+    Compaction, CompactionPlan, CompactionSpec, CompactionType, SourceId,
+};
 use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -361,16 +363,8 @@ impl CompactionExecuteBench {
 
         let compaction_plan = source_sr_ids.map(|_source_sr_ids| {
             let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let compaction = Compaction::new(
-                sources,
-                spec,
-                destination_sr_id,
-            );
-            CompactionPlan::new(
-                id,
-                CompactionType::Internal,
-                compaction,
-            )
+            let compaction = Compaction::new(sources, spec, destination_sr_id);
+            CompactionPlan::new(id, CompactionType::Internal, compaction)
         });
 
         info!("load compaction job");
