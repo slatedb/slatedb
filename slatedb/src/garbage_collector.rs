@@ -1159,12 +1159,8 @@ mod tests {
         );
         let (_, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(DefaultSystemClock::default());
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(gc),
-            rx,
-            clock,
-            cancellation_token.clone(),
-        );
+        let mut dispatcher =
+            MessageDispatcher::new(Box::new(gc), rx, clock, cancellation_token.clone());
         let jh = tokio::spawn(async move { dispatcher.run().await });
         cancellation_token.cancel();
         let result = jh.await.unwrap();
