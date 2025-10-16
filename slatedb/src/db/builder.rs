@@ -139,6 +139,8 @@ use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::mem_table_flush::MemtableFlusher;
+use crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -481,11 +483,12 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner.wal_buffer.start_background().await?;
         };
 
-        let memtable_flush_task = inner.spawn_memtable_flush_task(
-            manifest,
+        let memtable_flush_handler = Box::new(MemtableFlusher::new(inner.clone(), manifest));
+        task_executor.spawn_on(
+            MEMTABLE_FLUSHER_TASK_NAME.to_string(),
+            memtable_flush_handler,
             memtable_flush_rx,
             &tokio_handle,
-            self.cancellation_token.clone(),
         );
         let write_task =
             inner.spawn_write_task(write_rx, &tokio_handle, self.cancellation_token.clone());
@@ -550,7 +553,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .expect("failed to spawn garbage collector task");
         }
 
-        // Start and monitor background tasks
+        // Monitor background tasks
         task_executor.monitor(&tokio_handle);
 
         // Replay WAL
@@ -567,7 +570,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         Ok(Db {
             inner,
             task_executor,
-            memtable_flush_task: Mutex::new(memtable_flush_task),
             write_task: Mutex::new(write_task),
             compactor_task: Mutex::new(compactor_task),
             cancellation_token: self.cancellation_token,
