@@ -2,14 +2,15 @@ use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
-use crate::dispatcher::MessageDispatcher;
+use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
-use crate::utils::IdGenerator;
+use crate::utils::{IdGenerator, WatchableOnceCell};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -18,9 +19,8 @@ use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
@@ -123,13 +123,8 @@ impl Admin {
     /// # Arguments
     ///
     /// * `gc_opts`: The garbage collector options.
-    /// * `cancellation_token`: The cancellation token to stop the garbage collector.
-    pub async fn run_gc_in_background(
-        &self,
-        gc_opts: GarbageCollectorOptions,
-        cancellation_token: CancellationToken,
-    ) -> Result<(), Box<dyn Error>> {
-        let tracker = TaskTracker::new();
+    ///
+    pub async fn run_gc(&self, gc_opts: GarbageCollectorOptions) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
@@ -140,19 +135,22 @@ impl Admin {
         .build();
 
         let (_, rx) = mpsc::unbounded_channel();
-        let mut gc_dispatcher = MessageDispatcher::new(
-            Box::new(gc),
-            rx,
-            self.system_clock.clone(),
-            cancellation_token,
-        );
+        let error_state = WatchableOnceCell::new();
+        let task_executor = MessageHandlerExecutor::new(error_state, self.system_clock.clone());
 
-        let jh = tracker.spawn(async move { gc_dispatcher.run().await });
-        tracker.close();
-        tracker.wait().await;
-        jh.await
-            .expect("Failed to finish garbage collector task")
-            .map_err(Into::into)
+        task_executor
+            .spawn_on(
+                GC_TASK_NAME.to_string(),
+                Box::new(gc),
+                rx,
+                &Handle::current(),
+            )
+            .map_err(Into::<crate::Error>::into)?;
+
+        task_executor
+            .join_task(GC_TASK_NAME)
+            .await
+            .map_err(Into::<crate::Error>::into)
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
