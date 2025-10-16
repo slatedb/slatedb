@@ -484,12 +484,14 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         let memtable_flush_handler = Box::new(MemtableFlusher::new(inner.clone(), manifest));
-        task_executor.spawn_on(
-            MEMTABLE_FLUSHER_TASK_NAME.to_string(),
-            memtable_flush_handler,
-            memtable_flush_rx,
-            &tokio_handle,
-        );
+        task_executor
+            .spawn_on(
+                MEMTABLE_FLUSHER_TASK_NAME.to_string(),
+                memtable_flush_handler,
+                memtable_flush_rx,
+                &tokio_handle,
+            )
+            .expect("failed to spawn memtable flusher task");
         let write_task =
             inner.spawn_write_task(write_rx, &tokio_handle, self.cancellation_token.clone());
 
