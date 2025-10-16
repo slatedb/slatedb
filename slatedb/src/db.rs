@@ -544,7 +544,7 @@ impl DbInner {
 
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
-    task_executor: MessageHandlerExecutor,
+    task_executor: Arc<MessageHandlerExecutor>,
     cancellation_token: CancellationToken,
 }
 
