@@ -375,7 +375,7 @@ pub(crate) struct MessageHandlerExecutor {
     tasks: Mutex<Option<JoinMap<String, Result<(), SlateDBError>>>>,
     tokens: SkipMap<String, CancellationToken>,
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
-    error_state: WatchableOnceCell<Result<(), SlateDBError>>,
+    error_state: WatchableOnceCell<SlateDBError>,
     clock: Arc<dyn SystemClock>,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
@@ -383,14 +383,14 @@ pub(crate) struct MessageHandlerExecutor {
 
 impl MessageHandlerExecutor {
     pub(crate) fn new(
-        error_state: WatchableOnceCell<Result<(), SlateDBError>>,
+        error_state: WatchableOnceCell<SlateDBError>,
         clock: Arc<dyn SystemClock>,
     ) -> Self {
         Self::new_with_fp_registry(error_state, clock, Arc::new(FailPointRegistry::new()))
     }
 
     pub(crate) fn new_with_fp_registry(
-        error_state: WatchableOnceCell<Result<(), SlateDBError>>,
+        error_state: WatchableOnceCell<SlateDBError>,
         clock: Arc<dyn SystemClock>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
@@ -436,9 +436,7 @@ impl MessageHandlerExecutor {
         let task_future = async move {
             let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
             let run_result = unwrap_unwind(this_name.clone(), run_unwind_result);
-            if let Err(ref run_error) = run_result {
-                this_error_state.write(Err(run_error.clone()));
-            }
+            this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
             let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(run_result.clone()))
                 .catch_unwind()
                 .await;
