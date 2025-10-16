@@ -134,9 +134,10 @@ use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::CoreDbState;
-use crate::dispatcher::MessageDispatcher;
+use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
+use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
@@ -473,6 +474,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
 
         // Setup background tasks
+        let task_executor =
+            MessageHandlerExecutor::new(inner.clone().state.read().error(), system_clock.clone());
         let tokio_handle = Handle::current();
         if inner.wal_enabled {
             inner.wal_buffer.start_background().await?;
@@ -531,29 +534,24 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
         // If either are set, we need to initialize the garbage collector.
-        let garbage_collector_task =
-            if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
-                let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
-                let gc = GarbageCollector::new(
-                    manifest_store.clone(),
-                    uncached_table_store.clone(),
-                    gc_options,
-                    inner.stat_registry.clone(),
-                    system_clock.clone(),
-                );
-                // Garbage collector only uses tickers, so pass in a dummy rx channel
-                let (_, rx) = mpsc::unbounded_channel();
-                let mut gc_dispatcher = MessageDispatcher::new(
-                    Box::new(gc),
-                    rx,
-                    system_clock.clone(),
-                    self.cancellation_token.clone(),
-                );
-                let garbage_collector_task = tokio::spawn(async move { gc_dispatcher.run().await });
-                Some(garbage_collector_task)
-            } else {
-                None
-            };
+        if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
+            let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
+            let gc = GarbageCollector::new(
+                manifest_store.clone(),
+                uncached_table_store.clone(),
+                gc_options,
+                inner.stat_registry.clone(),
+                system_clock.clone(),
+            );
+            // Garbage collector only uses tickers, so pass in a dummy rx channel
+            let (_, rx) = mpsc::unbounded_channel();
+            task_executor
+                .spawn_on(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)
+                .expect("failed to spawn garbage collector task");
+        }
+
+        // Start and monitor background tasks
+        task_executor.monitor(&tokio_handle);
 
         // Replay WAL
         inner.replay_wal().await?;
@@ -568,10 +566,10 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create and return the Db instance
         Ok(Db {
             inner,
+            task_executor,
             memtable_flush_task: Mutex::new(memtable_flush_task),
             write_task: Mutex::new(write_task),
             compactor_task: Mutex::new(compactor_task),
-            garbage_collector_task: Mutex::new(garbage_collector_task),
             cancellation_token: self.cancellation_token,
         })
     }

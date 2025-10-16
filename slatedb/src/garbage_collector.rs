@@ -37,6 +37,7 @@ mod manifest_gc;
 pub mod stats;
 mod wal_gc;
 
+pub const GC_TASK_NAME: &str = "garbage_collector";
 pub const DEFAULT_MIN_AGE: Duration = Duration::from_secs(86_400);
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
 
