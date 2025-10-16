@@ -56,7 +56,7 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
-use crate::mem_table_flush::MemtableFlushMsg;
+use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
 use crate::oracle::Oracle;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -545,7 +545,6 @@ impl DbInner {
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: MessageHandlerExecutor,
-    memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     compactor_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     cancellation_token: CancellationToken,
@@ -663,14 +662,12 @@ impl Db {
         info!("wal buffer task exited [result={:?}]", result);
 
         // Shutdown the memtable flush thread.
-        if let Some(memtable_flush_task) = {
-            let mut memtable_flush_task = self.memtable_flush_task.lock();
-            memtable_flush_task.take()
-        } {
-            let result = memtable_flush_task
-                .await
-                .expect("failed to join memtable flush thread");
-            info!("mem table flush task exited [result={:?}]", result);
+        if let Err(e) = self
+            .task_executor
+            .shutdown_task(MEMTABLE_FLUSHER_TASK_NAME)
+            .await
+        {
+            warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
         self.inner.state.write().error().write(SlateDBError::Closed);

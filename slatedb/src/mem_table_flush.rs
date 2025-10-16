@@ -19,6 +19,8 @@ use tokio::sync::oneshot::Sender;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
+pub(crate) const MEMTABLE_FLUSHER_TASK_NAME: &str = "memtable_writer";
+
 #[derive(Debug)]
 pub(crate) enum MemtableFlushMsg {
     FlushImmutableMemtables {
@@ -37,6 +39,10 @@ pub(crate) struct MemtableFlusher {
 }
 
 impl MemtableFlusher {
+    pub(crate) fn new(db_inner: Arc<DbInner>, manifest: FenceableManifest) -> Self {
+        Self { db_inner, manifest }
+    }
+
     pub(crate) async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
         self.manifest.refresh().await?;
         let mut wguard_state = self.db_inner.state.write();
@@ -279,27 +285,5 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
             imm_table.table().notify_durable(Err(error.clone()));
         }
         Ok(())
-    }
-}
-
-impl DbInner {
-    pub(crate) fn spawn_memtable_flush_task(
-        self: &Arc<Self>,
-        manifest: FenceableManifest,
-        flush_rx: UnboundedReceiver<MemtableFlushMsg>,
-        tokio_handle: &Handle,
-        cancellation_token: CancellationToken,
-    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
-        let memtable_flush_handler = MemtableFlusher {
-            db_inner: self.clone(),
-            manifest,
-        };
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(memtable_flush_handler),
-            flush_rx,
-            self.system_clock.clone(),
-            cancellation_token.clone(),
-        );
-        Some(tokio_handle.spawn(async move { dispatcher.run().await }))
     }
 }
