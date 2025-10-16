@@ -14,7 +14,7 @@ use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 
 use crate::compactor_executor::{CompactionJob, CompactionJobSpec};
-use crate::compactor_state::{CompactionState, CompactionStatus, CompactionType, SourceId};
+use crate::compactor_state::{CompactionState, CompactionStatus, CompactionType, CompactionPlan, SourceId};
 use crate::record::RecordCodec;
 
 #[path = "./generated/root_generated.rs"]
@@ -301,22 +301,25 @@ impl FlatBufferCompactionStateCodec {
     pub fn compaction_state(fb_compaction_state: &FbCompactionState) -> CompactionState {
         CompactionState {
             compactor_epoch: fb_compaction_state.compactor_epoch(),
-            compactions: fb_compaction_state
+            compaction_plans: fb_compaction_state
                 .recent_compactions()
                 .iter()
                 .map(|c| {
                     let fb_ulid = c.compaction_id();
                     let compaction_id = fb_ulid.to_ulid();
-                    let comp = Compaction {
-                        id: compaction_id,
+                    let compaction = Compaction {
                         status: Self::get_status(c.status()),
                         sources: Self::get_sources(&c),
                         destination: c.destination(),
-                        compaction_type: Self::get_compaction_type(c.compaction_type()),
                         job_attempts: Self::get_job_attempts(&c),
                         spec: Self::get_spec(&c),
                     };
-                    (compaction_id, comp)
+                    let compaction_plan = CompactionPlan::new(
+                        compaction_id,
+                        Self::get_compaction_type(c.compaction_type()),
+                        compaction,
+                    );
+                    (compaction_id, compaction_plan)
                 })
                 .collect(),
         }
@@ -738,7 +741,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
     }
 
     fn create_compaction_state(&mut self, compaction_state: &CompactionState) -> Bytes {
-        let compactions = self.add_compactions(&compaction_state.compactions);
+        let compactions = self.add_compactions(&compaction_state.compaction_plans);
         let compaction_state = FbCompactionState::create(
             &mut self.builder,
             &CompactionStateArgs {
@@ -754,18 +757,19 @@ impl<'b> DbFlatBufferBuilder<'b> {
 
     fn add_compactions(
         &mut self,
-        compactions: &HashMap<Ulid, Compaction>,
+        compaction_plans: &HashMap<Ulid, CompactionPlan>,
     ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbCompaction<'b>>>> {
         let mut compactions_fb_vec: Vec<WIPOffset<FbCompaction>> =
-            Vec::<WIPOffset<FbCompaction>>::with_capacity(compactions.len());
-        for compaction in compactions.values() {
-            compactions_fb_vec.push(self.add_compaction(compaction));
+            Vec::<WIPOffset<FbCompaction>>::with_capacity(compaction_plans.len());
+        for compaction_plan in compaction_plans.values() {
+            compactions_fb_vec.push(self.add_compaction(compaction_plan));
         }
         self.builder.create_vector(compactions_fb_vec.as_ref())
     }
 
-    fn add_compaction(&mut self, compaction: &Compaction) -> WIPOffset<FbCompaction<'b>> {
-        let compaction_id = self.add_ulid(compaction.id);
+    fn add_compaction(&mut self, compaction_plan: &CompactionPlan) -> WIPOffset<FbCompaction<'b>> {
+        let compaction_id = self.add_ulid(compaction_plan.id());
+        let compaction = compaction_plan.compaction();
         let ssts = self
             .builder
             .create_vector::<WIPOffset<CompactedSsTable<'b>>>(&[]);
@@ -776,7 +780,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 ssts: Some(ssts),
             },
         );
-        let compaction_type = match compaction.compaction_type {
+        let compaction_type = match compaction_plan.compaction_type() {
             CompactionType::Internal => FbCompactionType::Internal,
             CompactionType::External => FbCompactionType::External,
         };
@@ -788,6 +792,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         builder.add_compaction_type(compaction_type);
         let fb_status = match compaction.status {
             CompactionStatus::Submitted => FbCompactionStatus::Submitted,
+            CompactionStatus::Pending => FbCompactionStatus::Pending,
             CompactionStatus::InProgress => FbCompactionStatus::InProgress,
             CompactionStatus::Completed => FbCompactionStatus::Completed,
             CompactionStatus::Failed => FbCompactionStatus::Failed,
@@ -929,7 +934,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
-    use crate::compactor_state::{Compaction, CompactionSpec, CompactionState, SourceId};
+    use crate::compactor_state::{Compaction, CompactionSpec, CompactionState, CompactionPlan, CompactionType, SourceId};
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{
         CompactionJob, CompactionJobSpec, DbFlatBufferBuilder, FbUlid, FlatBufferBuilder,
@@ -1186,7 +1191,7 @@ mod tests {
         let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
 
         assert_eq!(decoded.compactor_epoch, 42);
-        assert_eq!(decoded.compactions.len(), 0);
+        assert_eq!(decoded.compaction_plans.len(), 0);
     }
 
     // TODO: Add db_state and compaction details for the test
@@ -1213,10 +1218,13 @@ mod tests {
         };
         let compaction = Compaction::new(vec![SourceId::Sst(ulid::Ulid::new())], spec, 0);
 
+        let id = ulid::Ulid::new();
+        let compaction_plan = CompactionPlan::new(id, CompactionType::Internal, compaction.clone());
+
         // Build a LinearCompactionJob with empty inputs
         let job = CompactionJob {
             id: ulid::Ulid::new(),
-            compaction_id: compaction.id,
+            compaction_id: compaction_plan.id(),
             destination: compaction.destination,
             ssts: vec![sst_handle.clone()],
             sorted_runs: vec![sorted_run.clone()],
@@ -1243,9 +1251,9 @@ mod tests {
         let (_jty, _jval) = db.add_compaction_job_spec(&job.spec);
 
         // Compaction and compactions vector
-        let _fb_comp = db.add_compaction(&compaction);
+        let _fb_comp = db.add_compaction(&compaction_plan);
         let mut map = std::collections::HashMap::new();
-        map.insert(compaction.id, compaction);
+        map.insert(compaction_plan.id(), compaction_plan);
         let _fb_vec = db.add_compactions(&map);
 
         // Compaction job helpers
@@ -1255,7 +1263,7 @@ mod tests {
         // Create compaction state buffer
         let state = CompactionState {
             compactor_epoch: 1,
-            compactions: map,
+            compaction_plans: map,
         };
         let _bytes = db.create_compaction_state(&state);
 
@@ -1290,5 +1298,102 @@ mod tests {
         let decoded = codec.decode(&bytes).expect("decode");
 
         assert_eq!(decoded.compactor_epoch, 7);
+    }
+
+    #[test]
+    fn test_should_roundtrip_compaction_state_with_plan_and_job() {
+        // Build minimal SST handle and SortedRun to populate spec and sources
+        let sst_info = SsTableInfo {
+            first_key: Some(Bytes::from_static(b"k")),
+            ..Default::default()
+        };
+        let sst_handle = SsTableHandle::new_compacted(
+            SsTableId::Compacted(ulid::Ulid::new()),
+            sst_info,
+            None,
+        );
+        let sorted_run = SortedRun { id: 7, ssts: vec![sst_handle.clone()] };
+
+        // Compaction with both ssts and sorted_runs in spec so sources can be recovered
+        let spec = CompactionSpec::SortedRunCompaction {
+            ssts: vec![sst_handle.clone()],
+            sorted_runs: vec![sorted_run.clone()],
+        };
+        let mut compaction = Compaction::new(vec![SourceId::SortedRun(7)], spec, 3);
+
+        // One job attempt snapshot
+        let plan_id = ulid::Ulid::new();
+        let job = CompactionJob {
+            id: ulid::Ulid::new(),
+            compaction_id: plan_id,
+            destination: 3,
+            ssts: vec![sst_handle.clone()],
+            sorted_runs: vec![sorted_run.clone()],
+            compaction_ts: 0,
+            is_dest_last_run: false,
+            retention_min_seq: None,
+            spec: CompactionJobSpec::LinearCompactionJob {
+                completed_input_sst_ids: vec![],
+                completed_input_sr_ids: vec![],
+            },
+        };
+        compaction.job_attempts.push(job);
+
+        // Plan and state
+        let plan = CompactionPlan::new(plan_id, CompactionType::Internal, compaction);
+        let mut map = std::collections::HashMap::new();
+        map.insert(plan_id, plan);
+        let state = CompactionState { compactor_epoch: 9, compaction_plans: map };
+
+        // Encode and decode
+        let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&state);
+        let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref())
+            .expect("invalid FB");
+        let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
+
+        // Assertions
+        assert_eq!(decoded.compactor_epoch, 9);
+        assert_eq!(decoded.compaction_plans.len(), 1);
+        let decoded_plan = decoded.compaction_plans.get(&plan_id).expect("plan missing");
+        assert_eq!(decoded_plan.id(), plan_id);
+        assert!(matches!(decoded_plan.compaction_type(), CompactionType::Internal));
+        let decoded_comp = decoded_plan.compaction();
+        assert_eq!(decoded_comp.destination, 3);
+        assert_eq!(decoded_comp.job_attempts.len(), 1);
+        // Sources should include the SR id from spec
+        assert!(decoded_comp.sources.contains(&SourceId::SortedRun(7)));
+        // Spec round-trip: one sorted run with one sst
+        match decoded_comp.spec {
+            CompactionSpec::SortedRunCompaction { ref ssts, ref sorted_runs } => {
+                assert_eq!(ssts.len(), 1);
+                assert_eq!(sorted_runs.len(), 1);
+                assert_eq!(sorted_runs[0].id, 7);
+            }
+        }
+    }
+
+    #[test]
+    fn test_should_map_status_and_type_roundtrip() {
+        // Build a compaction marked Completed and External
+        let spec = CompactionSpec::SortedRunCompaction { ssts: vec![], sorted_runs: vec![] };
+        let mut compaction = Compaction::new(vec![], spec, 0);
+        compaction.status = crate::compactor_state::CompactionStatus::Completed;
+
+        let plan_id = ulid::Ulid::new();
+        let plan = CompactionPlan::new(plan_id, CompactionType::External, compaction);
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(plan_id, plan);
+        let state = CompactionState { compactor_epoch: 1, compaction_plans: map };
+
+        let bytes = FlatBufferCompactionStateCodec::create_compaction_state(&state);
+        let fb = flatbuffers::root::<root_generated::CompactionState>(bytes.as_ref())
+            .expect("invalid FB");
+        let decoded = FlatBufferCompactionStateCodec::compaction_state(&fb);
+
+        let decoded_plan = decoded.compaction_plans.get(&plan_id).expect("plan missing");
+        assert!(matches!(decoded_plan.compaction_type(), CompactionType::External));
+        let decoded_comp = decoded_plan.compaction();
+        assert!(matches!(decoded_comp.status, crate::compactor_state::CompactionStatus::Completed));
     }
 }

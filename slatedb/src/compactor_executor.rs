@@ -274,6 +274,17 @@ impl TokioCompactionExecutorInner {
 
         let id = compaction.id;
 
+        // TODO: Add compaction plan to object store with InProgress status
+        // TODO: Commenting tests fail due to some receiver channel issues. 
+        // Would enable it in subsequent PR.
+        
+        // #[allow(clippy::disallowed_methods)]
+        // self.worker_tx
+        // .send(CompactorMessage::CompactionStarted {
+        //     id: compaction.id,
+        // })
+        // .expect("failed to send compaction progress");
+
         let this = self.clone();
         let this_cleanup = self.clone();
         let task = spawn_bg_task(

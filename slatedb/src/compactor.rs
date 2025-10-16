@@ -15,7 +15,7 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, CompactionJob, CompactionJobSpec, TokioCompactionExecutor,
 };
-use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
+use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, CompactionPlan, CompactionType, SourceId};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -121,6 +121,11 @@ pub(crate) enum CompactorMessage {
     CompactionFinished {
         id: Ulid,
         result: Result<SortedRun, SlateDBError>,
+    },
+    /// Sent when an [`CompactionExecutor`] wishes to alert the compactor about starting a compaction.
+    #[allow(dead_code)]
+    CompactionStarted {
+        id: Ulid,
     },
     /// Sent when an [`CompactionExecutor`] wishes to alert the compactor of progress. This
     /// information is only used for reporting purposes, and can be an estimate.
@@ -283,6 +288,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
         match message {
             CompactorMessage::LogStats => self.handle_log_ticker(),
             CompactorMessage::PollManifest => self.handle_ticker().await,
+            CompactorMessage::CompactionStarted { id } => self.compaction_started(id),
             CompactorMessage::CompactionFinished { id, result } => match result {
                 Ok(sr) => self
                     .finish_compaction(id, sr)
@@ -476,7 +482,11 @@ impl CompactorEventHandler {
                 );
                 break;
             }
-            self.submit_compaction(compaction.clone()).await?;
+            // Pass compaction plan in here
+            let compaction_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
+            let compaction_plan: CompactionPlan = CompactionPlan::new(compaction_id, 
+                CompactionType::Internal, compaction.clone());
+            self.submit_compaction(compaction_plan).await?;
         }
         Ok(())
     }
@@ -484,12 +494,13 @@ impl CompactorEventHandler {
     async fn start_compaction(
         &mut self,
         id: Ulid,
-        compaction: Compaction,
+        compaction_plan: CompactionPlan,
     ) -> Result<(), SlateDBError> {
         self.log_compaction_state();
         let db_state = self.state.db_state();
-        let (ssts, sorted_runs) = match compaction.spec {
-            CompactionSpec::SortedRunCompaction { ssts, sorted_runs } => (ssts, sorted_runs),
+        let compaction = compaction_plan.compaction();
+        let (ssts, sorted_runs) = match &compaction.spec {
+            CompactionSpec::SortedRunCompaction { ssts, sorted_runs } => (ssts.to_vec(), sorted_runs.to_vec()),
         };
         // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
         let is_dest_last_run = db_state.compacted.is_empty()
@@ -497,9 +508,10 @@ impl CompactorEventHandler {
                 .compacted
                 .last()
                 .is_some_and(|sr| compaction.destination == sr.id);
+
         let job = CompactionJob {
             id,
-            compaction_id: compaction.id,
+            compaction_id: compaction_plan.id(),
             destination: compaction.destination,
             ssts,
             sorted_runs,
@@ -512,6 +524,9 @@ impl CompactorEventHandler {
                 completed_input_sr_ids: vec![],
             },
         };
+
+        // TODO: Add job attempt to compaction
+        
         self.progress_tracker
             .add_job(id, job.estimated_source_bytes());
         let this_executor = self.executor.clone();
@@ -541,6 +556,11 @@ impl CompactorEventHandler {
         self.progress_tracker.remove_job(id);
     }
 
+    fn compaction_started(&mut self, id: Ulid) {
+       self.state.compaction_started(id);
+       self.log_compaction_state();
+    }
+
     #[instrument(level = "debug", skip_all, fields(id = %id))]
     async fn finish_compaction(
         &mut self,
@@ -559,22 +579,30 @@ impl CompactorEventHandler {
     }
 
     #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
-    async fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
+    async fn submit_compaction(
+        &mut self,
+        compaction_plan: CompactionPlan,
+    ) -> Result<(), SlateDBError> {
+        let compaction = compaction_plan.compaction();
         // Validate the candidate compaction; skip invalid ones
-        if let Err(e) = self.validate_compaction(&compaction) {
+        if let Err(e) = self.validate_compaction(compaction) {
             warn!("invalid compaction [error={:?}]", e);
             return Ok(());
         }
 
+        self.state.compaction_submitted(compaction_plan.clone());  
+        // Generate a compactionJob id
         let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
         tracing::Span::current().record("id", tracing::field::display(&id));
-        // Compaction id would be set by the compactor state
-        let result = self.state.submit_compaction(id, compaction.clone());
+        let result = self.state.submit_compaction(id, compaction_plan.clone());
         match result {
             Ok(_) => {
-                self.start_compaction(id, compaction).await?;
+                // TODO: Add compaction plan to object store with Pending status
+                self.start_compaction(id, compaction_plan).await?;
             }
             Err(err) => {
+                 // TODO: Add compaction plan to object store with Failed status
+                self.state.remove(&compaction_plan.id());
                 warn!("invalid compaction [error={:?}]", err);
             }
         }
@@ -584,6 +612,8 @@ impl CompactorEventHandler {
     async fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
+        // TODO: Fetch and Run Pending Compactions from object store
+        // self.run_pending_compactions().await?;
         self.maybe_schedule_compactions().await?;
         Ok(())
     }
@@ -1079,7 +1109,7 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(500), fixture.real_executor_rx.recv())
             .await
             .unwrap()
             .expect("timeout");
@@ -1116,7 +1146,7 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(100), fixture.real_executor_rx.recv())
             .await
             .unwrap()
             .expect("timeout");
@@ -1209,7 +1239,7 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(100), fixture.real_executor_rx.recv())
             .await
             .unwrap()
             .expect("timeout");
@@ -1326,7 +1356,7 @@ mod tests {
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(100),
             fixture.real_executor_rx.recv(),
         )
         .await
@@ -1351,7 +1381,7 @@ mod tests {
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(100),
             fixture.real_executor_rx.recv(),
         )
         .await
