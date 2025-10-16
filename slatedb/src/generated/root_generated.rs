@@ -374,11 +374,12 @@ impl flatbuffers::SimpleToVerifyInSlice for CompactionType {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_COMPACTION_STATUS: i8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_COMPACTION_STATUS: i8 = 3;
+pub const ENUM_MAX_COMPACTION_STATUS: i8 = 4;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_COMPACTION_STATUS: [CompactionStatus; 4] = [
+pub const ENUM_VALUES_COMPACTION_STATUS: [CompactionStatus; 5] = [
   CompactionStatus::Submitted,
+  CompactionStatus::Pending,
   CompactionStatus::InProgress,
   CompactionStatus::Completed,
   CompactionStatus::Failed,
@@ -390,14 +391,16 @@ pub struct CompactionStatus(pub i8);
 #[allow(non_upper_case_globals)]
 impl CompactionStatus {
   pub const Submitted: Self = Self(0);
-  pub const InProgress: Self = Self(1);
-  pub const Completed: Self = Self(2);
-  pub const Failed: Self = Self(3);
+  pub const Pending: Self = Self(1);
+  pub const InProgress: Self = Self(2);
+  pub const Completed: Self = Self(3);
+  pub const Failed: Self = Self(4);
 
   pub const ENUM_MIN: i8 = 0;
-  pub const ENUM_MAX: i8 = 3;
+  pub const ENUM_MAX: i8 = 4;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::Submitted,
+    Self::Pending,
     Self::InProgress,
     Self::Completed,
     Self::Failed,
@@ -406,6 +409,7 @@ impl CompactionStatus {
   pub fn variant_name(self) -> Option<&'static str> {
     match self {
       Self::Submitted => Some("Submitted"),
+      Self::Pending => Some("Pending"),
       Self::InProgress => Some("InProgress"),
       Self::Completed => Some("Completed"),
       Self::Failed => Some("Failed"),

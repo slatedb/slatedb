@@ -5,6 +5,7 @@ enum CompactionType : byte { Internal, External, }
 
 enum CompactionStatus : byte {
     Submitted,      // Waiting to be scheduled
+    Pending,        // Waiting to be executed
     InProgress,     // Currently executing
     Completed,      // Successfully finished
     Failed,         // Failed with error

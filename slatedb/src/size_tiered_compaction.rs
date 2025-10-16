@@ -429,7 +429,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::compactor::CompactionScheduler;
-    use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
+    use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, CompactionPlan, CompactionType, SourceId};
 
     use crate::clock::DefaultSystemClock;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
@@ -516,8 +516,7 @@ mod tests {
         // then:
         assert_eq!(compactions.len(), 1);
         let compaction = compactions.first().unwrap();
-        let mut expected_compaction = create_sr_compaction(state.db_state(), vec![4, 3, 2, 1, 0]);
-        expected_compaction.id = compaction.id;
+        let expected_compaction = create_sr_compaction(state.db_state(), vec![4, 3, 2, 1, 0]);
 
         assert_eq!(compaction.clone(), expected_compaction,)
     }
@@ -544,8 +543,7 @@ mod tests {
         assert_eq!(compactions.len(), 1);
 
         let compaction = compactions.first().unwrap();
-        let mut expected_compaction = create_sr_compaction(state.db_state(), vec![4, 3, 2, 1]);
-        expected_compaction.id = compaction.id;
+        let expected_compaction = create_sr_compaction(state.db_state(), vec![4, 3, 2, 1]);
         assert_eq!(compaction.clone(), expected_compaction)
     }
 
@@ -567,14 +565,19 @@ mod tests {
         let system_clock = Arc::new(DefaultSystemClock::new());
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_plan = CompactionPlan::new(compaction_id, CompactionType::Internal, create_sr_compaction(state.db_state(), vec![3, 2, 1, 0]));
+        
+        state.compaction_submitted(compaction_plan.clone());
+
         let id = state
             .submit_compaction(
-                compaction_id,
-                create_sr_compaction(state.db_state(), vec![3, 2, 1, 0]),
+                compaction_job_id,
+                compaction_plan,
             )
             .unwrap();
 
-        assert_eq!(id, compaction_id);
+        assert_eq!(id, compaction_job_id);
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
@@ -623,10 +626,8 @@ mod tests {
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
-        let mut expected_compaction =
+        let expected_compaction =
             create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]);
-
-        expected_compaction.id = compactions.first().unwrap().id;
 
         // then:
         assert_eq!(compactions.len(), 1);
@@ -658,14 +659,17 @@ mod tests {
         let system_clock = Arc::new(DefaultSystemClock::new());
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_plan = CompactionPlan::new(compaction_id, CompactionType::Internal, create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]));
+        state.compaction_submitted(compaction_plan.clone());
         let id = state
             .submit_compaction(
-                compaction_id,
-                create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]),
+                compaction_job_id,
+                compaction_plan,
             )
             .unwrap();
 
-        assert_eq!(id, compaction_id);
+        assert_eq!(id, compaction_job_id);
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
@@ -695,16 +699,18 @@ mod tests {
         let rand = Arc::new(DbRand::default());
         let system_clock = Arc::new(DefaultSystemClock::new());
 
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-
+        let compaction_plan = CompactionPlan::new(compaction_id, CompactionType::Internal, create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]));
+        state.compaction_submitted(compaction_plan.clone());
         let id = state
             .submit_compaction(
-                compaction_id,
-                create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]),
+                compaction_job_id,
+                compaction_plan,
             )
             .unwrap();
 
-        assert_eq!(id, compaction_id);
+        assert_eq!(id, compaction_job_id);
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
@@ -738,16 +744,13 @@ mod tests {
         // then:
         assert_eq!(compactions.len(), 3);
         let compaction = compactions.first().unwrap();
-        let mut expected_l0_compaction = create_l0_compaction(&l0, 11);
-        expected_l0_compaction.id = compaction.id;
+        let expected_l0_compaction = create_l0_compaction(&l0, 11);
         assert_eq!(compaction.clone(), expected_l0_compaction);
         let compaction = compactions.get(1).unwrap();
-        let mut expected_sr0_compaction = create_sr_compaction(state.db_state(), vec![10, 9, 8, 7]);
-        expected_sr0_compaction.id = compaction.id;
+        let expected_sr0_compaction = create_sr_compaction(state.db_state(), vec![10, 9, 8, 7]);
         assert_eq!(compaction.clone(), expected_sr0_compaction);
         let compaction = compactions.get(2).unwrap();
-        let mut expected_sr1_compaction = create_sr_compaction(state.db_state(), vec![3, 2, 1, 0]);
-        expected_sr1_compaction.id = compaction.id;
+        let expected_sr1_compaction = create_sr_compaction(state.db_state(), vec![3, 2, 1, 0]);
         assert_eq!(compaction.clone(), expected_sr1_compaction);
     }
 
