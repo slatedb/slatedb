@@ -481,27 +481,24 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
 
         // Setup background tasks
+        let tokio_handle = Handle::current();
         let task_executor =
             MessageHandlerExecutor::new(inner.clone().state.read().error(), system_clock.clone());
-        let tokio_handle = Handle::current();
         if inner.wal_enabled {
             inner.wal_buffer.start_background().await?;
         };
-
-        let memtable_flush_handler = Box::new(MemtableFlusher::new(inner.clone(), manifest));
         task_executor
             .spawn_on(
                 MEMTABLE_FLUSHER_TASK_NAME.to_string(),
-                memtable_flush_handler,
+                Box::new(MemtableFlusher::new(inner.clone(), manifest)),
                 memtable_flush_rx,
                 &tokio_handle,
             )
             .expect("failed to spawn memtable flusher task");
-        let write_batch_event_handler = Box::new(WriteBatchEventHandler::new(inner.clone()));
         task_executor
             .spawn_on(
                 WRITE_BATCH_TASK_NAME.to_string(),
-                write_batch_event_handler,
+                Box::new(WriteBatchEventHandler::new(inner.clone())),
                 write_rx,
                 &tokio_handle,
             )
