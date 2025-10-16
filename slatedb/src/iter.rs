@@ -50,12 +50,22 @@ pub trait KeyValueIterator: Send + Sync {
     ///
     /// Will fail with `SlateDBError::IteratorNotInitialized` if the iterator is
     /// not yet initialized.
+    ///
+    /// NOTE: we don't initialize the iterator when calling next_entry and instead
+    /// require the caller to explicitly initialize the iterator. This is in order
+    /// to ensure that optimizations which eagerly initialize the iterator are not
+    /// lost in a refactor and instead would throw errors.
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
 
     /// Seek to the next (inclusive) key
     ///
     /// Will fail with `SlateDBError::IteratorNotInitialized` if the iterator is
     /// not yet initialized.
+    ///
+    /// NOTE: we don't initialize the iterator when calling seek and instead
+    /// require the caller to explicitly initialize the iterator. This is in order
+    /// to ensure that optimizations which eagerly initialize the iterator are not
+    /// lost in a refactor and instead would throw errors.
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError>;
 }
 

@@ -195,7 +195,6 @@ impl<'a> SstIterator<'a> {
         Ok(Some(Self::new(view, table_store.clone(), options)?))
     }
 
-    #[cfg(test)]
     pub(crate) async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
         range: T,
         table: &'a SsTableHandle,
@@ -380,8 +379,8 @@ impl<'a> SstIterator<'a> {
 #[async_trait]
 impl KeyValueIterator for SstIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
-        self.fetch_index().await?;
         if !self.state.is_initialized() {
+            self.fetch_index().await?;
             self.advance_block().await?;
         }
         Ok(())

@@ -152,7 +152,8 @@ impl TokioCompactionExecutorInner {
         let max_parallel = compute_max_parallel(compaction.ssts.len(), &compaction.sorted_runs, 4);
         // L0 (borrowed)
         let l0_iters_futures = build_concurrent(compaction.ssts.iter(), max_parallel, |h| async {
-            SstIterator::new_borrowed(.., h, self.table_store.clone(), sst_iter_options)
+            SstIterator::new_borrowed_initialized(.., h, self.table_store.clone(), sst_iter_options)
+                .await
         });
 
         // SR (borrowed)
