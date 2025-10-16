@@ -125,7 +125,7 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 /// details on its behavior.
 ///
 /// [crate::dispatcher] contains a complete code example.
-pub(crate) struct MessageDispatcher<T: Send + std::fmt::Debug> {
+pub struct MessageDispatcher<T: Send + std::fmt::Debug> {
     handler: Box<dyn MessageHandler<T>>,
     rx: mpsc::UnboundedReceiver<T>,
     clock: Arc<dyn SystemClock>,
@@ -146,7 +146,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `state`: The [DbState] to use for error tracking. If provided, the dispatcher
     ///   will set [DbState::error] when an error is encountered.
     #[allow(dead_code)]
-    pub(crate) fn new(
+    pub fn new(
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
@@ -173,7 +173,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     /// * `state`: The [DbState] to use for error tracking. If provided, the dispatcher
     ///   will set [DbState::error] when an error is encountered.
-    pub(crate) fn new_with_fp_registry(
+    pub fn new_with_fp_registry(
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
@@ -207,7 +207,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// A [Result] containing [SlateDBError::BackgroundTaskShutdown] on clean shutdown,
     /// or an uncaught error.
-    pub(crate) async fn run(&mut self) -> Result<(), SlateDBError> {
+    pub async fn run(&mut self) -> Result<(), SlateDBError> {
         let mut tickers = self
             .handler
             .tickers()
@@ -271,7 +271,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
 ///
 /// On each [MessageDispatcherTicker::tick], the message factory is called to generate a
 /// message, and the message is returned as a [Future].
-pub(crate) struct MessageDispatcherTicker<'a, T: Send> {
+pub struct MessageDispatcherTicker<'a, T: Send> {
     inner: SystemClockTicker<'a>,
     message_factory: Box<MessageFactory<T>>,
 }
@@ -287,10 +287,7 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// ## Returns
     ///
     /// The new [MessageDispatcherTicker].
-    pub(crate) fn new(
-        inner: SystemClockTicker<'a>,
-        message_factory: Box<MessageFactory<T>>,
-    ) -> Self {
+    pub fn new(inner: SystemClockTicker<'a>, message_factory: Box<MessageFactory<T>>) -> Self {
         Self {
             inner,
             message_factory,
@@ -303,7 +300,7 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// ## Returns
     ///
     /// A [Future] that resolves when the ticker ticks.
-    pub(crate) fn tick(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
+    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
         let message = (self.message_factory)();
         Box::pin(async move {
             self.inner.tick().await;
