@@ -101,15 +101,15 @@ pub(crate) enum SlateDBError {
     #[error("read channel error")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 
-    #[error("background task panic'd")]
+    #[error("background task panicked. name=`{0}`")]
     // we need to wrap the panic args in an Arc so SlateDbError is Clone
     // we need to wrap the panic args in a mutex so that SlateDbError is Sync
-    BackgroundTaskPanic(Arc<Mutex<Box<dyn Any + Send>>>),
+    BackgroundTaskPanic(String, Arc<Mutex<Box<dyn Any + Send>>>),
 
-    #[error("background task started. [name=`{0}`]")]
+    #[error("background task started. name=`{0}`")]
     BackgroundTaskStarted(String),
 
-    #[error("background task cancelled. [name=`{0}`]")]
+    #[error("background task cancelled. name=`{0}`")]
     BackgroundTaskCancelled(String),
 
     #[error("background task executor already started")]
@@ -468,7 +468,7 @@ impl From<SlateDBError> for Error {
 
             // Internal errors
             SlateDBError::CompactionExecutorFailed => Error::internal(msg),
-            SlateDBError::BackgroundTaskPanic(err) => {
+            SlateDBError::BackgroundTaskPanic(_, err) => {
                 Error::internal(msg).with_source(Box::new(PanicError(err)))
             }
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),

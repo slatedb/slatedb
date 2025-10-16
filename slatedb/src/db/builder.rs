@@ -548,7 +548,6 @@ impl<P: Into<Path>> DbBuilder<P> {
                     rx,
                     system_clock.clone(),
                     self.cancellation_token.clone(),
-                    inner.clone().state.read().error(),
                 );
                 let garbage_collector_task = tokio::spawn(async move { gc_dispatcher.run().await });
                 Some(garbage_collector_task)

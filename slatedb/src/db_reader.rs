@@ -383,7 +383,6 @@ impl DbReaderInner {
             rx,
             self.system_clock.clone(),
             cancellation_token,
-            self.error_watcher.clone(),
         );
         tokio::spawn(async move { disptacher.run().await })
     }

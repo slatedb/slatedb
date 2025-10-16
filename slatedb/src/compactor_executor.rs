@@ -265,6 +265,7 @@ impl TokioCompactionExecutorInner {
         let this = self.clone();
         let this_cleanup = self.clone();
         let task = spawn_bg_task(
+            "compactor_executor".to_string(),
             &self.handle,
             move |result| {
                 let result = result.clone();

@@ -145,7 +145,6 @@ impl Admin {
             rx,
             self.system_clock.clone(),
             cancellation_token,
-            WatchableOnceCell::new(),
         );
 
         let jh = tracker.spawn(async move { gc_dispatcher.run().await });

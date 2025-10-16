@@ -77,6 +77,7 @@ impl<T: Clone> WatchableOnceCellReader<T> {
 /// When the task exits, the provided cleanup fn is called with a reference to the returned
 /// result. If the task panics, the cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_task<F, T, C>(
+    name: String,
     handle: &tokio::runtime::Handle,
     cleanup_fn: C,
     future: F,
@@ -96,7 +97,7 @@ where
         let result = match outcome {
             Ok(Ok(val)) => Ok(val),
             Ok(Err(e)) => Err(e),
-            Err(panic) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic)))),
+            Err(panic) => Err(BackgroundTaskPanic(name, Arc::new(Mutex::new(panic)))),
         };
         cleanup_fn(&result);
         result
@@ -537,9 +538,10 @@ pub(crate) fn unwrap_join(
             if join_error.is_cancelled() {
                 Err(SlateDBError::BackgroundTaskCancelled(name))
             } else {
-                Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
-                    Box::new(join_error.into_panic()),
-                ))))
+                Err(SlateDBError::BackgroundTaskPanic(
+                    name,
+                    Arc::new(Mutex::new(Box::new(join_error.into_panic()))),
+                ))
             }
         }
     }
@@ -551,9 +553,10 @@ pub(crate) fn unwrap_unwind(
 ) -> Result<(), SlateDBError> {
     match unwind_result {
         Ok(task_result) => task_result,
-        Err(payload) => Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
-            Box::new(payload),
-        )))),
+        Err(payload) => Err(SlateDBError::BackgroundTaskPanic(
+            name,
+            Arc::new(Mutex::new(Box::new(payload))),
+        )),
     }
 }
 
@@ -646,9 +649,12 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
-        let task = spawn_bg_task(&handle, move |err| captor2.capture(err), async {
-            Err(SlateDBError::Fenced)
-        });
+        let task = spawn_bg_task(
+            "test".to_string(),
+            &handle,
+            move |err| captor2.capture(err),
+            async { Err(SlateDBError::Fenced) },
+        );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
         assert!(matches!(result, Err(SlateDBError::Fenced)));
@@ -664,13 +670,21 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
-        let task = spawn_bg_task(&handle, move |err| captor2.capture(err), monitored);
+        let task = spawn_bg_task(
+            "test".to_string(),
+            &handle,
+            move |err| captor2.capture(err),
+            monitored,
+        );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskPanic(_, _))
+        ));
         assert!(matches!(
             captor.captured(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
+            Some(Err(SlateDBError::BackgroundTaskPanic(_, _)))
         ));
     }
 
@@ -680,7 +694,12 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
-        let task = spawn_bg_task(&handle, move |err| captor2.capture(err), async { Ok(()) });
+        let task = spawn_bg_task(
+            "test".to_string(),
+            &handle,
+            move |err| captor2.capture(err),
+            async { Ok(()) },
+        );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
         assert!(matches!(result, Ok(())));
