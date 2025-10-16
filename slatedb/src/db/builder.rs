@@ -108,7 +108,6 @@ use fail_parallel::FailPointRegistry;
 use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -123,8 +122,12 @@ use crate::clock::DefaultLogicalClock;
 use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
 use crate::clock::SystemClock;
+use crate::compactor::CompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
+use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
+use crate::compactor_executor::TokioCompactionExecutor;
+use crate::compactor_stats::CompactionStats;
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
@@ -518,33 +521,48 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
         // If either are set, we need to initialize the compactor.
-        let compactor_task = if self.compaction_scheduler_supplier.is_some()
-            || self.settings.compactor_options.is_some()
+        if self.compaction_scheduler_supplier.is_some() || self.settings.compactor_options.is_some()
         {
-            let compactor_options = self.settings.compactor_options.unwrap_or_default();
+            let compactor_options = Arc::new(self.settings.compactor_options.unwrap_or_default());
             let compaction_handle = self
                 .compaction_runtime
                 .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
                 .unwrap_or_else(default_compaction_scheduler_supplier);
-            let compactor = Compactor::new(
-                manifest_store.clone(),
-                uncached_table_store.clone(),
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&compactor_options));
+            let stats = Arc::new(CompactionStats::new(inner.stat_registry.clone()));
+            let executor = Arc::new(TokioCompactionExecutor::new(
+                compaction_handle,
                 compactor_options.clone(),
-                scheduler_supplier,
-                compaction_handle.clone(),
+                tx,
+                uncached_table_store.clone(),
                 rand.clone(),
-                inner.stat_registry.clone(),
+                stats.clone(),
                 system_clock.clone(),
-                inner.clone().state.read().error(),
-                self.cancellation_token.clone(),
-            );
-            let compactor_task = tokio::spawn(async move { compactor.run_async_task().await });
-            Some(compactor_task)
-        } else {
-            None
-        };
+                manifest_store.clone(),
+            ));
+            let handler = CompactorEventHandler::new(
+                manifest_store.clone(),
+                compactor_options.clone(),
+                scheduler,
+                executor,
+                rand.clone(),
+                stats.clone(),
+                system_clock.clone(),
+            )
+            .await
+            .expect("failed to create compactor");
+            task_executor
+                .spawn_on(
+                    COMPACTOR_TASK_NAME.to_string(),
+                    Box::new(handler),
+                    rx,
+                    &tokio_handle,
+                )
+                .expect("failed to spawn compactor task");
+        }
 
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
         // If either are set, we need to initialize the garbage collector.
@@ -581,7 +599,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         Ok(Db {
             inner,
             task_executor,
-            compactor_task: Mutex::new(compactor_task),
             cancellation_token: self.cancellation_token,
         })
     }
@@ -829,7 +846,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.stat_registry,
             self.system_clock,
             self.error_state,
-            self.cancellation_token,
         )
     }
 }

@@ -29,6 +29,7 @@ use object_store::path::Path;
 use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 
+use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::db_transaction::DBTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
@@ -545,7 +546,6 @@ impl DbInner {
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: MessageHandlerExecutor,
-    compactor_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
     cancellation_token: CancellationToken,
 }
 
@@ -636,12 +636,8 @@ impl Db {
     pub async fn close(&self) -> Result<(), crate::Error> {
         self.cancellation_token.cancel();
 
-        if let Some(compactor_task) = {
-            let mut maybe_compactor_task = self.compactor_task.lock();
-            maybe_compactor_task.take()
-        } {
-            let result = compactor_task.await.expect("failed to join compactor task");
-            info!("compactor task exited [result={:?}]", result);
+        if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
+            warn!("failed to shutdown compactor task [error={:?}]", e);
         }
 
         if let Err(e) = self.task_executor.shutdown_task(GC_TASK_NAME).await {

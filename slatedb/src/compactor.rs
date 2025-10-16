@@ -20,7 +20,9 @@ use crate::compactor_state::SourceId;
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
-use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
+use crate::dispatcher::{
+    MessageDispatcher, MessageFactory, MessageHandler, MessageHandlerExecutor,
+};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::rand::DbRand;
@@ -28,6 +30,8 @@ pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{IdGenerator, WatchableOnceCell};
+
+pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
 
 pub trait CompactionSchedulerSupplier: Send + Sync {
     fn compaction_scheduler(
@@ -163,12 +167,11 @@ pub(crate) struct Compactor {
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    task_executor: Arc<MessageHandlerExecutor>,
     compactor_runtime: Handle,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
-    error_state: WatchableOnceCell<SlateDBError>,
-    cancellation_token: CancellationToken,
 }
 
 impl Compactor {
@@ -183,20 +186,22 @@ impl Compactor {
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
         error_state: WatchableOnceCell<SlateDBError>,
-        cancellation_token: CancellationToken,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            error_state.clone(),
+            system_clock.clone(),
+        ));
         Self {
             manifest_store,
             table_store,
             options: Arc::new(options),
             scheduler_supplier,
+            task_executor,
             compactor_runtime,
             rand,
             stats,
             system_clock,
-            error_state,
-            cancellation_token,
         }
     }
 
@@ -231,17 +236,24 @@ impl Compactor {
             self.system_clock.clone(),
         )
         .await?;
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(handler),
-            rx,
-            self.system_clock.clone(),
-            self.cancellation_token.clone(),
-        );
-        dispatcher.run().await
+        self.task_executor
+            .spawn_on(
+                COMPACTOR_TASK_NAME.to_string(),
+                Box::new(handler),
+                rx,
+                &self.compactor_runtime,
+            )
+            .expect("failed to spawn compactor task");
+        self.task_executor.monitor(&Handle::current());
+        self.task_executor.join_task(COMPACTOR_TASK_NAME).await
+    }
+
+    pub async fn stop(&self) -> Result<(), SlateDBError> {
+        self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await
     }
 }
 
-struct CompactorEventHandler {
+pub(crate) struct CompactorEventHandler {
     state: CompactorState,
     manifest: FenceableManifest,
     options: Arc<CompactorOptions>,
@@ -308,7 +320,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
 }
 
 impl CompactorEventHandler {
-    async fn new(
+    pub(crate) async fn new(
         manifest_store: Arc<ManifestStore>,
         options: Arc<CompactorOptions>,
         scheduler: Arc<dyn CompactionScheduler + Send + Sync>,
