@@ -577,7 +577,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         }
 
         // Monitor background tasks
-        task_executor.monitor(&tokio_handle);
+        task_executor.monitor_on(&tokio_handle);
 
         // Replay WAL
         inner.replay_wal().await?;

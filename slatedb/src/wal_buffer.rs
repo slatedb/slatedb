@@ -555,7 +555,7 @@ mod tests {
             .start_background(task_executor.clone())
             .await
             .unwrap();
-        task_executor.monitor(&Handle::current());
+        task_executor.monitor_on(&Handle::current());
         (wal_buffer, table_store, test_clock)
     }
 

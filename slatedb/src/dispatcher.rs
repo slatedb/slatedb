@@ -451,7 +451,7 @@ impl MessageHandlerExecutor {
         Ok(())
     }
 
-    pub(crate) fn monitor(&self, handle: &Handle) -> JoinHandle<()> {
+    pub(crate) fn monitor_on(&self, handle: &Handle) -> JoinHandle<()> {
         let mut tasks = {
             let mut guard = self.tasks.lock();
             guard.take().expect("join map isn't set when expected")
@@ -671,7 +671,7 @@ mod test {
                 &Handle::current(),
             )
             .expect("spawn failed");
-        task_executor.monitor(&Handle::current());
+        task_executor.monitor_on(&Handle::current());
 
         // Stop before cleanup so we can send a message and ensure it is drained
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "pause").unwrap();
@@ -1045,7 +1045,7 @@ mod test {
             .expect("failed to spawn task");
 
         // Monitor the executor
-        task_executor.monitor(&Handle::current());
+        task_executor.monitor_on(&Handle::current());
 
         // Trigger panic inside the run loop via handle()
         tx.send(1u8).unwrap();
