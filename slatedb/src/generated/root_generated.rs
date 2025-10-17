@@ -69,10 +69,14 @@ impl<'a> flatbuffers::Follow<'a> for CompressionFormat {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
 =======
     let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
     Self(b)
   }
 }
@@ -82,10 +86,14 @@ impl flatbuffers::Push for CompressionFormat {
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
 <<<<<<< HEAD
+<<<<<<< HEAD
         flatbuffers::emplace_scalar::<i8>(dst, self.0);
 =======
         unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
     }
 }
 
@@ -170,10 +178,14 @@ impl<'a> flatbuffers::Follow<'a> for BoundType {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
 =======
     let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
     Self(b)
   }
 }
@@ -183,10 +195,14 @@ impl flatbuffers::Push for BoundType {
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
 <<<<<<< HEAD
+<<<<<<< HEAD
         flatbuffers::emplace_scalar::<i8>(dst, self.0);
 =======
         unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
     }
 }
 
@@ -263,10 +279,14 @@ impl<'a> flatbuffers::Follow<'a> for CheckpointMetadata {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
 =======
     let b = unsafe { flatbuffers::read_scalar_at::<u8>(buf, loc) };
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
     Self(b)
   }
 }
@@ -276,10 +296,14 @@ impl flatbuffers::Push for CheckpointMetadata {
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
 <<<<<<< HEAD
+<<<<<<< HEAD
         flatbuffers::emplace_scalar::<u8>(dst, self.0);
 =======
         unsafe { flatbuffers::emplace_scalar::<u8>(dst, self.0); }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+        flatbuffers::emplace_scalar::<u8>(dst, self.0);
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
     }
 }
 
@@ -359,7 +383,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionType {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
     Self(b)
   }
 }
@@ -368,7 +392,7 @@ impl flatbuffers::Push for CompactionType {
     type Output = CompactionType;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
     }
 }
 
@@ -456,7 +480,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionStatus {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
     Self(b)
   }
 }
@@ -465,7 +489,7 @@ impl flatbuffers::Push for CompactionStatus {
     type Output = CompactionStatus;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
     }
 }
 
@@ -541,7 +565,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionJobSpec {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
     Self(b)
   }
 }
@@ -550,7 +574,7 @@ impl flatbuffers::Push for CompactionJobSpec {
     type Output = CompactionJobSpec;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<u8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<u8>(dst, self.0);
     }
 }
 
@@ -628,7 +652,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionSpec {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
     Self(b)
   }
 }
@@ -637,7 +661,7 @@ impl flatbuffers::Push for CompactionSpec {
     type Output = CompactionSpec;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<u8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<u8>(dst, self.0);
     }
 }
 
@@ -681,10 +705,14 @@ impl<'a> flatbuffers::Follow<'a> for SsTableInfo<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -867,10 +895,14 @@ impl<'a> flatbuffers::Follow<'a> for BlockMeta<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -986,10 +1018,14 @@ impl<'a> flatbuffers::Follow<'a> for SsTableIndex<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -1088,10 +1124,14 @@ impl<'a> flatbuffers::Follow<'a> for CompactedSstId<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -1206,10 +1246,14 @@ impl<'a> flatbuffers::Follow<'a> for CompactedSsTable<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -1343,10 +1387,14 @@ impl<'a> flatbuffers::Follow<'a> for SortedRun<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -1462,10 +1510,14 @@ impl<'a> flatbuffers::Follow<'a> for Uuid<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -1580,10 +1632,14 @@ impl<'a> flatbuffers::Follow<'a> for Ulid<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -1698,10 +1754,14 @@ impl<'a> flatbuffers::Follow<'a> for BytesBound<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -1816,10 +1876,14 @@ impl<'a> flatbuffers::Follow<'a> for BytesRange<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -1936,10 +2000,14 @@ impl<'a> flatbuffers::Follow<'a> for ExternalDb<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -2091,10 +2159,14 @@ impl<'a> flatbuffers::Follow<'a> for ManifestV1<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -2450,10 +2522,14 @@ impl<'a> flatbuffers::Follow<'a> for WriterCheckpoint<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -2551,10 +2627,14 @@ impl<'a> flatbuffers::Follow<'a> for Checkpoint<'a> {
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
 <<<<<<< HEAD
+<<<<<<< HEAD
     Self { _tab: flatbuffers::Table::new(buf, loc) }
 =======
     Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
 >>>>>>> c69edae (Generated root.fbs file)
+=======
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
+>>>>>>> cf654d6 (Regenerated root.fbs file with flatc version v24.3.25)
   }
 }
 
@@ -2770,7 +2850,7 @@ impl<'a> flatbuffers::Follow<'a> for LinearCompactionJob<'a> {
   type Inner = LinearCompactionJob<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -2884,7 +2964,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionJob<'a> {
   type Inner = CompactionJob<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -3065,7 +3145,7 @@ impl<'a> flatbuffers::Follow<'a> for SortedRunCompaction<'a> {
   type Inner = SortedRunCompaction<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -3179,7 +3259,7 @@ impl<'a> flatbuffers::Follow<'a> for Compaction<'a> {
   type Inner = Compaction<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -3428,7 +3508,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionState<'a> {
   type Inner = CompactionState<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
