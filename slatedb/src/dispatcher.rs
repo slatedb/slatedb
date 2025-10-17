@@ -13,11 +13,11 @@
 //! this pattern in a single set of event loops.
 //!
 //! - [MessageHandlerExecutor] spawns background tasks, monitors them for completion, and
-//! updates [crate::db_state::DbState::error] accordingly.
+//!   updates [crate::db_state::DbState::error] accordingly.
 //! - [MessageDispatcher] runs an event loop for a single background task. It receives
-//! messages and ticks, and passes them to the [MessageHandler] for processing.
+//!   messages and ticks, and passes them to the [MessageHandler] for processing.
 //! - [MessageHandler] receives callbacks from the dispatcher based on lifetime events
-//! (messages, ticks, etc.) and performs work based on those events.
+//!   (messages, ticks, etc.) and performs work based on those events.
 //!
 //! SlateDB instantiates a [MessageHandlerExecutor] and calls
 //! [MessageHandlerExecutor::spawn_on] for each [MessageHandler]. The DB then calls
@@ -440,7 +440,7 @@ impl MessageHandlerExecutor {
     /// * `name`: The name of the dispatcher.
     /// * `handler`: The [MessageHandler] to use for handling messages.
     /// * `rx`: The [mpsc::UnboundedReceiver] to use for receiving messages on the
-    ///    handler's behalf.
+    ///   handler's behalf.
     /// * `handle`: The [Handle] to use for spawning the dispatcher.
     ///
     /// ## Returns
