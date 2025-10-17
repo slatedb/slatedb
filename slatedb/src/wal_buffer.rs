@@ -594,7 +594,7 @@ mod tests {
             eager_spawn: true,
             ..SstIteratorOptions::default()
         };
-        let mut iter = SstIterator::new_owned(
+        let mut iter = SstIterator::new_owned_initialized(
             ..,
             table_store.open_sst(&SsTableId::Wal(1)).await.unwrap(),
             table_store.clone(),

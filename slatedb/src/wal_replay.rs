@@ -155,7 +155,8 @@ impl WalReplayIterator<'_> {
             table_store: Arc<TableStore>,
         ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
             let sst = table_store.open_sst(&SsTableId::Wal(wal_id)).await?;
-            SstIterator::new_owned(.., sst, Arc::clone(&table_store), sst_iter_options).await
+            SstIterator::new_owned_initialized(.., sst, Arc::clone(&table_store), sst_iter_options)
+                .await
         }
 
         let handle = task::spawn(load_iter(

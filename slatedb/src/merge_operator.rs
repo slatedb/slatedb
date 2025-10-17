@@ -177,6 +177,10 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
 
 #[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.delegate.init().await
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let next_entry = match self.buffered_entry.take() {
             Some(entry) => Some(entry),
@@ -348,6 +352,10 @@ mod tests {
 
     #[async_trait]
     impl KeyValueIterator for MockKeyValueIterator {
+        async fn init(&mut self) -> Result<(), SlateDBError> {
+            Ok(())
+        }
+
         async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
             Ok(self.values.pop_front())
         }
