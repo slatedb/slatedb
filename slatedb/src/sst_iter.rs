@@ -145,28 +145,6 @@ trait FilterEvaluator: Send + Sync {
     fn notify_finished_iteration(&mut self);
 }
 
-#[derive(Default)]
-struct NoopFilterEvaluator;
-
-#[async_trait]
-impl FilterEvaluator for NoopFilterEvaluator {
-    async fn ensure_evaluated(
-        &mut self,
-        _view: &SstView<'_>,
-        _table_store: &Arc<TableStore>,
-    ) -> Result<(), SlateDBError> {
-        Ok(())
-    }
-
-    fn is_filtered_out(&self) -> bool {
-        false
-    }
-
-    fn notify_key_found(&mut self, _key: &[u8]) {}
-
-    fn notify_finished_iteration(&mut self) {}
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FilterState {
     NotChecked,
@@ -251,8 +229,7 @@ impl FilterEvaluator for SingleKeyBloomFilterEvaluator {
     }
 }
 
-
-pub(crate) struct SstIterator<'a> {
+pub(crate) struct InternalSstIterator<'a> {
     view: SstView<'a>,
     index: Option<Arc<SsTableIndexOwned>>,
     state: IteratorState,
@@ -261,22 +238,18 @@ pub(crate) struct SstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
-    filter: Box<dyn FilterEvaluator + Send + 'static>,
 }
 
-impl<'a> SstIterator<'a> {
-    fn new_with_stats(
+impl<'a> InternalSstIterator<'a> {
+    fn new(
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
-        db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
         assert!(options.max_fetch_tasks > 0);
         assert!(options.blocks_to_fetch > 0);
 
-        let filter = Self::create_filter_evaluator(&view, db_stats);
-
-        let iter = Self {
+        Ok(Self {
             view,
             index: None,
             state: IteratorState::new(),
@@ -285,76 +258,39 @@ impl<'a> SstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
-            filter,
-        };
-        Ok(iter)
+        })
     }
 
-    fn create_filter_evaluator(
-        view: &SstView<'a>,
-        db_stats: Option<DbStats>,
-    ) -> Box<dyn FilterEvaluator + Send + 'static> {
-        if let Some(point_key) = view.point_key() {
-            Box::new(SingleKeyBloomFilterEvaluator::new(
-                Bytes::copy_from_slice(point_key),
-                db_stats,
-            ))
-        } else {
-            Box::new(NoopFilterEvaluator::default())
-        }
-    }
-
-    pub(crate) fn new(
-        view: SstView<'a>,
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Self, SlateDBError> {
-        Self::new_with_stats(view, table_store, options, None)
-    }
-
-    pub(crate) fn table_id(&self) -> SsTableId {
+    fn table_id(&self) -> SsTableId {
         self.view.table_as_ref().id
     }
 
-    pub(crate) fn is_filtered_out(&self) -> bool {
-        self.filter.is_filtered_out()
+    fn view(&self) -> &SstView<'a> {
+        &self.view
     }
 
-    async fn ensure_filter_evaluated(&mut self) -> Result<(), SlateDBError> {
-        self.filter
-            .ensure_evaluated(&self.view, &self.table_store)
-            .await
+    fn table_store(&self) -> &Arc<TableStore> {
+        &self.table_store
     }
 
-    fn new_owned_with_stats<T: RangeBounds<Bytes>>(
+    fn is_initialized(&self) -> bool {
+        self.state.is_initialized()
+    }
+
+    fn new_owned<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableHandle,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
-        db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
         let Some(view_range) = table.calculate_view_range(BytesRange::from(range)) else {
             return Ok(None);
         };
         let view = SstView::Owned(Box::new(table), view_range);
-        Ok(Some(Self::new_with_stats(
-            view,
-            table_store.clone(),
-            options,
-            db_stats,
-        )?))
+        Self::new(view, table_store, options).map(Some)
     }
 
-    pub(crate) fn new_owned<T: RangeBounds<Bytes>>(
-        range: T,
-        table: SsTableHandle,
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_owned_with_stats(range, table, table_store, options, None)
-    }
-
-    pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
+    async fn new_owned_initialized<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableHandle,
         table_store: Arc<TableStore>,
@@ -364,35 +300,20 @@ impl<'a> SstIterator<'a> {
         init_optional_iterator(iter).await
     }
 
-    fn new_borrowed_with_stats<T: RangeBounds<Bytes>>(
+    fn new_borrowed<T: RangeBounds<Bytes>>(
         range: T,
         table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
-        db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
         let Some(view_range) = table.calculate_view_range(BytesRange::from(range)) else {
             return Ok(None);
         };
         let view = SstView::Borrowed(table, view_range);
-        Ok(Some(Self::new_with_stats(
-            view,
-            table_store.clone(),
-            options,
-            db_stats,
-        )?))
+        Self::new(view, table_store, options).map(Some)
     }
 
-    pub(crate) fn new_borrowed<T: RangeBounds<Bytes>>(
-        range: T,
-        table: &'a SsTableHandle,
-        table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
-    ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_borrowed_with_stats(range, table, table_store, options, None)
-    }
-
-    pub(crate) async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
+    async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
         range: T,
         table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
@@ -402,37 +323,28 @@ impl<'a> SstIterator<'a> {
         init_optional_iterator(iter).await
     }
 
-    pub(crate) fn for_key_with_stats(
+    fn for_key(
         table: &'a SsTableHandle,
         key: &'a [u8],
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
-        db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_borrowed_with_stats(
+        Self::new_borrowed(
             BytesRange::from_slice(key..=key),
             table,
             table_store,
             options,
-            db_stats,
         )
     }
 
-    pub(crate) async fn for_key_with_stats_initialized(
+    async fn for_key_initialized(
         table: &'a SsTableHandle,
         key: &'a [u8],
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
-        db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
-        let mut iter = Self::for_key_with_stats(table, key, table_store, options, db_stats)?;
-        if let Some(it) = iter.as_mut() {
-            it.init().await?;
-            if it.is_filtered_out() {
-                return Ok(None);
-            }
-        }
-        Ok(iter)
+        let iter = Self::for_key(table, key, table_store, options)?;
+        init_optional_iterator(iter).await
     }
 
     fn last_block_with_data_including_key(index: &SsTableIndex, key: &[u8]) -> Option<usize> {
@@ -570,7 +482,8 @@ impl<'a> SstIterator<'a> {
                 .table_store
                 .read_index(self.view.table_as_ref())
                 .await?;
-            let block_idx_range = SstIterator::blocks_covering_view(&index.borrow(), &self.view);
+            let block_idx_range =
+                InternalSstIterator::blocks_covering_view(&index.borrow(), &self.view);
             self.block_idx_range = block_idx_range.clone();
             self.next_block_idx_to_fetch = block_idx_range.start;
             self.index = Some(index);
@@ -583,14 +496,9 @@ impl<'a> SstIterator<'a> {
 }
 
 #[async_trait]
-impl KeyValueIterator for SstIterator<'_> {
+impl KeyValueIterator for InternalSstIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.state.is_initialized() {
-            self.ensure_filter_evaluated().await?;
-            if self.is_filtered_out() {
-                self.stop();
-                return Ok(());
-            }
             self.advance_block().await?;
         }
         Ok(())
@@ -610,7 +518,6 @@ impl KeyValueIterator for SstIterator<'_> {
             match next_entry {
                 Some(kv) => {
                     if self.view.contains(&kv.key) {
-                        self.filter.notify_key_found(kv.key.as_ref());
                         return Ok(Some(kv));
                     } else if self.view.key_exceeds(&kv.key) {
                         self.stop()
@@ -619,7 +526,6 @@ impl KeyValueIterator for SstIterator<'_> {
                 None => self.advance_block().await?,
             }
         }
-        self.filter.notify_finished_iteration();
         Ok(None)
     }
 
@@ -633,9 +539,6 @@ impl KeyValueIterator for SstIterator<'_> {
                 start_key: self.view.start_key().map(|b| b.to_vec()),
                 end_key: self.view.end_key().map(|b| b.to_vec()),
             });
-        }
-        if self.is_filtered_out() {
-            return Ok(());
         }
         if !self.state.is_finished() {
             if let Some(iter) = self.state.current_iter.as_mut() {
@@ -672,6 +575,269 @@ impl KeyValueIterator for SstIterator<'_> {
             }
         }
         Ok(())
+    }
+}
+
+struct BloomFilterIterator<'a> {
+    inner: InternalSstIterator<'a>,
+    filter: Box<dyn FilterEvaluator + Send + Sync + 'static>,
+}
+
+impl<'a> BloomFilterIterator<'a> {
+    fn new(
+        inner: InternalSstIterator<'a>,
+        filter: Box<dyn FilterEvaluator + Send + Sync + 'static>,
+    ) -> Self {
+        Self { inner, filter }
+    }
+
+    fn table_id(&self) -> SsTableId {
+        self.inner.table_id()
+    }
+
+    fn is_filtered_out(&self) -> bool {
+        self.filter.is_filtered_out()
+    }
+
+    async fn ensure_filter_evaluated(&mut self) -> Result<(), SlateDBError> {
+        self.filter
+            .ensure_evaluated(self.inner.view(), self.inner.table_store())
+            .await
+    }
+}
+
+#[async_trait]
+impl KeyValueIterator for BloomFilterIterator<'_> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        if !self.inner.is_initialized() {
+            self.ensure_filter_evaluated().await?;
+            if self.is_filtered_out() {
+                self.inner.stop();
+                return Ok(());
+            }
+        }
+        self.inner.init().await
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.ensure_filter_evaluated().await?;
+        if self.is_filtered_out() {
+            self.filter.notify_finished_iteration();
+            return Ok(None);
+        }
+        let next = self.inner.next_entry().await?;
+        if let Some(entry) = next.as_ref() {
+            self.filter.notify_key_found(entry.key.as_ref());
+        } else {
+            self.filter.notify_finished_iteration();
+        }
+        Ok(next)
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.ensure_filter_evaluated().await?;
+        if self.is_filtered_out() {
+            return Ok(());
+        }
+        self.inner.seek(next_key).await
+    }
+}
+
+enum SstIteratorDelegate<'a> {
+    Direct(InternalSstIterator<'a>),
+    Bloom(BloomFilterIterator<'a>),
+}
+
+pub(crate) struct SstIterator<'a> {
+    delegate: SstIteratorDelegate<'a>,
+}
+
+impl<'a> SstIterator<'a> {
+    fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
+        let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
+        let delegate = match point_key {
+            Some(key) => SstIteratorDelegate::Bloom(BloomFilterIterator::new(
+                internal,
+                Box::new(SingleKeyBloomFilterEvaluator::new(key, db_stats)),
+            )),
+            None => SstIteratorDelegate::Direct(internal),
+        };
+        Self { delegate }
+    }
+
+    pub(crate) fn new(
+        view: SstView<'a>,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        let internal = InternalSstIterator::new(view, table_store, options)?;
+        Ok(Self::from_internal(internal, None))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_owned_with_stats<T: RangeBounds<Bytes>>(
+        range: T,
+        table: SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
+        Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_owned<T: RangeBounds<Bytes>>(
+        range: T,
+        table: SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        Self::new_owned_with_stats(range, table, table_store, options, None)
+    }
+
+    pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
+        range: T,
+        table: SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal =
+            InternalSstIterator::new_owned_initialized(range, table, table_store, options).await?;
+        match internal {
+            Some(inner) => {
+                let mut iterator = Self::from_internal(inner, None);
+                if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
+                    inner.ensure_filter_evaluated().await?;
+                    if inner.is_filtered_out() {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(iterator))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn new_borrowed_with_stats<T: RangeBounds<Bytes>>(
+        range: T,
+        table: &'a SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal = InternalSstIterator::new_borrowed(range, table, table_store, options)?;
+        Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_borrowed<T: RangeBounds<Bytes>>(
+        range: T,
+        table: &'a SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        Self::new_borrowed_with_stats(range, table, table_store, options, None)
+    }
+
+    pub(crate) async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
+        range: T,
+        table: &'a SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal =
+            InternalSstIterator::new_borrowed_initialized(range, table, table_store, options)
+                .await?;
+        match internal {
+            Some(inner) => {
+                let mut iterator = Self::from_internal(inner, None);
+                if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
+                    inner.ensure_filter_evaluated().await?;
+                    if inner.is_filtered_out() {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(iterator))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn for_key_with_stats(
+        table: &'a SsTableHandle,
+        key: &'a [u8],
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal = InternalSstIterator::for_key(table, key, table_store, options)?;
+        Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
+    }
+
+    pub(crate) async fn for_key_with_stats_initialized(
+        table: &'a SsTableHandle,
+        key: &'a [u8],
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal =
+            InternalSstIterator::for_key_initialized(table, key, table_store, options).await?;
+        match internal {
+            Some(inner) => {
+                let mut iterator = Self::from_internal(inner, db_stats);
+                if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
+                    inner.ensure_filter_evaluated().await?;
+                    if inner.is_filtered_out() {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(iterator))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn table_id(&self) -> SsTableId {
+        match &self.delegate {
+            SstIteratorDelegate::Direct(inner) => inner.table_id(),
+            SstIteratorDelegate::Bloom(inner) => inner.table_id(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_filtered_out(&self) -> bool {
+        match &self.delegate {
+            SstIteratorDelegate::Direct(_) => false,
+            SstIteratorDelegate::Bloom(inner) => inner.is_filtered_out(),
+        }
+    }
+}
+
+#[async_trait]
+impl KeyValueIterator for SstIterator<'_> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        match &mut self.delegate {
+            SstIteratorDelegate::Direct(inner) => inner.init().await,
+            SstIteratorDelegate::Bloom(inner) => inner.init().await,
+        }
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        match &mut self.delegate {
+            SstIteratorDelegate::Direct(inner) => inner.next_entry().await,
+            SstIteratorDelegate::Bloom(inner) => inner.next_entry().await,
+        }
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match &mut self.delegate {
+            SstIteratorDelegate::Direct(inner) => inner.seek(next_key).await,
+            SstIteratorDelegate::Bloom(inner) => inner.seek(next_key).await,
+        }
     }
 }
 
