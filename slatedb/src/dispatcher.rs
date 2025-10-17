@@ -9,20 +9,30 @@
 //! 4. Drain messages on shutdown
 //! 5. Clean up resources on shutdown
 //!
-//! [MessageDispatcher] unifies this pattern into a single event loop implementation.
+//! [MessageDispatcher], [MessageHandlerExecutor], and [MessageHandler] standardize
+//! this pattern in a single set of event loops.
 //!
-//! Logic is then implemented in a [MessageHandler]. Handlers receive callbacks from
-//! the dispatcher based on lifetime events (messages, ticks, etc.) and perform work
-//! based on those events.
+//! - [MessageHandlerExecutor] spawns background tasks, monitors them for completion, and
+//! updates [crate::db_state::DbState::error] accordingly.
+//! - [MessageDispatcher] runs an event loop for a single background task. It receives
+//! messages and ticks, and passes them to the [MessageHandler] for processing.
+//! - [MessageHandler] receives callbacks from the dispatcher based on lifetime events
+//! (messages, ticks, etc.) and performs work based on those events.
+//!
+//! SlateDB instantiates a [MessageHandlerExecutor] and calls
+//! [MessageHandlerExecutor::spawn_on] for each [MessageHandler]. The DB then calls
+//! [MessageHandlerExecutor::monitor_on] to start the event loop and monitor tasks until
+//! shutdown.
 //!
 //! ## Example
 //!
 //! ```ignore
-//! # use crate::dispatcher::{MessageDispatcher, MessageHandler};
+//! # use crate::dispatcher::{MessageHandlerExecutor, MessageHandler};
 //! # use crate::error::SlateDBError;
 //! # use crate::clock::DefaultSystemClock;
 //! # use crate::watchable_once_cell::WatchableOnceCell;
 //! # use tokio::sync::mpsc;
+//! # use tokio::runtime::Handle;
 //! # use tokio_util::sync::CancellationToken;
 //! # use futures::stream::BoxStream;
 //! # #[tokio::main]
@@ -71,16 +81,20 @@
 //! let cancellation_token = CancellationToken::new();
 //! let (tx, rx) = mpsc::unbounded_channel();
 //! let error_state = WatchableOnceCell::new(None);
-//! let dispatcher = MessageDispatcher::new(
+//! let handle = Handle::current();
+//! let task_executor = MessageHandlerExecutor::new(
+//!     error_state,
+//!     clock,
+//! );
+//! task_executor.spawn_on(
+//!     "print_message_handler".to_string(),
 //!     Box::new(PrintMessageHandler),
 //!     rx,
-//!     clock,
-//!     cancellation_token,
-//!     error_state,
-//! );
-//! let join_handle = tokio::spawn(async move { dispatcher.run().await });
+//!     &handle,
+//! ).expect("failed to spawn task");
+//! let join_handle = task_executor.monitor_on(handle);
 //! tx.send(Message::Say("hello".to_string())).await;
-//! cancellation_token.cancel();
+//! task_executor.shutdown_task("print_message_handler").await;
 //! join_handle.await;
 //! # }
 //! ```
@@ -114,17 +128,9 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 /// Messages sent to the receiver are passed to the [MessageHandler] for processing.
 ///
 /// [MessageDispatcher::run] is the primary entry point for running the dispatcher;
-/// it is responsible for running the main event loop ([MessageDispatcher::run_loop])
-/// and handling cleaning up after the event loop exits.
-///
-/// [MessageDispatcher::run_loop] implements the main event loop for the dispatcher.
-/// The function receives messages from the [mpsc::UnboundedReceiver<T>] and from any
-/// [MessageDispatcherTicker]s, and passes them to the [MessageHandler] for processing.
-/// It also shuts down when the either [crate::db_state::DbState::error] is set or the
-/// [CancellationToken] is cancelled. See [MessageDispatcher::run_loop] for more
-/// details on its behavior.
-///
-/// [crate::dispatcher] contains a complete code example.
+/// it is responsible for running the main event loop. The function receives messages
+/// from the [mpsc::UnboundedReceiver<T>] and from any [MessageDispatcherTicker]s, and
+/// passes them to the [MessageHandler] for processing.
 pub struct MessageDispatcher<T: Send + std::fmt::Debug> {
     handler: Box<dyn MessageHandler<T>>,
     rx: mpsc::UnboundedReceiver<T>,
@@ -141,10 +147,9 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// ## Arguments
     ///
     /// * `handler`: The [MessageHandler] to use for processing messages.
+    /// * `rx`: The [mpsc::UnboundedReceiver<T>] to use for receiving messages.
     /// * `clock`: The [SystemClock] to use for time.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
-    /// * `state`: The [DbState] to use for error tracking. If provided, the dispatcher
-    ///   will set [DbState::error] when an error is encountered.
     #[allow(dead_code)]
     pub fn new(
         handler: Box<dyn MessageHandler<T>>,
@@ -171,8 +176,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `rx`: The [mpsc::UnboundedReceiver<T>] to use for receiving messages.
     /// * `clock`: The [SystemClock] to use for time.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
-    /// * `state`: The [DbState] to use for error tracking. If provided, the dispatcher
-    ///   will set [DbState::error] when an error is encountered.
+    /// * `fp_registry`: The [FailPointRegistry] to use for fail points.
     pub fn new_with_fp_registry(
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
@@ -192,21 +196,17 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// Runs the main event loop for the dispatcher. This is where messages and ticker
     /// events are processed.
     ///
-    /// [MessageDispatcher::run_loop] contains a message loop with the following control
+    /// [MessageDispatcher::run] contains a message loop with the following control
     /// flow:
     ///
-    /// 1. Break immediately if we're in an error state or cancelled, and return
-    ///    [SlateDBError::BackgroundTaskShutdown].
+    /// 1. Break immediately if the task is cancelled and returns `Ok(())`.
     /// 2. Else, if there is a message, read it and invoke [MessageHandler::handle].
     /// 3. Else, if there is a ticker event, read it and invoke [MessageHandler::handle].
     ///
-    /// If there is an uncaught error at any point, the error is returned immediately (in
-    /// lieu of [SlateDBError::BackgroundTaskShutdown] on a clean shutdown).
-    ///
     /// ## Returns
     ///
-    /// A [Result] containing [SlateDBError::BackgroundTaskShutdown] on clean shutdown,
-    /// or an uncaught error.
+    /// A [Result] containing `Ok(())` on clean shutdown, or an error if the handler
+    /// fails for any reason.
     pub async fn run(&mut self) -> Result<(), SlateDBError> {
         let mut tickers = self
             .handler
@@ -246,11 +246,8 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// ## Arguments
     ///
-    /// * `maybe_error`: An optional error to pass to the handler. Setting this argument
-    ///   signals to the [MessageHandler] that the database is in an error state during
-    ///   shutdown. An option is used instead of `Result`` because we convert
-    ///   [SlateDBError::BackgroundTaskShutdown] to None, so handlers handle messages
-    ///   cleanly during shutdown when the database is not in an error state.
+    /// * `result`: The value of [crate::db_state::DbState::error] when
+    ///   [MessageDispatcher::run] returns.
     ///
     /// ## Returns
     ///
@@ -316,11 +313,11 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
 /// 2. Defining ticker schedules (when to tick a certain message) ([MessageHandler::tickers])
 /// 3. Cleaning up resources ([MessageHandler::cleanup])
 ///
-/// It is safe to return errors on failure; the [MessageDispatcher] will handle failures
-/// appropriately.
+/// It is safe to return errors on failure or panic; the [MessageDispatcher] and
+/// [MessageHandlerExecutor] will handle them appropriately.
 #[async_trait]
 pub(crate) trait MessageHandler<T: Send>: Send {
-    /// Defines message ticker schedules. [MessageDispatcher::run_loop] instantiates a
+    /// Defines message ticker schedules. [MessageDispatcher::run] instantiates a
     /// [MessageDispatcherTicker] for each ticker defined here. Whenever each ticker
     /// ticks, the message factory generates a message, and [MessageDispatcher] sends the
     /// message to this [MessageHandler].
@@ -348,15 +345,16 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     /// The [Result] after handling the message.
     async fn handle(&mut self, message: T) -> Result<(), SlateDBError>;
 
-    /// Cleans up resources.
+    /// Cleans up resources. This method should not be used to continue attempting to
+    /// write to the database.
     ///
     /// ## Arguments
     ///
     /// * `messages`: An iterator of messages still in the channel after
-    ///   [MessageDispatcher::run_loop] returns.
-    /// * `error`: An optional error to pass to the handler. If set, this argument
-    ///   signals to the [MessageHandler] that the database is in an error state during
-    ///   shutdown.
+    ///   [MessageDispatcher::run] returns. If a handler fails, this iterator will not
+    ///   include the message that triggered the failure.
+    /// * `result`: The value of [crate::db_state::DbState::error] when
+    ///   [MessageDispatcher::run] returns.
     ///
     /// ## Returns
     ///
@@ -368,6 +366,16 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     ) -> Result<(), SlateDBError>;
 }
 
+/// The [MessageHandlerExecutor] is responsible for spawning, monitoring, and shutting
+/// down [MessageDispatcher]s. Think of it as a dispatcher pool.
+///
+/// Each dispatcher is associated with a name, which is used to identify the dispatcher
+/// in the [MessageHandlerExecutor]. As dispatchers complete, their results are stored in
+/// the [MessageHandlerExecutor]. The first completed dispatcher's results are also used for
+/// [crate::db_state::DbState::error].
+///
+/// The dispatcher also catches panics, and will convert them to an appropriate
+/// [SlateDBError].
 #[derive(Debug)]
 pub(crate) struct MessageHandlerExecutor {
     tasks: Mutex<Option<JoinMap<String, Result<(), SlateDBError>>>>,
@@ -380,6 +388,16 @@ pub(crate) struct MessageHandlerExecutor {
 }
 
 impl MessageHandlerExecutor {
+    /// Creates a new [MessageHandlerExecutor].
+    ///
+    /// ## Arguments
+    ///
+    /// * `error_state`: A [WatchableOnceCell] that stores the error state of the database.
+    /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
+    ///
+    /// ## Returns
+    ///
+    /// The new [MessageHandlerExecutor].
     pub(crate) fn new(
         error_state: WatchableOnceCell<SlateDBError>,
         clock: Arc<dyn SystemClock>,
@@ -387,6 +405,17 @@ impl MessageHandlerExecutor {
         Self::new_with_fp_registry(error_state, clock, Arc::new(FailPointRegistry::new()))
     }
 
+    /// Creates a new [MessageHandlerExecutor] with a custom [FailPointRegistry].
+    ///
+    /// ## Arguments
+    ///
+    /// * `error_state`: A [WatchableOnceCell] that stores the error state of the database.
+    /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
+    /// * `fp_registry`: A [FailPointRegistry] to use for fail points.
+    ///
+    /// ## Returns
+    ///
+    /// The new [MessageHandlerExecutor].
     pub(crate) fn new_with_fp_registry(
         error_state: WatchableOnceCell<SlateDBError>,
         clock: Arc<dyn SystemClock>,
@@ -402,6 +431,23 @@ impl MessageHandlerExecutor {
         }
     }
 
+    /// Spawns a new [MessageDispatcher] for the provided [MessageHandler] on the given
+    /// [Handle]. Calls [MessageDispatcher::run] on the dispatcher in a new task. When
+    /// the dispatcher returns, [MessageDispatcher::cleanup] is called.
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the dispatcher.
+    /// * `handler`: The [MessageHandler] to use for handling messages.
+    /// * `rx`: The [mpsc::UnboundedReceiver] to use for receiving messages on the
+    ///    handler's behalf.
+    /// * `handle`: The [Handle] to use for spawning the dispatcher.
+    ///
+    /// ## Returns
+    ///
+    /// - `Ok(())` if the dispatcher was successfully spawned.
+    /// - Err([SlateDBError::BackgroundTaskStarted]) if a dispatcher with the same name is already running.
+    /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already running.
     pub(crate) fn spawn_on<T: Send + std::fmt::Debug + 'static>(
         &self,
         name: String,
@@ -455,6 +501,16 @@ impl MessageHandlerExecutor {
         Ok(())
     }
 
+    /// Spawns a task that monitors for completed [MessageDispatcher]s and stores their
+    /// results.
+    ///
+    /// ## Arguments
+    ///
+    /// * `handle`: The [Handle] to use for spawning the monitor.
+    ///
+    /// ## Returns
+    ///
+    /// A [JoinHandle] that can be used to wait for the monitor to complete.
     pub(crate) fn monitor_on(&self, handle: &Handle) -> JoinHandle<()> {
         let mut tasks = {
             let mut guard = self.tasks.lock();
@@ -485,12 +541,26 @@ impl MessageHandlerExecutor {
         handle.spawn(monitor_future)
     }
 
+    /// Cancels a task by name.
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the task to cancel.
     pub(crate) fn cancel_task(&self, name: &str) {
         if let Some(entry) = self.tokens.get(name) {
             entry.value().cancel();
         }
     }
 
+    /// Waits for a task to complete.
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the task to wait for.
+    ///
+    /// ## Returns
+    ///
+    /// The result of the task.
     pub(crate) async fn join_task(&self, name: &str) -> Result<(), SlateDBError> {
         if let Some(entry) = self.results.get(name) {
             return entry.value().reader().await_value().await;
@@ -498,6 +568,15 @@ impl MessageHandlerExecutor {
         Ok(())
     }
 
+    /// Cancels a task and waits for it to complete.
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the task to cancel and wait for.
+    ///
+    /// ## Returns
+    ///
+    /// The result of the task.
     pub(crate) async fn shutdown_task(&self, name: &str) -> Result<(), SlateDBError> {
         self.cancel_task(name);
         self.join_task(name).await
