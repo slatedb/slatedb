@@ -385,7 +385,7 @@ impl DbReaderInner {
             rx,
             &Handle::current(),
         );
-        task_executor.monitor(&Handle::current());
+        task_executor.monitor_on(&Handle::current());
         result
     }
 
