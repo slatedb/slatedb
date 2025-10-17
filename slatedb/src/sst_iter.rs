@@ -132,19 +132,6 @@ impl IteratorState {
     }
 }
 
-#[async_trait]
-trait FilterEvaluator: Send + Sync {
-    async fn ensure_evaluated(
-        &mut self,
-        view: &SstView<'_>,
-        table_store: &Arc<TableStore>,
-    ) -> Result<(), SlateDBError>;
-
-    fn is_filtered_out(&self) -> bool;
-    fn notify_key_found(&mut self, key: &[u8]);
-    fn notify_finished_iteration(&mut self);
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FilterState {
     NotChecked,
@@ -153,7 +140,7 @@ enum FilterState {
     Negative,
 }
 
-struct SingleKeyBloomFilterEvaluator {
+struct BloomFilterEvaluator {
     key: Bytes,
     db_stats: Option<DbStats>,
     state: FilterState,
@@ -161,7 +148,7 @@ struct SingleKeyBloomFilterEvaluator {
     false_positive_recorded: bool,
 }
 
-impl SingleKeyBloomFilterEvaluator {
+impl BloomFilterEvaluator {
     fn new(key: Bytes, db_stats: Option<DbStats>) -> Self {
         Self {
             key,
@@ -173,9 +160,8 @@ impl SingleKeyBloomFilterEvaluator {
     }
 }
 
-#[async_trait]
-impl FilterEvaluator for SingleKeyBloomFilterEvaluator {
-    async fn ensure_evaluated(
+impl BloomFilterEvaluator {
+    async fn evaluate(
         &mut self,
         view: &SstView<'_>,
         table_store: &Arc<TableStore>,
@@ -271,10 +257,6 @@ impl<'a> InternalSstIterator<'a> {
 
     fn table_store(&self) -> &Arc<TableStore> {
         &self.table_store
-    }
-
-    fn is_initialized(&self) -> bool {
-        self.state.is_initialized()
     }
 
     fn new_owned<T: RangeBounds<Bytes>>(
@@ -580,15 +562,17 @@ impl KeyValueIterator for InternalSstIterator<'_> {
 
 struct BloomFilterIterator<'a> {
     inner: InternalSstIterator<'a>,
-    filter: Box<dyn FilterEvaluator + Send + Sync + 'static>,
+    filter: BloomFilterEvaluator,
+    initialized: bool,
 }
 
 impl<'a> BloomFilterIterator<'a> {
-    fn new(
-        inner: InternalSstIterator<'a>,
-        filter: Box<dyn FilterEvaluator + Send + Sync + 'static>,
-    ) -> Self {
-        Self { inner, filter }
+    fn new(inner: InternalSstIterator<'a>, filter: BloomFilterEvaluator) -> Self {
+        Self {
+            inner,
+            filter,
+            initialized: false,
+        }
     }
 
     fn table_id(&self) -> SsTableId {
@@ -598,47 +582,50 @@ impl<'a> BloomFilterIterator<'a> {
     fn is_filtered_out(&self) -> bool {
         self.filter.is_filtered_out()
     }
-
-    async fn ensure_filter_evaluated(&mut self) -> Result<(), SlateDBError> {
-        self.filter
-            .ensure_evaluated(self.inner.view(), self.inner.table_store())
-            .await
-    }
 }
 
 #[async_trait]
 impl KeyValueIterator for BloomFilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
-        if !self.inner.is_initialized() {
-            self.ensure_filter_evaluated().await?;
+        if !self.initialized {
+            self.filter
+                .evaluate(self.inner.view(), self.inner.table_store())
+                .await?;
+
             if self.is_filtered_out() {
-                self.inner.stop();
                 return Ok(());
             }
+
+            // make sure initializing the inner iterator only happens after
+            // the filter is evaluated to avoid unnecessary work
+            self.inner.init().await?;
+            self.initialized = true;
         }
-        self.inner.init().await
+
+        Ok(())
     }
 
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.ensure_filter_evaluated().await?;
         if self.is_filtered_out() {
             self.filter.notify_finished_iteration();
             return Ok(None);
         }
+
         let next = self.inner.next_entry().await?;
         if let Some(entry) = next.as_ref() {
             self.filter.notify_key_found(entry.key.as_ref());
         } else {
             self.filter.notify_finished_iteration();
         }
+
         Ok(next)
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        self.ensure_filter_evaluated().await?;
         if self.is_filtered_out() {
             return Ok(());
         }
+
         self.inner.seek(next_key).await
     }
 }
@@ -656,10 +643,10 @@ impl<'a> SstIterator<'a> {
     fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
         let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
         let delegate = match point_key {
-            Some(key) => SstIteratorDelegate::Bloom(BloomFilterIterator::new(
-                internal,
-                Box::new(SingleKeyBloomFilterEvaluator::new(key, db_stats)),
-            )),
+            Some(key) => {
+                let filter = BloomFilterEvaluator::new(key, db_stats);
+                SstIteratorDelegate::Bloom(BloomFilterIterator::new(internal, filter))
+            }
             None => SstIteratorDelegate::Direct(internal),
         };
         Self { delegate }
@@ -708,7 +695,7 @@ impl<'a> SstIterator<'a> {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, None);
                 if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
-                    inner.ensure_filter_evaluated().await?;
+                    inner.init().await?;
                     if inner.is_filtered_out() {
                         return Ok(None);
                     }
@@ -754,7 +741,7 @@ impl<'a> SstIterator<'a> {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, None);
                 if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
-                    inner.ensure_filter_evaluated().await?;
+                    inner.init().await?;
                     if inner.is_filtered_out() {
                         return Ok(None);
                     }
@@ -790,7 +777,7 @@ impl<'a> SstIterator<'a> {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, db_stats);
                 if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
-                    inner.ensure_filter_evaluated().await?;
+                    inner.init().await?;
                     if inner.is_filtered_out() {
                         return Ok(None);
                     }
