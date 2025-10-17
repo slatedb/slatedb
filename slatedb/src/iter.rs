@@ -18,6 +18,12 @@ pub(crate) enum IterationOrder {
 
 #[async_trait]
 pub trait KeyValueIterator: Send + Sync {
+    /// Performs any expensive initialization required before regular iteration.
+    ///
+    /// This method should be idempotent and can be called multiple times, only
+    /// the first initialization should perform expensive operations.
+    async fn init(&mut self) -> Result<(), SlateDBError>;
+
     /// Returns the next non-deleted key-value pair in the iterator.
     async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         loop {
@@ -41,14 +47,47 @@ pub trait KeyValueIterator: Send + Sync {
 
     /// Returns the next entry in the iterator, which may be a key-value pair or
     /// a tombstone of a deleted key-value pair.
+    ///
+    /// Will fail with `SlateDBError::IteratorNotInitialized` if the iterator is
+    /// not yet initialized.
+    ///
+    /// NOTE: we don't initialize the iterator when calling next_entry and instead
+    /// require the caller to explicitly initialize the iterator. This is in order
+    /// to ensure that optimizations which eagerly initialize the iterator are not
+    /// lost in a refactor and instead would throw errors.
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
 
     /// Seek to the next (inclusive) key
+    ///
+    /// Will fail with `SlateDBError::IteratorNotInitialized` if the iterator is
+    /// not yet initialized.
+    ///
+    /// NOTE: we don't initialize the iterator when calling seek and instead
+    /// require the caller to explicitly initialize the iterator. This is in order
+    /// to ensure that optimizations which eagerly initialize the iterator are not
+    /// lost in a refactor and instead would throw errors.
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError>;
+}
+
+/// Initializes the iterator contained in the option, propagating `None` unchanged.
+pub async fn init_optional_iterator<T: KeyValueIterator>(
+    iter: Option<T>,
+) -> Result<Option<T>, SlateDBError> {
+    match iter {
+        Some(mut it) => {
+            it.init().await?;
+            Ok(Some(it))
+        }
+        None => Ok(None),
+    }
 }
 
 #[async_trait]
 impl<'a> KeyValueIterator for Box<dyn KeyValueIterator + 'a> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.as_mut().init().await
+    }
+
     async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
         self.as_mut().next().await
     }
@@ -72,6 +111,10 @@ impl EmptyIterator {
 
 #[async_trait]
 impl KeyValueIterator for EmptyIterator {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(None)
     }

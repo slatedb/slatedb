@@ -411,7 +411,7 @@ mod tests {
         ));
         let sst_handle = table_store.open_sst(table_id).await.unwrap();
 
-        let mut sst_iter = SstIterator::for_key(
+        let mut sst_iter = SstIterator::for_key_initialized(
             &sst_handle,
             kv.0,
             Arc::clone(&table_store),

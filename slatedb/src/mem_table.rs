@@ -165,6 +165,10 @@ pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange
 
 #[async_trait]
 impl KeyValueIterator for MemTableIterator {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }

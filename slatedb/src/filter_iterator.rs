@@ -32,6 +32,10 @@ impl<T: KeyValueIterator> FilterIterator<T> {
 
 #[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.iterator.init().await
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while let Some(entry) = self.iterator.next_entry().await? {
             if (self.predicate)(&entry) {

@@ -144,7 +144,8 @@ impl<'a> DbIterator<'a> {
             ]
         };
 
-        let iter = MergeIterator::new(iters).await?;
+        let mut iter = MergeIterator::new(iters).await?;
+        iter.init().await?;
         Ok(DbIterator {
             range,
             iter,

@@ -54,6 +54,10 @@ pub struct BlockIterator<B: BlockLike> {
 
 #[async_trait]
 impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let result = self.load_at_current_off();
         match result {

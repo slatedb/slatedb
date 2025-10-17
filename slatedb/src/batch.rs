@@ -237,6 +237,10 @@ impl<'a> WriteBatchIterator<'a> {
 
 #[async_trait]
 impl<'a> KeyValueIterator for WriteBatchIterator<'a> {
+    async fn init(&mut self) -> Result<(), crate::error::SlateDBError> {
+        Ok(())
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
         // Return current item (similar to MemTableIterator pattern)
         let result = self.current.map(|(_, op)| {

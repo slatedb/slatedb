@@ -728,7 +728,7 @@ mod tests {
         let db_state = db_state.expect("db was not compacted");
         for run in db_state.compacted {
             for sst in run.ssts {
-                let mut iter = SstIterator::new_borrowed(
+                let mut iter = SstIterator::new_borrowed_initialized(
                     ..,
                     &sst,
                     table_store.clone(),
@@ -809,11 +809,15 @@ mod tests {
         assert_eq!(db_state.compacted.len(), 1);
 
         let l0 = db_state.l0.front().unwrap();
-        let mut iter =
-            SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default())
-                .await
-                .unwrap()
-                .expect("Expected Some(iter) but got None");
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            l0,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
 
         let tombstone = iter.next_entry().await.unwrap();
         assert!(tombstone.unwrap().value.is_tombstone());
@@ -827,7 +831,7 @@ mod tests {
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
-        let mut iter = SstIterator::new_borrowed(
+        let mut iter = SstIterator::new_borrowed_initialized(
             ..,
             handle,
             table_store.clone(),
@@ -938,7 +942,7 @@ mod tests {
         let compacted = &db_state.compacted.first().unwrap().ssts;
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
-        let mut iter = SstIterator::new_borrowed(
+        let mut iter = SstIterator::new_borrowed_initialized(
             ..,
             handle,
             table_store.clone(),

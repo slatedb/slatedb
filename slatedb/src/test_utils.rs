@@ -27,6 +27,10 @@ use tracing_subscriber::EnvFilter;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
+    iterator
+        .init()
+        .await
+        .expect("iterator init failed in assert_iterator");
     for expected_entry in entries.iter() {
         assert_next_entry(iterator, expected_entry).await;
     }
@@ -41,6 +45,10 @@ pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
     iterator: &mut T,
     expected_entry: &RowEntry,
 ) {
+    iterator
+        .init()
+        .await
+        .expect("iterator init failed in assert_next_entry");
     let actual_entry = iterator
         .next_entry()
         .await
@@ -93,6 +101,10 @@ impl TestIterator {
 
 #[async_trait]
 impl KeyValueIterator for TestIterator {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         self.entries.pop_front().map_or(Ok(None), |e| match e {
             Ok(kv) => Ok(Some(kv)),
