@@ -4,21 +4,18 @@ use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
-use crate::filter_iterator::FilterIterator;
 use crate::iter::{IterationOrder, KeyValueIterator};
-use crate::mem_table::{ImmutableMemtable, KVTable, MemTableIterator};
+use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
-use crate::types::{RowEntry, ValueDeletable};
+use crate::utils::get_now_for_read;
 use crate::utils::{build_concurrent, compute_max_parallel};
-use crate::utils::{get_now_for_read, is_not_expired};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
 
 use bytes::Bytes;
-use futures::future::{join, BoxFuture};
-use futures::FutureExt;
+use futures::future::join;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -26,6 +23,13 @@ pub(crate) trait DbStateReader {
     fn memtable(&self) -> Arc<KVTable>;
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
     fn core(&self) -> &CoreDbState;
+}
+
+struct IteratorSources<'a> {
+    write_batch_iter: Option<WriteBatchIterator<'a>>,
+    mem_iters: Vec<Box<dyn KeyValueIterator + 'a>>,
+    l0_iters: VecDeque<Box<dyn KeyValueIterator + 'a>>,
+    sr_iters: VecDeque<Box<dyn KeyValueIterator + 'a>>,
 }
 
 pub(crate) struct Reader {
@@ -76,6 +80,175 @@ impl Reader {
         max_seq
     }
 
+    async fn build_iterator_sources<'a>(
+        &self,
+        range: &BytesRange,
+        db_state: &(dyn DbStateReader + Sync),
+        write_batch: Option<&'a WriteBatch>,
+        sst_iter_options: SstIteratorOptions,
+        point_lookup_stats: Option<DbStats>,
+    ) -> Result<IteratorSources<'a>, SlateDBError> {
+        let write_batch_iter = write_batch
+            .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
+
+        let mut memtables = VecDeque::new();
+        memtables.push_back(db_state.memtable());
+        for memtable in db_state.imm_memtable() {
+            memtables.push_back(memtable.table());
+        }
+        let mem_iters = memtables
+            .iter()
+            .map(|table| {
+                Box::new(table.range_ascending(range.clone())) as Box<dyn KeyValueIterator + 'a>
+            })
+            .collect::<Vec<_>>();
+
+        let max_parallel =
+            compute_max_parallel(db_state.core().l0.len(), &db_state.core().compacted, 4);
+
+        let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point().cloned() {
+            let l0 = self.build_point_l0_iters(
+                range,
+                db_state,
+                sst_iter_options,
+                point_lookup_stats.clone(),
+            )?;
+            let sr = self.build_point_sr_iters(
+                range,
+                &point_key,
+                db_state,
+                sst_iter_options,
+                point_lookup_stats,
+            )?;
+            (l0, sr)
+        } else {
+            let l0_future =
+                self.build_range_l0_iters(range, db_state, sst_iter_options, max_parallel);
+            let sr_future =
+                self.build_range_sr_iters(range, db_state, sst_iter_options, max_parallel);
+            let (l0_res, sr_res) = join(l0_future, sr_future).await;
+            (l0_res?, sr_res?)
+        };
+
+        Ok(IteratorSources {
+            write_batch_iter,
+            mem_iters,
+            l0_iters,
+            sr_iters,
+        })
+    }
+
+    fn build_point_l0_iters<'a>(
+        &self,
+        range: &BytesRange,
+        db_state: &(dyn DbStateReader + Sync),
+        sst_iter_options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+        let mut iters = VecDeque::new();
+        for sst in &db_state.core().l0 {
+            let iterator = SstIterator::new_owned_with_stats(
+                range.clone(),
+                sst.clone(),
+                self.table_store.clone(),
+                sst_iter_options,
+                db_stats.clone(),
+            )?;
+            if let Some(iterator) = iterator {
+                iters.push_back(Box::new(iterator) as Box<dyn KeyValueIterator + 'a>);
+            }
+        }
+        Ok(iters)
+    }
+
+    fn build_point_sr_iters<'a>(
+        &self,
+        range: &BytesRange,
+        key: &Bytes,
+        db_state: &(dyn DbStateReader + Sync),
+        sst_iter_options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+        let mut iters = VecDeque::new();
+        for sr in &db_state.core().compacted {
+            if let Some(handle) = sr.find_sst_with_range_covering_key(key.as_ref()) {
+                let iterator = SstIterator::new_owned_with_stats(
+                    range.clone(),
+                    handle.clone(),
+                    self.table_store.clone(),
+                    sst_iter_options,
+                    db_stats.clone(),
+                )?;
+                if let Some(iterator) = iterator {
+                    iters.push_back(Box::new(iterator) as Box<dyn KeyValueIterator + 'a>);
+                }
+            }
+        }
+        Ok(iters)
+    }
+
+    async fn build_range_l0_iters<'a>(
+        &self,
+        range: &BytesRange,
+        db_state: &(dyn DbStateReader + Sync),
+        sst_iter_options: SstIteratorOptions,
+        max_parallel: usize,
+    ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+        let range_clone = range.clone();
+        let table_store = self.table_store.clone();
+        build_concurrent(
+            db_state.core().l0.iter().cloned(),
+            max_parallel,
+            move |sst| {
+                let table_store = table_store.clone();
+                let range = range_clone.clone();
+                async move {
+                    SstIterator::new_owned_initialized(
+                        range.clone(),
+                        sst,
+                        table_store,
+                        sst_iter_options,
+                    )
+                    .await
+                    .map(|maybe_iter| {
+                        maybe_iter.map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'a>)
+                    })
+                }
+            },
+        )
+        .await
+    }
+
+    async fn build_range_sr_iters<'a>(
+        &self,
+        range: &BytesRange,
+        db_state: &(dyn DbStateReader + Sync),
+        sst_iter_options: SstIteratorOptions,
+        max_parallel: usize,
+    ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+        let range_clone = range.clone();
+        let table_store = self.table_store.clone();
+        build_concurrent(
+            db_state.core().compacted.iter().cloned(),
+            max_parallel,
+            move |sr| {
+                let table_store = table_store.clone();
+                let range = range_clone.clone();
+                async move {
+                    SortedRunIterator::new_owned_initialized(
+                        range.clone(),
+                        sr,
+                        table_store,
+                        sst_iter_options,
+                    )
+                    .await
+                    .map(|iter| Some(Box::new(iter) as Box<dyn KeyValueIterator + 'a>))
+                }
+            },
+        )
+        .await
+    }
+
     /// Get the value for the given key.
     ///
     /// Returns `Ok(Some(value))` if a non-expired value exists for `key`,
@@ -105,16 +278,50 @@ impl Reader {
     ) -> Result<Option<Bytes>, SlateDBError> {
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
-        let get = LevelGet {
-            key: key.as_ref(),
-            max_seq,
-            db_state,
-            table_store: self.table_store.clone(),
-            db_stats: self.db_stats.clone(),
-            write_batch,
-            now,
+        let key_slice = key.as_ref();
+        let target_key = Bytes::copy_from_slice(key_slice);
+        let range = BytesRange::from_slice(key_slice..=key_slice);
+
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: true,
+            eager_spawn: true,
+            ..SstIteratorOptions::default()
         };
-        get.get().await
+
+        let IteratorSources {
+            write_batch_iter,
+            mem_iters,
+            l0_iters,
+            sr_iters,
+        } = self
+            .build_iterator_sources(
+                &range,
+                db_state,
+                write_batch,
+                sst_iter_options,
+                Some(self.db_stats.clone()),
+            )
+            .await?;
+
+        let mut iterator = DbIterator::new(
+            range,
+            write_batch_iter,
+            mem_iters,
+            l0_iters,
+            sr_iters,
+            max_seq,
+            None,
+            now,
+        )
+        .await?;
+
+        if let Some(entry) = iterator.next_key_value().await? {
+            if entry.key == target_key {
+                return Ok(Some(entry.value));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Create an iterator over a key range.
@@ -148,16 +355,6 @@ impl Reader {
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
 
-        let mut memtables = VecDeque::new();
-        memtables.push_back(db_state.memtable());
-        for memtable in db_state.imm_memtable() {
-            memtables.push_back(memtable.table());
-        }
-        let memtable_iters: Vec<MemTableIterator> = memtables
-            .iter()
-            .map(|t| t.range_ascending(range.clone()))
-            .collect();
-
         let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let sst_iter_options = SstIteratorOptions {
@@ -167,47 +364,19 @@ impl Reader {
             eager_spawn: true,
         };
 
-        let max_parallel =
-            compute_max_parallel(db_state.core().l0.len(), &db_state.core().compacted, 4);
-
-        let l0_iters_futures =
-            build_concurrent(db_state.core().l0.iter().cloned(), max_parallel, |sst| {
-                SstIterator::new_owned_initialized(
-                    range.clone(),
-                    sst,
-                    self.table_store.clone(),
-                    sst_iter_options,
-                )
-            });
-
-        // SR (owned)
-        let sr_iters_futures = build_concurrent(
-            db_state.core().compacted.iter().cloned(),
-            max_parallel,
-            |sr| async {
-                SortedRunIterator::new_owned_initialized(
-                    range.clone(),
-                    sr,
-                    self.table_store.clone(),
-                    sst_iter_options,
-                )
-                .await
-                .map(Some)
-            },
-        );
-
-        let (l0_iters_res, sr_iters_res) = join(l0_iters_futures, sr_iters_futures).await;
-        let l0_iters = l0_iters_res?;
-        let sr_iters = sr_iters_res?;
-
-        // Create WriteBatchIterator if write_batch is provided
-        let write_batch_iter = write_batch
-            .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
+        let IteratorSources {
+            write_batch_iter,
+            mem_iters,
+            l0_iters,
+            sr_iters,
+        } = self
+            .build_iterator_sources(&range, db_state, write_batch, sst_iter_options, None)
+            .await?;
 
         DbIterator::new(
             range,
             write_batch_iter,
-            memtable_iters,
+            mem_iters,
             l0_iters,
             sr_iters,
             max_seq,
@@ -215,174 +384,6 @@ impl Reader {
             now,
         )
         .await
-    }
-}
-
-/// [`LevelGet`] is a helper struct for [`Reader::get_with_options`], it encapsulates the
-/// read path of getting a value for a given key.
-///
-/// This struct implements the multi-level read strategy that checks data sources
-/// in priority order: write batch → memtables → L0 SSTs → compacted sorted runs.
-/// The first valid (non-tombstone, non-expired) value found is returned.
-struct LevelGet<'a> {
-    /// The key to get.
-    key: &'a [u8],
-    /// The maximum sequence number to filter the entries, this field is used inside Snapshot and Transaction.
-    max_seq: Option<u64>,
-    /// The reference to in-memory state (memtables) and on-disk states (level-0 SSTs and compacted sorted runs).
-    db_state: &'a (dyn DbStateReader + Sync + Send),
-    /// The table store to read the data from.
-    table_store: Arc<TableStore>,
-    /// The reference to the database statistics.
-    db_stats: DbStats,
-    /// The current time, it's used to check if the entry is expired.
-    now: i64,
-    /// The optional write batch to read the data from. It's only used when operating within a Transaction.
-    write_batch: Option<&'a WriteBatch>,
-}
-
-impl<'a> LevelGet<'a> {
-    fn get_write_batch(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
-        async move {
-            let batch = match self.write_batch {
-                Some(batch) => batch,
-                None => return Ok(None),
-            };
-
-            match batch.get_op(self.key) {
-                None => Ok(None),
-                Some(op) => {
-                    // place a highest seq number as the placeholder.
-                    let entry = op.to_row_entry(u64::MAX, None, None);
-                    Ok(Some(entry))
-                }
-            }
-        }
-        .boxed()
-    }
-
-    async fn get(&'a self) -> Result<Option<Bytes>, SlateDBError> {
-        let mut getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>> = vec![];
-
-        // WriteBatch has highest priority
-        if self.write_batch.is_some() {
-            getters.push(self.get_write_batch());
-        }
-
-        getters.extend(vec![
-            self.get_memtable(),
-            self.get_l0(),
-            self.get_compacted(),
-        ]);
-
-        self.get_inner(getters).await
-    }
-
-    async fn get_inner(
-        &'a self,
-        getters: Vec<BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>>>,
-    ) -> Result<Option<Bytes>, SlateDBError> {
-        for getter in getters {
-            let result = match getter.await? {
-                Some(result) => result,
-                None => continue,
-            };
-
-            // expired is semantically equivalent to a tombstone. tombstone does not have an expiration.
-            let is_tombstone = matches!(result.value, ValueDeletable::Tombstone);
-            let is_expired = !is_not_expired(&result, self.now);
-            if is_tombstone || is_expired {
-                return Ok(None);
-            }
-            return Ok(result.value.as_bytes());
-        }
-        Ok(None)
-    }
-
-    fn get_memtable(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
-        async move {
-            let maybe_val = std::iter::once(self.db_state.memtable())
-                .chain(self.db_state.imm_memtable().iter().map(|imm| imm.table()))
-                .find_map(|memtable| memtable.get(self.key, self.max_seq));
-            if let Some(val) = maybe_val {
-                return Ok(Some(val));
-            }
-
-            Ok(None)
-        }
-        .boxed()
-    }
-
-    fn get_l0(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
-        async move {
-            // cache blocks that are being read
-            let sst_iter_options = SstIteratorOptions {
-                cache_blocks: true,
-                eager_spawn: true,
-                ..SstIteratorOptions::default()
-            };
-
-            for sst in &self.db_state.core().l0 {
-                if !sst.range_covers_key(self.key) {
-                    continue;
-                }
-                let maybe_iter = SstIterator::for_key_with_stats_initialized(
-                    sst,
-                    self.key,
-                    self.table_store.clone(),
-                    sst_iter_options,
-                    Some(self.db_stats.clone()),
-                )
-                .await?;
-
-                if let Some(iter) = maybe_iter {
-                    let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
-                    if let Some(entry) = iter.next_entry().await? {
-                        if entry.key == self.key {
-                            return Ok(Some(entry));
-                        }
-                    }
-                }
-            }
-            Ok(None)
-        }
-        .boxed()
-    }
-
-    fn get_compacted(&'a self) -> BoxFuture<'a, Result<Option<RowEntry>, SlateDBError>> {
-        async move {
-            // cache blocks that are being read
-            let sst_iter_options = SstIteratorOptions {
-                cache_blocks: true,
-                eager_spawn: true,
-                ..SstIteratorOptions::default()
-            };
-            for sr in &self.db_state.core().compacted {
-                let Some(sst) = sr.find_sst_with_range_covering_key(self.key) else {
-                    continue;
-                };
-
-                let maybe_iter = SstIterator::for_key_with_stats_initialized(
-                    sst,
-                    self.key,
-                    self.table_store.clone(),
-                    sst_iter_options,
-                    Some(self.db_stats.clone()),
-                )
-                .await?;
-
-                if let Some(iter) = maybe_iter {
-                    let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
-                    if let Some(entry) = iter.next_entry().await? {
-                        if entry.key == self.key {
-                            return Ok(Some(entry));
-                        }
-                    }
-                }
-            }
-            Ok(None)
-        }
-        .boxed()
     }
 }
 

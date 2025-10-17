@@ -167,12 +167,10 @@ impl TokioCompactionExecutorInner {
         let l0_iters = l0_iters_res?;
         let sr_iters = sr_iters_res?;
 
-        let l0_merge_iter = MergeIterator::new(l0_iters).await?.with_dedup(false);
-        let sr_merge_iter = MergeIterator::new(sr_iters).await?.with_dedup(false);
+        let l0_merge_iter = MergeIterator::new(l0_iters)?.with_dedup(false);
+        let sr_merge_iter = MergeIterator::new(sr_iters)?.with_dedup(false);
 
-        let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])
-            .await?
-            .with_dedup(false);
+        let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])?.with_dedup(false);
 
         let stored_manifest = StoredManifest::load(self.manifest_store.clone()).await?;
         let mut retention_iter = RetentionIterator::new(
