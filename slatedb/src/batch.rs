@@ -195,10 +195,6 @@ impl WriteBatch {
         self.ops.insert(key.clone(), WriteOp::Delete(key));
     }
 
-    pub(crate) fn get_op(&self, key: &[u8]) -> Option<&WriteOp> {
-        self.ops.get(key)
-    }
-
     pub(crate) fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
         self.ops.keys().cloned()
     }
