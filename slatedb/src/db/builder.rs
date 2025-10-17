@@ -799,7 +799,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             retrying_main_object_store.clone(),
             self.system_clock.clone(),
         ));
-
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store.clone(), None),
             SsTableFormat::default(), // read only SSTs can use default
