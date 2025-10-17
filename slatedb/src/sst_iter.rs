@@ -132,6 +132,41 @@ impl IteratorState {
     }
 }
 
+#[async_trait]
+trait FilterEvaluator: Send + Sync {
+    async fn ensure_evaluated(
+        &mut self,
+        view: &SstView<'_>,
+        table_store: &Arc<TableStore>,
+    ) -> Result<(), SlateDBError>;
+
+    fn is_filtered_out(&self) -> bool;
+    fn notify_key_found(&mut self, key: &[u8]);
+    fn notify_finished_iteration(&mut self);
+}
+
+#[derive(Default)]
+struct NoopFilterEvaluator;
+
+#[async_trait]
+impl FilterEvaluator for NoopFilterEvaluator {
+    async fn ensure_evaluated(
+        &mut self,
+        _view: &SstView<'_>,
+        _table_store: &Arc<TableStore>,
+    ) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+
+    fn is_filtered_out(&self) -> bool {
+        false
+    }
+
+    fn notify_key_found(&mut self, _key: &[u8]) {}
+
+    fn notify_finished_iteration(&mut self) {}
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FilterState {
     NotChecked,
@@ -140,30 +175,82 @@ enum FilterState {
     Negative,
 }
 
-struct SingleKeyState {
+struct SingleKeyBloomFilterEvaluator {
     key: Bytes,
     db_stats: Option<DbStats>,
-    filter_state: FilterState,
+    state: FilterState,
     found_key: bool,
     false_positive_recorded: bool,
 }
 
-impl SingleKeyState {
+impl SingleKeyBloomFilterEvaluator {
     fn new(key: Bytes, db_stats: Option<DbStats>) -> Self {
         Self {
             key,
             db_stats,
-            filter_state: FilterState::NotChecked,
+            state: FilterState::NotChecked,
             found_key: false,
             false_positive_recorded: false,
         }
     }
 }
 
-enum SstIteratorKind {
-    Generic,
-    SingleKey(SingleKeyState),
+#[async_trait]
+impl FilterEvaluator for SingleKeyBloomFilterEvaluator {
+    async fn ensure_evaluated(
+        &mut self,
+        view: &SstView<'_>,
+        table_store: &Arc<TableStore>,
+    ) -> Result<(), SlateDBError> {
+        if self.state != FilterState::NotChecked {
+            return Ok(());
+        }
+
+        let key_hash = filter::filter_hash(self.key.as_ref());
+        let maybe_filter = table_store.read_filter(view.table_as_ref()).await?;
+
+        match maybe_filter {
+            Some(filter) => {
+                if filter.might_contain(key_hash) {
+                    if let Some(stats) = &self.db_stats {
+                        stats.sst_filter_positives.inc();
+                    }
+                    self.state = FilterState::Positive;
+                } else {
+                    if let Some(stats) = &self.db_stats {
+                        stats.sst_filter_negatives.inc();
+                    }
+                    self.state = FilterState::Negative;
+                }
+            }
+            None => {
+                self.state = FilterState::NoFilter;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_filtered_out(&self) -> bool {
+        self.state == FilterState::Negative
+    }
+
+    fn notify_key_found(&mut self, key: &[u8]) {
+        if key == self.key.as_ref() {
+            self.found_key = true;
+        }
+    }
+
+    fn notify_finished_iteration(&mut self) {
+        if self.state == FilterState::Positive && !self.found_key && !self.false_positive_recorded {
+            if let Some(stats) = &self.db_stats {
+                stats.sst_filter_false_positives.inc();
+            }
+            self.false_positive_recorded = true;
+        }
+    }
 }
+
 
 pub(crate) struct SstIterator<'a> {
     view: SstView<'a>,
@@ -174,7 +261,7 @@ pub(crate) struct SstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
-    kind: SstIteratorKind,
+    filter: Box<dyn FilterEvaluator + Send + 'static>,
 }
 
 impl<'a> SstIterator<'a> {
@@ -187,11 +274,7 @@ impl<'a> SstIterator<'a> {
         assert!(options.max_fetch_tasks > 0);
         assert!(options.blocks_to_fetch > 0);
 
-        let point_key = view.point_key().map(Bytes::copy_from_slice);
-        let kind = match point_key {
-            Some(key) => SstIteratorKind::SingleKey(SingleKeyState::new(key, db_stats)),
-            None => SstIteratorKind::Generic,
-        };
+        let filter = Self::create_filter_evaluator(&view, db_stats);
 
         let iter = Self {
             view,
@@ -202,9 +285,23 @@ impl<'a> SstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
-            kind,
+            filter,
         };
         Ok(iter)
+    }
+
+    fn create_filter_evaluator(
+        view: &SstView<'a>,
+        db_stats: Option<DbStats>,
+    ) -> Box<dyn FilterEvaluator + Send + 'static> {
+        if let Some(point_key) = view.point_key() {
+            Box::new(SingleKeyBloomFilterEvaluator::new(
+                Bytes::copy_from_slice(point_key),
+                db_stats,
+            ))
+        } else {
+            Box::new(NoopFilterEvaluator::default())
+        }
     }
 
     pub(crate) fn new(
@@ -220,95 +317,13 @@ impl<'a> SstIterator<'a> {
     }
 
     pub(crate) fn is_filtered_out(&self) -> bool {
-        matches!(
-            &self.kind,
-            SstIteratorKind::SingleKey(state) if state.filter_state == FilterState::Negative
-        )
+        self.filter.is_filtered_out()
     }
 
-    fn single_key_state(&self) -> Option<&SingleKeyState> {
-        match &self.kind {
-            SstIteratorKind::SingleKey(state) => Some(state),
-            SstIteratorKind::Generic => None,
-        }
-    }
-
-    fn single_key_state_mut(&mut self) -> Option<&mut SingleKeyState> {
-        match &mut self.kind {
-            SstIteratorKind::SingleKey(state) => Some(state),
-            SstIteratorKind::Generic => None,
-        }
-    }
-
-    async fn apply_filter_if_needed(&mut self) -> Result<bool, SlateDBError> {
-        let Some(state) = self.single_key_state() else {
-            return Ok(false);
-        };
-
-        if state.filter_state != FilterState::NotChecked {
-            return Ok(state.filter_state == FilterState::Negative);
-        }
-
-        let key_hash = filter::filter_hash(state.key.as_ref());
-        let maybe_filter = self
-            .table_store
-            .read_filter(self.view.table_as_ref())
-            .await?;
-
-        let filtered_out = {
-            let state = self
-                .single_key_state_mut()
-                .expect("single key state must exist after initial check");
-            let mut filtered_out = false;
-            match maybe_filter {
-                Some(filter) => {
-                    if filter.might_contain(key_hash) {
-                        if let Some(stats) = &state.db_stats {
-                            stats.sst_filter_positives.inc();
-                        }
-                        state.filter_state = FilterState::Positive;
-                    } else {
-                        if let Some(stats) = &state.db_stats {
-                            stats.sst_filter_negatives.inc();
-                        }
-                        state.filter_state = FilterState::Negative;
-                        filtered_out = true;
-                    }
-                }
-                None => {
-                    state.filter_state = FilterState::NoFilter;
-                }
-            }
-            filtered_out
-        };
-
-        if filtered_out {
-            self.state.stop();
-        }
-
-        Ok(filtered_out)
-    }
-
-    fn maybe_mark_key_found(&mut self, key: &[u8]) {
-        if let Some(state) = self.single_key_state_mut() {
-            if key == state.key.as_ref() {
-                state.found_key = true;
-            }
-        }
-    }
-
-    fn maybe_record_false_positive(&mut self) {
-        if let Some(state) = self.single_key_state_mut() {
-            if state.filter_state == FilterState::Positive
-                && !state.found_key
-                && !state.false_positive_recorded
-            {
-                if let Some(stats) = &state.db_stats {
-                    stats.sst_filter_false_positives.inc();
-                }
-                state.false_positive_recorded = true;
-            }
-        }
+    async fn ensure_filter_evaluated(&mut self) -> Result<(), SlateDBError> {
+        self.filter
+            .ensure_evaluated(&self.view, &self.table_store)
+            .await
     }
 
     fn new_owned_with_stats<T: RangeBounds<Bytes>>(
@@ -571,7 +586,11 @@ impl<'a> SstIterator<'a> {
 impl KeyValueIterator for SstIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.state.is_initialized() {
-            self.fetch_index().await?;
+            self.ensure_filter_evaluated().await?;
+            if self.is_filtered_out() {
+                self.stop();
+                return Ok(());
+            }
             self.advance_block().await?;
         }
         Ok(())
@@ -591,7 +610,7 @@ impl KeyValueIterator for SstIterator<'_> {
             match next_entry {
                 Some(kv) => {
                     if self.view.contains(&kv.key) {
-                        self.maybe_mark_key_found(kv.key.as_ref());
+                        self.filter.notify_key_found(kv.key.as_ref());
                         return Ok(Some(kv));
                     } else if self.view.key_exceeds(&kv.key) {
                         self.stop()
@@ -600,7 +619,7 @@ impl KeyValueIterator for SstIterator<'_> {
                 None => self.advance_block().await?,
             }
         }
-        self.maybe_record_false_positive();
+        self.filter.notify_finished_iteration();
         Ok(None)
     }
 
