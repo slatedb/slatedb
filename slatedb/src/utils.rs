@@ -518,7 +518,7 @@ pub fn panic_string(panic: &(dyn Any + Send)) -> String {
         err.to_string()
     } else if let Some(err) = panic.downcast_ref::<String>() {
         err.clone()
-    } else if let Some(err) = panic.downcast_ref::<&'static str>() {
+    } else if let Some(err) = panic.downcast_ref::<&str>() {
         err.to_string()
     } else {
         format!(
@@ -538,10 +538,7 @@ pub(crate) fn unwrap_join(
             if join_error.is_cancelled() {
                 Err(SlateDBError::BackgroundTaskCancelled(name))
             } else {
-                Err(SlateDBError::BackgroundTaskPanic(
-                    name,
-                    Arc::new(Mutex::new(Box::new(join_error.into_panic()))),
-                ))
+                unwrap_unwind(name, Err(join_error.into_panic()))
             }
         }
     }
@@ -553,10 +550,13 @@ pub(crate) fn unwrap_unwind(
 ) -> Result<(), SlateDBError> {
     match unwind_result {
         Ok(task_result) => task_result,
-        Err(payload) => Err(SlateDBError::BackgroundTaskPanic(
-            name,
-            Arc::new(Mutex::new(Box::new(payload))),
-        )),
+        Err(payload) => match payload.downcast::<SlateDBError>() {
+            Ok(err) => Err(*err.clone()),
+            Err(payload) => Err(SlateDBError::BackgroundTaskPanic(
+                name,
+                Arc::new(Mutex::new(payload)),
+            )),
+        },
     }
 }
 
@@ -569,7 +569,8 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
+        compute_max_parallel, panic_string, spawn_bg_task, unwrap_join, unwrap_unwind, BitReader,
+        BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -1182,5 +1183,97 @@ mod tests {
 
         let msg = panic_string(&MyType);
         assert!(msg.contains("task panicked with unknown type"));
+    }
+
+    #[test]
+    fn test_unwrap_join_ok_ok() {
+        let join_result = Ok(Ok(()));
+        let result = unwrap_join("test".to_string(), join_result);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_unwrap_join_ok_err() {
+        let join_result = Ok(Err(SlateDBError::BlockCompressionError));
+        let result = unwrap_join("test".to_string(), join_result);
+        assert!(matches!(result, Err(SlateDBError::BlockCompressionError)));
+    }
+
+    #[tokio::test]
+    async fn test_unwrap_join_err_cancelled() {
+        let jh = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            Ok::<(), SlateDBError>(())
+        });
+        jh.abort();
+        let join_result = jh.await;
+        let result = unwrap_join("test".to_string(), join_result);
+        match result {
+            Ok(_) => panic!("expected Err"),
+            Err(SlateDBError::BackgroundTaskCancelled(task_name)) => {
+                assert_eq!(task_name, "test");
+            }
+            Err(e) => panic!("expected BackgroundTaskCancelled, got: {}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unwrap_join_err_other() {
+        let jh = tokio::spawn(async move { panic!("boom") });
+        let join_result = jh.await;
+        let result = unwrap_join("test".to_string(), join_result);
+        match result {
+            Ok(_) => panic!("expected Err"),
+            Err(SlateDBError::BackgroundTaskPanic(task_name, payload)) => {
+                assert_eq!(task_name, "test");
+                let guard = payload.lock().expect("mutex poisoned");
+                match guard.downcast_ref::<&str>() {
+                    Some(s) => assert_eq!(*s, "boom"),
+                    None => panic!("expected BackgroundTaskPanic(test, boom), got None"),
+                }
+            }
+            Err(e) => panic!("expected BackgroundTaskPanic(test, boom), got: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_unwrap_unwind_ok_ok() {
+        let result = unwrap_unwind("test".to_string(), Ok(Ok(())));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_unwrap_unwind_ok_err() {
+        let result = unwrap_unwind(
+            "test".to_string(),
+            Ok(Err(SlateDBError::BlockCompressionError)),
+        );
+        assert!(matches!(result, Err(SlateDBError::BlockCompressionError)));
+    }
+
+    #[test]
+    fn test_unwrap_unwind_err_slate_db_error() {
+        let result = unwrap_unwind(
+            "test".to_string(),
+            Err(Box::new(SlateDBError::BlockCompressionError)),
+        );
+        assert!(matches!(result, Err(SlateDBError::BlockCompressionError)));
+    }
+
+    #[test]
+    fn test_unwrap_unwind_err_other() {
+        let result = unwrap_unwind("test".to_string(), Err(Box::new("boom")));
+        match result {
+            Ok(_) => panic!("expected Err"),
+            Err(SlateDBError::BackgroundTaskPanic(task_name, payload)) => {
+                assert_eq!(task_name, "test");
+                let guard = payload.lock().expect("mutex poisoned");
+                match guard.downcast_ref::<&str>() {
+                    Some(s) => assert_eq!(*s, "boom"),
+                    None => panic!("expected BackgroundTaskPanic(test, boom), got None"),
+                }
+            }
+            Err(e) => panic!("expected BackgroundTaskPanic(test, boom), got: {:?}", e),
+        }
     }
 }
