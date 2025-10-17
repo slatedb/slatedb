@@ -133,26 +133,6 @@ impl<'a> SortedRunIterator<'a> {
         Ok(iter)
     }
 
-    pub(crate) async fn for_key(
-        sorted_run: &'a SortedRun,
-        key: &'a [u8],
-        table_store: Arc<TableStore>,
-        sst_iter_options: SstIteratorOptions,
-    ) -> Result<SortedRunIterator<'a>, SlateDBError> {
-        Self::new_borrowed(key..=key, sorted_run, table_store, sst_iter_options).await
-    }
-
-    pub(crate) async fn for_key_initialized(
-        sorted_run: &'a SortedRun,
-        key: &'a [u8],
-        table_store: Arc<TableStore>,
-        sst_iter_options: SstIteratorOptions,
-    ) -> Result<SortedRunIterator<'a>, SlateDBError> {
-        let mut iter = Self::for_key(sorted_run, key, table_store, sst_iter_options).await?;
-        iter.init().await?;
-        Ok(iter)
-    }
-
     async fn advance_table(&mut self) -> Result<(), SlateDBError> {
         self.current_iter = self
             .view
