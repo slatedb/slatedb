@@ -528,6 +528,19 @@ pub fn panic_string(panic: &(dyn Any + Send)) -> String {
     }
 }
 
+/// Unwraps a tokio task join result, converting any panics to SlateDBErrors.
+///
+/// # Arguments
+///
+/// * `name`: The name of the task
+/// * `join_result`: The result of the task join
+///
+/// # Returns
+///
+/// - Ok() if the task completed successfully
+/// - Err(SlateDBError:: .. ) if the task completed with an error or panicked with a SlateDBError
+/// - Err(SlateDBError::BackgroundTaskCancelled) if the task was cancelled
+/// - Err(SlateDBError::BackgroundTaskPanic) if the task panicked with a non-SlateDBError
 pub(crate) fn unwrap_join(
     name: String,
     join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError>,
@@ -544,6 +557,18 @@ pub(crate) fn unwrap_join(
     }
 }
 
+/// Unwraps a catch_unwind result, converting any panics to SlateDBErrors.
+///
+/// # Arguments
+///
+/// * `name`: The name of the task
+/// * `unwind_result`: The result of the catch_unwind
+///
+/// # Returns
+///
+/// - Ok() if the task completed successfully
+/// - Err(SlateDBError:: .. ) if the task completed with an error or panicked with a SlateDBError
+/// - Err(SlateDBError::BackgroundTaskPanic) if the task panicked with a non-SlateDBError
 pub(crate) fn unwrap_unwind(
     name: String,
     unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>,
