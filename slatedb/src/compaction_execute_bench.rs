@@ -19,7 +19,9 @@ use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
-use crate::compactor_state::{Compaction, SourceId};
+use crate::compactor_state::{
+    Compaction, CompactionPlan, CompactionSpec, CompactionType, SourceId,
+};
 use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -210,6 +212,7 @@ impl CompactionExecuteBench {
         table_store: &Arc<TableStore>,
         is_dest_last_run: bool,
         rand: Arc<DbRand>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> Result<CompactionJob, SlateDBError> {
         let sst_ids: Vec<SsTableId> = (0u32..num_ssts as u32)
             .map(CompactionExecuteBench::sst_id)
@@ -246,7 +249,12 @@ impl CompactionExecuteBench {
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
         Ok(CompactionJob {
-            id: rand.rng().gen_uuid(),
+            id: rand.rng().gen_ulid(system_clock.as_ref()),
+            compaction_id: rand.rng().gen_ulid(system_clock.as_ref()),
+            spec: crate::compactor_executor::CompactionJobSpec::LinearCompactionJob {
+                completed_input_sst_ids: vec![],
+                completed_input_sr_ids: vec![],
+            },
             destination: 0,
             ssts,
             sorted_runs: vec![],
@@ -258,11 +266,13 @@ impl CompactionExecuteBench {
 
     fn load_compaction_as_job(
         manifest: &StoredManifest,
-        compaction: &Compaction,
+        compaction_plan: &CompactionPlan,
         is_dest_last_run: bool,
         rand: Arc<DbRand>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> CompactionJob {
         let state = manifest.db_state();
+        let compaction = compaction_plan.compaction();
         let srs_by_id: HashMap<_, _> = state
             .compacted
             .iter()
@@ -280,7 +290,12 @@ impl CompactionExecuteBench {
             .collect();
         info!("loaded compaction job");
         CompactionJob {
-            id: rand.rng().gen_uuid(),
+            id: rand.rng().gen_ulid(system_clock.as_ref()),
+            compaction_id: compaction_plan.id(),
+            spec: crate::compactor_executor::CompactionJobSpec::LinearCompactionJob {
+                completed_input_sst_ids: vec![],
+                completed_input_sr_ids: vec![],
+            },
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
@@ -307,12 +322,6 @@ impl CompactionExecuteBench {
             self.path.clone(),
             None,
         ));
-        let compaction = source_sr_ids.map(|source_sr_ids| {
-            Compaction::new(
-                source_sr_ids.into_iter().map(SourceId::SortedRun).collect(),
-                destination_sr_id,
-            )
-        });
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();
         let registry = Arc::new(StatRegistry::new());
@@ -336,16 +345,36 @@ impl CompactionExecuteBench {
             manifest_store.clone(),
         );
 
-        info!("load compaction job");
         let manifest = StoredManifest::load(manifest_store).await?;
-        let job = match &compaction {
-            Some(compaction) => {
+        let db_state = manifest.db_state();
+
+        let sources: Vec<SourceId> = source_sr_ids
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(SourceId::SortedRun)
+            .collect();
+        let spec = CompactionSpec::SortedRunCompaction {
+            ssts: vec![],
+            sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
+        };
+
+        let compaction_plan = source_sr_ids.map(|_source_sr_ids| {
+            let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
+            let compaction = Compaction::new(sources, spec, destination_sr_id);
+            CompactionPlan::new(id, CompactionType::Internal, compaction)
+        });
+
+        info!("load compaction job");
+        let job = match &compaction_plan {
+            Some(compaction_plan) => {
                 info!("load job from existing compaction");
                 CompactionExecuteBench::load_compaction_as_job(
                     &manifest,
-                    compaction,
+                    compaction_plan,
                     false,
                     self.rand.clone(),
+                    self.system_clock.clone(),
                 )
             }
             None => {
@@ -355,6 +384,7 @@ impl CompactionExecuteBench {
                     &table_store,
                     false,
                     self.rand.clone(),
+                    self.system_clock.clone(),
                 )
                 .await?
             }

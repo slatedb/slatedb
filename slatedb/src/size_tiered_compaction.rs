@@ -4,7 +4,7 @@ use std::iter::Peekable;
 use std::slice::Iter;
 
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
-use crate::compactor_state::{Compaction, CompactorState, SourceId};
+use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
 use crate::db_state::CoreDbState;
 
@@ -180,8 +180,9 @@ impl Default for SizeTieredCompactionScheduler {
 impl CompactionScheduler for SizeTieredCompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction> {
         let mut compactions = Vec::new();
+        let db_state = state.db_state();
 
-        let (l0, srs) = self.compaction_sources(state.db_state());
+        let (l0, srs) = self.compaction_sources(db_state);
 
         let conflict_checker = ConflictChecker::new(&state.compactions());
         let backpressure_checker = BackpressureChecker::new(
@@ -192,7 +193,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         let mut checker = CompactionChecker::new(conflict_checker, backpressure_checker);
 
         while state.compactions().len() + compactions.len() < self.max_concurrent_compactions {
-            let Some(compaction) = self.pick_next_compaction(&l0, &srs, &checker) else {
+            let Some(compaction) = self.pick_next_compaction(db_state, &l0, &srs, &checker) else {
                 break;
             };
             checker.conflict_checker.add_compaction(&compaction);
@@ -275,6 +276,7 @@ impl SizeTieredCompactionScheduler {
 
     fn pick_next_compaction(
         &self,
+        db_state: &CoreDbState,
         l0: &[CompactionSource],
         srs: &[CompactionSource],
         checker: &CompactionChecker,
@@ -288,7 +290,7 @@ impl SizeTieredCompactionScheduler {
                 .map_or(0, |sr| sr.source.unwrap_sorted_run() + 1);
             let next_sr = srs.first();
             if checker.check_compaction(&l0_candidates, dst, next_sr) {
-                return Some(self.create_compaction(l0_candidates, dst));
+                return Some(self.create_compaction(db_state, l0_candidates, dst));
             }
         }
 
@@ -308,7 +310,7 @@ impl SizeTieredCompactionScheduler {
                     .expect("expected non-empty compactable run")
                     .source
                     .unwrap_sorted_run();
-                return Some(self.create_compaction(compactable_run, dst));
+                return Some(self.create_compaction(db_state, compactable_run, dst));
             }
             srs_iter.next();
         }
@@ -329,9 +331,18 @@ impl SizeTieredCompactionScheduler {
         sources
     }
 
-    fn create_compaction(&self, sources: VecDeque<CompactionSource>, dst: u32) -> Compaction {
+    fn create_compaction(
+        &self,
+        db_state: &CoreDbState,
+        sources: VecDeque<CompactionSource>,
+        dst: u32,
+    ) -> Compaction {
         let sources: Vec<SourceId> = sources.iter().map(|src| src.source.clone()).collect();
-        Compaction::new(sources, dst)
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: Compaction::get_ssts(db_state, &sources),
+            sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
+        };
+        Compaction::new(sources, spec, dst)
     }
 
     // looks for a series of sorted runs with similar sizes and assemble to a vecdequeue,
@@ -418,12 +429,18 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::compactor::CompactionScheduler;
-    use crate::compactor_state::{Compaction, CompactorState, SourceId};
+    use crate::compactor_state::{
+        Compaction, CompactionPlan, CompactionSpec, CompactionType, CompactorState, SourceId,
+    };
 
+    use crate::clock::DefaultSystemClock;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
+    use crate::utils::IdGenerator;
+    use crate::DbRand;
+    use std::sync::Arc;
 
     #[test]
     fn test_should_compact_l0s_to_first_sr() {
@@ -501,10 +518,9 @@ mod tests {
         // then:
         assert_eq!(compactions.len(), 1);
         let compaction = compactions.first().unwrap();
-        assert_eq!(
-            compaction.clone(),
-            create_sr_compaction(vec![4, 3, 2, 1, 0])
-        )
+        let expected_compaction = create_sr_compaction(state.db_state(), vec![4, 3, 2, 1, 0]);
+
+        assert_eq!(compaction.clone(), expected_compaction,)
     }
 
     #[test]
@@ -527,8 +543,10 @@ mod tests {
 
         // then:
         assert_eq!(compactions.len(), 1);
+
         let compaction = compactions.first().unwrap();
-        assert_eq!(compaction.clone(), create_sr_compaction(vec![4, 3, 2, 1]))
+        let expected_compaction = create_sr_compaction(state.db_state(), vec![4, 3, 2, 1]);
+        assert_eq!(compaction.clone(), expected_compaction)
     }
 
     #[test]
@@ -545,9 +563,24 @@ mod tests {
                 create_sr2(0, 2),
             ],
         ));
-        state
-            .submit_compaction(uuid::Uuid::new_v4(), create_sr_compaction(vec![3, 2, 1, 0]))
+        let rand = Arc::new(DbRand::default());
+        let system_clock = Arc::new(DefaultSystemClock::new());
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_plan = CompactionPlan::new(
+            compaction_id,
+            CompactionType::Internal,
+            create_sr_compaction(state.db_state(), vec![3, 2, 1, 0]),
+        );
+
+        state.compaction_submitted(compaction_plan.clone());
+
+        let id = state
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
+
+        assert_eq!(id, compaction_job_id);
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
@@ -596,13 +629,12 @@ mod tests {
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
+        let expected_compaction =
+            create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]);
 
         // then:
         assert_eq!(compactions.len(), 1);
-        assert_eq!(
-            compactions.first().unwrap(),
-            &create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0])
-        );
+        assert_eq!(compactions.first().unwrap(), &expected_compaction,);
     }
 
     #[test]
@@ -626,12 +658,22 @@ mod tests {
                 create_sr4(0, 2),
             ],
         ));
-        state
-            .submit_compaction(
-                uuid::Uuid::new_v4(),
-                create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
-            )
+        let rand = Arc::new(DbRand::default());
+        let system_clock = Arc::new(DefaultSystemClock::new());
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_plan = CompactionPlan::new(
+            compaction_id,
+            CompactionType::Internal,
+            create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]),
+        );
+        state.compaction_submitted(compaction_plan.clone());
+        let id = state
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
+
+        assert_eq!(id, compaction_job_id);
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
@@ -658,12 +700,22 @@ mod tests {
                 create_sr4(0, 2),
             ],
         ));
-        state
-            .submit_compaction(
-                uuid::Uuid::new_v4(),
-                create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
-            )
+        let rand = Arc::new(DbRand::default());
+        let system_clock = Arc::new(DefaultSystemClock::new());
+
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_plan = CompactionPlan::new(
+            compaction_id,
+            CompactionType::Internal,
+            create_sr_compaction(state.db_state(), vec![7, 6, 5, 4, 3, 2, 1, 0]),
+        );
+        state.compaction_submitted(compaction_plan.clone());
+        let id = state
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
+
+        assert_eq!(id, compaction_job_id);
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);
@@ -697,11 +749,14 @@ mod tests {
         // then:
         assert_eq!(compactions.len(), 3);
         let compaction = compactions.first().unwrap();
-        assert_eq!(compaction, &create_l0_compaction(&l0, 11));
+        let expected_l0_compaction = create_l0_compaction(&l0, 11);
+        assert_eq!(compaction.clone(), expected_l0_compaction);
         let compaction = compactions.get(1).unwrap();
-        assert_eq!(compaction, &create_sr_compaction(vec![10, 9, 8, 7]));
+        let expected_sr0_compaction = create_sr_compaction(state.db_state(), vec![10, 9, 8, 7]);
+        assert_eq!(compaction.clone(), expected_sr0_compaction);
         let compaction = compactions.get(2).unwrap();
-        assert_eq!(compaction, &create_sr_compaction(vec![3, 2, 1, 0]));
+        let expected_sr1_compaction = create_sr_compaction(state.db_state(), vec![3, 2, 1, 0]);
+        assert_eq!(compaction.clone(), expected_sr1_compaction);
     }
 
     #[test]
@@ -768,7 +823,8 @@ mod tests {
         ));
 
         let srs = state.db_state().compacted.clone();
-        let compaction = create_sr_compaction(srs.iter().map(|sr| sr.id).collect());
+        let compaction =
+            create_sr_compaction(state.db_state(), srs.iter().map(|sr| sr.id).collect());
         // when:
         let result = scheduler.validate_compaction(&state, &compaction);
 
@@ -825,18 +881,25 @@ mod tests {
     }
 
     fn create_l0_compaction(l0: &[SsTableHandle], dst: u32) -> Compaction {
-        Compaction::new(
-            l0.iter()
-                .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
-                .collect(),
-            dst,
-        )
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: l0.to_vec(),
+            sorted_runs: vec![],
+        };
+
+        let sources: Vec<SourceId> = l0
+            .iter()
+            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .collect();
+
+        Compaction::new(sources, spec, dst)
     }
 
-    fn create_sr_compaction(srs: Vec<u32>) -> Compaction {
-        Compaction::new(
-            srs.iter().map(|sr| SourceId::SortedRun(*sr)).collect(),
-            *srs.last().unwrap(),
-        )
+    fn create_sr_compaction(db_state: &CoreDbState, srs: Vec<u32>) -> Compaction {
+        let sources: Vec<SourceId> = srs.iter().map(|sr| SourceId::SortedRun(*sr)).collect();
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: vec![],
+            sorted_runs: Compaction::get_sorted_runs(db_state, &sources),
+        };
+        Compaction::new(sources, spec, *srs.last().unwrap())
     }
 }

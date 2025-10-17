@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
-use log::info;
+use log::{error, info};
 use ulid::Ulid;
-use uuid::Uuid;
 
+use crate::compactor_executor::CompactionJob;
 use crate::compactor_state::CompactionStatus::Submitted;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
@@ -56,7 +56,28 @@ impl SourceId {
 pub(crate) enum CompactionStatus {
     Submitted,
     #[allow(dead_code)]
+    Pending,
+    #[allow(dead_code)]
     InProgress,
+    #[allow(dead_code)]
+    Completed,
+    #[allow(dead_code)]
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CompactionType {
+    Internal,
+    #[allow(dead_code)]
+    External,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CompactionSpec {
+    SortedRunCompaction {
+        ssts: Vec<SsTableHandle>,
+        sorted_runs: Vec<SortedRun>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +85,37 @@ pub struct Compaction {
     pub(crate) status: CompactionStatus,
     pub(crate) sources: Vec<SourceId>,
     pub(crate) destination: u32,
+    pub(crate) job_attempts: Vec<CompactionJob>,
+    pub(crate) spec: CompactionSpec,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompactionPlan {
+    id: Ulid,
+    compaction_type: CompactionType,
+    pub(crate) compaction: Compaction,
+}
+
+impl CompactionPlan {
+    pub(crate) fn new(id: Ulid, compaction_type: CompactionType, compaction: Compaction) -> Self {
+        Self {
+            id,
+            compaction_type,
+            compaction,
+        }
+    }
+
+    pub(crate) fn id(&self) -> Ulid {
+        self.id
+    }
+
+    pub(crate) fn compaction_type(&self) -> &CompactionType {
+        &self.compaction_type
+    }
+
+    pub(crate) fn compaction(&self) -> &Compaction {
+        &self.compaction
+    }
 }
 
 impl Display for Compaction {
@@ -78,18 +130,70 @@ impl Display for Compaction {
 }
 
 impl Compaction {
-    pub(crate) fn new(sources: Vec<SourceId>, destination: u32) -> Self {
+    pub(crate) fn new(sources: Vec<SourceId>, spec: CompactionSpec, destination: u32) -> Self {
         Self {
             status: Submitted,
             sources,
             destination,
+            job_attempts: Vec::new(),
+            spec,
+        }
+    }
+
+    pub(crate) fn get_sorted_runs(db_state: &CoreDbState, sources: &[SourceId]) -> Vec<SortedRun> {
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
+
+        sources
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sorted_run())
+            .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
+            .collect()
+    }
+
+    pub(crate) fn get_ssts(db_state: &CoreDbState, sources: &[SourceId]) -> Vec<SsTableHandle> {
+        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
+            .l0
+            .iter()
+            .map(|sst| (sst.id.unwrap_compacted_id(), sst))
+            .collect();
+
+        sources
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sst())
+            .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
+            .collect()
+    }
+}
+
+// Represents the compaction state in the object store
+#[derive(Clone)]
+pub(crate) struct CompactionState {
+    #[allow(dead_code)]
+    pub(crate) compactor_epoch: u64,
+    // active_compaction plan queued, in-progress and completed mapped by compaction id in object store
+    #[allow(dead_code)]
+    pub(crate) compaction_plans: HashMap<Ulid, CompactionPlan>,
+}
+
+impl CompactionState {
+    #[allow(dead_code)]
+    pub(crate) fn initial() -> Self {
+        Self {
+            compactor_epoch: 0,
+            compaction_plans: HashMap::<Ulid, CompactionPlan>::new(),
         }
     }
 }
 
 pub struct CompactorState {
     manifest: DirtyManifest,
-    compactions: HashMap<Uuid, Compaction>,
+    // TODO: Add compaction_state during compaction state persistence implementation
+    //compaction_state: DirtyRecord<CompactionState>,
+    compaction_plans: HashMap<Ulid, CompactionPlan>,
+
+    // In-memory record of compaction plans scheduled by compactor process mapped by compaction job id
+    scheduled_compactions: HashMap<Ulid, CompactionPlan>,
 }
 
 impl CompactorState {
@@ -102,28 +206,35 @@ impl CompactorState {
     }
 
     pub(crate) fn num_compactions(&self) -> usize {
-        self.compactions.len()
+        self.scheduled_compactions.len()
     }
 
     pub(crate) fn compactions(&self) -> Vec<Compaction> {
-        self.compactions.values().cloned().collect()
+        self.scheduled_compactions
+            .values()
+            .map(|plan| plan.compaction())
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn new(manifest: DirtyManifest) -> Self {
         Self {
             manifest,
-            compactions: HashMap::<Uuid, Compaction>::new(),
+            scheduled_compactions: HashMap::new(),
+            compaction_plans: HashMap::new(),
         }
     }
 
     pub(crate) fn submit_compaction(
         &mut self,
-        id: Uuid,
-        compaction: Compaction,
-    ) -> Result<Uuid, SlateDBError> {
+        id: Ulid,
+        compaction_plan: CompactionPlan,
+    ) -> Result<Ulid, SlateDBError> {
+        let compaction = compaction_plan.compaction().clone();
         if self
-            .compactions
+            .scheduled_compactions
             .values()
+            .map(|c| c.compaction())
             .any(|c| c.destination == compaction.destination)
         {
             // we already have an ongoing compaction for this destination
@@ -144,7 +255,18 @@ impl CompactorState {
             }
         }
         info!("accepted submitted compaction [compaction={}]", compaction);
-        self.compactions.insert(id, compaction);
+        // TODO: Add compactionJob attempt to the object store
+        let compaction_id = compaction_plan.id();
+        if let Some(plan) = self.compaction_plans.get_mut(&compaction_id) {
+            plan.compaction.status = CompactionStatus::Pending;
+            self.scheduled_compactions.insert(id, plan.clone());
+        } else {
+            error!(
+                "compaction plan not found [compaction_id={}]",
+                compaction_id
+            );
+            return Err(SlateDBError::InvalidCompaction);
+        }
         Ok(id)
     }
 
@@ -188,12 +310,48 @@ impl CompactorState {
         self.manifest = remote_manifest;
     }
 
-    pub(crate) fn finish_failed_compaction(&mut self, id: Uuid) {
-        self.compactions.remove(&id);
+    pub(crate) fn compaction_submitted(&mut self, compaction_plan: CompactionPlan) {
+        self.compaction_plans
+            .insert(compaction_plan.id(), compaction_plan);
     }
 
-    pub(crate) fn finish_compaction(&mut self, id: Uuid, output_sr: SortedRun) {
-        if let Some(compaction) = self.compactions.get(&id) {
+    pub(crate) fn remove(&mut self, id: &Ulid) {
+        self.compaction_plans.remove(id);
+    }
+
+    pub(crate) fn compaction_started(&mut self, id: Ulid) {
+        if let Some(sched) = self.scheduled_compactions.get(&id) {
+            let plan_id = sched.id();
+            if let Some(plan) = self.compaction_plans.get_mut(&plan_id) {
+                plan.compaction.status = CompactionStatus::InProgress; // update canonical entry
+            } else {
+                error!("compaction plan not found [compaction_id={}]", plan_id);
+            }
+        } else {
+            error!("scheduled compaction job not found [job_id={}]", id);
+        }
+    }
+
+    pub(crate) fn finish_failed_compaction(&mut self, id: Ulid) {
+        // TODO: Add compaction plan to object store with Failed status
+        if let Some(sched) = self.scheduled_compactions.get(&id) {
+            let plan_id = sched.id();
+            if let Some(plan) = self.compaction_plans.get_mut(&plan_id) {
+                plan.compaction.status = CompactionStatus::Failed; // update canonical entry
+            } else {
+                error!("compaction plan not found [compaction_id={}]", plan_id);
+            }
+            self.scheduled_compactions.remove(&id);
+            // This should be removed once persistence is implemented since removal be take care by garbage collection
+            self.compaction_plans.remove(&plan_id);
+        } else {
+            error!("scheduled compaction job not found [job_id={}]", id);
+        }
+    }
+
+    pub(crate) fn finish_compaction(&mut self, id: Ulid, output_sr: SortedRun) {
+        if let Some(compaction_plan) = self.scheduled_compactions.get(&id) {
+            let compaction = compaction_plan.compaction();
             info!("finished compaction [compaction={}]", compaction);
             // reconstruct l0
             let compaction_l0s: HashSet<Ulid> = compaction
@@ -248,7 +406,20 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.core = db_state;
-            self.compactions.remove(&id);
+            // TODO: Add compaction plan to object store with Completed status
+            if let Some(sched) = self.scheduled_compactions.get(&id) {
+                let plan_id = sched.id();
+                if let Some(plan) = self.compaction_plans.get_mut(&plan_id) {
+                    plan.compaction.status = CompactionStatus::Completed; // update canonical entry
+                } else {
+                    error!("compaction plan not found [compaction_id={}]", plan_id);
+                }
+                self.scheduled_compactions.remove(&id);
+                // This should be removed once persistence is implemented since removal be take care by garbage collection
+                self.compaction_plans.remove(&plan_id);
+            } else {
+                error!("scheduled compaction job not found [job_id={}]", id);
+            }
         }
     }
 
@@ -270,13 +441,14 @@ mod tests {
     use super::*;
     use crate::checkpoint::Checkpoint;
     use crate::clock::{DefaultSystemClock, SystemClock};
-    use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
     use crate::config::Settings;
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::utils::IdGenerator;
+    use crate::DbRand;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -288,31 +460,46 @@ mod tests {
     fn test_should_register_compaction_as_submitted() {
         // given:
         let rt = build_runtime();
-        let (_, _, mut state) = build_test_state(rt.handle());
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction = build_l0_compaction(&state.db_state().l0, 0);
 
         // when:
-        state
-            .submit_compaction(
-                uuid::Uuid::new_v4(),
-                build_l0_compaction(&state.db_state().l0, 0),
-            )
+        let compaction_plan =
+            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
+        state.compaction_submitted(compaction_plan.clone());
+        let id = state
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
 
         // then:
+        assert_eq!(id, compaction_job_id);
         assert_eq!(state.compactions().len(), 1);
-        assert_eq!(state.compactions().first().unwrap().status, Submitted);
+        assert_eq!(
+            state.compactions().first().unwrap().status,
+            CompactionStatus::Pending
+        );
     }
 
     #[test]
     fn test_should_update_dbstate_when_compaction_finished() {
         // given:
         let rt = build_runtime();
-        let (_, _, mut state) = build_test_state(rt.handle());
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
+        let compaction_plan =
+            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
+        state.compaction_submitted(compaction_plan.clone());
         let id = state
-            .submit_compaction(uuid::Uuid::new_v4(), compaction)
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
+
+        assert_eq!(id, compaction_job_id);
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -354,12 +541,19 @@ mod tests {
     fn test_should_remove_compaction_when_compaction_finished() {
         // given:
         let rt = build_runtime();
-        let (_, _, mut state) = build_test_state(rt.handle());
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction = build_l0_compaction(&before_compaction.l0, 0);
+        let compaction_plan =
+            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
+        state.compaction_submitted(compaction_plan.clone());
         let id = state
-            .submit_compaction(uuid::Uuid::new_v4(), compaction)
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
+
+        assert_eq!(id, compaction_job_id);
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -377,7 +571,7 @@ mod tests {
     fn test_should_merge_db_state_correctly_when_never_compacted() {
         // given:
         let rt = build_runtime();
-        let (os, mut sm, mut state) = build_test_state(rt.handle());
+        let (os, mut sm, mut state, _, _) = build_test_state(rt.handle());
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
         rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
@@ -409,18 +603,29 @@ mod tests {
     fn test_should_merge_db_state_correctly() {
         // given:
         let rt = build_runtime();
-        let (os, mut sm, mut state) = build_test_state(rt.handle());
+        let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: original_l0s.clone().into(),
+            sorted_runs: vec![],
+        };
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction = Compaction::new(
+            vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
+            spec,
+            0,
+        );
+        let compaction_plan =
+            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
+        state.compaction_submitted(compaction_plan.clone());
         let id = state
-            .submit_compaction(
-                uuid::Uuid::new_v4(),
-                Compaction::new(
-                    vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
-                    0,
-                ),
-            )
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
+
+        assert_eq!(compaction_job_id, id);
+
         state.finish_compaction(
             id,
             SortedRun {
@@ -475,21 +680,33 @@ mod tests {
     fn test_should_merge_db_state_correctly_when_all_l0_compacted() {
         // given:
         let rt = build_runtime();
-        let (os, mut sm, mut state) = build_test_state(rt.handle());
+        let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: original_l0s.clone().into(),
+            sorted_runs: vec![],
+        };
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+
+        let compaction = Compaction::new(
+            original_l0s
+                .iter()
+                .map(|h| Sst(h.id.unwrap_compacted_id()))
+                .collect(),
+            spec,
+            0,
+        );
+        let compaction_plan =
+            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
+        state.compaction_submitted(compaction_plan.clone());
         let id = state
-            .submit_compaction(
-                uuid::Uuid::new_v4(),
-                Compaction::new(
-                    original_l0s
-                        .iter()
-                        .map(|h| Sst(h.id.unwrap_compacted_id()))
-                        .collect(),
-                    0,
-                ),
-            )
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
+
+        assert_eq!(compaction_job_id, id);
+
         state.finish_compaction(
             id,
             SortedRun {
@@ -552,31 +769,40 @@ mod tests {
     fn test_should_submit_correct_compaction() {
         // given:
         let rt = build_runtime();
-        let (_os, mut _sm, mut state) = build_test_state(rt.handle());
+        let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        let result = state.submit_compaction(
-            uuid::Uuid::new_v4(),
-            Compaction::new(
-                original_l0s
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _e)| i > &2usize)
-                    .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
-                    .collect::<Vec<SourceId>>(),
-                0,
-            ),
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: original_l0s.clone().into(),
+            sorted_runs: vec![],
+        };
+        let id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction = Compaction::new(
+            original_l0s
+                .iter()
+                .enumerate()
+                .filter(|(i, _e)| i > &2usize)
+                .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
+                .collect::<Vec<SourceId>>(),
+            spec,
+            0,
         );
-
+        let compaction_plan =
+            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
+        state.compaction_submitted(compaction_plan.clone());
+        let result = state.submit_compaction(id, compaction_plan);
         // then:
         assert!(result.is_ok());
+        let result_id = result.unwrap();
+        assert_eq!(result_id, id);
     }
 
     #[test]
     fn test_source_boundary_compaction() {
         // given:
         let rt = build_runtime();
-        let (_os, mut _sm, mut state) = build_test_state(rt.handle());
+        let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         let original_l0s = &state.db_state().clone().l0;
         let original_srs = &state.db_state().clone().compacted;
         // L0: from 4th onward (index > 2)
@@ -593,7 +819,18 @@ mod tests {
 
         // If you need both:
         let sources: Vec<SourceId> = l0_sources.chain(sr_sources).collect();
-        let result = state.submit_compaction(uuid::Uuid::new_v4(), Compaction::new(sources, 0));
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: original_l0s.clone().into(),
+            sorted_runs: original_srs.clone(),
+        };
+
+        let id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction = Compaction::new(sources, spec, 0);
+        let compaction_plan =
+            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
+        state.compaction_submitted(compaction_plan.clone());
+        let result = state.submit_compaction(id, compaction_plan);
 
         // or simply:
         assert!(result.is_ok());
@@ -667,7 +904,11 @@ mod tests {
             .iter()
             .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
             .collect();
-        Compaction::new(sources, dst)
+        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+            ssts: ssts.clone().into(),
+            sorted_runs: vec![],
+        };
+        Compaction::new(sources, spec, dst)
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
@@ -683,9 +924,16 @@ mod tests {
             .unwrap()
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_test_state(
         tokio_handle: &Handle,
-    ) -> (Arc<dyn ObjectStore>, StoredManifest, CompactorState) {
+    ) -> (
+        Arc<dyn ObjectStore>,
+        StoredManifest,
+        CompactorState,
+        Arc<dyn SystemClock>,
+        Arc<DbRand>,
+    ) {
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = build_db(os.clone(), tokio_handle);
         let l0_count: u64 = 5;
@@ -698,15 +946,18 @@ mod tests {
                 .unwrap();
         }
         tokio_handle.block_on(db.close()).unwrap();
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let rand: Arc<DbRand> = Arc::new(DbRand::default());
+
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(PATH),
             os.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            system_clock.clone(),
         ));
         let stored_manifest = tokio_handle
             .block_on(StoredManifest::load(manifest_store))
             .unwrap();
         let state = CompactorState::new(stored_manifest.prepare_dirty());
-        (os, stored_manifest, state)
+        (os, stored_manifest, state, system_clock, rand)
     }
 }
