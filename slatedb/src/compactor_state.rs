@@ -311,11 +311,8 @@ impl CompactorState {
     }
 
     pub(crate) fn compaction_submitted(&mut self, compaction_plan: CompactionPlan) {
-        // info!("compaction submission started");
-        let id = compaction_plan.id();
         self.compaction_plans
             .insert(compaction_plan.id(), compaction_plan);
-        info!("compaction submitted [compaction_id={}]", id);
     }
 
     pub(crate) fn remove(&mut self, id: &Ulid) {
@@ -691,6 +688,8 @@ mod tests {
             sorted_runs: vec![],
         };
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+
         let compaction = Compaction::new(
             original_l0s
                 .iter()
@@ -703,10 +702,10 @@ mod tests {
             CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
         state.compaction_submitted(compaction_plan.clone());
         let id = state
-            .submit_compaction(compaction_id, compaction_plan)
+            .submit_compaction(compaction_job_id, compaction_plan)
             .unwrap();
 
-        assert_eq!(compaction_id, id);
+        assert_eq!(compaction_job_id, id);
 
         state.finish_compaction(
             id,
