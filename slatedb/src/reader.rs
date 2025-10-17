@@ -2,44 +2,25 @@ use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
-use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
+use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::mem_table::{ImmutableMemtable, KVTable, MemTableIterator};
 use crate::oracle::Oracle;
-use crate::reader::SstFilterResult::{
-    FilterNegative, FilterPositive, RangeNegative, RangePositive,
-};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::{RowEntry, ValueDeletable};
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::utils::{get_now_for_read, is_not_expired};
-use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, filter, DbIterator};
+use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
 
 use bytes::Bytes;
 use futures::future::{join, BoxFuture};
 use futures::FutureExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
-
-enum SstFilterResult {
-    RangeNegative,
-    RangePositive,
-    FilterPositive,
-    FilterNegative,
-}
-
-impl SstFilterResult {
-    pub(crate) fn might_contain_key(&self) -> bool {
-        match self {
-            RangeNegative | FilterNegative => false,
-            RangePositive | FilterPositive => true,
-        }
-    }
-}
 
 pub(crate) trait DbStateReader {
     fn memtable(&self) -> Arc<KVTable>;
@@ -341,32 +322,25 @@ impl<'a> LevelGet<'a> {
                 ..SstIteratorOptions::default()
             };
 
-            let key_hash = filter::filter_hash(self.key);
-
             for sst in &self.db_state.core().l0 {
-                let filter_result = self.sst_might_include_key(sst, self.key, key_hash).await?;
-                self.record_filter_result(&filter_result);
+                if !sst.range_covers_key(self.key) {
+                    continue;
+                }
+                let maybe_iter = SstIterator::for_key_with_stats_initialized(
+                    sst,
+                    self.key,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                    Some(self.db_stats.clone()),
+                )
+                .await?;
 
-                if filter_result.might_contain_key() {
-                    let maybe_iter = SstIterator::for_key_initialized(
-                        sst,
-                        self.key,
-                        self.table_store.clone(),
-                        sst_iter_options,
-                    )
-                    .await?;
-
-                    if let Some(iter) = maybe_iter {
-                        let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
-                        if let Some(entry) = iter.next_entry().await? {
-                            if entry.key == self.key {
-                                return Ok(Some(entry));
-                            }
+                if let Some(iter) = maybe_iter {
+                    let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
+                    if let Some(entry) = iter.next_entry().await? {
+                        if entry.key == self.key {
+                            return Ok(Some(entry));
                         }
-                    }
-
-                    if matches!(filter_result, FilterPositive) {
-                        self.db_stats.sst_filter_false_positives.inc();
                     }
                 }
             }
@@ -383,99 +357,32 @@ impl<'a> LevelGet<'a> {
                 eager_spawn: true,
                 ..SstIteratorOptions::default()
             };
-            let key_hash = filter::filter_hash(self.key);
-
             for sr in &self.db_state.core().compacted {
-                let filter_result = self.sr_might_include_key(sr, self.key, key_hash).await?;
-                self.record_filter_result(&filter_result);
+                let Some(sst) = sr.find_sst_with_range_covering_key(self.key) else {
+                    continue;
+                };
 
-                if filter_result.might_contain_key() {
-                    let iter = SortedRunIterator::for_key_initialized(
-                        sr,
-                        self.key,
-                        self.table_store.clone(),
-                        sst_iter_options,
-                    )
-                    .await?;
+                let maybe_iter = SstIterator::for_key_with_stats_initialized(
+                    sst,
+                    self.key,
+                    self.table_store.clone(),
+                    sst_iter_options,
+                    Some(self.db_stats.clone()),
+                )
+                .await?;
 
+                if let Some(iter) = maybe_iter {
                     let mut iter = FilterIterator::new_with_max_seq(iter, self.max_seq);
                     if let Some(entry) = iter.next_entry().await? {
                         if entry.key == self.key {
                             return Ok(Some(entry));
                         }
                     }
-                    if matches!(filter_result, FilterPositive) {
-                        self.db_stats.sst_filter_false_positives.inc();
-                    }
                 }
             }
             Ok(None)
         }
         .boxed()
-    }
-
-    /// Check if the given key might be in the range of the SST. Checks if the key is
-    /// in the range of the sst and if the filter might contain the key.
-    /// ## Arguments
-    /// - `sst`: the sst to check
-    /// - `key`: the key to check
-    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
-    /// ## Returns
-    /// - `SstFilterResult` indicating whether the key was found or was not in range
-    async fn sst_might_include_key(
-        &self,
-        sst: &SsTableHandle,
-        key: &[u8],
-        key_hash: u64,
-    ) -> Result<SstFilterResult, SlateDBError> {
-        if !sst.range_covers_key(key) {
-            Ok(RangeNegative)
-        } else {
-            self.apply_filter(sst, key_hash).await
-        }
-    }
-
-    /// Check if the given key might be in the range of the sorted run (SR). Checks if the key
-    /// is in the range of the SSTs in the run and if the SST's filter might contain the key.
-    /// ## Arguments
-    /// - `sr`: the sorted run to check
-    /// - `key`: the key to check
-    /// - `key_hash`: the hash of the key (used for filter, to avoid recomputing the hash)
-    /// ## Returns
-    /// - `SstFilterResult` indicating whether the key was found or not
-    async fn sr_might_include_key(
-        &self,
-        sr: &SortedRun,
-        key: &[u8],
-        key_hash: u64,
-    ) -> Result<SstFilterResult, SlateDBError> {
-        let Some(sst) = sr.find_sst_with_range_covering_key(key) else {
-            return Ok(RangeNegative);
-        };
-        self.apply_filter(sst, key_hash).await
-    }
-
-    async fn apply_filter(
-        &self,
-        sst: &SsTableHandle,
-        key_hash: u64,
-    ) -> Result<SstFilterResult, SlateDBError> {
-        if let Some(filter) = self.table_store.read_filter(sst).await? {
-            return if filter.might_contain(key_hash) {
-                Ok(FilterPositive)
-            } else {
-                Ok(FilterNegative)
-            };
-        }
-        Ok(RangePositive)
-    }
-
-    fn record_filter_result(&self, result: &SstFilterResult) {
-        if matches!(result, FilterPositive) {
-            self.db_stats.sst_filter_positives.inc();
-        } else if matches!(result, FilterNegative) {
-            self.db_stats.sst_filter_negatives.inc();
-        }
     }
 }
 
