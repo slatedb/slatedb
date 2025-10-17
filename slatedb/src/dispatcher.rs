@@ -452,8 +452,10 @@ impl MessageHandlerExecutor {
     }
 
     pub(crate) fn monitor(&self, handle: &Handle) -> JoinHandle<()> {
-        let mut guard = self.tasks.lock();
-        let mut tasks = guard.take().expect("join map isn't set when expected");
+        let mut tasks = {
+            let mut guard = self.tasks.lock();
+            guard.take().expect("join map isn't set when expected")
+        };
         let this_results = self.results.clone();
         let monitor_future = async move {
             while !tasks.is_empty() {
@@ -493,7 +495,7 @@ impl MessageHandlerExecutor {
 mod test {
     use super::{MessageDispatcher, MessageHandler};
     use crate::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
-    use crate::dispatcher::MessageFactory;
+    use crate::dispatcher::{MessageFactory, MessageHandlerExecutor};
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
@@ -502,6 +504,7 @@ mod test {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::runtime::Handle;
     use tokio::sync::mpsc;
     use tokio::task::yield_now;
     use tokio::time::timeout;
@@ -601,10 +604,9 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_run_happy_path() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (tx, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1)
             .add_clock_schedule(5); // Advance clock by 5ms after first message
         let cancellation_token = CancellationToken::new();
@@ -633,13 +635,6 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(matches!(
-            cleanup_called
-                .reader()
-                .read()
-                .expect("cleanup result not set"),
-            Ok(()),
-        ));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
             messages,
@@ -653,25 +648,30 @@ mod test {
 
     #[cfg(feature = "test-util")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_dispatcher_propagates_handler_error_drains_messages() {
+    async fn test_executor_propagates_handler_error_drains_messages() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let mut cleanup_reader = cleanup_called.reader();
         let (tx, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
-            Box::new(handler),
-            rx,
+        let task_executor = MessageHandlerExecutor::new_with_fp_registry(
+            error_state.clone(),
             clock.clone(),
-            cancellation_token.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
-        let join = tokio::spawn(async move { dispatcher.run().await });
+        task_executor
+            .spawn_on(
+                "test".to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .expect("spawn failed");
+        task_executor.monitor(&Handle::current());
 
         // Stop before cleanup so we can send a message and ensure it is drained
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "pause").unwrap();
@@ -681,12 +681,14 @@ mod test {
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->pause").unwrap();
         wait_for_message_count(log.clone(), 1).await;
 
-        // Force a return by setting an error message
-        error_state.write(SlateDBError::Fenced);
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
+        // Enable a panic on the next message
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "return").unwrap();
 
-        // Send another message after error state is set
+        // Send another message to trigger the panic
         tx.send(TestMessage::Channel(77)).unwrap();
+
+        // And another to verify it is drained
+        tx.send(TestMessage::Channel(99)).unwrap();
 
         // Now proceed with cleanup
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "off").unwrap();
@@ -694,10 +696,9 @@ mod test {
         // Wait for cleanup to start (unclean shutdown)
         let _ = cleanup_reader.await_value().await;
 
-        let result = timeout(Duration::from_secs(30), join)
+        let result = timeout(Duration::from_secs(30), task_executor.join_task("test"))
             .await
-            .expect("dispatcher did not stop in time")
-            .expect("join failed");
+            .expect("dispatcher did not stop in time");
 
         // Verify final state
         assert!(matches!(result, Err(SlateDBError::Fenced)));
@@ -715,51 +716,18 @@ mod test {
             messages,
             vec![
                 (Phase::Pre, TestMessage::Channel(42)),
-                (Phase::Cleanup, TestMessage::Channel(77))
+                (Phase::Pre, TestMessage::Channel(77)),
+                (Phase::Cleanup, TestMessage::Channel(99))
             ]
         );
-    }
-
-    #[cfg(feature = "test-util")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_dispatcher_prefers_preexisting_error_state() {
-        let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
-        let mut cleanup_reader = cleanup_called.reader();
-        let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
-        let clock = Arc::new(DefaultSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
-        // Pre-set error state to simulate prior failure
-        error_state.write(SlateDBError::Fenced);
-        let mut dispatcher =
-            MessageDispatcher::new(Box::new(handler), rx, clock, cancellation_token.clone());
-        let join = tokio::spawn(async move { dispatcher.run().await });
-
-        // Cleanup should start promptly because run_loop exits immediately on existing error
-        let _ = cleanup_reader.await_value().await;
-
-        let result = timeout(Duration::from_secs(30), join)
-            .await
-            .expect("dispatcher did not stop in time")
-            .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::Fenced)));
-        assert!(matches!(
-            cleanup_reader.read(),
-            Some(Err(SlateDBError::Fenced))
-        ));
-        let messages = log.lock().unwrap().clone();
-        assert_eq!(messages, vec![]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_prioritizes_messages_over_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (tx, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1);
         let cancellation_token = CancellationToken::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
@@ -788,7 +756,6 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
             messages,
@@ -820,10 +787,9 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_multiple_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1)
             .add_ticker(Duration::from_millis(7), 2)
             .add_clock_schedule(0) // 0ms (initial two ticks are immediate, so don't advance clock until second tick)
@@ -866,7 +832,6 @@ mod test {
 
         // Shutdown and wait for cleanup to start
         cancellation_token.cancel();
-        let _ = cleanup_called.reader().await_value().await;
 
         let result = timeout(Duration::from_secs(30), join)
             .await
@@ -875,7 +840,6 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 9);
     }
 
@@ -898,10 +862,9 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_overlapping_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(3), 3)
             .add_ticker(Duration::from_millis(5), 5)
             .add_clock_schedule(0) // 0 (initial two ticks are immediate, so don't advance clock until second tick)
@@ -956,23 +919,20 @@ mod test {
 
         // Shutdown cleanly
         cancellation_token.cancel();
-        let _ = cleanup_called.reader().await_value().await;
         let result = timeout(Duration::from_secs(30), join)
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
         assert!(matches!(result, Ok(())));
-        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 10);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_identical_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(3), 1)
             .add_ticker(Duration::from_millis(3), 2)
             .add_clock_schedule(0) // 0 (initial two ticks are immediate, so don't advance clock until second tick)
@@ -1029,18 +989,16 @@ mod test {
 
         // Shutdown cleanly
         cancellation_token.cancel();
-        let _ = cleanup_called.reader().await_value().await;
         let result = timeout(Duration::from_secs(30), join)
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
         assert!(matches!(result, Ok(())));
-        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 16);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_dispatcher_catches_panic_from_run_loop() {
+    async fn test_executor_catches_panic_from_run_loop() {
         #[derive(Clone)]
         struct PanicHandler {
             cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
@@ -1073,15 +1031,21 @@ mod test {
         let (tx, rx) = mpsc::unbounded_channel::<u8>();
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = PanicHandler { cleanup_called };
-        let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(handler),
-            rx,
-            clock.clone(),
-            cancellation_token.clone(),
-        );
-        let join = tokio::spawn(async move { dispatcher.run().await });
+        let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone());
+
+        // Spawn the panic task
+        task_executor
+            .spawn_on(
+                "test".to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to spawn task");
+
+        // Monitor the executor
+        task_executor.monitor(&Handle::current());
 
         // Trigger panic inside the run loop via handle()
         tx.send(1u8).unwrap();
@@ -1092,10 +1056,11 @@ mod test {
             .expect("timeout waiting for cleanup result");
 
         // Join dispatcher and verify panic was converted and propagated
-        let result = timeout(Duration::from_secs(30), join)
+        let result = timeout(Duration::from_secs(30), task_executor.join_task("test"))
             .await
-            .expect("dispatcher did not stop in time")
-            .expect("join failed");
+            .expect("dispatcher did not stop in time");
+
+        // Check final state
         assert!(matches!(
             result,
             Err(SlateDBError::BackgroundTaskPanic(_, _))

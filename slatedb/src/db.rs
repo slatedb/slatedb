@@ -2152,7 +2152,7 @@ mod tests {
         let stats_registry = StatRegistry::new();
         let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let part_size = 1024;
-        eprintln!("temp_dir: {:?}", temp_dir.path());
+        info!("temp_dir: {:?}", temp_dir.path());
 
         let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.keep(),

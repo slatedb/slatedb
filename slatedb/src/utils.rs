@@ -1194,9 +1194,9 @@ mod tests {
 
     #[test]
     fn test_unwrap_join_ok_err() {
-        let join_result = Ok(Err(SlateDBError::BlockCompressionError));
+        let join_result = Ok(Err(SlateDBError::ChecksumMismatch));
         let result = unwrap_join("test".to_string(), join_result);
-        assert!(matches!(result, Err(SlateDBError::BlockCompressionError)));
+        assert!(matches!(result, Err(SlateDBError::ChecksumMismatch)));
     }
 
     #[tokio::test]
@@ -1244,20 +1244,17 @@ mod tests {
 
     #[test]
     fn test_unwrap_unwind_ok_err() {
-        let result = unwrap_unwind(
-            "test".to_string(),
-            Ok(Err(SlateDBError::BlockCompressionError)),
-        );
-        assert!(matches!(result, Err(SlateDBError::BlockCompressionError)));
+        let result = unwrap_unwind("test".to_string(), Ok(Err(SlateDBError::ChecksumMismatch)));
+        assert!(matches!(result, Err(SlateDBError::ChecksumMismatch)));
     }
 
     #[test]
     fn test_unwrap_unwind_err_slate_db_error() {
         let result = unwrap_unwind(
             "test".to_string(),
-            Err(Box::new(SlateDBError::BlockCompressionError)),
+            Err(Box::new(SlateDBError::ChecksumMismatch)),
         );
-        assert!(matches!(result, Err(SlateDBError::BlockCompressionError)));
+        assert!(matches!(result, Err(SlateDBError::ChecksumMismatch)));
     }
 
     #[test]
