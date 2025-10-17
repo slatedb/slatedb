@@ -435,7 +435,11 @@ impl MessageHandlerExecutor {
             let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
             let run_result = unwrap_unwind(this_name.clone(), run_unwind_result);
             this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
-            let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(run_result.clone()))
+            let error_state = Err(this_error_state
+                .reader()
+                .read()
+                .expect("error state was unexpectedly empty"));
+            let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(error_state))
                 .catch_unwind()
                 .await;
             if let Err(cleanup_error) = unwrap_unwind(this_name.clone(), cleanup_unwind_result) {
@@ -457,6 +461,11 @@ impl MessageHandlerExecutor {
             guard.take().expect("join map isn't set when expected")
         };
         let this_results = self.results.clone();
+        let this_tokens = self
+            .tokens
+            .iter()
+            .map(|e| e.value().clone())
+            .collect::<Vec<_>>();
         let monitor_future = async move {
             while !tasks.is_empty() {
                 if let Some((name, join_result)) = tasks.join_next().await {
@@ -465,7 +474,11 @@ impl MessageHandlerExecutor {
                         .get(&name)
                         .expect("result cell isn't set when expected");
                     let result_cell = entry.value();
-                    result_cell.write(task_result);
+                    result_cell.write(task_result.clone());
+                    if task_result.is_err() {
+                        // db is in an error state, so cancel all other tasks
+                        this_tokens.iter().for_each(|t| t.cancel());
+                    }
                 }
             }
         };
