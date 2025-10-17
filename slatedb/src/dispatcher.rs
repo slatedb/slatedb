@@ -9,20 +9,30 @@
 //! 4. Drain messages on shutdown
 //! 5. Clean up resources on shutdown
 //!
-//! [MessageDispatcher] unifies this pattern into a single event loop implementation.
+//! [MessageDispatcher], [MessageHandlerExecutor], and [MessageHandler] standardize
+//! this pattern in a single set of event loops.
 //!
-//! Logic is then implemented in a [MessageHandler]. Handlers receive callbacks from
-//! the dispatcher based on lifetime events (messages, ticks, etc.) and perform work
-//! based on those events.
+//! - [MessageHandlerExecutor] spawns background tasks, monitors them for completion, and
+//!   updates [crate::db_state::DbState::error] accordingly.
+//! - [MessageDispatcher] runs an event loop for a single background task. It receives
+//!   messages and ticks, and passes them to the [MessageHandler] for processing.
+//! - [MessageHandler] receives callbacks from the dispatcher based on lifetime events
+//!   (messages, ticks, etc.) and performs work based on those events.
+//!
+//! SlateDB instantiates a [MessageHandlerExecutor] and calls
+//! [MessageHandlerExecutor::spawn_on] for each [MessageHandler]. The DB then calls
+//! [MessageHandlerExecutor::monitor_on] to start the event loop and monitor tasks until
+//! shutdown.
 //!
 //! ## Example
 //!
 //! ```ignore
-//! # use crate::dispatcher::{MessageDispatcher, MessageHandler};
+//! # use crate::dispatcher::{MessageHandlerExecutor, MessageHandler};
 //! # use crate::error::SlateDBError;
 //! # use crate::clock::DefaultSystemClock;
 //! # use crate::watchable_once_cell::WatchableOnceCell;
 //! # use tokio::sync::mpsc;
+//! # use tokio::runtime::Handle;
 //! # use tokio_util::sync::CancellationToken;
 //! # use futures::stream::BoxStream;
 //! # #[tokio::main]
@@ -71,43 +81,42 @@
 //! let cancellation_token = CancellationToken::new();
 //! let (tx, rx) = mpsc::unbounded_channel();
 //! let error_state = WatchableOnceCell::new(None);
-//! let dispatcher = MessageDispatcher::new(
+//! let handle = Handle::current();
+//! let task_executor = MessageHandlerExecutor::new(
+//!     error_state,
+//!     clock,
+//! );
+//! task_executor.spawn_on(
+//!     "print_message_handler".to_string(),
 //!     Box::new(PrintMessageHandler),
 //!     rx,
-//!     clock,
-//!     cancellation_token,
-//!     error_state,
-//! );
-//! let join_handle = tokio::spawn(async move { dispatcher.run().await });
+//!     &handle,
+//! ).expect("failed to spawn task");
+//! let join_handle = task_executor.monitor_on(handle);
 //! tx.send(Message::Say("hello".to_string())).await;
-//! cancellation_token.cancel();
+//! task_executor.shutdown_task("print_message_handler").await;
 //! join_handle.await;
 //! # }
 //! ```
 
-use std::{
-    any::Any,
-    future::Future,
-    panic::AssertUnwindSafe,
-    pin::Pin,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use crossbeam_skiplist::SkipMap;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{
     stream::{BoxStream, FuturesUnordered},
     FutureExt, StreamExt,
 };
 use log::warn;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use parking_lot::Mutex;
+use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
+use tokio_util::{sync::CancellationToken, task::JoinMap};
 
 use crate::{
     clock::{SystemClock, SystemClockTicker},
     error::SlateDBError,
-    utils::WatchableOnceCell,
+    utils::{unwrap_join, unwrap_unwind, WatchableOnceCell},
 };
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
@@ -119,23 +128,14 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 /// Messages sent to the receiver are passed to the [MessageHandler] for processing.
 ///
 /// [MessageDispatcher::run] is the primary entry point for running the dispatcher;
-/// it is responsible for running the main event loop ([MessageDispatcher::run_loop])
-/// and handling cleaning up after the event loop exits.
-///
-/// [MessageDispatcher::run_loop] implements the main event loop for the dispatcher.
-/// The function receives messages from the [mpsc::UnboundedReceiver<T>] and from any
-/// [MessageDispatcherTicker]s, and passes them to the [MessageHandler] for processing.
-/// It also shuts down when the either [crate::db_state::DbState::error] is set or the
-/// [CancellationToken] is cancelled. See [MessageDispatcher::run_loop] for more
-/// details on its behavior.
-///
-/// [crate::dispatcher] contains a complete code example.
-pub(crate) struct MessageDispatcher<T: Send + std::fmt::Debug> {
+/// it is responsible for running the main event loop. The function receives messages
+/// from the [mpsc::UnboundedReceiver<T>] and from any [MessageDispatcherTicker]s, and
+/// passes them to the [MessageHandler] for processing.
+pub struct MessageDispatcher<T: Send + std::fmt::Debug> {
     handler: Box<dyn MessageHandler<T>>,
     rx: mpsc::UnboundedReceiver<T>,
     clock: Arc<dyn SystemClock>,
     cancellation_token: CancellationToken,
-    error_state: WatchableOnceCell<SlateDBError>,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
 }
@@ -147,23 +147,21 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// ## Arguments
     ///
     /// * `handler`: The [MessageHandler] to use for processing messages.
+    /// * `rx`: The [mpsc::UnboundedReceiver<T>] to use for receiving messages.
     /// * `clock`: The [SystemClock] to use for time.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
-    /// * `state`: The [DbState] to use for error tracking. If provided, the dispatcher
-    ///   will set [DbState::error] when an error is encountered.
-    pub(crate) fn new(
+    #[allow(dead_code)]
+    pub fn new(
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
-        error_state: WatchableOnceCell<SlateDBError>,
     ) -> Self {
         Self::new_with_fp_registry(
             handler,
             rx,
             clock,
             cancellation_token,
-            error_state,
             Arc::new(FailPointRegistry::new()),
         )
     }
@@ -178,14 +176,12 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `rx`: The [mpsc::UnboundedReceiver<T>] to use for receiving messages.
     /// * `clock`: The [SystemClock] to use for time.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
-    /// * `state`: The [DbState] to use for error tracking. If provided, the dispatcher
-    ///   will set [DbState::error] when an error is encountered.
-    pub(crate) fn new_with_fp_registry(
+    /// * `fp_registry`: The [FailPointRegistry] to use for fail points.
+    pub fn new_with_fp_registry(
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
-        error_state: WatchableOnceCell<SlateDBError>,
         fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
         Self {
@@ -193,75 +189,31 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             rx,
             clock,
             cancellation_token,
-            error_state,
             fp_registry,
         }
-    }
-
-    /// Runs the dispatcher. This is the primary entry point for running the dispatcher.
-    /// Run blocks until the dispatcher is shutdown or an error occurs.
-    ///
-    /// [MessageDispatcher::run] is the primary entry point for running the dispatcher;
-    /// it is responsible for:
-    ///
-    /// 1. Running the main event loop ([MessageDispatcher::run_loop]).
-    /// 2. Processing the final result when the event loop exits
-    ///    ([MessageDispatcher::handle_result]).
-    /// 4. Cleaning up resources and processing any remaining messages
-    ///    ([MessageDispatcher::cleanup]).
-    ///
-    /// ## Returns
-    ///
-    /// A [Result] containing the [DbState::error] if it was already set, or the result
-    /// of [MessageDispatcher::handle_result] otherwise.
-    pub(crate) async fn run(&mut self) -> Result<(), SlateDBError> {
-        let result = AssertUnwindSafe(self.run_loop())
-            .catch_unwind()
-            .await
-            .unwrap_or_else(Self::handle_panic);
-        let result = self.handle_result(result);
-        if let Err(e) = self.cleanup(result.clone()).await {
-            warn!("failed to cleanup dispatcher on shutdown [error={:?}]", e);
-        }
-        result
     }
 
     /// Runs the main event loop for the dispatcher. This is where messages and ticker
     /// events are processed.
     ///
-    /// [MessageDispatcher::run_loop] contains a message loop with the following control
+    /// [MessageDispatcher::run] contains a message loop with the following control
     /// flow:
     ///
-    /// 1. Break immediately if we're in an error state or cancelled, and return
-    ///    [SlateDBError::BackgroundTaskShutdown].
+    /// 1. Break immediately if the task is cancelled and returns `Ok(())`.
     /// 2. Else, if there is a message, read it and invoke [MessageHandler::handle].
     /// 3. Else, if there is a ticker event, read it and invoke [MessageHandler::handle].
     ///
-    /// If there is an uncaught error at any point, the error is returned immediately (in
-    /// lieu of [SlateDBError::BackgroundTaskShutdown] on a clean shutdown).
-    ///
     /// ## Returns
     ///
-    /// A [Result] containing [SlateDBError::BackgroundTaskShutdown] on clean shutdown,
-    /// or an uncaught error.
-    async fn run_loop(&mut self) -> Result<(), SlateDBError> {
-        let cancellation_token = self.cancellation_token.clone();
-        let mut error_watcher = self.error_state.reader();
+    /// A [Result] containing `Ok(())` on clean shutdown, or an error if the handler
+    /// fails for any reason.
+    pub async fn run(&mut self) -> Result<(), SlateDBError> {
         let mut tickers = self
             .handler
             .tickers()
             .into_iter()
             .map(|(dur, factory)| MessageDispatcherTicker::new(self.clock.ticker(dur), factory))
             .collect::<Vec<_>>();
-        // stop if we're in an error state or cancelled
-        let mut check_shutdown = async move || {
-            tokio::select! {
-                _ = cancellation_token.cancelled() => {},
-                e = error_watcher.await_value() => {
-                    warn!("halting message loop because db is in error state [error={:?}]", e);
-                },
-            }
-        };
         let mut ticker_futures: FuturesUnordered<_> =
             tickers.iter_mut().map(|t| t.tick()).collect();
         loop {
@@ -271,7 +223,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             tokio::select! {
                 biased;
                 // stop the loop if we're in an error state or cancelled
-                _ = check_shutdown() => {
+                _ = self.cancellation_token.cancelled() => {
                     break;
                 }
                 // if no errors, prioritize messages
@@ -288,55 +240,14 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         Ok(())
     }
 
-    /// Handles the result of [MessageDispatcher::run_loop] using the following logic:
-    ///
-    /// 1. If [DbState::error] is set, return it.
-    /// 2. Else if `result` is an error, set [DbState::error] and return it.
-    /// 3. Else, return `result`.
-    ///
-    /// ## Arguments
-    ///
-    /// * `result`: The result of [MessageDispatcher::run_loop].
-    ///
-    /// ## Returns
-    ///
-    /// A [Result] containing the [DbState::error] if it was already set, or the result
-    /// of [MessageDispatcher::handle_result] otherwise.
-    fn handle_result(&self, result: Result<(), SlateDBError>) -> Result<(), SlateDBError> {
-        // if we failed, notify state (won't overwrite if state is already failed)
-        if let Err(ref e) = result {
-            self.error_state.write(e.clone());
-        }
-        // use the first error that occurred (could be ours, or a previous failure)
-        self.error_state.reader().read().map_or(result, Err)
-    }
-
-    /// Maps panic errors into SlateDBError::BackgroundTaskPanic.
-    ///
-    /// ## Arguments
-    ///
-    /// * `panic`: The panic to map.
-    ///
-    /// ## Returns
-    ///
-    /// A [Result] containing [SlateDBError::BackgroundTaskPanic], which wraps the panic.
-    fn handle_panic(panic: Box<dyn Any + Send>) -> Result<(), SlateDBError> {
-        Err(SlateDBError::BackgroundTaskPanic(Arc::new(Mutex::new(
-            panic,
-        ))))
-    }
-
     /// Tells the handler to clean up any resources.
     ///
     /// If cleanup fails, the error is returned.
     ///
     /// ## Arguments
     ///
-    /// * `maybe_error`: An optional error to pass to the handler. Setting this argument
-    ///   signals to the [MessageHandler] that the database is in an error state during
-    ///   shutdown. An option is used instead of `Result`` because we convert
-    ///   [SlateDBError::BackgroundTaskShutdown] to None, so handlers handle messages
-    ///   cleanly during shutdown when the database is not in an error state.
+    /// * `result`: The value of [crate::db_state::DbState::error] when
+    ///   [MessageDispatcher::run] returns.
     ///
     /// ## Returns
     ///
@@ -357,7 +268,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
 ///
 /// On each [MessageDispatcherTicker::tick], the message factory is called to generate a
 /// message, and the message is returned as a [Future].
-pub(crate) struct MessageDispatcherTicker<'a, T: Send> {
+pub struct MessageDispatcherTicker<'a, T: Send> {
     inner: SystemClockTicker<'a>,
     message_factory: Box<MessageFactory<T>>,
 }
@@ -373,10 +284,7 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// ## Returns
     ///
     /// The new [MessageDispatcherTicker].
-    pub(crate) fn new(
-        inner: SystemClockTicker<'a>,
-        message_factory: Box<MessageFactory<T>>,
-    ) -> Self {
+    pub fn new(inner: SystemClockTicker<'a>, message_factory: Box<MessageFactory<T>>) -> Self {
         Self {
             inner,
             message_factory,
@@ -389,7 +297,7 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// ## Returns
     ///
     /// A [Future] that resolves when the ticker ticks.
-    pub(crate) fn tick(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
+    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
         let message = (self.message_factory)();
         Box::pin(async move {
             self.inner.tick().await;
@@ -405,11 +313,11 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
 /// 2. Defining ticker schedules (when to tick a certain message) ([MessageHandler::tickers])
 /// 3. Cleaning up resources ([MessageHandler::cleanup])
 ///
-/// It is safe to return errors on failure; the [MessageDispatcher] will handle failures
-/// appropriately.
+/// It is safe to return errors on failure or panic; the [MessageDispatcher] and
+/// [MessageHandlerExecutor] will handle them appropriately.
 #[async_trait]
 pub(crate) trait MessageHandler<T: Send>: Send {
-    /// Defines message ticker schedules. [MessageDispatcher::run_loop] instantiates a
+    /// Defines message ticker schedules. [MessageDispatcher::run] instantiates a
     /// [MessageDispatcherTicker] for each ticker defined here. Whenever each ticker
     /// ticks, the message factory generates a message, and [MessageDispatcher] sends the
     /// message to this [MessageHandler].
@@ -437,15 +345,16 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     /// The [Result] after handling the message.
     async fn handle(&mut self, message: T) -> Result<(), SlateDBError>;
 
-    /// Cleans up resources.
+    /// Cleans up resources. This method should not be used to continue attempting to
+    /// write to the database.
     ///
     /// ## Arguments
     ///
     /// * `messages`: An iterator of messages still in the channel after
-    ///   [MessageDispatcher::run_loop] returns.
-    /// * `error`: An optional error to pass to the handler. If set, this argument
-    ///   signals to the [MessageHandler] that the database is in an error state during
-    ///   shutdown.
+    ///   [MessageDispatcher::run] returns. If a handler fails, this iterator will not
+    ///   include the message that triggered the failure.
+    /// * `result`: The value of [crate::db_state::DbState::error] when
+    ///   [MessageDispatcher::run] returns.
     ///
     /// ## Returns
     ///
@@ -457,11 +366,228 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     ) -> Result<(), SlateDBError>;
 }
 
+/// The [MessageHandlerExecutor] is responsible for spawning, monitoring, and shutting
+/// down [MessageDispatcher]s. Think of it as a dispatcher pool.
+///
+/// Each dispatcher is associated with a name, which is used to identify the dispatcher
+/// in the [MessageHandlerExecutor]. As dispatchers complete, their results are stored in
+/// the [MessageHandlerExecutor]. The first completed dispatcher's results are also used for
+/// [crate::db_state::DbState::error].
+///
+/// The dispatcher also catches panics, and will convert them to an appropriate
+/// [SlateDBError].
+#[derive(Debug)]
+pub(crate) struct MessageHandlerExecutor {
+    tasks: Mutex<Option<JoinMap<String, Result<(), SlateDBError>>>>,
+    tokens: SkipMap<String, CancellationToken>,
+    results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
+    error_state: WatchableOnceCell<SlateDBError>,
+    clock: Arc<dyn SystemClock>,
+    #[allow(dead_code)]
+    fp_registry: Arc<FailPointRegistry>,
+}
+
+impl MessageHandlerExecutor {
+    /// Creates a new [MessageHandlerExecutor].
+    ///
+    /// ## Arguments
+    ///
+    /// * `error_state`: A [WatchableOnceCell] that stores the error state of the database.
+    /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
+    ///
+    /// ## Returns
+    ///
+    /// The new [MessageHandlerExecutor].
+    pub(crate) fn new(
+        error_state: WatchableOnceCell<SlateDBError>,
+        clock: Arc<dyn SystemClock>,
+    ) -> Self {
+        Self::new_with_fp_registry(error_state, clock, Arc::new(FailPointRegistry::new()))
+    }
+
+    /// Creates a new [MessageHandlerExecutor] with a custom [FailPointRegistry].
+    ///
+    /// ## Arguments
+    ///
+    /// * `error_state`: A [WatchableOnceCell] that stores the error state of the database.
+    /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
+    /// * `fp_registry`: A [FailPointRegistry] to use for fail points.
+    ///
+    /// ## Returns
+    ///
+    /// The new [MessageHandlerExecutor].
+    pub(crate) fn new_with_fp_registry(
+        error_state: WatchableOnceCell<SlateDBError>,
+        clock: Arc<dyn SystemClock>,
+        fp_registry: Arc<FailPointRegistry>,
+    ) -> Self {
+        Self {
+            tasks: Mutex::new(Some(JoinMap::new())),
+            tokens: SkipMap::new(),
+            results: Arc::new(SkipMap::new()),
+            clock,
+            error_state,
+            fp_registry,
+        }
+    }
+
+    /// Spawns a new [MessageDispatcher] for the provided [MessageHandler] on the given
+    /// [Handle]. Calls [MessageDispatcher::run] on the dispatcher in a new task. When
+    /// the dispatcher returns, [MessageDispatcher::cleanup] is called.
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the dispatcher.
+    /// * `handler`: The [MessageHandler] to use for handling messages.
+    /// * `rx`: The [mpsc::UnboundedReceiver] to use for receiving messages on the
+    ///   handler's behalf.
+    /// * `handle`: The [Handle] to use for spawning the dispatcher.
+    ///
+    /// ## Returns
+    ///
+    /// - `Ok(())` if the dispatcher was successfully spawned.
+    /// - Err([SlateDBError::BackgroundTaskStarted]) if a dispatcher with the same name is already running.
+    /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already running.
+    pub(crate) fn spawn_on<T: Send + std::fmt::Debug + 'static>(
+        &self,
+        name: String,
+        handler: Box<dyn MessageHandler<T>>,
+        rx: mpsc::UnboundedReceiver<T>,
+        handle: &Handle,
+    ) -> Result<(), SlateDBError> {
+        // hold guard for remainder of method to prevent multiple threads
+        // from starting the same task simultaneously.
+        let mut guard = self.tasks.lock();
+        let tasks = match guard.as_mut() {
+            Some(tasks) if tasks.contains_key(&name) => {
+                return Err(SlateDBError::BackgroundTaskStarted(name))
+            }
+            Some(tasks) => tasks,
+            None => return Err(SlateDBError::BackgroundTaskExecutorStarted),
+        };
+        let token = CancellationToken::new();
+        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
+            handler,
+            rx,
+            self.clock.clone(),
+            token.clone(),
+            self.fp_registry.clone(),
+        );
+        self.results.insert(name.clone(), WatchableOnceCell::new());
+        self.tokens.insert(name.clone(), token);
+        let this_error_state = self.error_state.clone();
+        let this_name = name.clone();
+        let task_future = async move {
+            let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
+            let run_result = unwrap_unwind(this_name.clone(), run_unwind_result);
+            this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
+            let error_state = Err(this_error_state
+                .reader()
+                .read()
+                .expect("error state was unexpectedly empty"));
+            let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(error_state))
+                .catch_unwind()
+                .await;
+            if let Err(cleanup_error) = unwrap_unwind(this_name.clone(), cleanup_unwind_result) {
+                warn!(
+                    "background task failed to clean up on shutdown [name={}, error={:?}",
+                    this_name.clone(),
+                    cleanup_error,
+                );
+            }
+            run_result
+        };
+        tasks.spawn_on(name, task_future, handle);
+        Ok(())
+    }
+
+    /// Spawns a task that monitors for completed [MessageDispatcher]s and stores their
+    /// results.
+    ///
+    /// ## Arguments
+    ///
+    /// * `handle`: The [Handle] to use for spawning the monitor.
+    ///
+    /// ## Returns
+    ///
+    /// A [JoinHandle] that can be used to wait for the monitor to complete.
+    pub(crate) fn monitor_on(&self, handle: &Handle) -> JoinHandle<()> {
+        let mut tasks = {
+            let mut guard = self.tasks.lock();
+            guard.take().expect("join map isn't set when expected")
+        };
+        let this_results = self.results.clone();
+        let this_tokens = self
+            .tokens
+            .iter()
+            .map(|e| e.value().clone())
+            .collect::<Vec<_>>();
+        let monitor_future = async move {
+            while !tasks.is_empty() {
+                if let Some((name, join_result)) = tasks.join_next().await {
+                    let task_result = unwrap_join(name.clone(), join_result);
+                    let entry = this_results
+                        .get(&name)
+                        .expect("result cell isn't set when expected");
+                    let result_cell = entry.value();
+                    result_cell.write(task_result.clone());
+                    if task_result.is_err() {
+                        // db is in an error state, so cancel all other tasks
+                        this_tokens.iter().for_each(|t| t.cancel());
+                    }
+                }
+            }
+        };
+        handle.spawn(monitor_future)
+    }
+
+    /// Cancels a task by name.
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the task to cancel.
+    pub(crate) fn cancel_task(&self, name: &str) {
+        if let Some(entry) = self.tokens.get(name) {
+            entry.value().cancel();
+        }
+    }
+
+    /// Waits for a task to complete.
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the task to wait for.
+    ///
+    /// ## Returns
+    ///
+    /// The result of the task.
+    pub(crate) async fn join_task(&self, name: &str) -> Result<(), SlateDBError> {
+        if let Some(entry) = self.results.get(name) {
+            return entry.value().reader().await_value().await;
+        }
+        Ok(())
+    }
+
+    /// Cancels a task and waits for it to complete.
+    ///
+    /// ## Arguments
+    ///
+    /// * `name`: The name of the task to cancel and wait for.
+    ///
+    /// ## Returns
+    ///
+    /// The result of the task.
+    pub(crate) async fn shutdown_task(&self, name: &str) -> Result<(), SlateDBError> {
+        self.cancel_task(name);
+        self.join_task(name).await
+    }
+}
+
 #[cfg(all(test, feature = "test-util"))]
 mod test {
     use super::{MessageDispatcher, MessageHandler};
     use crate::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
-    use crate::dispatcher::MessageFactory;
+    use crate::dispatcher::{MessageFactory, MessageHandlerExecutor};
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
@@ -470,6 +596,7 @@ mod test {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::runtime::Handle;
     use tokio::sync::mpsc;
     use tokio::task::yield_now;
     use tokio::time::timeout;
@@ -569,20 +696,17 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_run_happy_path() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (tx, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1)
             .add_clock_schedule(5); // Advance clock by 5ms after first message
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
         );
         let join = tokio::spawn(async move { dispatcher.run().await });
 
@@ -603,14 +727,6 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
-        assert!(matches!(
-            cleanup_called
-                .reader()
-                .read()
-                .expect("cleanup result not set"),
-            Ok(()),
-        ));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
             messages,
@@ -624,40 +740,37 @@ mod test {
 
     #[cfg(feature = "test-util")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_dispatcher_propagates_handler_error_drains_messages() {
+    async fn test_executor_propagates_handler_error_drains_messages() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
         let cleanup_called = WatchableOnceCell::new();
         let mut cleanup_reader = cleanup_called.reader();
         let (tx, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
-            Box::new(handler),
-            rx,
-            clock.clone(),
-            cancellation_token.clone(),
+        let task_executor = MessageHandlerExecutor::new_with_fp_registry(
             error_state.clone(),
+            clock.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
-        let join = tokio::spawn(async move { dispatcher.run().await });
+        task_executor
+            .spawn_on(
+                "test".to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .expect("spawn failed");
+        task_executor.monitor_on(&Handle::current());
 
-        // Stop before cleanup so we can send a message and ensure it is drained
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "pause").unwrap();
-
-        // Send a regular message successfully
+        // Send a regular message successfully and then trigger a panic
         tx.send(TestMessage::Channel(42)).unwrap();
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->pause").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->return").unwrap();
         wait_for_message_count(log.clone(), 1).await;
 
-        // Force a return by setting an error message
-        error_state.write(SlateDBError::Fenced);
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "off").unwrap();
-
-        // Send another message after error state is set
+        // Send another message after the panic
         tx.send(TestMessage::Channel(77)).unwrap();
 
         // Now proceed with cleanup
@@ -666,10 +779,9 @@ mod test {
         // Wait for cleanup to start (unclean shutdown)
         let _ = cleanup_reader.await_value().await;
 
-        let result = timeout(Duration::from_secs(30), join)
+        let result = timeout(Duration::from_secs(30), task_executor.join_task("test"))
             .await
-            .expect("dispatcher did not stop in time")
-            .expect("join failed");
+            .expect("dispatcher did not stop in time");
 
         // Verify final state
         assert!(matches!(result, Err(SlateDBError::Fenced)));
@@ -687,70 +799,25 @@ mod test {
             messages,
             vec![
                 (Phase::Pre, TestMessage::Channel(42)),
-                (Phase::Cleanup, TestMessage::Channel(77))
+                (Phase::Cleanup, TestMessage::Channel(77)),
             ]
         );
-    }
-
-    #[cfg(feature = "test-util")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_dispatcher_prefers_preexisting_error_state() {
-        let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
-        let mut cleanup_reader = cleanup_called.reader();
-        let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
-        let clock = Arc::new(DefaultSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
-        // Pre-set error state to simulate prior failure
-        error_state.write(SlateDBError::Fenced);
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(handler),
-            rx,
-            clock,
-            cancellation_token.clone(),
-            error_state.clone(),
-        );
-        let join = tokio::spawn(async move { dispatcher.run().await });
-
-        // Cleanup should start promptly because run_loop exits immediately on existing error
-        let _ = cleanup_reader.await_value().await;
-
-        let result = timeout(Duration::from_secs(30), join)
-            .await
-            .expect("dispatcher did not stop in time")
-            .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::Fenced)));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::Fenced)
-        ));
-        assert!(matches!(
-            cleanup_reader.read(),
-            Some(Err(SlateDBError::Fenced))
-        ));
-        let messages = log.lock().unwrap().clone();
-        assert_eq!(messages, vec![]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_prioritizes_messages_over_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (tx, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1);
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
@@ -771,8 +838,6 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
-        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
             messages,
@@ -804,10 +869,9 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_multiple_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(5), 1)
             .add_ticker(Duration::from_millis(7), 2)
             .add_clock_schedule(0) // 0ms (initial two ticks are immediate, so don't advance clock until second tick)
@@ -819,14 +883,12 @@ mod test {
             .add_clock_schedule(5) // 20ms
             .add_clock_schedule(1); // 21ms
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
@@ -852,7 +914,6 @@ mod test {
 
         // Shutdown and wait for cleanup to start
         cancellation_token.cancel();
-        let _ = cleanup_called.reader().await_value().await;
 
         let result = timeout(Duration::from_secs(30), join)
             .await
@@ -861,8 +922,6 @@ mod test {
 
         // Verify final state
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
-        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 9);
     }
 
@@ -885,10 +944,9 @@ mod test {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_overlapping_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(3), 3)
             .add_ticker(Duration::from_millis(5), 5)
             .add_clock_schedule(0) // 0 (initial two ticks are immediate, so don't advance clock until second tick)
@@ -900,14 +958,12 @@ mod test {
             .add_clock_schedule(2) // 12
             .add_clock_schedule(3); // 15
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
@@ -945,24 +1001,20 @@ mod test {
 
         // Shutdown cleanly
         cancellation_token.cancel();
-        let _ = cleanup_called.reader().await_value().await;
         let result = timeout(Duration::from_secs(30), join)
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
-        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 10);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_dispatcher_supports_identical_tickers() {
         let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
-        let cleanup_called = WatchableOnceCell::new();
         let (_tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         let clock = Arc::new(MockSystemClock::new());
-        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone())
+        let handler = TestHandler::new(log.clone(), WatchableOnceCell::new(), clock.clone())
             .add_ticker(Duration::from_millis(3), 1)
             .add_ticker(Duration::from_millis(3), 2)
             .add_clock_schedule(0) // 0 (initial two ticks are immediate, so don't advance clock until second tick)
@@ -981,14 +1033,12 @@ mod test {
             .add_clock_schedule(3) // 21
             .add_clock_schedule(0); // 21 (process second)
         let cancellation_token = CancellationToken::new();
-        let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new_with_fp_registry(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            error_state.clone(),
             fp_registry.clone(),
         );
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
@@ -1021,19 +1071,16 @@ mod test {
 
         // Shutdown cleanly
         cancellation_token.cancel();
-        let _ = cleanup_called.reader().await_value().await;
         let result = timeout(Duration::from_secs(30), join)
             .await
             .expect("dispatcher did not stop in time")
             .expect("join failed");
         assert!(matches!(result, Ok(())));
-        assert!(error_state.reader().read().is_none());
-        assert!(matches!(cleanup_called.reader().read(), Some(Ok(()))));
         assert_eq!(log.lock().unwrap().len(), 16);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_dispatcher_catches_panic_from_run_loop() {
+    async fn test_executor_catches_panic_from_run_loop() {
         #[derive(Clone)]
         struct PanicHandler {
             cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
@@ -1066,16 +1113,21 @@ mod test {
         let (tx, rx) = mpsc::unbounded_channel::<u8>();
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = PanicHandler { cleanup_called };
-        let cancellation_token = CancellationToken::new();
         let error_state = WatchableOnceCell::new();
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(handler),
-            rx,
-            clock.clone(),
-            cancellation_token.clone(),
-            error_state.clone(),
-        );
-        let join = tokio::spawn(async move { dispatcher.run().await });
+        let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone());
+
+        // Spawn the panic task
+        task_executor
+            .spawn_on(
+                "test".to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to spawn task");
+
+        // Monitor the executor
+        task_executor.monitor_on(&Handle::current());
 
         // Trigger panic inside the run loop via handle()
         tx.send(1u8).unwrap();
@@ -1086,18 +1138,22 @@ mod test {
             .expect("timeout waiting for cleanup result");
 
         // Join dispatcher and verify panic was converted and propagated
-        let result = timeout(Duration::from_secs(30), join)
+        let result = timeout(Duration::from_secs(30), task_executor.join_task("test"))
             .await
-            .expect("dispatcher did not stop in time")
-            .expect("join failed");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+            .expect("dispatcher did not stop in time");
+
+        // Check final state
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskPanic(_, _))
+        ));
         assert!(matches!(
             error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskPanic(_))
+            Some(SlateDBError::BackgroundTaskPanic(_, _))
         ));
         assert!(matches!(
             cleanup_reader.read(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
+            Some(Err(SlateDBError::BackgroundTaskPanic(_, _)))
         ));
     }
 }

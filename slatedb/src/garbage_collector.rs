@@ -39,6 +39,7 @@ mod wal_gc;
 
 pub const DEFAULT_MIN_AGE: Duration = Duration::from_secs(86_400);
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
+pub(crate) const GC_TASK_NAME: &str = "garbage_collector";
 
 trait GcTask {
     fn resource(&self) -> &str;
@@ -266,7 +267,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
-    use crate::utils::WatchableOnceCell;
+
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
         manifest::store::{ManifestStore, StoredManifest},
@@ -1159,14 +1160,8 @@ mod tests {
         );
         let (_, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(DefaultSystemClock::default());
-        let error_state = WatchableOnceCell::new();
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(gc),
-            rx,
-            clock,
-            cancellation_token.clone(),
-            error_state,
-        );
+        let mut dispatcher =
+            MessageDispatcher::new(Box::new(gc), rx, clock, cancellation_token.clone());
         let jh = tokio::spawn(async move { dispatcher.run().await });
         cancellation_token.cancel();
         let result = jh.await.unwrap();
