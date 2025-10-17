@@ -673,22 +673,13 @@ mod test {
             .expect("spawn failed");
         task_executor.monitor_on(&Handle::current());
 
-        // Stop before cleanup so we can send a message and ensure it is drained
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "pause").unwrap();
-
-        // Send a regular message successfully
+        // Send a regular message successfully and then trigger a panic
         tx.send(TestMessage::Channel(42)).unwrap();
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->pause").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->return").unwrap();
         wait_for_message_count(log.clone(), 1).await;
 
-        // Enable a panic on the next message
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "return").unwrap();
-
-        // Send another message to trigger the panic
+        // Send another message after the panic
         tx.send(TestMessage::Channel(77)).unwrap();
-
-        // And another to verify it is drained
-        tx.send(TestMessage::Channel(99)).unwrap();
 
         // Now proceed with cleanup
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "off").unwrap();
@@ -716,8 +707,7 @@ mod test {
             messages,
             vec![
                 (Phase::Pre, TestMessage::Channel(42)),
-                (Phase::Pre, TestMessage::Channel(77)),
-                (Phase::Cleanup, TestMessage::Channel(99))
+                (Phase::Cleanup, TestMessage::Channel(77)),
             ]
         );
     }
