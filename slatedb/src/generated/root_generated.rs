@@ -68,7 +68,7 @@ impl<'a> flatbuffers::Follow<'a> for CompressionFormat {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
     Self(b)
   }
 }
@@ -77,7 +77,7 @@ impl flatbuffers::Push for CompressionFormat {
     type Output = CompressionFormat;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
     }
 }
 
@@ -161,7 +161,7 @@ impl<'a> flatbuffers::Follow<'a> for BoundType {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
     Self(b)
   }
 }
@@ -170,7 +170,7 @@ impl flatbuffers::Push for BoundType {
     type Output = BoundType;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
     }
 }
 
@@ -246,7 +246,7 @@ impl<'a> flatbuffers::Follow<'a> for CheckpointMetadata {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
     Self(b)
   }
 }
@@ -255,7 +255,7 @@ impl flatbuffers::Push for CheckpointMetadata {
     type Output = CheckpointMetadata;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<u8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<u8>(dst, self.0);
     }
 }
 
@@ -333,7 +333,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionType {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
     Self(b)
   }
 }
@@ -342,7 +342,7 @@ impl flatbuffers::Push for CompactionType {
     type Output = CompactionType;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
     }
 }
 
@@ -430,7 +430,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionStatus {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<i8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
     Self(b)
   }
 }
@@ -439,7 +439,7 @@ impl flatbuffers::Push for CompactionStatus {
     type Output = CompactionStatus;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<i8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
     }
 }
 
@@ -515,7 +515,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionJobSpec {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
     Self(b)
   }
 }
@@ -524,7 +524,7 @@ impl flatbuffers::Push for CompactionJobSpec {
     type Output = CompactionJobSpec;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<u8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<u8>(dst, self.0);
     }
 }
 
@@ -602,7 +602,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionSpec {
   type Inner = Self;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    let b = unsafe { flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    let b = flatbuffers::read_scalar_at::<u8>(buf, loc);
     Self(b)
   }
 }
@@ -611,7 +611,7 @@ impl flatbuffers::Push for CompactionSpec {
     type Output = CompactionSpec;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
-        unsafe { flatbuffers::emplace_scalar::<u8>(dst, self.0); }
+        flatbuffers::emplace_scalar::<u8>(dst, self.0);
     }
 }
 
@@ -653,7 +653,7 @@ impl<'a> flatbuffers::Follow<'a> for SsTableInfo<'a> {
   type Inner = SsTableInfo<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -835,7 +835,7 @@ impl<'a> flatbuffers::Follow<'a> for BlockMeta<'a> {
   type Inner = BlockMeta<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -950,7 +950,7 @@ impl<'a> flatbuffers::Follow<'a> for SsTableIndex<'a> {
   type Inner = SsTableIndex<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -1048,7 +1048,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactedSstId<'a> {
   type Inner = CompactedSstId<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -1162,7 +1162,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactedSsTable<'a> {
   type Inner = CompactedSsTable<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -1295,7 +1295,7 @@ impl<'a> flatbuffers::Follow<'a> for SortedRun<'a> {
   type Inner = SortedRun<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -1410,7 +1410,7 @@ impl<'a> flatbuffers::Follow<'a> for Uuid<'a> {
   type Inner = Uuid<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -1524,7 +1524,7 @@ impl<'a> flatbuffers::Follow<'a> for Ulid<'a> {
   type Inner = Ulid<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -1638,7 +1638,7 @@ impl<'a> flatbuffers::Follow<'a> for BytesBound<'a> {
   type Inner = BytesBound<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -1752,7 +1752,7 @@ impl<'a> flatbuffers::Follow<'a> for BytesRange<'a> {
   type Inner = BytesRange<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -1868,7 +1868,7 @@ impl<'a> flatbuffers::Follow<'a> for ExternalDb<'a> {
   type Inner = ExternalDb<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -2019,7 +2019,7 @@ impl<'a> flatbuffers::Follow<'a> for ManifestV1<'a> {
   type Inner = ManifestV1<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -2374,7 +2374,7 @@ impl<'a> flatbuffers::Follow<'a> for WriterCheckpoint<'a> {
   type Inner = WriterCheckpoint<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -2471,7 +2471,7 @@ impl<'a> flatbuffers::Follow<'a> for Checkpoint<'a> {
   type Inner = Checkpoint<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -2685,7 +2685,7 @@ impl<'a> flatbuffers::Follow<'a> for LinearCompactionJob<'a> {
   type Inner = LinearCompactionJob<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -2799,7 +2799,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionJob<'a> {
   type Inner = CompactionJob<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -2980,7 +2980,7 @@ impl<'a> flatbuffers::Follow<'a> for SortedRunCompaction<'a> {
   type Inner = SortedRunCompaction<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -3094,7 +3094,7 @@ impl<'a> flatbuffers::Follow<'a> for Compaction<'a> {
   type Inner = Compaction<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
@@ -3343,7 +3343,7 @@ impl<'a> flatbuffers::Follow<'a> for CompactionState<'a> {
   type Inner = CompactionState<'a>;
   #[inline]
   unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    Self { _tab: unsafe { flatbuffers::Table::new(buf, loc) } }
+    Self { _tab: flatbuffers::Table::new(buf, loc) }
   }
 }
 
