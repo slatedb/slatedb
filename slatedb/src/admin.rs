@@ -290,17 +290,13 @@ impl Admin {
             .map_err(Into::into)
     }
 
-    /// Lookup the timestamp associated with a sequence number from the latest manifest's
-    /// sequence tracker. If no manifest exists this returns Ok(None). If a matching
-    /// timestamp cannot be found according to the rounding behaviour, returns Ok(None).
-    ///
-    /// `round_up` controls how non-exact matches are handled: when true, the next higher
-    /// recorded timestamp is returned; when false, the previous recorded timestamp is returned.
+    /// Returns the timestamp or sequence from the latest manifest's sequence tracker.
+    /// When `round_up` is true, uses the next higher value; otherwise the previous one.
     pub async fn get_timestamp_for_sequence(
         &self,
         seq: u64,
         round_up: bool,
-    ) -> Result<Option<DateTime<Utc>>, crate::Error>{
+    ) -> Result<Option<DateTime<Utc>>, crate::Error> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
@@ -320,12 +316,8 @@ impl Admin {
         Ok(manifest.core.sequence_tracker.find_ts(seq, rounding.into()))
     }
 
-    /// Lookup the sequence number associated with a timestamp from the latest manifest's
-    /// sequence tracker. If no manifest exists this returns Ok(None). If a matching
-    /// sequence cannot be found according to the rounding behaviour, returns Ok(None).
-    ///
-    /// `round_up` controls how non-exact matches are handled: when true, the next higher
-    /// recorded sequence is returned; when false, the previous recorded sequence is returned.
+    /// Returns the sequence for a given timestamp from the latest manifest's sequence tracker.
+    /// When `round_up` is true, uses the next higher value; otherwise the previous one.
     pub async fn get_sequence_for_timestamp(
         &self,
         ts: DateTime<Utc>,
