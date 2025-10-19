@@ -10,7 +10,9 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
+use crate::seq_tracker::FindOption;
 use crate::utils::{IdGenerator, WatchableOnceCell};
+use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -39,6 +41,22 @@ pub struct Admin {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
     pub(crate) rand: Arc<DbRand>,
+}
+
+/// Rounding policy for non-exact sequence/timestamp lookups.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Rounding {
+    Up,
+    Down,
+}
+
+impl From<Rounding> for FindOption {
+    fn from(r: Rounding) -> Self {
+        match r {
+            Rounding::Up => FindOption::RoundUp,
+            Rounding::Down => FindOption::RoundDown,
+        }
+    }
 }
 
 impl Admin {
@@ -270,6 +288,66 @@ impl Admin {
             })
             .await
             .map_err(Into::into)
+    }
+
+    /// Lookup the timestamp associated with a sequence number from the latest manifest's
+    /// sequence tracker. If no manifest exists this returns Ok(None). If a matching
+    /// timestamp cannot be found according to the rounding behaviour, returns Ok(None).
+    ///
+    /// `round_up` controls how non-exact matches are handled: when true, the next higher
+    /// recorded timestamp is returned; when false, the previous recorded timestamp is returned.
+    pub async fn get_timestamp_for_sequence(
+        &self,
+        seq: u64,
+        round_up: bool,
+    ) -> Result<Option<DateTime<Utc>>, crate::Error>{
+        let manifest_store = ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.system_clock.clone(),
+        );
+
+        let id_manifest = manifest_store.try_read_latest_manifest().await?;
+        let Some((_id, manifest)) = id_manifest else {
+            return Ok(None);
+        };
+
+        let rounding = if round_up {
+            Rounding::Up
+        } else {
+            Rounding::Down
+        };
+        Ok(manifest.core.sequence_tracker.find_ts(seq, rounding.into()))
+    }
+
+    /// Lookup the sequence number associated with a timestamp from the latest manifest's
+    /// sequence tracker. If no manifest exists this returns Ok(None). If a matching
+    /// sequence cannot be found according to the rounding behaviour, returns Ok(None).
+    ///
+    /// `round_up` controls how non-exact matches are handled: when true, the next higher
+    /// recorded sequence is returned; when false, the previous recorded sequence is returned.
+    pub async fn get_sequence_for_timestamp(
+        &self,
+        ts: DateTime<Utc>,
+        round_up: bool,
+    ) -> Result<Option<u64>, crate::Error> {
+        let manifest_store = ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.system_clock.clone(),
+        );
+
+        let id_manifest = manifest_store.try_read_latest_manifest().await?;
+        let Some((_id, manifest)) = id_manifest else {
+            return Ok(None);
+        };
+
+        let rounding = if round_up {
+            Rounding::Up
+        } else {
+            Rounding::Down
+        };
+        Ok(manifest.core.sequence_tracker.find_seq(ts, rounding.into()))
     }
 
     /// Clone a database. If no db already exists at the specified path, then this will create
