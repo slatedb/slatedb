@@ -158,6 +158,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
 
 #[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.inner.init().await?;
+        Ok(())
+    }
+
     /// Retrieves the next entry from the retention iterator
     ///
     /// This method implements a state machine that:

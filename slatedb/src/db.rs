@@ -2788,11 +2788,15 @@ mod tests {
         assert_eq!(state.l0.len(), 1);
 
         let l0 = state.l0.front().unwrap();
-        let mut iter =
-            SstIterator::new_borrowed(.., l0, table_store.clone(), SstIteratorOptions::default())
-                .await
-                .unwrap()
-                .expect("Expected Some(iter) but got None");
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            l0,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
         assert_iterator(
             &mut iter,
             vec![
@@ -2859,11 +2863,15 @@ mod tests {
 
         for i in 0u8..3u8 {
             let sst1 = l0.get(2 - i as usize).unwrap();
-            let mut iter =
-                SstIterator::new_borrowed(.., sst1, table_store.clone(), sst_iter_options)
-                    .await
-                    .unwrap()
-                    .expect("Expected Some(iter) but got None");
+            let mut iter = SstIterator::new_borrowed_initialized(
+                ..,
+                sst1,
+                table_store.clone(),
+                sst_iter_options,
+            )
+            .await
+            .unwrap()
+            .expect("Expected Some(iter) but got None");
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
@@ -2992,11 +3000,15 @@ mod tests {
         // Verify the data exists in the newly created SST
         let latest_sst = db_state.l0.back().unwrap();
         let sst_iter_options = SstIteratorOptions::default();
-        let mut iter =
-            SstIterator::new_borrowed(.., latest_sst, table_store.clone(), sst_iter_options)
-                .await
-                .unwrap()
-                .expect("Expected Some(iter) but got None");
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            latest_sst,
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
 
         // Collect all key-value pairs from the SST
         let mut found_keys = std::collections::HashSet::new();
