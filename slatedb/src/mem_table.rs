@@ -343,6 +343,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::bytes_range::BytesRange;
     use crate::merge_iterator::MergeIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::assert_iterator;
