@@ -30,9 +30,18 @@ use tracing::instrument;
 use ulid::Ulid;
 
 #[derive(Clone, Debug, PartialEq)]
+/// Specification of how a compaction job should be executed.
+///
+/// Job specs are derived from the parent `Compaction`/`CompactionPlan` and
+/// capture execution-time details (e.g., which inputs are already materialized)
+/// that the executor can use for progress reporting and resume logic.
 pub(crate) enum CompactionJobSpec {
     LinearCompactionJob {
+        /// ULIDs of L0 SSTs that have been fully read/compacted when the job
+        /// snapshot is taken (useful for resume/diagnostics).
         completed_input_sst_ids: Vec<Ulid>,
+        /// IDs of sorted runs that have been fully read/compacted when the job
+        /// snapshot is taken (useful for resume/diagnostics).
         completed_input_sr_ids: Vec<u32>,
     },
 }
