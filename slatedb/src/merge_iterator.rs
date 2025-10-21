@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::types::RowEntry;
+use crate::types::{RowEntry, ValueDeletable};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
@@ -52,8 +52,12 @@ impl PartialOrd<Self> for MergeIteratorHeapEntry<'_> {
 impl Ord for MergeIteratorHeapEntry<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         // we'll wrap a Reverse in the BinaryHeap, so the cmp here is in increasing order.
-        // after Reverse is wrapped, it will return the entries with higher seqnum first.
-        (&self.next_kv.key, self.next_kv.seq).cmp(&(&other.next_kv.key, other.next_kv.seq))
+        // the desired behavior is to return the entires with the lowest key first across keys
+        // but the highest seqnum first within a key.
+        match self.next_kv.key.cmp(&other.next_kv.key) {
+            Ordering::Equal => other.next_kv.seq.cmp(&self.next_kv.seq), // descending seq
+            ord => ord,                                                  // ascending key
+        }
     }
 }
 
@@ -111,7 +115,6 @@ impl<'a> MergeIterator<'a> {
                 }));
             }
         }
-
         self.current = self.iterators.pop().map(|r| r.0);
         self.initialized = true;
         Ok(())
@@ -157,22 +160,26 @@ impl KeyValueIterator for MergeIterator<'_> {
             return self.advance().await;
         }
 
-        let mut current_kv = match self.advance().await? {
+        let current_kv = match self.advance().await? {
             Some(kv) => kv,
             None => return Ok(None),
         };
 
-        // iterate until we find a key that is not the same as the current key,
-        // find the one with the highest seqnum.
-        while let Some(peeked_entry) = self.peek() {
-            if peeked_entry.key != current_kv.key {
-                break;
+        // the iterators are stored in order of increasing key and decreasing
+        // seqnum, which means that the first entry in the heap is the one with
+        // the highest seqnum for a given key. we want to advance other iterators
+        // to skip their current value if the current value is not a merge oepration
+        // (we can ignore merge values after seeing the first non-merge value
+        // because tombstones/values serve as "barriers" in the merge operation)
+        if !matches!(current_kv.value, ValueDeletable::Merge(_)) {
+            while let Some(peeked_entry) = self.peek() {
+                if peeked_entry.key != current_kv.key {
+                    break;
+                }
+                self.advance().await?;
             }
-            if peeked_entry.seq > current_kv.seq {
-                current_kv = peeked_entry.clone();
-            }
-            self.advance().await?;
         }
+
         Ok(Some(current_kv))
     }
 
@@ -256,8 +263,8 @@ mod tests {
         let mut iters: VecDeque<TestIterator> = VecDeque::new();
         iters.push_back(
             TestIterator::new()
-                .with_entry(b"aaaa", b"0000", 5)
-                .with_entry(b"aaaa", b"1111", 6)
+                .with_entry(b"aaaa", b"0000", 6)
+                .with_entry(b"aaaa", b"1111", 5)
                 .with_entry(b"cccc", b"use this one c", 5),
         );
         iters.push_back(
@@ -277,7 +284,7 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             vec![
-                RowEntry::new_value(b"aaaa", b"1111", 6),
+                RowEntry::new_value(b"aaaa", b"0000", 6),
                 RowEntry::new_value(b"bbbb", b"2222", 3),
                 RowEntry::new_value(b"cccc", b"use this one c", 5),
                 RowEntry::new_value(b"xxxx", b"use this one x", 4),
@@ -398,14 +405,14 @@ mod tests {
     async fn test_two_merge_seek() {
         let iter1 = TestIterator::new()
             .with_entry(b"aa", b"aa1", 1)
-            .with_entry(b"bb", b"bb0", 1)
-            .with_entry(b"bb", b"bb1", 2)
+            .with_entry(b"bb", b"bb0", 2)
+            .with_entry(b"bb", b"bb1", 1)
             .with_entry(b"dd", b"dd1", 3);
         let iter2 = TestIterator::new()
             .with_entry(b"aa", b"aa2", 4)
             .with_entry(b"bb", b"bb2", 5)
-            .with_entry(b"cc", b"cc0", 5)
-            .with_entry(b"cc", b"cc2", 6)
+            .with_entry(b"cc", b"cc0", 6)
+            .with_entry(b"cc", b"cc2", 5)
             .with_entry(b"ee", b"ee2", 7);
 
         let mut merge_iter = MergeIterator::new([iter1, iter2]).unwrap();
@@ -416,7 +423,7 @@ mod tests {
             &mut merge_iter,
             vec![
                 RowEntry::new_value(b"bb", b"bb2", 5),
-                RowEntry::new_value(b"cc", b"cc2", 6),
+                RowEntry::new_value(b"cc", b"cc0", 6),
                 RowEntry::new_value(b"dd", b"dd1", 3),
                 RowEntry::new_value(b"ee", b"ee2", 7),
             ],
@@ -441,11 +448,57 @@ mod tests {
         assert_iterator(
             &mut merge_iter,
             vec![
-                RowEntry::new_value(b"key1", b"value1", 1), // first occurrence
                 RowEntry::new_value(b"key1", b"value1_updated", 3), // second occurrence
+                RowEntry::new_value(b"key1", b"value1", 1),         // first occurrence
                 RowEntry::new_value(b"key2", b"value2", 2),
                 RowEntry::new_value(b"key3", b"value3", 4),
             ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn should_not_dedup_valid_merge_entries() {
+        let mut iters: VecDeque<TestIterator> = VecDeque::new();
+        iters.push_back(
+            TestIterator::new()
+                .with_row_entry(RowEntry::new_merge(b"k1", b"b", 2))
+                .with_row_entry(RowEntry::new_merge(b"k1", b"a", 1)),
+        );
+        iters.push_back(TestIterator::new().with_row_entry(RowEntry::new_merge(b"k1", b"c", 3)));
+
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_merge(b"k1", b"c", 3),
+                RowEntry::new_merge(b"k1", b"b", 2),
+                RowEntry::new_merge(b"k1", b"a", 1),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn should_advance_past_old_merge_entries() {
+        let mut iters: VecDeque<TestIterator> = VecDeque::new();
+        iters.push_back(
+            TestIterator::new()
+                .with_row_entry(RowEntry::new_merge(b"k1", b"a", 2))
+                .with_row_entry(RowEntry::new_merge(b"k1", b"b", 1)),
+        );
+        iters.push_back(TestIterator::new().with_row_entry(RowEntry::new_value(
+            b"k1",
+            b"new_value",
+            3,
+        )));
+
+        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![RowEntry::new_value(b"k1", b"new_value", 3)],
         )
         .await;
     }
