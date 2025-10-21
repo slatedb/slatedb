@@ -764,6 +764,7 @@ impl<'a> SstIterator<'a> {
         Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn for_key_with_stats_initialized(
         table: &'a SsTableHandle,
         key: &'a [u8],

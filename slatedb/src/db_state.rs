@@ -112,10 +112,6 @@ impl SsTableHandle {
         }
     }
 
-    pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
-        self.effective_range.contains(key)
-    }
-
     pub(crate) fn compacted_effective_range(&self) -> &BytesRange {
         &self.effective_range
     }

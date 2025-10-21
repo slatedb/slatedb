@@ -77,7 +77,7 @@ pub(crate) struct MergeIterator<'a> {
 }
 
 impl<'a> MergeIterator<'a> {
-    pub(crate) async fn new<T: KeyValueIterator + 'a>(
+    pub(crate) fn new<T: KeyValueIterator + 'a>(
         iterators: impl IntoIterator<Item = T>,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
@@ -239,7 +239,7 @@ mod tests {
                 .with_entry(b"gggg", b"7777", 0),
         );
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -279,7 +279,7 @@ mod tests {
                 .with_entry(b"xxxx", b"badx1", 3),
         );
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -304,7 +304,7 @@ mod tests {
             .with_entry(b"xxxx", b"24242424", 0)
             .with_entry(b"yyyy", b"25252525", 0);
 
-        let mut merge_iter = MergeIterator::new([iter1, iter2]).await.unwrap();
+        let mut merge_iter = MergeIterator::new([iter1, iter2]).unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -329,7 +329,7 @@ mod tests {
             .with_entry(b"cccc", b"badc1", 2)
             .with_entry(b"xxxx", b"24242424", 3);
 
-        let mut merge_iter = MergeIterator::new([iter1, iter2]).await.unwrap();
+        let mut merge_iter = MergeIterator::new([iter1, iter2]).unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -357,7 +357,7 @@ mod tests {
                 .with_entry(b"cc", b"cc2", 0),
         );
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).unwrap();
         merge_iter.init().await.unwrap();
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
 
@@ -386,7 +386,7 @@ mod tests {
                 .with_entry(b"cc", b"cc2", 0),
         );
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).unwrap();
         assert_next_entry(&mut merge_iter, &RowEntry::new_value(b"aa", b"aa1", 0)).await;
 
         merge_iter.seek(b"bb".as_ref()).await.unwrap();
@@ -415,7 +415,7 @@ mod tests {
             .with_entry(b"cc", b"cc2", 5)
             .with_entry(b"ee", b"ee2", 7);
 
-        let mut merge_iter = MergeIterator::new([iter1, iter2]).await.unwrap();
+        let mut merge_iter = MergeIterator::new([iter1, iter2]).unwrap();
         merge_iter.init().await.unwrap();
         merge_iter.seek(b"b".as_ref()).await.unwrap();
 
@@ -441,7 +441,6 @@ mod tests {
             .with_entry(b"key3", b"value3", 4);
 
         let mut merge_iter = MergeIterator::new([iter1, iter2])
-            .await
             .unwrap()
             .with_dedup(false);
 
@@ -468,7 +467,7 @@ mod tests {
         );
         iters.push_back(TestIterator::new().with_row_entry(RowEntry::new_merge(b"k1", b"c", 3)));
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -495,7 +494,7 @@ mod tests {
             3,
         )));
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).unwrap();
 
         assert_iterator(
             &mut merge_iter,

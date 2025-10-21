@@ -11,7 +11,6 @@ use ouroboros::self_referencing;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use crate::bytes_range::BytesRange;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::types::RowEntry;
@@ -267,28 +266,6 @@ impl KVTable {
         }
     }
 
-    /// Get the value for a given key.
-    /// Returns None if the key is not in the memtable at all,
-    /// Some(None) if the key is in the memtable but has a tombstone value,
-    /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
-    pub(crate) fn get(&self, key: &[u8], max_seq: Option<u64>) -> Option<RowEntry> {
-        let user_key = Bytes::from(key.to_vec());
-        let range = KVTableInternalKeyRange::from(BytesRange::new(
-            Bound::Included(user_key.clone()),
-            Bound::Included(user_key),
-        ));
-        self.map
-            .range(range)
-            .find(|entry| {
-                if let Some(max_seq) = max_seq {
-                    entry.key().seq <= max_seq
-                } else {
-                    true
-                }
-            })
-            .map(|entry| entry.value().clone())
-    }
-
     pub(crate) fn iter(&self) -> MemTableIterator {
         self.range_ascending(..)
     }
@@ -366,6 +343,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::bytes_range::BytesRange;
     use crate::merge_iterator::MergeIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::assert_iterator;
@@ -468,9 +446,7 @@ mod tests {
 
         // in merge iterator, it should only return one entry
         let iter = table.table().iter();
-        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
-            .await
-            .unwrap();
+        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter])).unwrap();
         assert_iterator(
             &mut merge_iter,
             vec![
