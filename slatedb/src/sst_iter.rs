@@ -9,11 +9,17 @@ use tokio::task::JoinHandle;
 
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableHandle, SsTableId};
+use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
+use crate::filter;
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::{
-    block::Block, block_iterator::BlockIterator, iter::KeyValueIterator, partitioned_keyspace,
-    tablestore::TableStore, types::RowEntry,
+    block::Block,
+    block_iterator::BlockIterator,
+    iter::{init_optional_iterator, KeyValueIterator},
+    partitioned_keyspace,
+    tablestore::TableStore,
+    types::RowEntry,
 };
 
 enum FetchTask {
@@ -62,6 +68,13 @@ impl SstView<'_> {
         }
     }
 
+    fn point_key(&self) -> Option<&[u8]> {
+        match (self.start_key(), self.end_key()) {
+            (Bound::Included(start), Bound::Included(end)) if start == end => Some(start),
+            _ => None,
+        }
+    }
+
     fn table_as_ref(&self) -> &SsTableHandle {
         match self {
             SstView::Owned(t, _) => t,
@@ -104,6 +117,10 @@ impl IteratorState {
         self.initialized && self.current_iter.is_none()
     }
 
+    fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
     fn advance(&mut self, iterator: BlockIterator<Arc<Block>>) {
         self.initialized = true;
         self.current_iter = Some(iterator);
@@ -115,9 +132,92 @@ impl IteratorState {
     }
 }
 
-pub(crate) struct SstIterator<'a> {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum FilterState {
+    NotChecked,
+    NoFilter,
+    Positive,
+    Negative,
+}
+
+struct BloomFilterEvaluator {
+    key: Bytes,
+    db_stats: Option<DbStats>,
+    state: FilterState,
+    found_key: bool,
+    false_positive_recorded: bool,
+}
+
+impl BloomFilterEvaluator {
+    fn new(key: Bytes, db_stats: Option<DbStats>) -> Self {
+        Self {
+            key,
+            db_stats,
+            state: FilterState::NotChecked,
+            found_key: false,
+            false_positive_recorded: false,
+        }
+    }
+}
+
+impl BloomFilterEvaluator {
+    async fn evaluate(
+        &mut self,
+        view: &SstView<'_>,
+        table_store: &Arc<TableStore>,
+    ) -> Result<(), SlateDBError> {
+        if self.state != FilterState::NotChecked {
+            return Ok(());
+        }
+
+        let key_hash = filter::filter_hash(self.key.as_ref());
+        let maybe_filter = table_store.read_filter(view.table_as_ref()).await?;
+
+        match maybe_filter {
+            Some(filter) => {
+                if filter.might_contain(key_hash) {
+                    if let Some(stats) = &self.db_stats {
+                        stats.sst_filter_positives.inc();
+                    }
+                    self.state = FilterState::Positive;
+                } else {
+                    if let Some(stats) = &self.db_stats {
+                        stats.sst_filter_negatives.inc();
+                    }
+                    self.state = FilterState::Negative;
+                }
+            }
+            None => {
+                self.state = FilterState::NoFilter;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_filtered_out(&self) -> bool {
+        self.state == FilterState::Negative
+    }
+
+    fn notify_key_found(&mut self, key: &[u8]) {
+        if key == self.key.as_ref() {
+            self.found_key = true;
+        }
+    }
+
+    fn notify_finished_iteration(&mut self) {
+        if self.state == FilterState::Positive && !self.found_key && !self.false_positive_recorded {
+            if let Some(stats) = &self.db_stats {
+                stats.sst_filter_false_positives.inc();
+            }
+            self.false_positive_recorded = true;
+        }
+    }
+}
+
+pub(crate) struct InternalSstIterator<'a> {
     view: SstView<'a>,
-    index: Arc<SsTableIndexOwned>,
+    index: Option<Arc<SsTableIndexOwned>>,
     state: IteratorState,
     next_block_idx_to_fetch: usize,
     block_idx_range: Range<usize>,
@@ -126,39 +226,40 @@ pub(crate) struct SstIterator<'a> {
     options: SstIteratorOptions,
 }
 
-impl<'a> SstIterator<'a> {
-    pub(crate) async fn new(
+impl<'a> InternalSstIterator<'a> {
+    fn new(
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         assert!(options.max_fetch_tasks > 0);
         assert!(options.blocks_to_fetch > 0);
-        let index = table_store.read_index(view.table_as_ref()).await?;
-        let block_idx_range = SstIterator::blocks_covering_view(&index.borrow(), &view);
 
-        let mut iter = Self {
+        Ok(Self {
             view,
-            index,
+            index: None,
             state: IteratorState::new(),
-            next_block_idx_to_fetch: block_idx_range.start,
-            block_idx_range,
+            next_block_idx_to_fetch: 0,
+            block_idx_range: 0..0,
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
-        };
-
-        if options.eager_spawn {
-            iter.spawn_fetches();
-        }
-        Ok(iter)
+        })
     }
 
-    pub(crate) fn table_id(&self) -> SsTableId {
+    fn table_id(&self) -> SsTableId {
         self.view.table_as_ref().id
     }
 
-    pub(crate) async fn new_owned<T: RangeBounds<Bytes>>(
+    fn view(&self) -> &SstView<'a> {
+        &self.view
+    }
+
+    fn table_store(&self) -> &Arc<TableStore> {
+        &self.table_store
+    }
+
+    fn new_owned<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableHandle,
         table_store: Arc<TableStore>,
@@ -168,10 +269,20 @@ impl<'a> SstIterator<'a> {
             return Ok(None);
         };
         let view = SstView::Owned(Box::new(table), view_range);
-        Ok(Some(Self::new(view, table_store.clone(), options).await?))
+        Self::new(view, table_store, options).map(Some)
     }
 
-    pub(crate) async fn new_borrowed<T: RangeBounds<Bytes>>(
+    async fn new_owned_initialized<T: RangeBounds<Bytes>>(
+        range: T,
+        table: SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let iter = Self::new_owned(range, table, table_store, options)?;
+        init_optional_iterator(iter).await
+    }
+
+    fn new_borrowed<T: RangeBounds<Bytes>>(
         range: T,
         table: &'a SsTableHandle,
         table_store: Arc<TableStore>,
@@ -181,10 +292,20 @@ impl<'a> SstIterator<'a> {
             return Ok(None);
         };
         let view = SstView::Borrowed(table, view_range);
-        Ok(Some(Self::new(view, table_store.clone(), options).await?))
+        Self::new(view, table_store, options).map(Some)
     }
 
-    pub(crate) async fn for_key(
+    async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
+        range: T,
+        table: &'a SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let iter = Self::new_borrowed(range, table, table_store, options)?;
+        init_optional_iterator(iter).await
+    }
+
+    fn for_key(
         table: &'a SsTableHandle,
         key: &'a [u8],
         table_store: Arc<TableStore>,
@@ -196,7 +317,16 @@ impl<'a> SstIterator<'a> {
             table_store,
             options,
         )
-        .await
+    }
+
+    async fn for_key_initialized(
+        table: &'a SsTableHandle,
+        key: &'a [u8],
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let iter = Self::for_key(table, key, table_store, options)?;
+        init_optional_iterator(iter).await
     }
 
     fn last_block_with_data_including_key(index: &SsTableIndex, key: &[u8]) -> Option<usize> {
@@ -240,6 +370,9 @@ impl<'a> SstIterator<'a> {
     }
 
     fn spawn_fetches(&mut self) {
+        let Some(index) = self.index.as_ref() else {
+            return;
+        };
         while self.fetch_tasks.len() < self.options.max_fetch_tasks
             && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
         {
@@ -251,7 +384,7 @@ impl<'a> SstIterator<'a> {
             let table_store = self.table_store.clone();
             let blocks_start = self.next_block_idx_to_fetch;
             let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
-            let index = self.index.clone();
+            let index = index.clone();
             let cache_blocks = self.options.cache_blocks;
             self.fetch_tasks
                 .push_back(FetchTask::InFlight(tokio::spawn(async move {
@@ -272,6 +405,9 @@ impl<'a> SstIterator<'a> {
         &mut self,
         spawn_fetches: bool,
     ) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
+        if self.index.is_none() {
+            return Ok(None);
+        }
         loop {
             if spawn_fetches {
                 self.spawn_fetches();
@@ -299,6 +435,7 @@ impl<'a> SstIterator<'a> {
     }
 
     async fn advance_block(&mut self) -> Result<(), SlateDBError> {
+        self.fetch_index().await?;
         if !self.state.is_finished() {
             if let Some(mut iter) = self.next_iter(true).await? {
                 match self.view.start_key() {
@@ -314,15 +451,45 @@ impl<'a> SstIterator<'a> {
     }
 
     fn stop(&mut self) {
-        let num_blocks = self.index.borrow().block_meta().len();
-        self.next_block_idx_to_fetch = num_blocks;
+        if let Some(index) = self.index.as_ref() {
+            let num_blocks = index.borrow().block_meta().len();
+            self.next_block_idx_to_fetch = num_blocks;
+        }
         self.state.stop();
+    }
+
+    async fn fetch_index(&mut self) -> Result<(), SlateDBError> {
+        if self.index.is_none() {
+            let index = self
+                .table_store
+                .read_index(self.view.table_as_ref())
+                .await?;
+            let block_idx_range =
+                InternalSstIterator::blocks_covering_view(&index.borrow(), &self.view);
+            self.block_idx_range = block_idx_range.clone();
+            self.next_block_idx_to_fetch = block_idx_range.start;
+            self.index = Some(index);
+            if self.options.eager_spawn {
+                self.spawn_fetches();
+            }
+        }
+        Ok(())
     }
 }
 
 #[async_trait]
-impl KeyValueIterator for SstIterator<'_> {
+impl KeyValueIterator for InternalSstIterator<'_> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        if !self.state.is_initialized() {
+            self.advance_block().await?;
+        }
+        Ok(())
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if !self.state.is_initialized() {
+            return Err(SlateDBError::IteratorNotInitialized);
+        }
         while !self.state.is_finished() {
             let next_entry = if let Some(iter) = self.state.current_iter.as_mut() {
                 iter.next_entry().await?
@@ -345,6 +512,9 @@ impl KeyValueIterator for SstIterator<'_> {
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        if !self.state.is_initialized() {
+            return Err(SlateDBError::IteratorNotInitialized);
+        }
         if !self.view.contains(next_key) {
             return Err(SlateDBError::SeekKeyOutOfKeyRange {
                 key: next_key.to_vec(),
@@ -360,7 +530,11 @@ impl KeyValueIterator for SstIterator<'_> {
                 }
             }
 
-            let index = self.index.clone();
+            let index = self
+                .index
+                .as_ref()
+                .expect("metadata must be initialized")
+                .clone();
             let block_idx =
                 Self::first_block_with_data_including_or_after_key(&index.borrow(), next_key);
             if block_idx < self.next_block_idx_to_fetch {
@@ -386,14 +560,286 @@ impl KeyValueIterator for SstIterator<'_> {
     }
 }
 
+struct BloomFilterIterator<'a> {
+    inner: InternalSstIterator<'a>,
+    filter: BloomFilterEvaluator,
+    initialized: bool,
+}
+
+impl<'a> BloomFilterIterator<'a> {
+    fn new(inner: InternalSstIterator<'a>, filter: BloomFilterEvaluator) -> Self {
+        Self {
+            inner,
+            filter,
+            initialized: false,
+        }
+    }
+
+    fn table_id(&self) -> SsTableId {
+        self.inner.table_id()
+    }
+
+    fn is_filtered_out(&self) -> bool {
+        self.filter.is_filtered_out()
+    }
+}
+
+#[async_trait]
+impl KeyValueIterator for BloomFilterIterator<'_> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        if !self.initialized {
+            self.filter
+                .evaluate(self.inner.view(), self.inner.table_store())
+                .await?;
+
+            if self.is_filtered_out() {
+                return Ok(());
+            }
+
+            // make sure initializing the inner iterator only happens after
+            // the filter is evaluated to avoid unnecessary work
+            self.inner.init().await?;
+            self.initialized = true;
+        }
+
+        Ok(())
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if self.is_filtered_out() {
+            self.filter.notify_finished_iteration();
+            return Ok(None);
+        }
+
+        let next = self.inner.next_entry().await?;
+        if let Some(entry) = next.as_ref() {
+            self.filter.notify_key_found(entry.key.as_ref());
+        } else {
+            self.filter.notify_finished_iteration();
+        }
+
+        Ok(next)
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        if self.is_filtered_out() {
+            return Ok(());
+        }
+
+        self.inner.seek(next_key).await
+    }
+}
+
+enum SstIteratorDelegate<'a> {
+    Direct(InternalSstIterator<'a>),
+    Bloom(BloomFilterIterator<'a>),
+}
+
+pub(crate) struct SstIterator<'a> {
+    delegate: SstIteratorDelegate<'a>,
+}
+
+impl<'a> SstIterator<'a> {
+    fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
+        let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
+        let delegate = match point_key {
+            Some(key) => {
+                let filter = BloomFilterEvaluator::new(key, db_stats);
+                SstIteratorDelegate::Bloom(BloomFilterIterator::new(internal, filter))
+            }
+            None => SstIteratorDelegate::Direct(internal),
+        };
+        Self { delegate }
+    }
+
+    pub(crate) fn new(
+        view: SstView<'a>,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Self, SlateDBError> {
+        let internal = InternalSstIterator::new(view, table_store, options)?;
+        Ok(Self::from_internal(internal, None))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_owned_with_stats<T: RangeBounds<Bytes>>(
+        range: T,
+        table: SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
+        Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_owned<T: RangeBounds<Bytes>>(
+        range: T,
+        table: SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        Self::new_owned_with_stats(range, table, table_store, options, None)
+    }
+
+    pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
+        range: T,
+        table: SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal =
+            InternalSstIterator::new_owned_initialized(range, table, table_store, options).await?;
+        match internal {
+            Some(inner) => {
+                let mut iterator = Self::from_internal(inner, None);
+                if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
+                    inner.init().await?;
+                    if inner.is_filtered_out() {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(iterator))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn new_borrowed_with_stats<T: RangeBounds<Bytes>>(
+        range: T,
+        table: &'a SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal = InternalSstIterator::new_borrowed(range, table, table_store, options)?;
+        Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn new_borrowed<T: RangeBounds<Bytes>>(
+        range: T,
+        table: &'a SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        Self::new_borrowed_with_stats(range, table, table_store, options, None)
+    }
+
+    pub(crate) async fn new_borrowed_initialized<T: RangeBounds<Bytes>>(
+        range: T,
+        table: &'a SsTableHandle,
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal =
+            InternalSstIterator::new_borrowed_initialized(range, table, table_store, options)
+                .await?;
+        match internal {
+            Some(inner) => {
+                let mut iterator = Self::from_internal(inner, None);
+                if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
+                    inner.init().await?;
+                    if inner.is_filtered_out() {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(iterator))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn for_key_with_stats(
+        table: &'a SsTableHandle,
+        key: &'a [u8],
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal = InternalSstIterator::for_key(table, key, table_store, options)?;
+        Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
+    }
+
+    pub(crate) async fn for_key_with_stats_initialized(
+        table: &'a SsTableHandle,
+        key: &'a [u8],
+        table_store: Arc<TableStore>,
+        options: SstIteratorOptions,
+        db_stats: Option<DbStats>,
+    ) -> Result<Option<Self>, SlateDBError> {
+        let internal =
+            InternalSstIterator::for_key_initialized(table, key, table_store, options).await?;
+        match internal {
+            Some(inner) => {
+                let mut iterator = Self::from_internal(inner, db_stats);
+                if let SstIteratorDelegate::Bloom(inner) = &mut iterator.delegate {
+                    inner.init().await?;
+                    if inner.is_filtered_out() {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(iterator))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn table_id(&self) -> SsTableId {
+        match &self.delegate {
+            SstIteratorDelegate::Direct(inner) => inner.table_id(),
+            SstIteratorDelegate::Bloom(inner) => inner.table_id(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_filtered_out(&self) -> bool {
+        match &self.delegate {
+            SstIteratorDelegate::Direct(_) => false,
+            SstIteratorDelegate::Bloom(inner) => inner.is_filtered_out(),
+        }
+    }
+}
+
+#[async_trait]
+impl KeyValueIterator for SstIterator<'_> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        match &mut self.delegate {
+            SstIteratorDelegate::Direct(inner) => inner.init().await,
+            SstIteratorDelegate::Bloom(inner) => inner.init().await,
+        }
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        match &mut self.delegate {
+            SstIteratorDelegate::Direct(inner) => inner.next_entry().await,
+            SstIteratorDelegate::Bloom(inner) => inner.next_entry().await,
+        }
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match &mut self.delegate {
+            SstIteratorDelegate::Direct(inner) => inner.seek(next_key).await,
+            SstIteratorDelegate::Bloom(inner) => inner.seek(next_key).await,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
+    use crate::db_stats::DbStats;
+    use crate::filter;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
+    use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::{assert_kv, gen_attrs};
+    use crate::types::ValueDeletable;
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
     use std::sync::Arc;
@@ -431,11 +877,15 @@ mod tests {
             cache_blocks: true,
             ..SstIteratorOptions::default()
         };
-        let mut iter =
-            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
-                .await
-                .unwrap()
-                .expect("Expected Some(iter) but got None");
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
         let kv = iter.next().await.unwrap().unwrap();
         assert_eq!(kv.key, b"key1".as_slice());
         assert_eq!(kv.value, b"value1".as_slice());
@@ -450,6 +900,143 @@ mod tests {
         assert_eq!(kv.value, b"value4".as_slice());
         let kv = iter.next().await.unwrap();
         assert!(kv.is_none());
+    }
+
+    #[tokio::test]
+    async fn should_record_bloom_filter_positive_for_single_key() {
+        // given
+        let registry = StatRegistry::new();
+        let db_stats = DbStats::new(&registry);
+        let table_store = bloom_filter_enabled_table_store(10);
+        let sst_handle = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+
+        // when
+        let mut iter = SstIterator::for_key_with_stats_initialized(
+            &sst_handle,
+            b"k1",
+            table_store.clone(),
+            SstIteratorOptions::default(),
+            Some(db_stats.clone()),
+        )
+        .await
+        .expect("iterator construction should succeed")
+        .expect("expected iterator for present key");
+        let entry = iter
+            .next_entry()
+            .await
+            .expect("iteration should succeed")
+            .expect("expected entry for present key");
+
+        // then
+        assert_eq!(entry.key.as_ref(), b"k1");
+        match entry.value {
+            ValueDeletable::Value(value) => assert_eq!(value.as_ref(), b"v_k1"),
+            other => panic!("expected value, found {other:?}"),
+        }
+        assert_eq!(db_stats.sst_filter_positives.get(), 1);
+        assert_eq!(db_stats.sst_filter_false_positives.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn should_record_bloom_filter_negative_for_missing_key() {
+        // given
+        let registry = StatRegistry::new();
+        let db_stats = DbStats::new(&registry);
+        let table_store = bloom_filter_enabled_table_store(10);
+        let sst_handle = build_single_block_sst(&table_store, &[b"k1", b"k3"]).await;
+
+        // when
+        let iter = SstIterator::for_key_with_stats_initialized(
+            &sst_handle,
+            b"k2",
+            table_store,
+            SstIteratorOptions::default(),
+            Some(db_stats.clone()),
+        )
+        .await
+        .expect("iterator construction should succeed");
+
+        // then
+        assert!(iter.is_none(), "negative bloom result should skip iterator");
+        assert_eq!(db_stats.sst_filter_negatives.get(), 1);
+        assert_eq!(db_stats.sst_filter_false_positives.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn should_record_bloom_filter_false_positive_for_single_key() {
+        // given
+        let registry = StatRegistry::new();
+        let db_stats = DbStats::new(&registry);
+        let table_store = bloom_filter_enabled_table_store(2);
+        // these two keys share the same bucket in the bloom filter (hard coded)
+        // after testing with the SIP13 algorithm
+        let existing_keys = [b"k1".as_slice(), b"k3".as_slice()];
+        let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
+
+        let filter = table_store
+            .read_filter(&sst_handle)
+            .await
+            .expect("filter read should succeed")
+            .expect("filter should exist");
+
+        let collision_key = b"k6";
+        let hash = filter::filter_hash(collision_key);
+        assert!(
+            filter.might_contain(hash),
+            "bloom filter should report collision for hard-coded key"
+        );
+
+        // when
+        let mut iter = SstIterator::for_key_with_stats_initialized(
+            &sst_handle,
+            collision_key,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+            Some(db_stats.clone()),
+        )
+        .await
+        .expect("iterator construction should succeed")
+        .expect("filter positive should yield iterator");
+
+        let entry = iter.next_entry().await.expect("iteration should succeed");
+
+        // then
+        assert!(entry.is_none(), "false positive must return no entry");
+        assert_eq!(db_stats.sst_filter_positives.get(), 1);
+        assert_eq!(db_stats.sst_filter_false_positives.get(), 1);
+        assert_eq!(db_stats.sst_filter_negatives.get(), 0);
+    }
+
+    fn bloom_filter_enabled_table_store(filter_bits_per_key: u32) -> Arc<TableStore> {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            filter_bits_per_key,
+            ..SsTableFormat::default()
+        };
+        Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        ))
+    }
+
+    async fn build_single_block_sst(
+        table_store: &Arc<TableStore>,
+        keys: &[&[u8]],
+    ) -> SsTableHandle {
+        let mut builder = table_store.table_builder();
+        for key in keys {
+            let value = format!("v_{}", String::from_utf8_lossy(key));
+            builder
+                .add_value(key, value.as_bytes(), gen_attrs(0))
+                .unwrap();
+        }
+        let encoded = builder.build().unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        table_store.write_sst(&id, encoded, false).await.unwrap()
     }
 
     #[tokio::test]
@@ -494,11 +1081,15 @@ mod tests {
             cache_blocks: true,
             ..SstIteratorOptions::default()
         };
-        let mut iter =
-            SstIterator::new_owned(.., sst_handle, table_store.clone(), sst_iter_options)
-                .await
-                .unwrap()
-                .expect("Expected Some(iter) but got None");
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
         for i in 0..1000 {
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, format!("key{}", i));
@@ -538,7 +1129,7 @@ mod tests {
             let mut expected_val_gen = test_case_val_gen.clone();
             let from_key = test_case_key_gen.next();
             let _ = test_case_val_gen.next();
-            let mut iter = SstIterator::new_borrowed(
+            let mut iter = SstIterator::new_borrowed_initialized(
                 BytesRange::from_slice(from_key.as_ref()..),
                 &sst,
                 table_store.clone(),
@@ -582,7 +1173,7 @@ mod tests {
         let mut expected_val_gen = val_gen.clone();
         let (sst, nkeys) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_borrowed(
+        let mut iter = SstIterator::new_borrowed_initialized(
             BytesRange::from_slice([b'a'; 16].as_ref()..),
             &sst,
             table_store.clone(),
@@ -624,7 +1215,7 @@ mod tests {
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&first_val, 1u8, 26u8);
         let (sst, _) = build_sst_with_n_blocks(2, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter = SstIterator::new_borrowed(
+        let mut iter = SstIterator::new_borrowed_initialized(
             BytesRange::from_slice([b'z'; 16].as_ref()..),
             &sst,
             table_store.clone(),
@@ -659,7 +1250,7 @@ mod tests {
         let (sst, nkeys) =
             build_sst_with_n_blocks(256, table_store.clone(), key_gen, val_gen).await;
 
-        let mut iter_large_fetch = SstIterator::new_borrowed(
+        let mut iter_large_fetch = SstIterator::new_borrowed_initialized(
             ..,
             &sst,
             table_store.clone(),
@@ -674,7 +1265,7 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        let mut iter_small_fetch = SstIterator::new_borrowed(
+        let mut iter_small_fetch = SstIterator::new_borrowed_initialized(
             ..,
             &sst,
             table_store.clone(),

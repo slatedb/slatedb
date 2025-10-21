@@ -1333,7 +1333,7 @@ mod tests {
 
         if is_owned {
             // scan the entire sst and validate that the visible range is respected.
-            let mut iter = SstIterator::new_owned(
+            let mut iter = SstIterator::new_owned_initialized(
                 ..,
                 sst_handle.clone(),
                 table_store.clone(),
@@ -1345,7 +1345,7 @@ mod tests {
             assert_iterator(&mut iter, expected_entries).await;
 
             // scan range outside of visible range and validate that it returns empty iterator.
-            let iter = SstIterator::new_owned(
+            let iter = SstIterator::new_owned_initialized(
                 Bytes::from_static(b"m")..Bytes::from_static(b"p"),
                 sst_handle,
                 table_store,
@@ -1356,7 +1356,7 @@ mod tests {
             assert!(iter.is_none());
         } else {
             // scan the entire sst and validate that the visible range is respected.
-            let mut iter = SstIterator::new_borrowed(
+            let mut iter = SstIterator::new_borrowed_initialized(
                 ..,
                 &sst_handle,
                 table_store.clone(),
@@ -1368,7 +1368,7 @@ mod tests {
             assert_iterator(&mut iter, expected_entries).await;
 
             // scan range outside of visible range and validate that it returns empty iterator.
-            let iter = SstIterator::new_borrowed(
+            let iter = SstIterator::new_borrowed_initialized(
                 Bytes::from_static(b"m")..Bytes::from_static(b"p"),
                 &sst_handle,
                 table_store,
