@@ -36,7 +36,11 @@ pub trait KeyValueIterator: Send + Sync {
                             value: v,
                         }))
                     }
-                    ValueDeletable::Merge(_) => todo!(),
+                    // next() should only be called at the top level and therefore
+                    // all merges should already be resolved before this point
+                    ValueDeletable::Merge(_) => {
+                        return Err(SlateDBError::MergeOperatorNotConfigured)
+                    }
                     ValueDeletable::Tombstone => continue,
                 }
             } else {

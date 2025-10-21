@@ -5,6 +5,7 @@ use crate::filter_iterator::FilterIterator;
 use crate::iter::{EmptyIterator, KeyValueIterator};
 use crate::map_iter::MapIterator;
 use crate::merge_iterator::MergeIterator;
+use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
 use async_trait::async_trait;
@@ -136,7 +137,9 @@ impl<'a> KeyValueIterator for GetIterator<'a> {
                     }));
                 }
                 ValueDeletable::Tombstone => return Ok(None),
-                ValueDeletable::Merge(_) => todo!(),
+                // This should never happen because the underlying iterator should handle
+                // merging before when we call next_entry
+                ValueDeletable::Merge(_) => return Err(SlateDBError::MergeOperatorNotConfigured),
             }
         }
 
@@ -230,6 +233,7 @@ impl<'a> DbIterator<'a> {
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
         now: i64,
+        merge_operator: Option<MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
         // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
         // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
@@ -266,6 +270,11 @@ impl<'a> DbIterator<'a> {
                 sr_iters,
             )?) as Box<dyn KeyValueIterator + 'a>,
         };
+
+        if let Some(merge_operator) = merge_operator {
+            iter = Box::new(MergeOperatorIterator::new(merge_operator, iter, true, now));
+        }
+
         iter.init().await?;
 
         Ok(DbIterator {
@@ -392,6 +401,7 @@ mod tests {
             None,
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -433,6 +443,7 @@ mod tests {
             Some(100),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -464,6 +475,7 @@ mod tests {
             None,
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -513,6 +525,7 @@ mod tests {
             None,
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -561,6 +574,7 @@ mod tests {
             None,
             None,
             49,
+            None,
         )
         .await
         .unwrap();
@@ -606,6 +620,7 @@ mod tests {
             None,
             None,
             50,
+            None,
         )
         .await
         .unwrap();
@@ -647,6 +662,7 @@ mod tests {
             None,
             None,
             100,
+            None,
         )
         .await
         .unwrap();
@@ -684,6 +700,7 @@ mod tests {
             None,
             None,
             200,
+            None,
         )
         .await
         .unwrap();
@@ -725,6 +742,7 @@ mod tests {
             None,
             None,
             100, // now = 100, so newer_entry with expire_ts=50 is expired
+            None,
         )
         .await
         .unwrap();

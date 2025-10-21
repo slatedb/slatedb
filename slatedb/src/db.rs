@@ -140,6 +140,7 @@ impl DbInner {
             db_stats: db_stats.clone(),
             mono_clock: mono_clock.clone(),
             oracle: oracle.clone(),
+            merge_operator: None,
         };
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;

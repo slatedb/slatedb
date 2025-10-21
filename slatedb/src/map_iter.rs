@@ -30,7 +30,10 @@ impl<T: KeyValueIterator> MapIterator<T> {
 
     pub(crate) fn new_with_ttl_now(iterator: T, ttl_now: i64) -> Self {
         let f = Box::new(move |entry: RowEntry| {
-            if is_not_expired(&entry, ttl_now) {
+            // Merge operands should not be converted into tombstones and instead they
+            // will be filtered out by the merge operator (otherwise we will early terminate
+            // the merging when we should keep looking for a base value or true tombstone)
+            if is_not_expired(&entry, ttl_now) || matches!(entry.value, ValueDeletable::Merge(_)) {
                 entry
             } else {
                 RowEntry {

@@ -37,6 +37,7 @@ pub(crate) struct Reader {
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) oracle: Arc<Oracle>,
+    pub(crate) merge_operator: Option<crate::merge_operator::MergeOperatorType>,
 }
 
 impl Reader {
@@ -312,6 +313,7 @@ impl Reader {
             max_seq,
             None,
             now,
+            self.merge_operator.clone(),
         )
         .await?;
 
@@ -382,6 +384,7 @@ impl Reader {
             max_seq,
             range_tracker,
             now,
+            self.merge_operator.clone(),
         )
         .await
     }
@@ -390,6 +393,7 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::types::{RowEntry, ValueDeletable};
     use rstest::rstest;
 
@@ -405,6 +409,26 @@ mod tests {
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::collections::HashMap;
     use ulid::Ulid;
+
+    /// A simple merge operator for testing that concatenates byte strings
+    struct StringConcatMergeOperator;
+
+    impl MergeOperator for StringConcatMergeOperator {
+        fn merge(
+            &self,
+            existing_value: Option<Bytes>,
+            operand: Bytes,
+        ) -> Result<Bytes, MergeOperatorError> {
+            match existing_value {
+                Some(base) => {
+                    let mut merged = base.to_vec();
+                    merged.extend_from_slice(&operand);
+                    Ok(Bytes::from(merged))
+                }
+                None => Ok(operand),
+            }
+        }
+    }
 
     /// Test database state that can be populated with entries
     struct TestDbState {
@@ -532,20 +556,56 @@ mod tests {
     struct TestEntry {
         location: LayerLocation,
         key: &'static [u8],
-        value: Option<&'static [u8]>, // None = tombstone
+        value: ValueDeletable,
         seq: u64,
         expire_ts: Option<i64>, // None = no expiration
     }
 
     impl TestEntry {
+        fn value(key: &'static [u8], val: &'static [u8], seq: u64) -> Self {
+            Self {
+                location: LayerLocation::Memtable,
+                key,
+                value: ValueDeletable::Value(Bytes::from_static(val)),
+                seq,
+                expire_ts: None,
+            }
+        }
+
+        fn tombstone(key: &'static [u8], seq: u64) -> Self {
+            Self {
+                location: LayerLocation::Memtable,
+                key,
+                value: ValueDeletable::Tombstone,
+                seq,
+                expire_ts: None,
+            }
+        }
+
+        fn merge(key: &'static [u8], val: &'static [u8], seq: u64) -> Self {
+            Self {
+                location: LayerLocation::Memtable,
+                key,
+                value: ValueDeletable::Merge(Bytes::from_static(val)),
+                seq,
+                expire_ts: None,
+            }
+        }
+
+        fn with_location(mut self, location: LayerLocation) -> Self {
+            self.location = location;
+            self
+        }
+
+        fn with_expire_ts(mut self, expire_ts: i64) -> Self {
+            self.expire_ts = Some(expire_ts);
+            self
+        }
+
         fn to_row_entry(&self) -> RowEntry {
-            let value = match self.value {
-                Some(v) => ValueDeletable::Value(Bytes::from_static(v)),
-                None => ValueDeletable::Tombstone,
-            };
             RowEntry::new(
                 Bytes::from_static(self.key),
-                value,
+                self.value.clone(),
                 self.seq,
                 None,
                 self.expire_ts,
@@ -573,10 +633,18 @@ mod tests {
                         wb_batch = Some(WriteBatch::new());
                     }
                     if let Some(ref mut batch) = wb_batch {
-                        if let Some(value) = entry.value {
-                            batch.put(entry.key, value);
-                        } else {
-                            batch.delete(entry.key);
+                        match &entry.value {
+                            ValueDeletable::Value(v) => {
+                                batch.put(entry.key, v.as_ref());
+                            }
+                            ValueDeletable::Tombstone => {
+                                batch.delete(entry.key);
+                            }
+                            ValueDeletable::Merge(_v) => {
+                                // Note: WriteBatch doesn't support merge() yet, but we can store
+                                // the row entry directly for testing purposes once merge is implemented
+                                panic!("Merge in WriteBatch not yet implemented - use Memtable/L0/SR layers for now");
+                            }
                         }
                     }
                 }
@@ -655,9 +723,9 @@ mod tests {
     // Test 1: Write batch overrides all other layers
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::WriteBatch, key: b"key1", value: Some(b"wb_value"), seq: 100, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem_value"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_value"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"wb_value", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"mem_value", 50),
+            TestEntry::value(b"key1", b"l0_value", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: Some(b"wb_value"),
@@ -666,9 +734,9 @@ mod tests {
     // Test 2: Memtable overrides L0 and sorted runs
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem_value"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_value"), seq: 40, expire_ts: None },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"sr_value"), seq: 30, expire_ts: None },
+            TestEntry::value(b"key1", b"mem_value", 50),
+            TestEntry::value(b"key1", b"l0_value", 40).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"sr_value", 30).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: Some(b"mem_value"),
@@ -677,9 +745,9 @@ mod tests {
     // Test 3: Tombstone in write batch hides all lower layers
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::WriteBatch, key: b"key1", value: None, seq: 100, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem_value"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_value"), seq: 40, expire_ts: None },
+            TestEntry::tombstone(b"key1", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"mem_value", 50),
+            TestEntry::value(b"key1", b"l0_value", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: None,
@@ -688,8 +756,8 @@ mod tests {
     // Test 4: Tombstone in memtable hides L0
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: None, seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_value"), seq: 40, expire_ts: None },
+            TestEntry::tombstone(b"key1", 50),
+            TestEntry::value(b"key1", b"l0_value", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: None,
@@ -698,8 +766,8 @@ mod tests {
     // Test 5: Tombstone in L0 hides sorted run
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: None, seq: 40, expire_ts: None },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"sr_value"), seq: 30, expire_ts: None },
+            TestEntry::tombstone(b"key1", 40).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"sr_value", 30).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: None,
@@ -708,8 +776,8 @@ mod tests {
     // Test 6: Value after tombstone (higher seq number)
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"new_value"), seq: 60, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: None, seq: 50, expire_ts: None },
+            TestEntry::value(b"key1", b"new_value", 60),
+            TestEntry::tombstone(b"key1", 50).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: Some(b"new_value"),
@@ -718,8 +786,8 @@ mod tests {
     // Test 7: Multiple L0 SSTs - newest wins
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::L0Sst(1), key: b"key1", value: Some(b"l0_newer"), seq: 45, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_older"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"l0_newer", 45).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::value(b"key1", b"l0_older", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: Some(b"l0_newer"),
@@ -728,8 +796,8 @@ mod tests {
     // Test 8: L0 overrides sorted run
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_value"), seq: 40, expire_ts: None },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"sr_value"), seq: 30, expire_ts: None },
+            TestEntry::value(b"key1", b"l0_value", 40).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"sr_value", 30).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: Some(b"l0_value"),
@@ -738,7 +806,7 @@ mod tests {
     // Test 9: Nonexistent key returns None
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"other_key", value: Some(b"value"), seq: 50, expire_ts: None },
+            TestEntry::value(b"other_key", b"value", 50),
         ],
         query_key: b"key1",
         expected: None,
@@ -747,7 +815,7 @@ mod tests {
     // Test 10: Only tombstone, no value
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: None, seq: 50, expire_ts: None },
+            TestEntry::tombstone(b"key1", 50),
         ],
         query_key: b"key1",
         expected: None,
@@ -756,11 +824,11 @@ mod tests {
     // Test 11: Multiple layers all with same key, write batch wins
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::WriteBatch, key: b"key1", value: Some(b"wb"), seq: 100, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem"), seq: 90, expire_ts: None },
-            TestEntry { location: LayerLocation::ImmutableMemtable(0), key: b"key1", value: Some(b"imm"), seq: 80, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0"), seq: 70, expire_ts: None },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"sr"), seq: 60, expire_ts: None },
+            TestEntry::value(b"key1", b"wb", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"mem", 90),
+            TestEntry::value(b"key1", b"imm", 80).with_location(LayerLocation::ImmutableMemtable(0)),
+            TestEntry::value(b"key1", b"l0", 70).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"sr", 60).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: Some(b"wb"),
@@ -769,9 +837,9 @@ mod tests {
     // Test 12: Multiple entries per L0 SST
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::L0Sst(1), key: b"key1", value: Some(b"l0_0_val1"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(1), key: b"key2", value: Some(b"l0_0_val2"), seq: 51, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_1_val1"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"l0_0_val1", 50).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::value(b"key2", b"l0_0_val2", 51).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::value(b"key1", b"l0_1_val1", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: Some(b"l0_0_val1"),
@@ -780,8 +848,8 @@ mod tests {
     // Test 13: Multiple sorted runs
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::SortedRun(1), key: b"key1", value: Some(b"sr0"), seq: 30, expire_ts: None },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"sr1"), seq: 20, expire_ts: None },
+            TestEntry::value(b"key1", b"sr0", 30).with_location(LayerLocation::SortedRun(1)),
+            TestEntry::value(b"key1", b"sr1", 20).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: Some(b"sr0"),
@@ -790,9 +858,9 @@ mod tests {
     // Test 14: Multiple immutable memtables
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::ImmutableMemtable(0), key: b"key1", value: Some(b"imm0"), seq: 60, expire_ts: None },
-            TestEntry { location: LayerLocation::ImmutableMemtable(1), key: b"key1", value: Some(b"imm1"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"imm0", 60).with_location(LayerLocation::ImmutableMemtable(0)),
+            TestEntry::value(b"key1", b"imm1", 50).with_location(LayerLocation::ImmutableMemtable(1)),
+            TestEntry::value(b"key1", b"l0", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: Some(b"imm0"),
@@ -802,15 +870,15 @@ mod tests {
     #[case(LayerPriorityTestCase {
         entries: vec![
             // WriteBatch has multiple keys but not key1
-            TestEntry { location: LayerLocation::WriteBatch, key: b"key2", value: Some(b"wb2"), seq: 100, expire_ts: None },
+            TestEntry::value(b"key2", b"wb2", 100).with_location(LayerLocation::WriteBatch),
             // Memtable has key1 with high seq
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem"), seq: 90, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key3", value: Some(b"mem3"), seq: 91, expire_ts: None },
+            TestEntry::value(b"key1", b"mem", 90),
+            TestEntry::value(b"key3", b"mem3", 91),
             // L0 has older versions
-            TestEntry { location: LayerLocation::L0Sst(1), key: b"key1", value: Some(b"l0_0"), seq: 70, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_1"), seq: 60, expire_ts: None },
+            TestEntry::value(b"key1", b"l0_0", 70).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::value(b"key1", b"l0_1", 60).with_location(LayerLocation::L0Sst(0)),
             // SR has oldest
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"sr"), seq: 50, expire_ts: None },
+            TestEntry::value(b"key1", b"sr", 50).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: Some(b"mem"),
@@ -819,7 +887,7 @@ mod tests {
     // Test 16: Expired value in memtable should return None
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem_value"), seq: 50, expire_ts: Some(100) },
+            TestEntry::value(b"key1", b"mem_value", 50).with_expire_ts(100),
         ],
         query_key: b"key1",
         expected: None,
@@ -828,8 +896,8 @@ mod tests {
     // Test 17: Expired value in L0 should not return older value from SR
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_value"), seq: 50, expire_ts: Some(100) },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"sr_old_value"), seq: 30, expire_ts: None },
+            TestEntry::value(b"key1", b"l0_value", 50).with_location(LayerLocation::L0Sst(0)).with_expire_ts(100),
+            TestEntry::value(b"key1", b"sr_old_value", 30).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: None,
@@ -838,7 +906,7 @@ mod tests {
     // Test 18: Non-expired value should be returned when now < expire_ts
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem_value"), seq: 50, expire_ts: Some(200) },
+            TestEntry::value(b"key1", b"mem_value", 50).with_expire_ts(200),
         ],
         query_key: b"key1",
         expected: Some(b"mem_value"),
@@ -847,8 +915,8 @@ mod tests {
     // Test 19: Expired value in memtable should not expose L0 value
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem_value"), seq: 60, expire_ts: Some(100) },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_value"), seq: 50, expire_ts: None },
+            TestEntry::value(b"key1", b"mem_value", 60).with_expire_ts(100),
+            TestEntry::value(b"key1", b"l0_value", 50).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: None,
@@ -857,9 +925,9 @@ mod tests {
     // Test 20: Mixed expired and non-expired values across layers
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::L0Sst(1), key: b"key1", value: Some(b"l0_new_expired"), seq: 60, expire_ts: Some(100) },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_old_valid"), seq: 50, expire_ts: Some(200) },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"sr_value"), seq: 30, expire_ts: None },
+            TestEntry::value(b"key1", b"l0_new_expired", 60).with_location(LayerLocation::L0Sst(1)).with_expire_ts(100),
+            TestEntry::value(b"key1", b"l0_old_valid", 50).with_location(LayerLocation::L0Sst(0)).with_expire_ts(200),
+            TestEntry::value(b"key1", b"sr_value", 30).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: None,
@@ -868,8 +936,8 @@ mod tests {
     // Test 21: Tombstone prevents revival even when newer value expires
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::L0Sst(1), key: b"key1", value: None, seq: 60, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_old_value"), seq: 50, expire_ts: None },
+            TestEntry::tombstone(b"key1", 60).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::value(b"key1", b"l0_old_value", 50).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: None,
@@ -878,7 +946,7 @@ mod tests {
     // Test 22: Value with no expiration should always be returned
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem_value"), seq: 50, expire_ts: None },
+            TestEntry::value(b"key1", b"mem_value", 50),
         ],
         query_key: b"key1",
         expected: Some(b"mem_value"),
@@ -887,7 +955,7 @@ mod tests {
     // Test 23: Committed read filters out uncommitted data in memtable
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"uncommitted"), seq: 100, expire_ts: None },
+            TestEntry::value(b"key1", b"uncommitted", 100),
         ],
         query_key: b"key1",
         expected: None,
@@ -896,7 +964,7 @@ mod tests {
     // Test 24: Committed read sees committed data
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"committed"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"committed", 40),
         ],
         query_key: b"key1",
         expected: Some(b"committed"),
@@ -905,8 +973,8 @@ mod tests {
     // Test 25: Uncommitted value doesn't hide older committed value
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"uncommitted"), seq: 100, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"committed"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"uncommitted", 100),
+            TestEntry::value(b"key1", b"committed", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: Some(b"committed"),
@@ -915,8 +983,8 @@ mod tests {
     // Test 26: Snapshot with max_seq filters newer values
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"newer"), seq: 80, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"older"), seq: 50, expire_ts: None },
+            TestEntry::value(b"key1", b"newer", 80),
+            TestEntry::value(b"key1", b"older", 50).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: Some(b"older"),
@@ -925,7 +993,7 @@ mod tests {
     // Test 27: Snapshot with max_seq returns None when all values are newer
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"newer"), seq: 80, expire_ts: None },
+            TestEntry::value(b"key1", b"newer", 80),
         ],
         query_key: b"key1",
         expected: None,
@@ -934,9 +1002,9 @@ mod tests {
     // Test 28: Combined max_seq and last_committed_seq filtering
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"v1"), seq: 100, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(1), key: b"key1", value: Some(b"v2"), seq: 70, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"v3"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"v1", 100),
+            TestEntry::value(b"key1", b"v2", 70).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::value(b"key1", b"v3", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: Some(b"v3"),
@@ -945,8 +1013,8 @@ mod tests {
     // Test 29: Tombstone within sequence bounds hides older values
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: None, seq: 45, expire_ts: None },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"old_value"), seq: 30, expire_ts: None },
+            TestEntry::tombstone(b"key1", 45).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"old_value", 30).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: None,
@@ -955,8 +1023,8 @@ mod tests {
     // Test 30: Newer tombstone filtered out doesn't prevent reading older value
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: None, seq: 100, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"old_value"), seq: 40, expire_ts: None },
+            TestEntry::tombstone(b"key1", 100),
+            TestEntry::value(b"key1", b"old_value", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         query_key: b"key1",
         expected: Some(b"old_value"),
@@ -965,10 +1033,10 @@ mod tests {
     // Test 31: Sequence filtering works across all layers
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem"), seq: 90, expire_ts: None },
-            TestEntry { location: LayerLocation::ImmutableMemtable(0), key: b"key1", value: Some(b"imm"), seq: 70, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"sr"), seq: 30, expire_ts: None },
+            TestEntry::value(b"key1", b"mem", 90),
+            TestEntry::value(b"key1", b"imm", 70).with_location(LayerLocation::ImmutableMemtable(0)),
+            TestEntry::value(b"key1", b"l0", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"sr", 30).with_location(LayerLocation::SortedRun(0)),
         ],
         query_key: b"key1",
         expected: Some(b"l0"),
@@ -977,11 +1045,168 @@ mod tests {
     // Test 32: Dirty read sees all uncommitted data
     #[case(LayerPriorityTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"uncommitted"), seq: 100, expire_ts: None },
+            TestEntry::value(b"key1", b"uncommitted", 100),
         ],
         query_key: b"key1",
         expected: Some(b"uncommitted"),
         description: "dirty read should see uncommitted data", now: None, dirty: true, last_committed_seq: Some(50), max_seq: None,
+    })]
+    // ========================================
+    // MERGE OPERATOR TESTS FOR GET OPERATIONS
+    // ========================================
+    // Test 33: Single merge operand without base value acts as base
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"a", 50),
+        ],
+        query_key: b"key1",
+        expected: Some(b"a"),  // Single merge operand with no base returns the operand
+        description: "[MERGE] single merge operand without base should be returned as-is", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 34: Merge operand with base value should merge
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"b", 60),
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"ab"),  // Merge("a", "b") = "ab" (concatenation)
+        description: "[MERGE] merge operand should be merged with base value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 35: Multiple merge operands should be applied in sequence number order
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"c", 70),
+            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::SortedRun(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"abc"),  // Merge(Merge("a", "b"), "c") = "abc"
+        description: "[MERGE] multiple merge operands should be applied in sequence order", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 36: Tombstone clears all merge history
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"d", 80),
+            TestEntry::tombstone(b"key1", 70).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::merge(b"key1", b"c", 60).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"ab", 50).with_location(LayerLocation::SortedRun(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"d"),  // Tombstone acts as barrier, only merge after tombstone is applied
+        description: "[MERGE] tombstone should clear merge history", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 37: Value after merges acts as new base
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"z", 90),
+            TestEntry::value(b"key1", b"y", 80).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::merge(b"key1", b"x", 70).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"w", 60).with_location(LayerLocation::SortedRun(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"yz"),  // Value("y") acts as barrier, only Merge("y", "z") is applied
+        description: "[MERGE] value should act as new base for subsequent merges", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 38: Merges across multiple layers
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"d", 100),
+            TestEntry::merge(b"key1", b"c", 90).with_location(LayerLocation::ImmutableMemtable(0)),
+            TestEntry::merge(b"key1", b"b", 80).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"a", 70).with_location(LayerLocation::SortedRun(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"abcd"),  // Merge(Merge(Merge("a", "b"), "c"), "d") = "abcd"
+        description: "[MERGE] merges should work across all layers", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 39: Expired merge operand should be filtered
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"c", 70).with_expire_ts(100),
+            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::SortedRun(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"ab"),  // Expired merge is filtered, only Merge("a", "b") is applied
+        description: "[MERGE] expired merge operand should be filtered out", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 40: Expired base value with merge operands still applies merges
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"b", 70),
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::L0Sst(0)).with_expire_ts(100),
+        ],
+        query_key: b"key1",
+        expected: Some(b"b"),  // Base value expired (None passed to merge operator), merge operands still applied
+        description: "[MERGE] expired base value passes None to merge operator, merge operands still apply", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 41: Mixed TTLs - only non-expired merges are applied
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"d", 80).with_expire_ts(200),  // Not expired
+            TestEntry::merge(b"key1", b"c", 70).with_location(LayerLocation::L0Sst(1)).with_expire_ts(100),  // Expired
+            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),  // No TTL
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::SortedRun(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"abd"),  // Merge(Merge("a", "b"), "d") = "abd" (expired "c" is filtered)
+        description: "[MERGE] only non-expired merge operands should be applied", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 42: Merge with sequence filtering
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"c", 100),  // Filtered (uncommitted)
+            TestEntry::merge(b"key1", b"b", 45),  // Visible
+            TestEntry::value(b"key1", b"a", 40).with_location(LayerLocation::L0Sst(0)),  // Visible
+        ],
+        query_key: b"key1",
+        expected: Some(b"ab"),  // Merge("a", "b") = "ab" (seq 100 filtered)
+        description: "[MERGE] merge operands should respect sequence filtering", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+    })]
+    // Test 43: Snapshot isolation with merge operands
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"c", 80),  // Filtered by snapshot
+            TestEntry::merge(b"key1", b"b", 55),  // Visible in snapshot
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::L0Sst(0)),  // Visible in snapshot
+        ],
+        query_key: b"key1",
+        expected: Some(b"ab"),  // Merge("a", "b") = "ab" (seq 80 filtered by snapshot)
+        description: "[MERGE] snapshot should filter merge operands by max_seq", now: None, dirty: true, last_committed_seq: None, max_seq: Some(60),
+    })]
+    // Test 44: Only merge operands, no tombstone/value base
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"c", 70),
+            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::merge(b"key1", b"a", 50).with_location(LayerLocation::SortedRun(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"abc"),  // String concatenation: "" + "a" + "b" + "c" = "abc"
+        description: "[MERGE] multiple merge operands without base should merge together", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 45: Tombstone after value prevents merge from applying to old value
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"new", 80),
+            TestEntry::tombstone(b"key1", 70).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::value(b"key1", b"old", 60).with_location(LayerLocation::L0Sst(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"new"),  // Tombstone blocks old value, merge becomes new base
+        description: "[MERGE] tombstone should prevent merge from applying to older value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 46: Merge operands in same layer (memtable)
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"c", 70),
+            TestEntry::merge(b"key1", b"b", 60),
+            TestEntry::merge(b"key1", b"a", 50),
+        ],
+        query_key: b"key1",
+        expected: Some(b"abc"),  // All merges in memtable: Merge(Merge("a", "b"), "c") = "abc"
+        description: "[MERGE] multiple merge operands in same layer should merge in seq order", now: None, dirty: true, last_committed_seq: None, max_seq: None,
     })]
     async fn test_get_with_options_layer_priority(
         #[case] test_case: LayerPriorityTestCase,
@@ -1008,11 +1233,19 @@ mod tests {
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
         oracle.last_committed_seq.store(last_committed_seq);
 
+        // Enable merge operator if the test description contains "[MERGE]"
+        let merge_operator = if test_case.description.contains("[MERGE]") {
+            Some(Arc::new(StringConcatMergeOperator) as Arc<dyn MergeOperator + Send + Sync>)
+        } else {
+            None
+        };
+
         let reader = Reader {
             table_store: test_db_state.table_store.clone(),
             db_stats,
             mono_clock,
             oracle,
+            merge_operator,
         };
 
         // Call the actual get_with_options method
@@ -1074,9 +1307,9 @@ mod tests {
     // Test 1: Scan returns keys in order from single layer
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"val1"), seq: 10, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key2", value: Some(b"val2"), seq: 10, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key3", value: Some(b"val3"), seq: 10, expire_ts: None },
+            TestEntry::value(b"key1", b"val1", 10),
+            TestEntry::value(b"key2", b"val2", 10),
+            TestEntry::value(b"key3", b"val3", 10),
         ],
         range_start: b"key1",
         range_end: b"key4",
@@ -1086,9 +1319,9 @@ mod tests {
     // Test 2: Scan respects range boundaries
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"val1"), seq: 10, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key2", value: Some(b"val2"), seq: 10, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key3", value: Some(b"val3"), seq: 10, expire_ts: None },
+            TestEntry::value(b"key1", b"val1", 10),
+            TestEntry::value(b"key2", b"val2", 10),
+            TestEntry::value(b"key3", b"val3", 10),
         ],
         range_start: b"key2",
         range_end: b"key3",
@@ -1098,9 +1331,9 @@ mod tests {
     // Test 3: Higher layer values override lower layers
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem_val"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"l0_val"), seq: 40, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key2", value: Some(b"l0_val2"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"mem_val", 50),
+            TestEntry::value(b"key1", b"l0_val", 40).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"l0_val2", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         range_start: b"key1",
         range_end: b"key3",
@@ -1110,10 +1343,10 @@ mod tests {
     // Test 4: Tombstones hide values in lower layers
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"val1"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key2", value: None, seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key2", value: Some(b"old_val2"), seq: 40, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key3", value: Some(b"val3"), seq: 50, expire_ts: None },
+            TestEntry::value(b"key1", b"val1", 50),
+            TestEntry::tombstone(b"key2", 50),
+            TestEntry::value(b"key2", b"old_val2", 40).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key3", b"val3", 50),
         ],
         range_start: b"key1",
         range_end: b"key4",
@@ -1123,9 +1356,9 @@ mod tests {
     // Test 5: Expired values are filtered out
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"val1"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key2", value: Some(b"expired"), seq: 50, expire_ts: Some(100) },
-            TestEntry { location: LayerLocation::Memtable, key: b"key3", value: Some(b"val3"), seq: 50, expire_ts: None },
+            TestEntry::value(b"key1", b"val1", 50),
+            TestEntry::value(b"key2", b"expired", 50).with_expire_ts(100),
+            TestEntry::value(b"key3", b"val3", 50),
         ],
         range_start: b"key1",
         range_end: b"key4",
@@ -1135,8 +1368,8 @@ mod tests {
     // Test 6: Expired value doesn't revive older value
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"expired"), seq: 60, expire_ts: Some(100) },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"old_value"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"expired", 60).with_expire_ts(100),
+            TestEntry::value(b"key1", b"old_value", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         range_start: b"key1",
         range_end: b"key2",
@@ -1146,9 +1379,9 @@ mod tests {
     // Test 7: Uncommitted values filtered in committed read
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"committed"), seq: 40, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key2", value: Some(b"uncommitted"), seq: 60, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key3", value: Some(b"committed"), seq: 30, expire_ts: None },
+            TestEntry::value(b"key1", b"committed", 40),
+            TestEntry::value(b"key2", b"uncommitted", 60),
+            TestEntry::value(b"key3", b"committed", 30),
         ],
         range_start: b"key1",
         range_end: b"key4",
@@ -1158,8 +1391,8 @@ mod tests {
     // Test 8: Uncommitted value doesn't hide older committed value
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"uncommitted"), seq: 60, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"committed"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"uncommitted", 60),
+            TestEntry::value(b"key1", b"committed", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         range_start: b"key1",
         range_end: b"key2",
@@ -1169,9 +1402,9 @@ mod tests {
     // Test 9: Snapshot with max_seq
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"v1_new"), seq: 70, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"v1_old"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key2", value: Some(b"v2"), seq: 55, expire_ts: None },
+            TestEntry::value(b"key1", b"v1_new", 70),
+            TestEntry::value(b"key1", b"v1_old", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"v2", 55),
         ],
         range_start: b"key1",
         range_end: b"key3",
@@ -1181,11 +1414,11 @@ mod tests {
     // Test 10: Multiple layers with proper deduplication
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"mem"), seq: 80, expire_ts: None },
-            TestEntry { location: LayerLocation::ImmutableMemtable(0), key: b"key2", value: Some(b"imm"), seq: 70, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(1), key: b"key3", value: Some(b"l0_new"), seq: 60, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key3", value: Some(b"l0_old"), seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key4", value: Some(b"sr"), seq: 40, expire_ts: None },
+            TestEntry::value(b"key1", b"mem", 80),
+            TestEntry::value(b"key2", b"imm", 70).with_location(LayerLocation::ImmutableMemtable(0)),
+            TestEntry::value(b"key3", b"l0_new", 60).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::value(b"key3", b"l0_old", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key4", b"sr", 40).with_location(LayerLocation::SortedRun(0)),
         ],
         range_start: b"key1",
         range_end: b"key5",
@@ -1195,7 +1428,7 @@ mod tests {
     // Test 11: Empty range returns no results
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"val1"), seq: 10, expire_ts: None },
+            TestEntry::value(b"key1", b"val1", 10),
         ],
         range_start: b"key5",
         range_end: b"key9",
@@ -1205,8 +1438,8 @@ mod tests {
     // Test 12: Scan with all keys deleted
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: None, seq: 50, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key2", value: None, seq: 50, expire_ts: None },
+            TestEntry::tombstone(b"key1", 50),
+            TestEntry::tombstone(b"key2", 50),
         ],
         range_start: b"key1",
         range_end: b"key3",
@@ -1216,10 +1449,10 @@ mod tests {
     // Test 13: Complex sequence filtering across range
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: Some(b"uncommitted1"), seq: 70, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"committed1"), seq: 40, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key2", value: Some(b"committed2"), seq: 45, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key3", value: Some(b"uncommitted3"), seq: 80, expire_ts: None },
+            TestEntry::value(b"key1", b"uncommitted1", 70),
+            TestEntry::value(b"key1", b"committed1", 40).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"committed2", 45),
+            TestEntry::value(b"key3", b"uncommitted3", 80),
         ],
         range_start: b"key1",
         range_end: b"key4",
@@ -1229,9 +1462,9 @@ mod tests {
     // Test 14: Tombstone within seq bounds prevents reading old value
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: None, seq: 45, expire_ts: None },
-            TestEntry { location: LayerLocation::SortedRun(0), key: b"key1", value: Some(b"old"), seq: 30, expire_ts: None },
-            TestEntry { location: LayerLocation::Memtable, key: b"key2", value: Some(b"val2"), seq: 40, expire_ts: None },
+            TestEntry::tombstone(b"key1", 45).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"old", 30).with_location(LayerLocation::SortedRun(0)),
+            TestEntry::value(b"key2", b"val2", 40),
         ],
         range_start: b"key1",
         range_end: b"key3",
@@ -1241,13 +1474,123 @@ mod tests {
     // Test 15: Filtered tombstone doesn't hide visible value
     #[case(ScanTestCase {
         entries: vec![
-            TestEntry { location: LayerLocation::Memtable, key: b"key1", value: None, seq: 70, expire_ts: None },
-            TestEntry { location: LayerLocation::L0Sst(0), key: b"key1", value: Some(b"visible"), seq: 40, expire_ts: None },
+            TestEntry::tombstone(b"key1", 70),
+            TestEntry::value(b"key1", b"visible", 40).with_location(LayerLocation::L0Sst(0)),
         ],
         range_start: b"key1",
         range_end: b"key2",
         expected: vec![(b"key1", b"visible")],
         description: "filtered tombstone should not hide visible value", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+    })]
+    // ========================================
+    // MERGE OPERATOR TESTS FOR SCAN OPERATIONS
+    // ========================================
+    // Test 16: Scan with merge operands
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"b", 60),
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"x", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"ab"), (b"key2", b"x")],  // key1: Merge("a", "b") = "ab"
+        description: "[MERGE SCAN] should merge operands with base values during scan", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 17: Scan with multiple keys having merge operands
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"2", 60),
+            TestEntry::value(b"key1", b"1", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::merge(b"key2", b"b", 60),
+            TestEntry::value(b"key2", b"a", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::merge(b"key3", b"y", 60),
+            TestEntry::value(b"key3", b"x", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key4",
+        expected: vec![(b"key1", b"12"), (b"key2", b"ab"), (b"key3", b"xy")],
+        description: "[MERGE SCAN] should merge operands for multiple keys", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 18: Scan with tombstone clearing merge history
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"new", 70),
+            TestEntry::tombstone(b"key1", 60).with_location(LayerLocation::L0Sst(1)),
+            TestEntry::merge(b"key1", b"c", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"x", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"new"), (b"key2", b"x")],  // Tombstone clears history
+        description: "[MERGE SCAN] tombstone should clear merge history in scan", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 19: Scan with expired merge operands
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"c", 70).with_expire_ts(100),  // Expired
+            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::SortedRun(0)),
+            TestEntry::value(b"key2", b"x", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"ab"), (b"key2", b"x")],  // Expired merge filtered
+        description: "[MERGE SCAN] expired merge operands should be filtered in scan", now: Some(150), dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 20: Scan with only merge operands (no base values)
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"b", 60),
+            TestEntry::merge(b"key1", b"a", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::merge(b"key2", b"y", 60),
+            TestEntry::merge(b"key2", b"x", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"ab"), (b"key2", b"xy")],
+        description: "[MERGE SCAN] should merge operands without base values", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 21: Scan with merge operands across layers
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"d", 80),
+            TestEntry::merge(b"key1", b"c", 70).with_location(LayerLocation::ImmutableMemtable(0)),
+            TestEntry::merge(b"key1", b"b", 60).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::SortedRun(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key2",
+        expected: vec![(b"key1", b"abcd")],  // Merge across all layers: "a"+"b"+"c"+"d" = "abcd"
+        description: "[MERGE SCAN] should merge operands across multiple layers", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 22: Scan with sequence filtering and merge operands
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"c", 100),  // Filtered (uncommitted)
+            TestEntry::merge(b"key1", b"b", 45),
+            TestEntry::value(b"key1", b"a", 40).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"x", 40).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"ab"), (b"key2", b"x")],  // seq 100 filtered
+        description: "[MERGE SCAN] should filter merge operands by sequence number", now: None, dirty: false, last_committed_seq: Some(50), max_seq: None,
+    })]
+    // Test 23: Scan with mixed values, merges, and tombstones
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"b", 60),
+            TestEntry::value(b"key1", b"a", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::tombstone(b"key2", 60),
+            TestEntry::merge(b"key2", b"z", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::merge(b"key3", b"y", 60),
+            TestEntry::merge(b"key3", b"x", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key4",
+        expected: vec![(b"key1", b"ab"), (b"key3", b"xy")],  // key2 tombstoned
+        description: "[MERGE SCAN] should handle mix of values, merges, and tombstones", now: None, dirty: true, last_committed_seq: None, max_seq: None,
     })]
     async fn test_scan_with_options_layer_priority(
         #[case] test_case: ScanTestCase,
@@ -1273,11 +1616,19 @@ mod tests {
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
         oracle.last_committed_seq.store(last_committed_seq);
 
+        // Enable merge operator if the test description contains "[MERGE"
+        let merge_operator = if test_case.description.contains("[MERGE") {
+            Some(Arc::new(StringConcatMergeOperator) as Arc<dyn MergeOperator + Send + Sync>)
+        } else {
+            None
+        };
+
         let reader = Reader {
             table_store: test_db_state.table_store.clone(),
             db_stats,
             mono_clock,
             oracle,
+            merge_operator,
         };
 
         // Create range
@@ -1316,15 +1667,23 @@ mod tests {
         assert_eq!(
             actual,
             expected,
-            "Failed test: {}\nActual keys: {:?}\nExpected keys: {:?}",
+            "Failed test: {}\nActual entries: {:?}\nExpected entries: {:?}",
             test_case.description,
             actual
                 .iter()
-                .map(|(k, _)| String::from_utf8_lossy(k))
+                .map(|(k, v)| format!(
+                    "({}, {})",
+                    String::from_utf8_lossy(k),
+                    String::from_utf8_lossy(v)
+                ))
                 .collect::<Vec<_>>(),
             expected
                 .iter()
-                .map(|(k, _)| String::from_utf8_lossy(k))
+                .map(|(k, v)| format!(
+                    "({}, {})",
+                    String::from_utf8_lossy(k),
+                    String::from_utf8_lossy(v)
+                ))
                 .collect::<Vec<_>>()
         );
 
