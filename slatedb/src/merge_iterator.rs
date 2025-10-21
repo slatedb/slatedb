@@ -467,7 +467,7 @@ mod tests {
         );
         iters.push_back(TestIterator::new().with_row_entry(RowEntry::new_merge(b"k1", b"c", 3)));
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).unwrap();
 
         assert_iterator(
             &mut merge_iter,
@@ -494,7 +494,7 @@ mod tests {
             3,
         )));
 
-        let mut merge_iter = MergeIterator::new(iters).await.unwrap();
+        let mut merge_iter = MergeIterator::new(iters).unwrap();
 
         assert_iterator(
             &mut merge_iter,
