@@ -28,7 +28,7 @@ use crate::DbRead;
 ///
 /// #     let object_store = Arc::new(InMemory::new());
 /// #     let db = Db::open("path/to/db", object_store).await?;
-/// let mut txn = db.begin_transaction(IsolationLevel::Snapshot).await?;
+/// let mut txn = db.begin(IsolationLevel::Snapshot).await?;
 ///
 /// // Read operations
 /// let value = txn.get(b"key").await?;
@@ -363,10 +363,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin transaction
-        let txn = db
-            .begin_transaction(IsolationLevel::Snapshot)
-            .await
-            .unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
 
         // Put data from others
         db.put(b"k2", b"v2").await.unwrap();
@@ -390,7 +387,7 @@ mod tests {
 
         // Begin transaction
         let mut txn = db
-            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
 
@@ -415,17 +412,11 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db
-            .begin_transaction(IsolationLevel::Snapshot)
-            .await
-            .unwrap();
+        let mut txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn1.put(b"k1", b"v2").unwrap();
 
         // Begin second transaction
-        let mut txn2 = db
-            .begin_transaction(IsolationLevel::Snapshot)
-            .await
-            .unwrap();
+        let mut txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn2.put(b"k1", b"v3").unwrap();
 
         // Commit first transaction - should succeed
@@ -446,10 +437,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db
-            .begin_transaction(IsolationLevel::Snapshot)
-            .await
-            .unwrap();
+        let mut txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn1.put(b"k1", b"v2").unwrap();
 
         // DB put on the same key
@@ -472,7 +460,7 @@ mod tests {
 
         // Begin first transaction
         let mut txn1 = db
-            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
         txn1.put(b"k1", b"v2").unwrap();
@@ -480,7 +468,7 @@ mod tests {
 
         // Begin second transaction
         let mut txn2 = db
-            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
         let val2 = txn2.get(b"k2").await.unwrap();
@@ -508,13 +496,13 @@ mod tests {
 
         // Begin first transaction
         let mut txn1 = db
-            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
 
         // Begin second transaction
         let mut txn2 = db
-            .begin_transaction(IsolationLevel::SerializableSnapshot)
+            .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
 
@@ -582,7 +570,7 @@ mod tests {
             db.put(key, value).await.unwrap();
         }
 
-        let mut txn_opt = Some(db.begin_transaction(isolation_level).await.unwrap());
+        let mut txn_opt = Some(db.begin(isolation_level).await.unwrap());
 
         let mut results = Vec::new();
         for operation in operations.iter() {
