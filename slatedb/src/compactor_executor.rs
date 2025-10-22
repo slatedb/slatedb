@@ -27,22 +27,47 @@ use crate::compactor::stats::CompactionStats;
 use crate::utils::{build_concurrent, compute_max_parallel, spawn_bg_task, IdGenerator};
 use log::{debug, error};
 use tracing::instrument;
-use uuid::Uuid;
+use ulid::Ulid;
 
+#[derive(Clone, Debug, PartialEq)]
+#[doc = "Specification of how a compaction job should be executed.\n\nJob specs are derived from the parent `Compaction`/`CompactionPlan` and capture execution-time details (e.g., which inputs are already materialized) that the executor can use for progress reporting and resume logic."]
+pub(crate) enum CompactionJobSpec {
+    LinearCompactionJob {
+        #[doc = "ULIDs of L0 SSTs that have been fully read/compacted when the job snapshot is taken (useful for resume/diagnostics)."]
+        completed_input_sst_ids: Vec<Ulid>,
+        #[doc = "IDs of sorted runs that have been fully read/compacted when the job snapshot is taken (useful for resume/diagnostics)."]
+        completed_input_sr_ids: Vec<u32>,
+    },
+}
+
+#[derive(Clone, PartialEq)]
+#[doc = "Execution unit (attempt) for a compaction plan.\n\n- `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is used as the runtime key in `scheduled_compactions`.\n- `compaction_id` is the canonical plan id (ULID) that ties this job attempt back to its `CompactionPlan` entry in the compactor's canonical map.\n\nJobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time metadata for progress reporting, retention, and resume logic."]
 pub(crate) struct CompactionJob {
-    pub(crate) id: Uuid,
+    #[doc = "Job id (attempt id). Unique per attempt and used for scheduling/routing."]
+    pub(crate) id: Ulid,
+    #[doc = "Canonical compaction plan id this job belongs to."]
+    pub(crate) compaction_id: Ulid,
+    #[doc = "Destination sorted run id to be produced by this job."]
     pub(crate) destination: u32,
+    #[doc = "Input L0 SSTs for this attempt."]
     pub(crate) ssts: Vec<SsTableHandle>,
+    #[doc = "Input existing sorted runs for this attempt."]
     pub(crate) sorted_runs: Vec<SortedRun>,
+    #[doc = "Compaction timestamp used by the executor (e.g., for retention decisions)."]
     pub(crate) compaction_ts: i64,
+    #[doc = "Whether the destination sorted run is the last (newest) run after compaction."]
     pub(crate) is_dest_last_run: bool,
+    #[doc = "Optional minimum sequence to retain; lower sequences may be dropped by retention."]
     pub(crate) retention_min_seq: Option<u64>,
+    #[doc = "Execution-time job spec (e.g., progress/resume details)."]
+    pub(crate) spec: CompactionJobSpec,
 }
 
 impl std::fmt::Debug for CompactionJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompactionJob")
             .field("id", &self.id)
+            .field("compaction_id", &self.compaction_id)
             .field("destination", &self.destination)
             .field("ssts", &self.ssts)
             .field("sorted_runs", &self.sorted_runs)
@@ -50,6 +75,7 @@ impl std::fmt::Debug for CompactionJob {
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("estimated_source_bytes", &self.estimated_source_bytes())
             .field("retention_min_seq", &self.retention_min_seq)
+            .field("spec", &self.spec)
             .finish()
     }
 }
@@ -261,6 +287,17 @@ impl TokioCompactionExecutorInner {
         assert!(!tasks.contains_key(&dst));
 
         let id = compaction.id;
+
+        // TODO: Add compaction plan to object store with InProgress status
+        // TODO: Commenting tests fail due to some receiver channel issues.
+        // Would enable it in subsequent PR.
+
+        // #[allow(clippy::disallowed_methods)]
+        // self.worker_tx
+        // .send(CompactorMessage::CompactionStarted {
+        //     id: compaction.id,
+        // })
+        // .expect("failed to send compaction progress");
 
         let this = self.clone();
         let this_cleanup = self.clone();

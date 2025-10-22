@@ -1,0 +1,27 @@
+table Uuid {
+    high: uint64;
+    low: uint64;
+}
+
+table Ulid {
+    high: uint64;
+    low: uint64;
+}
+
+enum BoundType : byte { Unknown = 0, Unbounded, Included, Excluded }
+
+table BytesBound {
+    // Key that represenents the boundary. Might be empty if type is Unbounded.
+    key: [ubyte];
+
+    // Whether the bound is inclusive, exclusive or unbounded.
+    bound_type: BoundType;
+}
+
+table BytesRange {
+    // Start bound of the range.
+    start_bound: BytesBound (required);
+
+    // End bound of the range.
+    end_bound: BytesBound (required);
+}

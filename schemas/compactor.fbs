@@ -1,28 +1,17 @@
 include "sst.fbs";
+include "common.fbs";
 
-table Ulid {
-    high: uint64;
-    low: uint64;
-}
-
-enum CompactionType : byte { Internal = 0, External; }
+enum CompactionType : byte { Internal, External, }
 
 enum CompactionStatus : byte {
-    Submitted = 0,  // Waiting to be scheduled
+    Submitted,      // Waiting to be scheduled
+    Pending,        // Waiting to be executed
     InProgress,     // Currently executing
     Completed,      // Successfully finished
     Failed,         // Failed with error
 }
 
 union CompactionJobSpec { LinearCompactionJob /*, ParallelCompactionJob */ }
-
-table LinearCompactionJob {
-    // InputSSTables completed before the job started
-    completed_input_sst_ids:[CompactedSstId];
-
-    // InputSortedRuns completed before the job started
-    completed_input_sr_ids:[uint32];
-}
 
 /*
 table ParallelCompactionJob {
@@ -50,14 +39,22 @@ table SubCompactionJob {
 }
 */
 
+table LinearCompactionJob {
+    // InputSSTables completed before the job started
+    completed_input_sst_ids:[CompactedSstId];
+
+    // InputSortedRuns completed before the job started
+    completed_input_sr_ids:[uint32];
+}
+
 table CompactionJob {
     // CompactionJob ID(Ulid)
-    job_id: Ulid;
+    job_id: Ulid (required);
 
     // Reference to the compaction to which this job belongs
-    compaction_id: Ulid;
+    compaction_id: Ulid (required);
 
-    spec: CompactionJobSpec;
+    spec: CompactionJobSpec (required);
 }
 
 union CompactionSpec { SortedRunCompaction }
@@ -72,10 +69,10 @@ table SortedRunCompaction {
 
 table Compaction {
     // Compaction Status visible to public API
-    status: CompactionStatus;
+    status: CompactionStatus = Submitted;
 
     // Destination Sorted Run ID
-    destination: u32 (required);
+    destination: uint32;
 
     // Destination Sorted Run
     output_sorted_run: SortedRun;
@@ -84,33 +81,22 @@ table Compaction {
     // Ulid can be used get the human readable timestamp:
     // https://docs.rs/ulid/latest/ulid/struct.Ulid.html#method.timestamp_ms
     // Can also be a replacement from created_ts
-    compaction_id: Ulid;
+    compaction_id: Ulid (required);
 
     // Compaction Type to distinguish between internal or external
-    compaction_type: CompactionType (required);
+    compaction_type: CompactionType = Internal;
 
     // List of CompactionJob Retries
-    job_attempts:[CompactionJob];
+    job_attempts:[CompactionJob] (required);
 
-    spec: CompactionSpec
-
-    // Update Timestamp of Compaction
-    updated_ts: uint64;
+    spec: CompactionSpec (required);
 }
 
 
 table CompactionState {
-    // Identifier of the compaction state. Compactor file name would be derived from this field
-    compaction_state_id: uint64;
-
     // Fencing token to ensure single active compactor
     compactor_epoch: uint64;
 
     // Compactions in scheduled, in_progress and recently completed compactions
-    recent_compactions: [Compaction];
-
-    // Creation Timestamp of CompactionState
-    created_at: uint64;
+    recent_compactions: [Compaction] (required);
 }
-
-root_type CompactionState;

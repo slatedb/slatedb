@@ -131,17 +131,17 @@ typedef struct CSdbScanResult {
 
 #define SsTableIndex_VT_BLOCK_META 4
 
-#define Uuid_VT_HIGH 4
+#define CompactedSstId_VT_HIGH 4
 
-#define Uuid_VT_LOW 6
+#define CompactedSstId_VT_LOW 6
 
-#define ExternalDb_VT_PATH 4
+#define CompactedSsTable_VT_ID 4
 
-#define ExternalDb_VT_SOURCE_CHECKPOINT_ID 6
+#define CompactedSsTable_VT_INFO 6
 
-#define ExternalDb_VT_FINAL_CHECKPOINT_ID 8
+#define CompactedSsTable_VT_VISIBLE_RANGE 8
 
-#define ExternalDb_VT_SST_IDS 10
+#define SortedRun_VT_SSTS 6
 
 #define BytesBound_VT_KEY 4
 
@@ -150,6 +150,14 @@ typedef struct CSdbScanResult {
 #define BytesRange_VT_START_BOUND 4
 
 #define BytesRange_VT_END_BOUND 6
+
+#define ExternalDb_VT_PATH 4
+
+#define ExternalDb_VT_SOURCE_CHECKPOINT_ID 6
+
+#define ExternalDb_VT_FINAL_CHECKPOINT_ID 8
+
+#define ExternalDb_VT_SST_IDS 10
 
 #define ManifestV1_VT_MANIFEST_ID 4
 
@@ -183,14 +191,6 @@ typedef struct CSdbScanResult {
 
 #define ManifestV1_VT_SEQUENCE_TRACKER 34
 
-#define CompactedSsTable_VT_ID 4
-
-#define CompactedSsTable_VT_INFO 6
-
-#define CompactedSsTable_VT_VISIBLE_RANGE 8
-
-#define SortedRun_VT_SSTS 6
-
 #define WriterCheckpoint_VT_EPOCH 4
 
 #define Checkpoint_VT_CHECKPOINT_EXPIRE_TIME_S 8
@@ -200,6 +200,32 @@ typedef struct CSdbScanResult {
 #define Checkpoint_VT_METADATA_TYPE 12
 
 #define Checkpoint_VT_METADATA 14
+
+#define LinearCompactionJob_VT_COMPLETED_INPUT_SST_IDS 4
+
+#define LinearCompactionJob_VT_COMPLETED_INPUT_SR_IDS 6
+
+#define CompactionJob_VT_JOB_ID 4
+
+#define CompactionJob_VT_COMPACTION_ID 6
+
+#define CompactionJob_VT_SPEC_TYPE 8
+
+#define CompactionJob_VT_SPEC 10
+
+#define SortedRunCompaction_VT_SORTED_RUNS 6
+
+#define Compaction_VT_STATUS 4
+
+#define Compaction_VT_DESTINATION 6
+
+#define Compaction_VT_OUTPUT_SORTED_RUN 8
+
+#define Compaction_VT_COMPACTION_TYPE 12
+
+#define Compaction_VT_JOB_ATTEMPTS 14
+
+#define CompactionState_VT_RECENT_COMPACTIONS 6
 
 // Initialize logging for SlateDB Go bindings
 // This should be called once before using any other SlateDB functions
