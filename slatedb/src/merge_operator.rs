@@ -8,7 +8,7 @@ use crate::{
     error::SlateDBError,
     iter::KeyValueIterator,
     types::{RowEntry, ValueDeletable},
-    utils::merge_options,
+    utils::{is_not_expired, merge_options},
 };
 
 #[non_exhaustive]
@@ -36,9 +36,11 @@ pub enum MergeOperatorError {}
 /// struct CounterMergeOperator;
 ///
 /// impl MergeOperator for CounterMergeOperator {
-///     fn merge(&self, existing_value: Bytes, value: Bytes) -> Result<Bytes, MergeOperatorError> {
-///         let existing = u64::from_le_bytes(existing_value.as_ref().try_into().unwrap());
-///         let increment = u64::from_le_bytes(value.as_ref().try_into().unwrap());
+///     fn merge(&self, existing_value: Option<Bytes>, operand: Bytes) -> Result<Bytes, MergeOperatorError> {
+///         let existing = existing_value
+///             .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
+///             .unwrap_or(0);
+///         let increment = u64::from_le_bytes(operand.as_ref().try_into().unwrap());
 ///         Ok(Bytes::copy_from_slice(&(existing + increment).to_le_bytes()))
 ///     }
 /// }
@@ -56,11 +58,20 @@ pub trait MergeOperator {
     /// # Returns
     /// * `Ok(Bytes)` - The merged result as bytes
     /// * `Err(MergeOperatorError)` - If the merge operation fails
-    fn merge(&self, existing_value: Bytes, value: Bytes) -> Result<Bytes, MergeOperatorError>;
+    fn merge(
+        &self,
+        existing_value: Option<Bytes>,
+        value: Bytes,
+    ) -> Result<Bytes, MergeOperatorError>;
 }
 
 pub(crate) type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
 
+/// An iterator that merges mergeable entries into a single value.
+///
+/// It is expected that this is the top level iterator in a merge scan, and therefore
+/// return a ValueDeletable::Value entry (instead of a Merge even if the resolved value
+/// is a merge operand).
 pub(crate) struct MergeOperatorIterator<T: KeyValueIterator> {
     merge_operator: MergeOperatorType,
     delegate: T,
@@ -68,6 +79,7 @@ pub(crate) struct MergeOperatorIterator<T: KeyValueIterator> {
     buffered_entry: Option<RowEntry>,
     /// Whether to merge entries with different expire timestamps.
     merge_different_expire_ts: bool,
+    now: i64,
 }
 
 #[allow(unused)]
@@ -76,12 +88,14 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         merge_operator: MergeOperatorType,
         delegate: T,
         merge_different_expire_ts: bool,
+        now: i64,
     ) -> Self {
         Self {
             merge_operator,
             delegate,
             buffered_entry: None,
             merge_different_expire_ts,
+            now,
         }
     }
 }
@@ -91,87 +105,101 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         &mut self,
         first_entry: RowEntry,
     ) -> Result<Option<RowEntry>, SlateDBError> {
-        let mut merged_value = match first_entry.value {
-            ValueDeletable::Merge(ref v) => v.clone(),
-            _ => unreachable!("Entry doesn't contain merge operand."),
-        };
-        let key = first_entry.key;
-        let mut max_create_ts = first_entry.create_ts;
-        let mut min_expire_ts = first_entry.expire_ts;
+        let key = first_entry.key.clone();
+        let mut entries = vec![first_entry];
 
-        // Keep looking ahead and merging as long as we find mergeable entries
+        // Collect all mergeable entries for the same key until we hit a value or tombstone
+        let mut found_base_value = false;
         loop {
             let next = self.delegate.next_entry().await?;
             match next {
                 Some(next_entry)
                     if key == next_entry.key
                         && (self.merge_different_expire_ts
-                            || first_entry.expire_ts == next_entry.expire_ts) =>
+                            || entries[0].expire_ts == next_entry.expire_ts) =>
                 {
-                    // Accumulate timestamps. For create_ts we use the maximum (when the accumulated value has last changed),
-                    // and for expire_ts we use the minimum (when the accumulated becomes invalid).
-                    max_create_ts = merge_options(max_create_ts, next_entry.create_ts, i64::max);
-                    min_expire_ts = merge_options(min_expire_ts, next_entry.expire_ts, i64::min);
                     // For sequence number, we want to use the maximum. Since all the entries are sorted in descending order,
                     // we just ensure it keeps decreasing.
-                    if first_entry.seq < next_entry.seq {
+                    if entries.last().expect("should have at least one entry").seq < next_entry.seq
+                    {
                         return Err(SlateDBError::InvalidDBState);
                     }
 
-                    match next_entry.value {
-                        ValueDeletable::Value(value) => {
-                            // Final merge with a regular value
-                            let merged_value = self.merge_operator.merge(merged_value, value)?;
-                            return Ok(Some(RowEntry::new(
-                                key,
-                                ValueDeletable::Value(merged_value),
-                                first_entry.seq,
-                                max_create_ts,
-                                min_expire_ts,
-                            )));
-                        }
-                        ValueDeletable::Merge(value) => {
-                            // Continue merging
-                            merged_value = self.merge_operator.merge(merged_value, value)?;
-                            continue;
-                        }
-                        ValueDeletable::Tombstone => {
-                            return Ok(Some(RowEntry::new(
-                                key,
-                                ValueDeletable::Value(merged_value),
-                                first_entry.seq,
-                                max_create_ts,
-                                min_expire_ts,
-                            )));
-                        }
+                    // If we hit a Value or Tombstone, include it but stop collecting
+                    found_base_value = !matches!(next_entry.value, ValueDeletable::Merge(_));
+                    entries.push(next_entry);
+                    if found_base_value {
+                        break;
                     }
                 }
                 Some(next_entry) => {
-                    // Different key or expire timestamp. We need to return both entries ...
-                    let result = RowEntry::new(
-                        key,
-                        ValueDeletable::Merge(merged_value),
-                        first_entry.seq,
-                        max_create_ts,
-                        min_expire_ts,
-                    );
-                    // Store the different key entry in the look-ahead buffer
+                    // Different key or expire timestamp. Store it in the buffer.
                     self.buffered_entry = Some(next_entry);
-                    // And return the accumulated merge
-                    return Ok(Some(result));
+                    break;
                 }
                 None => {
-                    // End of iterator, return accumulated merge
-                    return Ok(Some(RowEntry::new(
-                        key,
-                        ValueDeletable::Merge(merged_value),
-                        first_entry.seq,
-                        max_create_ts,
-                        min_expire_ts,
-                    )));
+                    // End of iterator
+                    break;
                 }
             }
         }
+
+        // Reverse entries so we merge from oldest to newest
+        entries.reverse();
+
+        // don't call the merge operator if the base value is a value
+        // and instead just set it as the initial merge value
+        let mut merged_value: Option<Bytes> =
+            if let ValueDeletable::Value(bytes) = &entries[0].value {
+                Some(bytes.clone())
+            } else {
+                None
+            };
+
+        let mut max_create_ts = entries[0].create_ts;
+        let mut min_expire_ts = entries[0].expire_ts;
+        let mut seq = entries[0].seq;
+
+        // a base value can be either a tombstone or a value, in either
+        // case we should not apply the merge operator to it (in the former
+        // case we just apply merges and in the latter we have already set
+        // the merged value to the base value)
+        if found_base_value {
+            entries.remove(0);
+        }
+
+        for entry in entries.iter().filter(|e| is_not_expired(e, self.now)) {
+            // Accumulate timestamps
+            max_create_ts = merge_options(max_create_ts, entry.create_ts, i64::max);
+            min_expire_ts = merge_options(min_expire_ts, entry.expire_ts, i64::min);
+            seq = std::cmp::max(seq, entry.seq);
+
+            match &entry.value {
+                ValueDeletable::Merge(value) => {
+                    merged_value = Some(self.merge_operator.merge(merged_value, value.clone())?);
+                }
+                // we collect at most one Tombstone/Value entry in the loop above, and
+                // if we do collect one it will be the first entry (which is removed in
+                // the conditional above) so this should never happen
+                _ => unreachable!("Should not merge any non-merge entries"),
+            }
+        }
+
+        if let Some(result_value) = merged_value {
+            return Ok(Some(RowEntry::new(
+                key,
+                if found_base_value {
+                    ValueDeletable::Value(result_value)
+                } else {
+                    ValueDeletable::Merge(result_value)
+                },
+                seq,
+                max_create_ts,
+                min_expire_ts,
+            )));
+        }
+
+        Ok(None)
     }
 }
 
@@ -218,10 +246,19 @@ mod tests {
     struct MockMergeOperator;
 
     impl MergeOperator for MockMergeOperator {
-        fn merge(&self, existing_value: Bytes, value: Bytes) -> Result<Bytes, MergeOperatorError> {
-            let mut merged = existing_value.to_vec();
-            merged.extend_from_slice(&value);
-            Ok(Bytes::from(merged))
+        fn merge(
+            &self,
+            existing_value: Option<Bytes>,
+            value: Bytes,
+        ) -> Result<Bytes, MergeOperatorError> {
+            match existing_value {
+                Some(existing) => {
+                    let mut merged = existing.to_vec();
+                    merged.extend_from_slice(&value);
+                    Ok(Bytes::from(merged))
+                }
+                None => Ok(value),
+            }
         }
     }
 
@@ -238,14 +275,18 @@ mod tests {
             RowEntry::new_merge(b"key3", b"2", 7),
             RowEntry::new_merge(b"key3", b"3", 8),
         ];
-        let mut iterator =
-            MergeOperatorIterator::<MockKeyValueIterator>::new(merge_operator, data.into(), true);
+        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            0,
+        );
         assert_iterator(
             &mut iterator,
             vec![
-                RowEntry::new_merge(b"key1", b"4321", 4),
+                RowEntry::new_merge(b"key1", b"1234", 4),
                 RowEntry::new_value(b"key2", b"1", 5),
-                RowEntry::new_value(b"key3", b"321", 8),
+                RowEntry::new_value(b"key3", b"123", 8),
             ],
         )
         .await;
@@ -280,9 +321,9 @@ mod tests {
             RowEntry::new_merge(b"key3", b"3", 7).with_expire_ts(2),
         ],
         expected: vec![
-            RowEntry::new_merge(b"key1", b"321", 3).with_expire_ts(1),
+            RowEntry::new_merge(b"key1", b"123", 3).with_expire_ts(1),
             RowEntry::new_value(b"key2", b"1", 4),
-            RowEntry::new_merge(b"key3", b"321", 7).with_expire_ts(1),
+            RowEntry::new_merge(b"key3", b"123", 7).with_expire_ts(1),
         ],
         ..TestCase::default()
     })]
@@ -302,7 +343,7 @@ mod tests {
             RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(1),
             RowEntry::new_value(b"key2", b"1", 4),
             RowEntry::new_merge(b"key3", b"3", 7).with_expire_ts(2),
-            RowEntry::new_merge(b"key3", b"21", 6).with_expire_ts(1),
+            RowEntry::new_merge(b"key3", b"12", 6).with_expire_ts(1),
         ],
         // On write path (compaction, memtable), we don't merge entries
         // with different expire timestamps to allow per-element expiration.
@@ -319,7 +360,7 @@ mod tests {
         expected: vec![
             // Merge + Tombstone becomes a value to invalidate older entries.
             RowEntry::new_value(b"key1", b"3", 4),
-            RowEntry::new_merge(b"key1", b"21", 2),
+            RowEntry::new_merge(b"key1", b"12", 2),
             RowEntry::new_value(b"key2", b"1", 5)
         ],
         ..TestCase::default()
@@ -342,6 +383,7 @@ mod tests {
             merge_operator,
             test_case.unsorted_data.into(),
             test_case.merge_different_expire_ts,
+            0,
         );
         assert_iterator(&mut iterator, test_case.expected).await;
     }

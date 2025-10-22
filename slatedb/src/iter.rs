@@ -36,7 +36,13 @@ pub trait KeyValueIterator: Send + Sync {
                             value: v,
                         }))
                     }
-                    ValueDeletable::Merge(_) => todo!(),
+                    // next() should only be called at the top level and therefore
+                    // if a merge is returned it's because there was no base value.
+                    // Since the merge is fully resolved at this point we can just
+                    // return it as is
+                    ValueDeletable::Merge(value) => {
+                        return Ok(Some(KeyValue { key: kv.key, value }))
+                    }
                     ValueDeletable::Tombstone => continue,
                 }
             } else {
