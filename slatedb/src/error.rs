@@ -195,9 +195,6 @@ pub(crate) enum SlateDBError {
 
     #[error("iterator not initialized")]
     IteratorNotInitialized,
-
-    #[error("merge operator not configured")]
-    MergeOperatorNotConfigured,
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -430,7 +427,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
-            SlateDBError::MergeOperatorNotConfigured => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
 
             // Data errors

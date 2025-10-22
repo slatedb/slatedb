@@ -136,10 +136,13 @@ impl<'a> KeyValueIterator for GetIterator<'a> {
                         value: v,
                     }));
                 }
+                ValueDeletable::Merge(value) => {
+                    return Ok(Some(KeyValue {
+                        key: entry.key,
+                        value,
+                    }))
+                }
                 ValueDeletable::Tombstone => return Ok(None),
-                // This should never happen because the underlying iterator should handle
-                // merging before when we call next_entry
-                ValueDeletable::Merge(_) => return Err(SlateDBError::MergeOperatorNotConfigured),
             }
         }
 

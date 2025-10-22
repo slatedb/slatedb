@@ -109,6 +109,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         let mut entries = vec![first_entry];
 
         // Collect all mergeable entries for the same key until we hit a value or tombstone
+        let mut found_base_value = false;
         loop {
             let next = self.delegate.next_entry().await?;
             match next {
@@ -125,9 +126,9 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                     }
 
                     // If we hit a Value or Tombstone, include it but stop collecting
-                    let should_stop = !matches!(next_entry.value, ValueDeletable::Merge(_));
+                    found_base_value = !matches!(next_entry.value, ValueDeletable::Merge(_));
                     entries.push(next_entry);
-                    if should_stop {
+                    if found_base_value {
                         break;
                     }
                 }
@@ -159,7 +160,11 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         let mut min_expire_ts = entries[0].expire_ts;
         let mut seq = entries[0].seq;
 
-        if merged_value.is_some() {
+        // a base value can be either a tombstone or a value, in either
+        // case we should not apply the merge operator to it (in the former
+        // case we just apply merges and in the latter we have already set
+        // the merged value to the base value)
+        if found_base_value {
             entries.remove(0);
         }
 
@@ -170,23 +175,24 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
             seq = std::cmp::max(seq, entry.seq);
 
             match &entry.value {
-                ValueDeletable::Value(value) => {
-                    merged_value = Some(self.merge_operator.merge(merged_value, value.clone())?);
-                }
                 ValueDeletable::Merge(value) => {
                     merged_value = Some(self.merge_operator.merge(merged_value, value.clone())?);
                 }
-                ValueDeletable::Tombstone => {
-                    // Tombstone resets the accumulated value
-                    merged_value = None;
-                }
+                // we collect at most one Tombstone/Value entry in the loop above, and
+                // if we do collect one it will be the first entry (which is removed in
+                // the conditional above) so this should never happen
+                _ => unreachable!("Should not merge any non-merge entries"),
             }
         }
 
         if let Some(result_value) = merged_value {
             return Ok(Some(RowEntry::new(
                 key,
-                ValueDeletable::Value(result_value),
+                if found_base_value {
+                    ValueDeletable::Value(result_value)
+                } else {
+                    ValueDeletable::Merge(result_value)
+                },
                 seq,
                 max_create_ts,
                 min_expire_ts,
@@ -278,7 +284,7 @@ mod tests {
         assert_iterator(
             &mut iterator,
             vec![
-                RowEntry::new_value(b"key1", b"1234", 4),
+                RowEntry::new_merge(b"key1", b"1234", 4),
                 RowEntry::new_value(b"key2", b"1", 5),
                 RowEntry::new_value(b"key3", b"123", 8),
             ],
@@ -315,9 +321,9 @@ mod tests {
             RowEntry::new_merge(b"key3", b"3", 7).with_expire_ts(2),
         ],
         expected: vec![
-            RowEntry::new_value(b"key1", b"123", 3).with_expire_ts(1),
+            RowEntry::new_merge(b"key1", b"123", 3).with_expire_ts(1),
             RowEntry::new_value(b"key2", b"1", 4),
-            RowEntry::new_value(b"key3", b"123", 7).with_expire_ts(1),
+            RowEntry::new_merge(b"key3", b"123", 7).with_expire_ts(1),
         ],
         ..TestCase::default()
     })]
@@ -332,12 +338,12 @@ mod tests {
             RowEntry::new_merge(b"key3", b"3", 7).with_expire_ts(2),
         ],
         expected: vec![
-            RowEntry::new_value(b"key1", b"3", 3).with_expire_ts(3),
-            RowEntry::new_value(b"key1", b"2", 2).with_expire_ts(2),
-            RowEntry::new_value(b"key1", b"1", 1).with_expire_ts(1),
+            RowEntry::new_merge(b"key1", b"3", 3).with_expire_ts(3),
+            RowEntry::new_merge(b"key1", b"2", 2).with_expire_ts(2),
+            RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(1),
             RowEntry::new_value(b"key2", b"1", 4),
-            RowEntry::new_value(b"key3", b"3", 7).with_expire_ts(2),
-            RowEntry::new_value(b"key3", b"12", 6).with_expire_ts(1),
+            RowEntry::new_merge(b"key3", b"3", 7).with_expire_ts(2),
+            RowEntry::new_merge(b"key3", b"12", 6).with_expire_ts(1),
         ],
         // On write path (compaction, memtable), we don't merge entries
         // with different expire timestamps to allow per-element expiration.
@@ -354,7 +360,7 @@ mod tests {
         expected: vec![
             // Merge + Tombstone becomes a value to invalidate older entries.
             RowEntry::new_value(b"key1", b"3", 4),
-            RowEntry::new_value(b"key1", b"12", 2),
+            RowEntry::new_merge(b"key1", b"12", 2),
             RowEntry::new_value(b"key2", b"1", 5)
         ],
         ..TestCase::default()
