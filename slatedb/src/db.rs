@@ -1234,11 +1234,11 @@ impl Db {
     /// async fn main() -> Result<(), slatedb::Error> {
     ///     let object_store = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     let txn = db.begin_transaction(IsolationLevel::SerializableSnapshot).await?;
+    ///     let txn = db.begin(IsolationLevel::SerializableSnapshot).await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn begin_transaction(
+    pub async fn begin(
         &self,
         isolation_level: IsolationLevel,
     ) -> Result<DBTransaction, crate::Error> {
