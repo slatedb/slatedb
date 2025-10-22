@@ -1112,7 +1112,7 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(500), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
             .await
             .unwrap()
             .expect("timeout");
@@ -1149,7 +1149,7 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(100), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
             .await
             .unwrap()
             .expect("timeout");
@@ -1242,7 +1242,7 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(100), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
             .await
             .unwrap()
             .expect("timeout");
@@ -1359,7 +1359,7 @@ mod tests {
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(50),
             fixture.real_executor_rx.recv(),
         )
         .await
@@ -1384,7 +1384,7 @@ mod tests {
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
         let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(50),
             fixture.real_executor_rx.recv(),
         )
         .await

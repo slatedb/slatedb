@@ -30,50 +30,36 @@ use tracing::instrument;
 use ulid::Ulid;
 
 #[derive(Clone, Debug, PartialEq)]
-/// Specification of how a compaction job should be executed.
-///
-/// Job specs are derived from the parent `Compaction`/`CompactionPlan` and
-/// capture execution-time details (e.g., which inputs are already materialized)
-/// that the executor can use for progress reporting and resume logic.
+#[doc = "Specification of how a compaction job should be executed.\n\nJob specs are derived from the parent `Compaction`/`CompactionPlan` and capture execution-time details (e.g., which inputs are already materialized) that the executor can use for progress reporting and resume logic."]
 pub(crate) enum CompactionJobSpec {
     LinearCompactionJob {
-        /// ULIDs of L0 SSTs that have been fully read/compacted when the job
-        /// snapshot is taken (useful for resume/diagnostics).
+        #[doc = "ULIDs of L0 SSTs that have been fully read/compacted when the job snapshot is taken (useful for resume/diagnostics)."]
         completed_input_sst_ids: Vec<Ulid>,
-        /// IDs of sorted runs that have been fully read/compacted when the job
-        /// snapshot is taken (useful for resume/diagnostics).
+        #[doc = "IDs of sorted runs that have been fully read/compacted when the job snapshot is taken (useful for resume/diagnostics)."]
         completed_input_sr_ids: Vec<u32>,
     },
 }
 
 #[derive(Clone, PartialEq)]
-/// Execution unit (attempt) for a compaction plan.
-///
-/// - `id` is the job id (ULID) and uniquely identifies a single execution attempt.
-///   This is used as the runtime key in `scheduled_compactions`.
-/// - `compaction_id` is the canonical plan id (ULID) that ties this job attempt
-///   back to its `CompactionPlan` entry in the compactor's canonical map.
-///
-/// Jobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with
-/// execution-time metadata for progress reporting, retention, and resume logic.
+#[doc = "Execution unit (attempt) for a compaction plan.\n\n- `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is used as the runtime key in `scheduled_compactions`.\n- `compaction_id` is the canonical plan id (ULID) that ties this job attempt back to its `CompactionPlan` entry in the compactor's canonical map.\n\nJobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time metadata for progress reporting, retention, and resume logic."]
 pub(crate) struct CompactionJob {
-    /// Job id (attempt id). Unique per attempt and used for scheduling/routing.
+    #[doc = "Job id (attempt id). Unique per attempt and used for scheduling/routing."]
     pub(crate) id: Ulid,
-    /// Canonical compaction plan id this job belongs to.
+    #[doc = "Canonical compaction plan id this job belongs to."]
     pub(crate) compaction_id: Ulid,
-    /// Destination sorted run id to be produced by this job.
+    #[doc = "Destination sorted run id to be produced by this job."]
     pub(crate) destination: u32,
-    /// Input L0 SSTs for this attempt.
+    #[doc = "Input L0 SSTs for this attempt."]
     pub(crate) ssts: Vec<SsTableHandle>,
-    /// Input existing sorted runs for this attempt.
+    #[doc = "Input existing sorted runs for this attempt."]
     pub(crate) sorted_runs: Vec<SortedRun>,
-    /// Compaction timestamp used by the executor (e.g., for retention decisions).
+    #[doc = "Compaction timestamp used by the executor (e.g., for retention decisions)."]
     pub(crate) compaction_ts: i64,
-    /// Whether the destination sorted run is the last (newest) run after compaction.
+    #[doc = "Whether the destination sorted run is the last (newest) run after compaction."]
     pub(crate) is_dest_last_run: bool,
-    /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
+    #[doc = "Optional minimum sequence to retain; lower sequences may be dropped by retention."]
     pub(crate) retention_min_seq: Option<u64>,
-    /// Execution-time job spec (e.g., progress/resume details).
+    #[doc = "Execution-time job spec (e.g., progress/resume details)."]
     pub(crate) spec: CompactionJobSpec,
 }
 

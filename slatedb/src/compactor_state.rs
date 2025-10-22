@@ -67,31 +67,21 @@ pub(crate) enum CompactionStatus {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CompactionType {
+    #[doc = "Signals that the compaction was requested by the DB's compactor."]
     Internal,
+    #[doc = "Signals that the compaction was requested by an external process such as the admin CLI."]
     #[allow(dead_code)]
     External,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// In-memory description of the inputs to a compaction.
-///
-/// A `CompactionSpec` represents the concrete set of input SSTs and/or Sorted
-/// Runs that a particular compaction algorithm (e.g., size-tiered, leveled,
-/// etc.) has selected to produce a destination Sorted Run.
-///
-/// The scheduler constructs a `CompactionSpec` for a planned compaction and
-/// passes it, together with the selected `sources`, to `Compaction::new`.
-/// Keeping the spec inside the in-memory `Compaction` avoids recomputing or
-/// cloning inputs at job creation time and enables encode/decode roundtrips in
-/// tests via FlatBuffers.
+#[doc = "In-memory description of the inputs to a compaction.\n\nA `CompactionSpec` represents the concrete set of input SSTs and/or Sorted Runs that a particular compaction algorithm (e.g., size-tiered, leveled, etc.) has selected to produce a destination Sorted Run.\n\nThe scheduler constructs a `CompactionSpec` for a planned compaction and passes it, together with the selected `sources`, to `Compaction::new`. Keeping the spec inside the in-memory `Compaction` avoids recomputing or cloning inputs at job creation time and enables encode/decode roundtrips in tests via FlatBuffers."]
 pub(crate) enum CompactionSpec {
-    /// Compact a combination of L0 SSTs and/or existing sorted runs into a
-    /// new sorted run with id `destination` carried by the surrounding
-    /// `Compaction`.
+    #[doc = "Compact a combination of L0 SSTs and/or existing sorted runs into a new sorted run with id `destination` carried by the surrounding `Compaction`."]
     SortedRunCompaction {
-        /// L0 SSTs (by handle) that will be compacted.
+        #[doc = "L0 SSTs (by handle) that will be compacted."]
         ssts: Vec<SsTableHandle>,
-        /// Existing sorted runs that participate in this compaction.
+        #[doc = "Existing sorted runs that participate in this compaction."]
         sorted_runs: Vec<SortedRun>,
     },
 }
@@ -106,18 +96,11 @@ pub struct Compaction {
 }
 
 #[derive(Clone)]
-/// Canonical, internal record of a compaction plan.
-///
-/// A plan bundles a stable `id` (ULID), a `compaction_type` (internal vs. external)
-/// and the client-facing `Compaction` payload. The compactor tracks plans in two
-/// maps: a canonical history keyed by plan id and a runtime view keyed by job id.
-///
-/// Note: `CompactionPlan` is internal-only; `Compaction` remains the public type
-/// that clients observe and does not expose the plan id.
+#[doc = "Canonical, internal record of a compaction plan.\n\nA plan bundles a stable `id` (ULID), a `compaction_type` (internal vs. external) and the client-facing `Compaction` payload. The compactor tracks plans in two maps: a canonical history keyed by plan id and a runtime view keyed by job id.\n\nNote: `CompactionPlan` is internal-only; `Compaction` remains the public type that clients observe and does not expose the plan id."]
 pub(crate) struct CompactionPlan {
     id: Ulid,
     compaction_type: CompactionType,
-    pub(crate) compaction: Compaction,
+    compaction: Compaction,
 }
 
 impl CompactionPlan {
@@ -190,12 +173,7 @@ impl Compaction {
     }
 }
 
-/// Compaction state persisted in the object store (future work).
-///
-/// This struct will hold the durable snapshot of compaction plans (queued,
-/// in-progress, and completed) keyed by the canonical plan id. Until
-/// persistence is implemented, this is used in tests and as a placeholder for
-/// wiring to the on-disk format.
+#[doc = "Compaction state persisted in the object store (future work).\n\nThis struct will hold the durable snapshot of compaction plans (queued, in-progress, and completed) keyed by the canonical plan id. Until persistence is implemented, this is used in tests and as a placeholder for wiring to the on-disk format."]
 #[derive(Clone)]
 pub(crate) struct CompactionState {
     #[allow(dead_code)]
@@ -215,23 +193,7 @@ impl CompactionState {
     }
 }
 
-/// Process-local runtime state owned by the compactor.
-///
-/// This is the in-memory controller view that a single compactor task uses to:
-/// - keep a fresh `DirtyManifest` (view of `CoreDbState`),
-/// - track canonical `compaction_plans` by plan id (ULID), and
-/// - track `scheduled_compactions` by job id for executions owned by this process.
-///
-/// It validates submissions, records lifecycle transitions (Submitted → Pending →
-/// InProgress → Completed/Failed) and mutates the in-memory manifest when jobs
-/// finish.
-///
-/// Difference vs `CompactionState`:
-/// - `CompactorState` is transient, process-local runtime state; it is not
-///   persisted and is rebuilt when the process starts.
-/// - `CompactionState` is the durable, object-store representation (future work)
-///   of compaction plans and their statuses across processes, used for
-///   recovery/GC and history.
+#[doc = "Process-local runtime state owned by the compactor.\n\nThis is the in-memory controller view that a single compactor task uses to:\n- keep a fresh `DirtyManifest` (view of `CoreDbState`),\n- track canonical `compaction_plans` by plan id (ULID), and\n- track `scheduled_compactions` by job id for executions owned by this process.\n\nIt validates submissions, records lifecycle transitions (Submitted → Pending → InProgress → Completed/Failed) and mutates the in-memory manifest when jobs finish.\n\nDifference vs `CompactionState`:\n- `CompactorState` is transient, process-local runtime state; it is not persisted and is rebuilt when the process starts.\n- `CompactionState` is the durable, object-store representation (future work) of compaction plans and their statuses across processes, used for recovery/GC and history."]
 pub struct CompactorState {
     manifest: DirtyManifest,
     // TODO: Add compaction_state during compaction state persistence implementation
