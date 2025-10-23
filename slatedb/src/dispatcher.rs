@@ -157,13 +157,13 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
         clock: Arc<dyn SystemClock>,
         cancellation_token: CancellationToken,
     ) -> Self {
-        Self::new_with_fp_registry(
+        Self {
             handler,
             rx,
             clock,
             cancellation_token,
-            Arc::new(FailPointRegistry::new()),
-        )
+            fp_registry: Arc::new(FailPointRegistry::new()),
+        }
     }
 
     /// Creates a new [MessageDispatcher]. Messages sent to the channel are passed to
@@ -177,20 +177,10 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `clock`: The [SystemClock] to use for time.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     /// * `fp_registry`: The [FailPointRegistry] to use for fail points.
-    fn new_with_fp_registry(
-        handler: Box<dyn MessageHandler<T>>,
-        rx: mpsc::UnboundedReceiver<T>,
-        clock: Arc<dyn SystemClock>,
-        cancellation_token: CancellationToken,
-        fp_registry: Arc<FailPointRegistry>,
-    ) -> Self {
-        Self {
-            handler,
-            rx,
-            clock,
-            cancellation_token,
-            fp_registry,
-        }
+    #[allow(dead_code)]
+    fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
+        self.fp_registry = fp_registry;
+        self
     }
 
     /// Runs the main event loop for the dispatcher. This is where messages and ticker
@@ -402,7 +392,14 @@ impl MessageHandlerExecutor {
         error_state: WatchableOnceCell<SlateDBError>,
         clock: Arc<dyn SystemClock>,
     ) -> Self {
-        Self::new_with_fp_registry(error_state, clock, Arc::new(FailPointRegistry::new()))
+        Self {
+            error_state,
+            clock,
+            tasks: Mutex::new(Some(JoinMap::new())),
+            tokens: SkipMap::new(),
+            results: Arc::new(SkipMap::new()),
+            fp_registry: Arc::new(FailPointRegistry::new()),
+        }
     }
 
     /// Creates a new [MessageHandlerExecutor] with a custom [FailPointRegistry].
@@ -416,19 +413,10 @@ impl MessageHandlerExecutor {
     /// ## Returns
     ///
     /// The new [MessageHandlerExecutor].
-    pub(crate) fn new_with_fp_registry(
-        error_state: WatchableOnceCell<SlateDBError>,
-        clock: Arc<dyn SystemClock>,
-        fp_registry: Arc<FailPointRegistry>,
-    ) -> Self {
-        Self {
-            tasks: Mutex::new(Some(JoinMap::new())),
-            tokens: SkipMap::new(),
-            results: Arc::new(SkipMap::new()),
-            clock,
-            error_state,
-            fp_registry,
-        }
+    #[allow(dead_code)]
+    pub(crate) fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
+        self.fp_registry = fp_registry;
+        self
     }
 
     /// Spawns a new [MessageDispatcher] for the provided [MessageHandler] on the given
@@ -466,13 +454,8 @@ impl MessageHandlerExecutor {
             None => return Err(SlateDBError::BackgroundTaskExecutorStarted),
         };
         let token = CancellationToken::new();
-        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
-            handler,
-            rx,
-            self.clock.clone(),
-            token.clone(),
-            self.fp_registry.clone(),
-        );
+        let mut dispatcher = MessageDispatcher::new(handler, rx, self.clock.clone(), token.clone())
+            .with_fp_registry(self.fp_registry.clone());
         self.results.insert(name.clone(), WatchableOnceCell::new());
         self.tokens.insert(name.clone(), token);
         let this_error_state = self.error_state.clone();
@@ -749,11 +732,8 @@ mod test {
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
         let error_state = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let task_executor = MessageHandlerExecutor::new_with_fp_registry(
-            error_state.clone(),
-            clock.clone(),
-            fp_registry.clone(),
-        );
+        let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone())
+            .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         task_executor
             .spawn_on(
@@ -813,13 +793,13 @@ mod test {
             .add_ticker(Duration::from_millis(5), 1);
         let cancellation_token = CancellationToken::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
+        let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            fp_registry.clone(),
-        );
+        )
+        .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         let join = tokio::spawn(async move { dispatcher.run().await });
 
@@ -884,13 +864,13 @@ mod test {
             .add_clock_schedule(1); // 21ms
         let cancellation_token = CancellationToken::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
+        let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            fp_registry.clone(),
-        );
+        )
+        .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         let join = tokio::spawn(async move { dispatcher.run().await });
         assert_eq!(log.lock().unwrap().len(), 0);
@@ -959,13 +939,13 @@ mod test {
             .add_clock_schedule(3); // 15
         let cancellation_token = CancellationToken::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
+        let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            fp_registry.clone(),
-        );
+        )
+        .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         let join = tokio::spawn(async move { dispatcher.run().await });
         assert_eq!(log.lock().unwrap().len(), 0);
@@ -1034,13 +1014,13 @@ mod test {
             .add_clock_schedule(0); // 21 (process second)
         let cancellation_token = CancellationToken::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let mut dispatcher = MessageDispatcher::new_with_fp_registry(
+        let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-            fp_registry.clone(),
-        );
+        )
+        .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         let join = tokio::spawn(async move { dispatcher.run().await });
         assert_eq!(log.lock().unwrap().len(), 0);
