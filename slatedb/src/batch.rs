@@ -4,12 +4,14 @@
 //! collection of write operations (puts and/or deletes) that are applied
 //! atomically to the database.
 
-use crate::config::PutOptions;
+use crate::config::{MergeOptions, PutOptions};
 use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::mem_table::{KVTableInternalKey, KVTableInternalKeyRange};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::collections::{btree_map, BTreeMap};
+use std::collections::{BTreeMap, HashSet};
+use std::iter::Peekable;
 use std::ops::RangeBounds;
 use uuid::Uuid;
 
@@ -45,8 +47,9 @@ use uuid::Uuid;
 /// means that WAL SSTs could get large if there's a large batch write.
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
-    pub(crate) ops: BTreeMap<Bytes, WriteOp>,
+    pub(crate) ops: BTreeMap<KVTableInternalKey, WriteOp>,
     pub(crate) txn_id: Option<Uuid>,
+    pub(crate) seq: u64,
 }
 
 impl Default for WriteBatch {
@@ -60,31 +63,33 @@ impl Default for WriteBatch {
 pub(crate) enum WriteOp {
     Put(Bytes, Bytes, PutOptions),
     Delete(Bytes),
+    Merge(Bytes, Bytes, MergeOptions),
 }
 
 impl std::fmt::Debug for WriteOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn trunc(bytes: &Bytes) -> String {
+            if bytes.len() > 10 {
+                format!("{:?}...", &bytes[..10])
+            } else {
+                format!("{:?}", bytes)
+            }
+        }
+
         match self {
             WriteOp::Put(key, value, options) => {
-                let key = if key.len() > 10 {
-                    format!("{:?}...", &key[..10])
-                } else {
-                    format!("{:?}", key)
-                };
-                let value = if value.len() > 10 {
-                    format!("{:?}...", &value[..10])
-                } else {
-                    format!("{:?}", value)
-                };
+                let key = trunc(key);
+                let value = trunc(value);
                 write!(f, "Put({key}, {value}, {:?})", options)
             }
             WriteOp::Delete(key) => {
-                let key = if key.len() > 10 {
-                    format!("{:?}...", &key[..10])
-                } else {
-                    format!("{:?}", key)
-                };
+                let key = trunc(key);
                 write!(f, "Delete({key})")
+            }
+            WriteOp::Merge(key, value, options) => {
+                let key = trunc(key);
+                let value = trunc(value);
+                write!(f, "Merge({key}, {value}, {:?})", options)
             }
         }
     }
@@ -92,7 +97,6 @@ impl std::fmt::Debug for WriteOp {
 
 impl WriteOp {
     /// Convert WriteOp to RowEntry for queries
-    #[allow(dead_code)]
     pub(crate) fn to_row_entry(
         &self,
         seq: u64,
@@ -119,6 +123,13 @@ impl WriteOp {
                 create_ts,
                 expire_ts,
             ),
+            WriteOp::Merge(key, value, _options) => RowEntry::new(
+                key.clone(),
+                ValueDeletable::Merge(value.clone()),
+                seq,
+                create_ts,
+                expire_ts,
+            ),
         }
     }
 }
@@ -128,6 +139,7 @@ impl WriteBatch {
         WriteBatch {
             ops: BTreeMap::new(),
             txn_id: None,
+            seq: 0,
         }
     }
 
@@ -135,7 +147,27 @@ impl WriteBatch {
         Self {
             ops: self.ops,
             txn_id: Some(txn_id),
+            seq: self.seq,
         }
+    }
+
+    fn assert_kv<K, V>(&self, key: &K, value: &V)
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let key = key.as_ref();
+        let value = value.as_ref();
+
+        assert!(!key.is_empty(), "key cannot be empty");
+        assert!(
+            key.len() <= u16::MAX as usize,
+            "key size must be <= u16::MAX"
+        );
+        assert!(
+            value.len() <= u32::MAX as usize,
+            "value size must be <= u32::MAX"
+        );
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.
@@ -163,40 +195,79 @@ impl WriteBatch {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        let key = key.as_ref();
-        let value = value.as_ref();
-        assert!(!key.is_empty(), "key cannot be empty");
-        assert!(
-            key.len() <= u16::MAX as usize,
-            "key size must be <= u16::MAX"
-        );
-        assert!(
-            value.len() <= u32::MAX as usize,
-            "value size must be <= u32::MAX"
+        self.assert_kv(&key, &value);
+
+        let key = Bytes::copy_from_slice(key.as_ref());
+        // put will overwrite the existing key so we can safely
+        // remove all previous entries. unfortunately, rust BTree doesn't have
+        // a more efficient way than scanning the entire map to remove
+        // a set of keys (though there is a proposal to amend the
+        // extract_if API to support taking in a range to scan)
+        self.ops.retain(|k, _| k.user_key != key);
+        self.ops.insert(
+            KVTableInternalKey::new(key.clone(), self.seq),
+            WriteOp::Put(
+                key.clone(),
+                Bytes::copy_from_slice(value.as_ref()),
+                options.clone(),
+            ),
         );
 
-        let key = Bytes::copy_from_slice(key);
+        self.seq += 1;
+    }
+
+    /// Merge a key-value pair into the batch. Keys must not be empty.
+    pub fn merge<K, V>(&mut self, key: K, value: V)
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.merge_with_options(key, value, &MergeOptions::default());
+    }
+
+    /// Merge a key-value pair into the batch with custom options.
+    pub fn merge_with_options<K, V>(&mut self, key: K, value: V, options: &MergeOptions)
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.assert_kv(&key, &value);
+
+        let key = Bytes::copy_from_slice(key.as_ref());
         self.ops.insert(
-            key.clone(),
-            WriteOp::Put(key, Bytes::copy_from_slice(value), options.clone()),
+            KVTableInternalKey::new(key.clone(), self.seq),
+            WriteOp::Merge(
+                key.clone(),
+                Bytes::copy_from_slice(value.as_ref()),
+                options.clone(),
+            ),
         );
+
+        self.seq += 1;
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
     pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
-        let key = key.as_ref();
-        assert!(!key.is_empty(), "key cannot be empty");
-        assert!(
-            key.len() <= u16::MAX as usize,
-            "key size must be <= u16::MAX"
+        self.assert_kv(&key, &[]);
+
+        let key = Bytes::copy_from_slice(key.as_ref());
+
+        // deletes will overwrite the existing key so we can safely
+        // remove all previous entries. unfortunately, rust BTree doesn't have
+        // a more efficient way than scanning the entire map to remove
+        // a set of keys (though there is a proposal to amend the
+        // extract_if API to support taking in a range to scan)
+        self.ops.retain(|k, _| k.user_key != key);
+        self.ops.insert(
+            KVTableInternalKey::new(key.clone(), self.seq),
+            WriteOp::Delete(key),
         );
 
-        let key = Bytes::copy_from_slice(key);
-        self.ops.insert(key.clone(), WriteOp::Delete(key));
+        self.seq += 1;
     }
 
-    pub(crate) fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
-        self.ops.keys().cloned()
+    pub(crate) fn keys(&self) -> HashSet<Bytes> {
+        self.ops.keys().map(|key| key.user_key.clone()).collect()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -206,27 +277,27 @@ impl WriteBatch {
 
 /// Iterator over WriteBatch entries
 pub(crate) struct WriteBatchIterator<'a> {
-    iter: btree_map::Range<'a, Bytes, WriteOp>,
+    iter: Peekable<
+        Box<dyn Iterator<Item = (&'a KVTableInternalKey, &'a WriteOp)> + Send + Sync + 'a>,
+    >,
     ordering: IterationOrder,
-    current: Option<(&'a Bytes, &'a WriteOp)>,
 }
 
 impl<'a> WriteBatchIterator<'a> {
-    pub fn new(
+    pub(crate) fn new(
         batch: &'a WriteBatch,
         range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
     ) -> Self {
-        let mut iter = batch.ops.range(range);
-        let current = match ordering {
-            IterationOrder::Ascending => iter.next(),
-            IterationOrder::Descending => iter.next_back(),
+        let range = KVTableInternalKeyRange::from(range);
+        let iter: Box<dyn Iterator<Item = _> + Send + Sync + 'a> = match ordering {
+            IterationOrder::Ascending => Box::new(batch.ops.range(range)),
+            IterationOrder::Descending => Box::new(batch.ops.range(range).rev()),
         };
 
         Self {
-            iter,
+            iter: iter.peekable(),
             ordering,
-            current,
         }
     }
 }
@@ -238,44 +309,24 @@ impl<'a> KeyValueIterator for WriteBatchIterator<'a> {
     }
 
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
-        // Return current item (similar to MemTableIterator pattern)
-        let result = self.current.map(|(_, op)| {
-            // Use u64::MAX as placeholder seq to indicate highest priority
-            op.to_row_entry(u64::MAX, None, None)
-        });
-
-        // Advance to next entry based on ordering (similar to next_entry_sync)
-        self.current = match self.ordering {
-            IterationOrder::Ascending => self.iter.next(),
-            IterationOrder::Descending => self.iter.next_back(),
-        };
-
-        Ok(result)
+        Ok(self
+            .iter
+            .next()
+            .map(|(_, op)| op.to_row_entry(u64::MAX, None, None)))
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
-        // Loop similar to MemTableIterator::seek
-        loop {
-            let should_advance = match &self.current {
-                Some((key, _)) => match self.ordering {
-                    // For ascending: advance if current key < target key
-                    IterationOrder::Ascending => key.as_ref() < next_key,
-                    // For descending: advance if current key > target key
-                    IterationOrder::Descending => key.as_ref() > next_key,
-                },
-                None => return Ok(()), // Iterator exhausted
-            };
-
-            if should_advance {
-                // Advance similar to calling next_entry_sync in MemTableIterator
-                self.current = match self.ordering {
-                    IterationOrder::Ascending => self.iter.next(),
-                    IterationOrder::Descending => self.iter.next_back(),
-                };
+        while let Some((key, _)) = self.iter.peek() {
+            if match self.ordering {
+                IterationOrder::Ascending => key.user_key < next_key,
+                IterationOrder::Descending => key.user_key > next_key,
+            } {
+                self.iter.next();
             } else {
-                return Ok(());
+                break;
             }
         }
+        Ok(())
     }
 }
 
@@ -285,6 +336,7 @@ mod tests {
 
     use super::*;
     use crate::bytes_range::BytesRange;
+    use crate::config::Ttl;
     use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;
 
@@ -332,7 +384,8 @@ mod tests {
     }])]
     fn test_put_delete_batch(#[case] test_case: Vec<WriteOpTestCase>) {
         let mut batch = WriteBatch::new();
-        let mut expected_ops: BTreeMap<Bytes, WriteOp> = BTreeMap::new();
+        let mut expected_ops: BTreeMap<KVTableInternalKey, WriteOp> = BTreeMap::new();
+        let mut seq = 0;
         for test_case in test_case {
             if let Some(value) = test_case.value {
                 batch.put_with_options(
@@ -341,7 +394,7 @@ mod tests {
                     &test_case.options,
                 );
                 expected_ops.insert(
-                    Bytes::from(test_case.key.clone()),
+                    KVTableInternalKey::new(Bytes::from(test_case.key.clone()), seq),
                     WriteOp::Put(
                         Bytes::from(test_case.key),
                         Bytes::from(value),
@@ -351,10 +404,11 @@ mod tests {
             } else {
                 batch.delete(test_case.key.as_slice());
                 expected_ops.insert(
-                    Bytes::from(test_case.key.clone()),
+                    KVTableInternalKey::new(Bytes::from(test_case.key.clone()), seq),
                     WriteOp::Delete(Bytes::from(test_case.key)),
                 );
             }
+            seq += 1;
         }
         assert_eq!(batch.ops, expected_ops);
     }
@@ -366,7 +420,10 @@ mod tests {
         batch.put(b"key1", b"value2"); // Should overwrite previous
 
         assert_eq!(batch.ops.len(), 1); // Only one entry due to deduplication
-        let op = batch.ops.get(b"key1".as_ref()).unwrap();
+        let op = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .unwrap();
         match op {
             WriteOp::Put(_, value, _) => assert_eq!(value.as_ref(), b"value2"),
             _ => panic!("Expected Put operation"),
@@ -600,6 +657,424 @@ mod tests {
                 None,
             ),
             RowEntry::new_value(b"key3", b"value3", u64::MAX),
+        ];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[test]
+    fn should_create_merge_operation_with_default_options() {
+        // Given: an empty WriteBatch
+        let mut batch = WriteBatch::new();
+
+        // When: adding a merge operation
+        batch.merge(b"key1", b"value1");
+
+        // Then: the batch should contain one merge operation with default options
+        assert_eq!(batch.ops.len(), 1);
+        let op = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .unwrap();
+        match op {
+            WriteOp::Merge(key, value, options) => {
+                assert_eq!(key.as_ref(), b"key1");
+                assert_eq!(value.as_ref(), b"value1");
+                assert_eq!(options, &MergeOptions::default());
+            }
+            _ => panic!("Expected Merge operation"),
+        }
+    }
+
+    #[test]
+    fn should_create_merge_operation_with_custom_options() {
+        // Given: an empty WriteBatch and custom merge options
+        let mut batch = WriteBatch::new();
+        let merge_options = MergeOptions {
+            ttl: Ttl::ExpireAfter(3600), // 1 hour
+        };
+
+        // When: adding a merge operation with custom options
+        batch.merge_with_options(b"key1", b"value1", &merge_options);
+
+        // Then: the batch should contain one merge operation with the custom options
+        assert_eq!(batch.ops.len(), 1);
+        let op = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .unwrap();
+        match op {
+            WriteOp::Merge(key, value, options) => {
+                assert_eq!(key.as_ref(), b"key1");
+                assert_eq!(value.as_ref(), b"value1");
+                assert_eq!(options.ttl, Ttl::ExpireAfter(3600));
+            }
+            _ => panic!("Expected Merge operation"),
+        }
+    }
+
+    #[test]
+    fn should_allow_multiple_merges_for_same_key() {
+        // Given: an empty WriteBatch
+        let mut batch = WriteBatch::new();
+
+        // When: adding multiple merge operations for the same key
+        batch.merge(b"key1", b"value1");
+        batch.merge(b"key1", b"value2");
+        batch.merge(b"key1", b"value3");
+
+        // Then: all merge operations should be preserved (not deduplicated)
+        assert_eq!(batch.ops.len(), 3);
+
+        // And: all three operations should exist with different sequence numbers
+        let op1 = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .unwrap();
+        let op2 = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .unwrap();
+        let op3 = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 2))
+            .unwrap();
+
+        match (op1, op2, op3) {
+            (WriteOp::Merge(_, v1, _), WriteOp::Merge(_, v2, _), WriteOp::Merge(_, v3, _)) => {
+                assert_eq!(v1.as_ref(), b"value1");
+                assert_eq!(v2.as_ref(), b"value2");
+                assert_eq!(v3.as_ref(), b"value3");
+            }
+            _ => panic!("Expected all Merge operations"),
+        }
+    }
+
+    #[test]
+    fn should_allow_merges_for_different_keys() {
+        // Given: an empty WriteBatch
+        let mut batch = WriteBatch::new();
+
+        // When: adding merge operations for different keys
+        batch.merge(b"key1", b"value1");
+        batch.merge(b"key2", b"value2");
+        batch.merge(b"key3", b"value3");
+
+        // Then: all merge operations should be preserved
+        assert_eq!(batch.ops.len(), 3);
+
+        // And: all keys should exist with correct sequence numbers
+        assert!(batch
+            .ops
+            .contains_key(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0)));
+        assert!(batch
+            .ops
+            .contains_key(&KVTableInternalKey::new(Bytes::from_static(b"key2"), 1)));
+        assert!(batch
+            .ops
+            .contains_key(&KVTableInternalKey::new(Bytes::from_static(b"key3"), 2)));
+    }
+
+    #[test]
+    fn should_preserve_both_put_and_merge_when_merge_comes_after_put() {
+        // Given: a WriteBatch with a put operation
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"put_value");
+
+        // When: adding a merge operation for the same key
+        batch.merge(b"key1", b"merge_value");
+
+        // Then: both operations should remain (merge accumulates on top of put)
+        assert_eq!(batch.ops.len(), 2);
+
+        // Verify the put operation exists
+        let put_op = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .unwrap();
+        match put_op {
+            WriteOp::Put(key, value, _) => {
+                assert_eq!(key.as_ref(), b"key1");
+                assert_eq!(value.as_ref(), b"put_value");
+            }
+            _ => panic!("Expected Put operation"),
+        }
+
+        // Verify the merge operation exists
+        let merge_op = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .unwrap();
+        match merge_op {
+            WriteOp::Merge(key, value, _) => {
+                assert_eq!(key.as_ref(), b"key1");
+                assert_eq!(value.as_ref(), b"merge_value");
+            }
+            _ => panic!("Expected Merge operation"),
+        }
+    }
+
+    #[test]
+    fn should_preserve_both_delete_and_merge_when_merge_comes_after_delete() {
+        // Given: a WriteBatch with a delete operation
+        let mut batch = WriteBatch::new();
+        batch.delete(b"key1");
+
+        // When: adding a merge operation for the same key
+        batch.merge(b"key1", b"merge_value");
+
+        // Then: both operations should remain (merge accumulates on top of delete)
+        assert_eq!(batch.ops.len(), 2);
+
+        // Verify the delete operation exists
+        let delete_op = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .unwrap();
+        match delete_op {
+            WriteOp::Delete(key) => {
+                assert_eq!(key.as_ref(), b"key1");
+            }
+            _ => panic!("Expected Delete operation"),
+        }
+
+        // Verify the merge operation exists
+        let merge_op = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .unwrap();
+        match merge_op {
+            WriteOp::Merge(key, value, _) => {
+                assert_eq!(key.as_ref(), b"key1");
+                assert_eq!(value.as_ref(), b"merge_value");
+            }
+            _ => panic!("Expected Merge operation"),
+        }
+    }
+
+    #[test]
+    fn should_deduplicate_merge_when_put_is_added_for_same_key() {
+        // Given: a WriteBatch with a merge operation
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"merge_value");
+
+        // When: adding a put operation for the same key
+        batch.put(b"key1", b"put_value");
+
+        // Then: only the put operation should remain (merge is deduplicated by put)
+        assert_eq!(batch.ops.len(), 1);
+
+        let op = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .unwrap();
+        match op {
+            WriteOp::Put(key, value, _) => {
+                assert_eq!(key.as_ref(), b"key1");
+                assert_eq!(value.as_ref(), b"put_value");
+            }
+            _ => panic!("Expected Put operation"),
+        }
+    }
+
+    #[test]
+    fn should_deduplicate_merge_when_delete_is_added_for_same_key() {
+        // Given: a WriteBatch with a merge operation
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"merge_value");
+
+        // When: adding a delete operation for the same key
+        batch.delete(b"key1");
+
+        // Then: only the delete operation should remain (merge is deduplicated by delete)
+        assert_eq!(batch.ops.len(), 1);
+
+        let op = batch
+            .ops
+            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .unwrap();
+        match op {
+            WriteOp::Delete(key) => {
+                assert_eq!(key.as_ref(), b"key1");
+            }
+            _ => panic!("Expected Delete operation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn should_iterate_over_mixed_operations_including_merges() {
+        // Given: a WriteBatch with mixed operations including multiple merges
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.merge(b"key2", b"merge1");
+        batch.merge(b"key2", b"merge2");
+        batch.delete(b"key3");
+
+        // When: creating an iterator
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+
+        // Then: the iterator should return all operations in order
+        let expected = vec![
+            RowEntry::new_value(b"key1", b"value1", u64::MAX),
+            RowEntry::new(
+                Bytes::from_static(b"key2"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge2")),
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new(
+                Bytes::from_static(b"key2"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge1")),
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new(
+                Bytes::from_static(b"key3"),
+                ValueDeletable::Tombstone,
+                u64::MAX,
+                None,
+                None,
+            ),
+        ];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn should_iterate_over_multiple_merges_for_same_key() {
+        // Given: a WriteBatch with multiple merges for the same key
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"merge1");
+        batch.merge(b"key1", b"merge2");
+        batch.merge(b"key1", b"merge3");
+
+        // When: creating an iterator
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+
+        // Then: the iterator should return all merge operations
+        let expected = vec![
+            RowEntry::new(
+                Bytes::from_static(b"key1"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge3")),
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new(
+                Bytes::from_static(b"key1"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge2")),
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new(
+                Bytes::from_static(b"key1"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge1")),
+                u64::MAX,
+                None,
+                None,
+            ),
+        ];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn should_iterate_over_merges_in_descending_order() {
+        // Given: a WriteBatch with merges for different keys
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"merge1");
+        batch.merge(b"key2", b"merge2");
+        batch.merge(b"key1", b"merge3");
+
+        // When: creating a descending iterator
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
+
+        // Then: the iterator should return operations in descending order
+        let expected = vec![
+            RowEntry::new(
+                Bytes::from_static(b"key2"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge2")),
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new(
+                Bytes::from_static(b"key1"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge1")),
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new(
+                Bytes::from_static(b"key1"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge3")),
+                u64::MAX,
+                None,
+                None,
+            ),
+        ];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn should_iterate_over_merges_in_range() {
+        // Given: a WriteBatch with merges for different keys
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"merge1");
+        batch.merge(b"key3", b"merge3");
+        batch.merge(b"key5", b"merge5");
+
+        // When: creating an iterator with a range filter
+        let mut iter = WriteBatchIterator::new(
+            &batch,
+            BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
+            IterationOrder::Ascending,
+        );
+
+        // Then: the iterator should only return merges within the range
+        let expected = vec![RowEntry::new(
+            Bytes::from_static(b"key3"),
+            ValueDeletable::Merge(Bytes::from_static(b"merge3")),
+            u64::MAX,
+            None,
+            None,
+        )];
+
+        assert_iterator(&mut iter, expected).await;
+    }
+
+    #[tokio::test]
+    async fn should_seek_to_merge_operations() {
+        // Given: a WriteBatch with merges for different keys
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"merge1");
+        batch.merge(b"key3", b"merge3");
+        batch.merge(b"key5", b"merge5");
+
+        // When: creating an iterator and seeking to key3
+        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        iter.seek(b"key3").await.unwrap();
+
+        // Then: the iterator should return key3 and key5
+        let expected = vec![
+            RowEntry::new(
+                Bytes::from_static(b"key3"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge3")),
+                u64::MAX,
+                None,
+                None,
+            ),
+            RowEntry::new(
+                Bytes::from_static(b"key5"),
+                ValueDeletable::Merge(Bytes::from_static(b"merge5")),
+                u64::MAX,
+                None,
+                None,
+            ),
         ];
 
         assert_iterator(&mut iter, expected).await;

@@ -144,7 +144,7 @@ impl DbReaderInner {
             db_stats: db_stats.clone(),
             mono_clock: Arc::clone(&mono_clock),
             oracle: oracle.clone(),
-            merge_operator: None,
+            merge_operator: options.merge_operator.clone(),
         };
 
         Ok(Self {

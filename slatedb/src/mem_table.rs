@@ -19,8 +19,8 @@ use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct KVTableInternalKey {
-    user_key: Bytes,
-    seq: u64,
+    pub(crate) user_key: Bytes,
+    pub(crate) seq: u64,
 }
 
 impl KVTableInternalKey {
