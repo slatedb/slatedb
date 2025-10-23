@@ -76,8 +76,14 @@ jobs:
       # Check for differences
       - name: Generate and validate files
         run: |
-          flatc -o tmp/generated --rust --gen-all schemas/manifest.fbs
-          if ! diff -r slatedb/src/generated/*.rs tmp/generated; then
+          flatc -o tmp/generated --rust --gen-all schemas/root.fbs
+          # Validate only files produced by root.fbs in this step.
+          # The checked-in generated folder may also contain outputs from other schemas
+          # (e.g., manifest_generated.rs) and docs (README.md). Those are unrelated to
+          # this invocation of flatc and would show up as "extra files" in a recursive
+          # dir-to-dir diff even when root.fbs outputs match. Exclude them to avoid
+          # false positives.
+          if ! diff -r -x 'README.md' -x 'manifest_generated.rs' slatedb/src/generated tmp/generated; then
             echo "Generated files do not match!"
             exit 1
           fi
