@@ -479,10 +479,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             system_clock.clone(),
         ));
         if inner.wal_enabled {
-            inner
-                .wal_buffer
-                .start_background(task_executor.clone())
-                .await?;
+            inner.wal_buffer.init(task_executor.clone()).await?;
         };
         task_executor
             .add_handler(

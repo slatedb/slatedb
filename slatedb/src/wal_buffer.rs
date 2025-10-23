@@ -119,7 +119,7 @@ impl WalBufferManager {
         }
     }
 
-    pub async fn start_background(
+    pub async fn init(
         self: &Arc<Self>,
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Result<(), SlateDBError> {
@@ -551,10 +551,7 @@ mod tests {
             db_state.read().error(),
             system_clock.clone(),
         ));
-        wal_buffer
-            .start_background(task_executor.clone())
-            .await
-            .unwrap();
+        wal_buffer.init(task_executor.clone()).await.unwrap();
         task_executor
             .monitor_on(&Handle::current())
             .expect("failed to monitor executor");
