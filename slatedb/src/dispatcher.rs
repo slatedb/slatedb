@@ -131,7 +131,7 @@ pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
 /// it is responsible for running the main event loop. The function receives messages
 /// from the [mpsc::UnboundedReceiver<T>] and from any [MessageDispatcherTicker]s, and
 /// passes them to the [MessageHandler] for processing.
-pub struct MessageDispatcher<T: Send + std::fmt::Debug> {
+struct MessageDispatcher<T: Send + std::fmt::Debug> {
     handler: Box<dyn MessageHandler<T>>,
     rx: mpsc::UnboundedReceiver<T>,
     clock: Arc<dyn SystemClock>,
@@ -151,7 +151,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `clock`: The [SystemClock] to use for time.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     #[allow(dead_code)]
-    pub fn new(
+    fn new(
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
@@ -177,7 +177,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     /// * `clock`: The [SystemClock] to use for time.
     /// * `cancellation_token`: The [CancellationToken] to use for shutdown.
     /// * `fp_registry`: The [FailPointRegistry] to use for fail points.
-    pub fn new_with_fp_registry(
+    fn new_with_fp_registry(
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
         clock: Arc<dyn SystemClock>,
@@ -207,7 +207,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// A [Result] containing `Ok(())` on clean shutdown, or an error if the handler
     /// fails for any reason.
-    pub async fn run(&mut self) -> Result<(), SlateDBError> {
+    async fn run(&mut self) -> Result<(), SlateDBError> {
         let mut tickers = self
             .handler
             .tickers()
@@ -268,7 +268,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
 ///
 /// On each [MessageDispatcherTicker::tick], the message factory is called to generate a
 /// message, and the message is returned as a [Future].
-pub struct MessageDispatcherTicker<'a, T: Send> {
+struct MessageDispatcherTicker<'a, T: Send> {
     inner: SystemClockTicker<'a>,
     message_factory: Box<MessageFactory<T>>,
 }
@@ -284,7 +284,7 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// ## Returns
     ///
     /// The new [MessageDispatcherTicker].
-    pub fn new(inner: SystemClockTicker<'a>, message_factory: Box<MessageFactory<T>>) -> Self {
+    fn new(inner: SystemClockTicker<'a>, message_factory: Box<MessageFactory<T>>) -> Self {
         Self {
             inner,
             message_factory,
@@ -297,7 +297,7 @@ impl<'a, T: Send> MessageDispatcherTicker<'a, T> {
     /// ## Returns
     ///
     /// A [Future] that resolves when the ticker ticks.
-    pub fn tick(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
+    fn tick(&mut self) -> Pin<Box<dyn Future<Output = (T, &mut Self)> + Send + '_>> {
         let message = (self.message_factory)();
         Box::pin(async move {
             self.inner.tick().await;
