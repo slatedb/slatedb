@@ -485,7 +485,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .await?;
         };
         task_executor
-            .spawn_on(
+            .add_handler(
                 MEMTABLE_FLUSHER_TASK_NAME.to_string(),
                 Box::new(MemtableFlusher::new(inner.clone(), manifest)),
                 memtable_flush_rx,
@@ -493,7 +493,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             )
             .expect("failed to spawn memtable flusher task");
         task_executor
-            .spawn_on(
+            .add_handler(
                 WRITE_BATCH_TASK_NAME.to_string(),
                 Box::new(WriteBatchEventHandler::new(inner.clone())),
                 write_rx,
@@ -549,7 +549,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             .await
             .expect("failed to create compactor");
             task_executor
-                .spawn_on(
+                .add_handler(
                     COMPACTOR_TASK_NAME.to_string(),
                     Box::new(handler),
                     rx,
@@ -572,12 +572,12 @@ impl<P: Into<Path>> DbBuilder<P> {
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = mpsc::unbounded_channel();
             task_executor
-                .spawn_on(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)
+                .add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)
                 .expect("failed to spawn garbage collector task");
         }
 
         // Monitor background tasks
-        task_executor.monitor_on(&tokio_handle);
+        task_executor.monitor_on(&tokio_handle)?;
 
         // Replay WAL
         inner.replay_wal().await?;

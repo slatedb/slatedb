@@ -139,7 +139,7 @@ impl Admin {
         let task_executor = MessageHandlerExecutor::new(error_state, self.system_clock.clone());
 
         task_executor
-            .spawn_on(
+            .add_handler(
                 GC_TASK_NAME.to_string(),
                 Box::new(gc),
                 rx,

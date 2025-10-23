@@ -236,14 +236,14 @@ impl Compactor {
         )
         .await?;
         self.task_executor
-            .spawn_on(
+            .add_handler(
                 COMPACTOR_TASK_NAME.to_string(),
                 Box::new(handler),
                 rx,
                 &Handle::current(),
             )
             .expect("failed to spawn compactor task");
-        self.task_executor.monitor_on(&Handle::current());
+        self.task_executor.monitor_on(&Handle::current())?;
         self.task_executor.join_task(COMPACTOR_TASK_NAME).await
     }
 

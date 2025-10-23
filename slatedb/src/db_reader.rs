@@ -380,13 +380,13 @@ impl DbReaderInner {
             inner: Arc::clone(self),
         };
         let (_tx, rx) = mpsc::unbounded_channel();
-        let result = task_executor.spawn_on(
+        let result = task_executor.add_handler(
             DB_READER_TASK_NAME.to_string(),
             Box::new(poller),
             rx,
             &Handle::current(),
         );
-        task_executor.monitor_on(&Handle::current());
+        task_executor.monitor_on(&Handle::current())?;
         result
     }
 

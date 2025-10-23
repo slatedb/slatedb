@@ -115,6 +115,9 @@ pub(crate) enum SlateDBError {
     #[error("background task executor already started")]
     BackgroundTaskExecutorStarted,
 
+    #[error("background task executor not started")]
+    BackgroundTaskExecutorNotStarted,
+
     #[error("db is closed")]
     Closed,
 
@@ -473,6 +476,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::BackgroundTaskStarted(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskCancelled(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskExecutorStarted => Error::internal(msg),
+            SlateDBError::BackgroundTaskExecutorNotStarted => Error::internal(msg),
         }
     }
 }

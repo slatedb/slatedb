@@ -1161,14 +1161,16 @@ mod tests {
         let clock = Arc::new(DefaultSystemClock::default());
         let executor = MessageHandlerExecutor::new(WatchableOnceCell::new(), clock);
         executor
-            .spawn_on(
+            .add_handler(
                 "garbage_collector".to_string(),
                 Box::new(gc),
                 rx,
                 &Handle::current(),
             )
             .expect("failed to spawn task");
-        let jh = executor.monitor_on(&Handle::current());
+        let jh = executor
+            .monitor_on(&Handle::current())
+            .expect("failed to start monitor task");
         executor.cancel_task(GC_TASK_NAME);
         let result = executor.join_task(GC_TASK_NAME).await;
         assert!(matches!(result, Ok(())));

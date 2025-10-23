@@ -132,7 +132,7 @@ impl WalBufferManager {
             max_flush_interval: self.max_flush_interval,
             wal_buffer: self.clone(),
         };
-        let result = task_executor.spawn_on(
+        let result = task_executor.add_handler(
             WAL_BUFFER_TASK_NAME.to_string(),
             Box::new(wal_flush_handler),
             flush_rx,
@@ -555,7 +555,9 @@ mod tests {
             .start_background(task_executor.clone())
             .await
             .unwrap();
-        task_executor.monitor_on(&Handle::current());
+        task_executor
+            .monitor_on(&Handle::current())
+            .expect("failed to monitor executor");
         (wal_buffer, table_store, test_clock)
     }
 

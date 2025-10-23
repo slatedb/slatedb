@@ -105,6 +105,7 @@ use async_trait::async_trait;
 use crossbeam_skiplist::SkipMap;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{
+    future::BoxFuture,
     stream::{BoxStream, FuturesUnordered},
     FutureExt, StreamExt,
 };
@@ -356,6 +357,21 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     ) -> Result<(), SlateDBError>;
 }
 
+struct MessageHandlerFuture {
+    name: String,
+    future: BoxFuture<'static, Result<(), SlateDBError>>,
+    token: CancellationToken,
+    handle: Handle,
+}
+
+impl std::fmt::Debug for MessageHandlerFuture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MessageHandlerFuture")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
 /// The [MessageHandlerExecutor] is responsible for spawning, monitoring, and shutting
 /// down [MessageDispatcher]s. Think of it as a dispatcher pool.
 ///
@@ -368,7 +384,7 @@ pub(crate) trait MessageHandler<T: Send>: Send {
 /// [SlateDBError].
 #[derive(Debug)]
 pub(crate) struct MessageHandlerExecutor {
-    tasks: Mutex<Option<JoinMap<String, Result<(), SlateDBError>>>>,
+    futures: Mutex<Option<Vec<MessageHandlerFuture>>>,
     tokens: SkipMap<String, CancellationToken>,
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
     error_state: WatchableOnceCell<SlateDBError>,
@@ -393,9 +409,9 @@ impl MessageHandlerExecutor {
         clock: Arc<dyn SystemClock>,
     ) -> Self {
         Self {
+            futures: Mutex::new(Some(vec![])),
             error_state,
             clock,
-            tasks: Mutex::new(Some(JoinMap::new())),
             tokens: SkipMap::new(),
             results: Arc::new(SkipMap::new()),
             fp_registry: Arc::new(FailPointRegistry::new()),
@@ -436,39 +452,29 @@ impl MessageHandlerExecutor {
     /// - `Ok(())` if the dispatcher was successfully spawned.
     /// - Err([SlateDBError::BackgroundTaskStarted]) if a dispatcher with the same name is already running.
     /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already running.
-    pub(crate) fn spawn_on<T: Send + std::fmt::Debug + 'static>(
+    pub(crate) fn add_handler<T: Send + std::fmt::Debug + 'static>(
         &self,
         name: String,
         handler: Box<dyn MessageHandler<T>>,
         rx: mpsc::UnboundedReceiver<T>,
         handle: &Handle,
     ) -> Result<(), SlateDBError> {
-        // hold guard for remainder of method to prevent multiple threads
-        // from starting the same task simultaneously.
-        let mut guard = self.tasks.lock();
-        let tasks = match guard.as_mut() {
-            Some(tasks) if tasks.contains_key(&name) => {
-                return Err(SlateDBError::BackgroundTaskStarted(name))
-            }
-            Some(tasks) => tasks,
-            None => return Err(SlateDBError::BackgroundTaskExecutorStarted),
-        };
         let token = CancellationToken::new();
         let mut dispatcher = MessageDispatcher::new(handler, rx, self.clock.clone(), token.clone())
             .with_fp_registry(self.fp_registry.clone());
-        self.results.insert(name.clone(), WatchableOnceCell::new());
-        self.tokens.insert(name.clone(), token);
         let this_error_state = self.error_state.clone();
         let this_name = name.clone();
+        // future that runs the dispatcher and handles cleanup
         let task_future = async move {
             let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
             let run_result = unwrap_unwind(this_name.clone(), run_unwind_result);
             this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
-            let error_state = Err(this_error_state
+            // re-read the error since it might have already been set by another task
+            let final_error_state = Err(this_error_state
                 .reader()
                 .read()
                 .expect("error state was unexpectedly empty"));
-            let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(error_state))
+            let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(final_error_state))
                 .catch_unwind()
                 .await;
             if let Err(cleanup_error) = unwrap_unwind(this_name.clone(), cleanup_unwind_result) {
@@ -480,8 +486,21 @@ impl MessageHandlerExecutor {
             }
             run_result
         };
-        tasks.spawn_on(name, task_future, handle);
-        Ok(())
+        let mut guard = self.futures.lock();
+        if let Some(task_definitions) = guard.as_mut() {
+            if task_definitions.iter().any(|t| t.name == name) {
+                return Err(SlateDBError::BackgroundTaskStarted(name));
+            }
+            task_definitions.push(MessageHandlerFuture {
+                name,
+                future: Box::pin(task_future),
+                token,
+                handle: handle.clone(),
+            });
+            Ok(())
+        } else {
+            Err(SlateDBError::BackgroundTaskExecutorStarted)
+        }
     }
 
     /// Spawns a task that monitors for completed [MessageDispatcher]s and stores their
@@ -494,17 +513,34 @@ impl MessageHandlerExecutor {
     /// ## Returns
     ///
     /// A [JoinHandle] that can be used to wait for the monitor to complete.
-    pub(crate) fn monitor_on(&self, handle: &Handle) -> JoinHandle<()> {
-        let mut tasks = {
-            let mut guard = self.tasks.lock();
-            guard.take().expect("join map isn't set when expected")
+    pub(crate) fn monitor_on(&self, handle: &Handle) -> Result<JoinHandle<()>, SlateDBError> {
+        let mut task_definitions = {
+            let mut guard = self.futures.lock();
+            if let Some(task_definitions) = guard.take() {
+                task_definitions
+            } else {
+                return Err(SlateDBError::BackgroundTaskExecutorNotStarted);
+            }
         };
+        let mut tasks = JoinMap::new();
+        for task_definition in task_definitions.drain(..) {
+            self.tokens
+                .insert(task_definition.name.clone(), task_definition.token.clone());
+            self.results
+                .insert(task_definition.name.clone(), WatchableOnceCell::new());
+            tasks.spawn_on(
+                task_definition.name.clone(),
+                task_definition.future,
+                &task_definition.handle,
+            );
+        }
         let this_results = self.results.clone();
         let this_tokens = self
             .tokens
             .iter()
             .map(|e| e.value().clone())
             .collect::<Vec<_>>();
+        // future that runs until all tasks are completed
         let monitor_future = async move {
             while !tasks.is_empty() {
                 if let Some((name, join_result)) = tasks.join_next().await {
@@ -521,7 +557,7 @@ impl MessageHandlerExecutor {
                 }
             }
         };
-        handle.spawn(monitor_future)
+        Ok(handle.spawn(monitor_future))
     }
 
     /// Cancels a task by name.
@@ -736,14 +772,16 @@ mod test {
             .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
         task_executor
-            .spawn_on(
+            .add_handler(
                 "test".to_string(),
                 Box::new(handler),
                 rx,
                 &Handle::current(),
             )
             .expect("spawn failed");
-        task_executor.monitor_on(&Handle::current());
+        task_executor
+            .monitor_on(&Handle::current())
+            .expect("failed to monitor executor");
 
         // Send a regular message successfully and then trigger a panic
         tx.send(TestMessage::Channel(42)).unwrap();
@@ -1098,7 +1136,7 @@ mod test {
 
         // Spawn the panic task
         task_executor
-            .spawn_on(
+            .add_handler(
                 "test".to_string(),
                 Box::new(handler),
                 rx,
@@ -1107,7 +1145,9 @@ mod test {
             .expect("failed to spawn task");
 
         // Monitor the executor
-        task_executor.monitor_on(&Handle::current());
+        task_executor
+            .monitor_on(&Handle::current())
+            .expect("failed to monitor executor");
 
         // Trigger panic inside the run loop via handle()
         tx.send(1u8).unwrap();
