@@ -11,9 +11,9 @@ enum CompactorJobStatus : byte {
     Failed,         // Failed with error
 }
 
-union CompactorJobProgress { LinearCompactionJobProgress }
+union CompactorJobProgress { LinearCompactorJobProgress }
 
-table LinearCompactionJobProgress {
+table LinearCompactorJobProgress {
     // InputSSTables completed before the job started
     completed_input_sst_ids:[CompactedSstId];
 
@@ -31,9 +31,9 @@ table CompactorJobAttempt {
     progress: CompactorJobProgress (required);
 }
 
-union CompactionJobInput { SortedRunCompaction }
+union CompactorJobInput { SortedRunJobInputs }
 
-table SortedRunCompaction {
+table SortedRunJobInputs {
     // input L0 SSTables
     ssts: [CompactedSsTable]; 
 
@@ -58,12 +58,12 @@ table CompactorJob {
     id: Ulid (required);
 
     // Compaction Type to distinguish between internal or external
-    compaction_type: CompactorJobRequestType = Internal;
+    request_type: CompactorJobRequestType = Internal;
 
     // List of CompactorJob Retries
     job_attempts:[CompactorJobAttempt] (required);
 
-    spec: CompactionJobInput (required);
+    spec: CompactorJobInput (required);
 }
 
 
@@ -72,5 +72,5 @@ table CompactionState {
     compactor_epoch: uint64;
 
     // Compactions in scheduled, in_progress and recently completed compactions
-    recent_compactions: [CompactorJob] (required);
+    recent_jobs: [CompactorJob] (required);
 }
