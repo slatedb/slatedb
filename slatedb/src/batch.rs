@@ -385,8 +385,7 @@ mod tests {
     fn test_put_delete_batch(#[case] test_case: Vec<WriteOpTestCase>) {
         let mut batch = WriteBatch::new();
         let mut expected_ops: BTreeMap<KVTableInternalKey, WriteOp> = BTreeMap::new();
-        let mut seq = 0;
-        for test_case in test_case {
+        for (seq, test_case) in test_case.into_iter().enumerate() {
             if let Some(value) = test_case.value {
                 batch.put_with_options(
                     test_case.key.as_slice(),
@@ -394,7 +393,7 @@ mod tests {
                     &test_case.options,
                 );
                 expected_ops.insert(
-                    KVTableInternalKey::new(Bytes::from(test_case.key.clone()), seq),
+                    KVTableInternalKey::new(Bytes::from(test_case.key.clone()), seq as u64),
                     WriteOp::Put(
                         Bytes::from(test_case.key),
                         Bytes::from(value),
@@ -404,11 +403,10 @@ mod tests {
             } else {
                 batch.delete(test_case.key.as_slice());
                 expected_ops.insert(
-                    KVTableInternalKey::new(Bytes::from(test_case.key.clone()), seq),
+                    KVTableInternalKey::new(Bytes::from(test_case.key.clone()), seq as u64),
                     WriteOp::Delete(Bytes::from(test_case.key)),
                 );
             }
-            seq += 1;
         }
         assert_eq!(batch.ops, expected_ops);
     }

@@ -1317,9 +1317,9 @@ mod tests {
         let actual = result.as_ref().map(|b| b.as_ref());
         let expected = test_case.expected;
         assert_eq!(
-            actual, 
-            expected, 
-            "Failed test: {}\nActual: {:?}\nExpected: {:?}", 
+            actual,
+            expected,
+            "Failed test: {}\nActual: {:?}\nExpected: {:?}",
             test_case.description,
             actual.map(|b| String::from_utf8_lossy(b)),
             expected.map(|b| String::from_utf8_lossy(b))
