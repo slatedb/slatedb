@@ -99,7 +99,6 @@ pub(crate) struct DbInner {
 }
 
 impl DbInner {
-    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         settings: Settings,
         logical_clock: Arc<dyn LogicalClock>,

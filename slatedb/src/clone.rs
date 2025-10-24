@@ -75,7 +75,6 @@ pub(crate) async fn create_clone<P: Into<Path>>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn create_clone_manifest(
     clone_manifest_store: Arc<ManifestStore>,
     parent_manifest_store: Arc<ManifestStore>,

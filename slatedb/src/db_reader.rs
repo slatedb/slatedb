@@ -90,7 +90,6 @@ impl DbStateReader for CheckpointState {
 }
 
 impl DbReaderInner {
-    #[allow(clippy::too_many_arguments)]
     async fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,

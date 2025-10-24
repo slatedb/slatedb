@@ -226,7 +226,6 @@ pub struct DbIterator<'a> {
 }
 
 impl<'a> DbIterator<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
         range: BytesRange,
         write_batch_iter: Option<WriteBatchIterator<'a>>,

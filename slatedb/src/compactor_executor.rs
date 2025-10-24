@@ -78,7 +78,6 @@ pub(crate) struct TokioCompactionExecutor {
 }
 
 impl TokioCompactionExecutor {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         handle: tokio::runtime::Handle,
         options: Arc<CompactorOptions>,
