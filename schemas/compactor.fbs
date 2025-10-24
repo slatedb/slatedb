@@ -1,22 +1,19 @@
 include "sst.fbs";
+include "common.fbs";
 
-table Ulid {
-    high: uint64;
-    low: uint64;
-}
+enum CompactorJobRequestType : byte { Internal = 0, External, }
 
-enum CompactionType : byte { Internal = 0, External; }
-
-enum CompactionStatus : byte {
+enum CompactorJobStatus : byte {
     Submitted = 0,  // Waiting to be scheduled
+    Pending,        // Waiting to be executed
     InProgress,     // Currently executing
     Completed,      // Successfully finished
     Failed,         // Failed with error
 }
 
-union CompactionJobSpec { LinearCompactionJob /*, ParallelCompactionJob */ }
+union CompactorJobProgress { LinearCompactorJobProgress }
 
-table LinearCompactionJob {
+table LinearCompactorJobProgress {
     // InputSSTables completed before the job started
     completed_input_sst_ids:[CompactedSstId];
 
@@ -24,45 +21,19 @@ table LinearCompactionJob {
     completed_input_sr_ids:[uint32];
 }
 
-/*
-table ParallelCompactionJob {
-    shards: [SubCompactionJob]
-}
-
-table SubCompactionJob {
-    // Sub CompactionJob ID(Ulid)
-    sub_job_id: Ulid;
-
-    // InputSSTables completed before the job started
-    completed_input_sst_ids:[CompactedSstId];
-
-    // InputSortedRuns completed before the job started
-    completed_input_sr_ids:[uint32];
-
-    // Subset of InputSSTables to be compacted
-    input_sst:[CompactedSsTable];
-
-    // Subset of InputSortedRuns to be compacted
-    input_sr:[SortedRun];
-
-    // Output SR of the subset Input SSTs and SortedRuns
-    output_sr:SortedRun;
-}
-*/
-
-table CompactionJob {
-    // CompactionJob ID(Ulid)
-    job_id: Ulid;
+table CompactorJobAttempt {
+    // CompactorJobAttempt ID(Ulid)
+    id: Ulid (required);
 
     // Reference to the compaction to which this job belongs
-    compaction_id: Ulid;
+    compactor_job_id: Ulid (required);
 
-    spec: CompactionJobSpec;
+    progress: CompactorJobProgress (required);
 }
 
-union CompactionSpec { SortedRunCompaction }
+union CompactorJobInput { SortedRunJobInputs }
 
-table SortedRunCompaction {
+table SortedRunJobInputs {
     // input L0 SSTables
     ssts: [CompactedSsTable]; 
 
@@ -70,12 +41,12 @@ table SortedRunCompaction {
     sorted_runs: [SortedRun];
 }
 
-table Compaction {
+table CompactorJob {
     // Compaction Status visible to public API
-    status: CompactionStatus;
+    status: CompactorJobStatus = Submitted;
 
     // Destination Sorted Run ID
-    destination: u32 (required);
+    destination: uint32;
 
     // Destination Sorted Run
     output_sorted_run: SortedRun;
@@ -84,33 +55,22 @@ table Compaction {
     // Ulid can be used get the human readable timestamp:
     // https://docs.rs/ulid/latest/ulid/struct.Ulid.html#method.timestamp_ms
     // Can also be a replacement from created_ts
-    compaction_id: Ulid;
+    id: Ulid (required);
 
     // Compaction Type to distinguish between internal or external
-    compaction_type: CompactionType (required);
+    request_type: CompactorJobRequestType = Internal;
 
-    // List of CompactionJob Retries
-    job_attempts:[CompactionJob];
+    // List of CompactorJob Retries
+    job_attempts:[CompactorJobAttempt] (required);
 
-    spec: CompactionSpec
-
-    // Update Timestamp of Compaction
-    updated_ts: uint64;
+    spec: CompactorJobInput (required);
 }
 
 
 table CompactionState {
-    // Identifier of the compaction state. Compactor file name would be derived from this field
-    compaction_state_id: uint64;
-
     // Fencing token to ensure single active compactor
     compactor_epoch: uint64;
 
     // Compactions in scheduled, in_progress and recently completed compactions
-    recent_compactions: [Compaction];
-
-    // Creation Timestamp of CompactionState
-    created_at: uint64;
+    recent_jobs: [CompactorJob] (required);
 }
-
-root_type CompactionState;
