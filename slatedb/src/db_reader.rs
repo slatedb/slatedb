@@ -6,7 +6,7 @@ use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions
 use crate::db_read::DbRead;
 use crate::db_state::CoreDbState;
 use crate::db_stats::DbStats;
-use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
+use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
@@ -28,22 +28,22 @@ use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+pub(crate) const DB_READER_TASK_NAME: &str = "manifest_poller";
 
 /// Read-only interface for accessing a database from either
 /// the latest persistent state or from an arbitrary checkpoint.
 pub struct DbReader {
     inner: Arc<DbReaderInner>,
-    manifest_poller_task: Mutex<Option<JoinHandle<Result<(), SlateDBError>>>>,
-    cancellation_token: CancellationToken,
+    task_executor: MessageHandlerExecutor,
 }
 
 struct DbReaderInner {
@@ -95,6 +95,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
+        error_watcher: WatchableOnceCell<SlateDBError>,
         logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
@@ -156,7 +157,7 @@ impl DbReaderInner {
             user_checkpoint_id: checkpoint_id,
             oracle,
             reader,
-            error_watcher: WatchableOnceCell::new(),
+            error_watcher,
             rand,
         })
     }
@@ -372,20 +373,20 @@ impl DbReaderInner {
 
     fn spawn_manifest_poller(
         self: &Arc<Self>,
-        cancellation_token: CancellationToken,
-    ) -> JoinHandle<Result<(), SlateDBError>> {
+        task_executor: &MessageHandlerExecutor,
+    ) -> Result<(), SlateDBError> {
         let poller = ManifestPoller {
             inner: Arc::clone(self),
         };
         let (_tx, rx) = mpsc::unbounded_channel();
-        let mut disptacher = MessageDispatcher::new(
+        let result = task_executor.add_handler(
+            DB_READER_TASK_NAME.to_string(),
             Box::new(poller),
             rx,
-            self.system_clock.clone(),
-            cancellation_token,
-            self.error_watcher.clone(),
+            &Handle::current(),
         );
-        tokio::spawn(async move { disptacher.run().await })
+        task_executor.monitor_on(&Handle::current())?;
+        result
     }
 
     async fn replay_wal_into(
@@ -564,7 +565,9 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let cancellation_token = CancellationToken::new();
+        let error_watcher = WatchableOnceCell::new();
+        let task_executor =
+            MessageHandlerExecutor::new(error_watcher.clone(), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
         let table_store = store_provider.table_store();
         let inner = Arc::new(
@@ -573,6 +576,7 @@ impl DbReader {
                 table_store,
                 options,
                 checkpoint_id,
+                error_watcher,
                 logical_clock,
                 system_clock,
                 rand,
@@ -583,16 +587,13 @@ impl DbReader {
         // If no checkpoint was provided, then we have established a new checkpoint
         // from the latest state, and we need to refresh it according to the params
         // of `DbReaderOptions`.
-        let manifest_poller_task = if checkpoint_id.is_none() {
-            Some(inner.spawn_manifest_poller(cancellation_token.clone()))
-        } else {
-            None
-        };
+        if checkpoint_id.is_none() {
+            inner.spawn_manifest_poller(&task_executor)?;
+        }
 
         Ok(Self {
             inner,
-            manifest_poller_task: Mutex::new(manifest_poller_task),
-            cancellation_token,
+            task_executor,
         })
     }
 
@@ -835,19 +836,10 @@ impl DbReader {
     /// ```
     ///
     pub async fn close(&self) -> Result<(), crate::Error> {
-        self.cancellation_token.cancel();
-
-        if let Some(manifest_poller_task) = {
-            let mut maybe_manifest_poller_task = self.manifest_poller_task.lock();
-            maybe_manifest_poller_task.take()
-        } {
-            let result = manifest_poller_task
-                .await
-                .expect("failed to join manifest poller task");
-            info!("manifest poller task exited [result={:?}]", result);
-        }
-
-        Ok(())
+        self.task_executor
+            .shutdown_task(DB_READER_TASK_NAME)
+            .await
+            .map_err(Into::into)
     }
 }
 

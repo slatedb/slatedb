@@ -8,7 +8,6 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -20,7 +19,7 @@ use crate::compactor_state::SourceId;
 use crate::compactor_state::{Compaction, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
-use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
+use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::rand::DbRand;
@@ -28,6 +27,8 @@ pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{IdGenerator, WatchableOnceCell};
+
+pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
 
 pub trait CompactionSchedulerSupplier: Send + Sync {
     fn compaction_scheduler(
@@ -158,21 +159,20 @@ pub(crate) enum CompactorMessage {
 /// sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
 /// is the [`TokioCompactionExecutor`] which runs compaction on a local tokio runtime.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) struct Compactor {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    task_executor: Arc<MessageHandlerExecutor>,
     compactor_runtime: Handle,
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
-    error_state: WatchableOnceCell<SlateDBError>,
-    cancellation_token: CancellationToken,
 }
 
 impl Compactor {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
@@ -183,20 +183,22 @@ impl Compactor {
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
         error_state: WatchableOnceCell<SlateDBError>,
-        cancellation_token: CancellationToken,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            error_state.clone(),
+            system_clock.clone(),
+        ));
         Self {
             manifest_store,
             table_store,
             options: Arc::new(options),
             scheduler_supplier,
+            task_executor,
             compactor_runtime,
             rand,
             stats,
             system_clock,
-            error_state,
-            cancellation_token,
         }
     }
 
@@ -208,6 +210,7 @@ impl Compactor {
     ///
     /// ## Returns
     /// * `Result<(), SlateDBError>` - The result of the compaction event loop.
+    #[allow(dead_code)]
     pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
@@ -231,18 +234,25 @@ impl Compactor {
             self.system_clock.clone(),
         )
         .await?;
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(handler),
-            rx,
-            self.system_clock.clone(),
-            self.cancellation_token.clone(),
-            self.error_state.clone(),
-        );
-        dispatcher.run().await
+        self.task_executor
+            .add_handler(
+                COMPACTOR_TASK_NAME.to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to spawn compactor task");
+        self.task_executor.monitor_on(&Handle::current())?;
+        self.task_executor.join_task(COMPACTOR_TASK_NAME).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn stop(&self) -> Result<(), SlateDBError> {
+        self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await
     }
 }
 
-struct CompactorEventHandler {
+pub(crate) struct CompactorEventHandler {
     state: CompactorState,
     manifest: FenceableManifest,
     options: Arc<CompactorOptions>,
@@ -309,7 +319,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
 }
 
 impl CompactorEventHandler {
-    async fn new(
+    pub(crate) async fn new(
         manifest_store: Arc<ManifestStore>,
         options: Arc<CompactorOptions>,
         scheduler: Arc<dyn CompactionScheduler + Send + Sync>,

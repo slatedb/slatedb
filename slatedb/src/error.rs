@@ -101,10 +101,19 @@ pub(crate) enum SlateDBError {
     #[error("read channel error")]
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 
-    #[error("background task panic'd")]
+    #[error("background task panicked. name=`{0}`")]
     // we need to wrap the panic args in an Arc so SlateDbError is Clone
     // we need to wrap the panic args in a mutex so that SlateDbError is Sync
-    BackgroundTaskPanic(Arc<Mutex<Box<dyn Any + Send>>>),
+    BackgroundTaskPanic(String, Arc<Mutex<Box<dyn Any + Send>>>),
+
+    #[error("background task exists. name=`{0}`")]
+    BackgroundTaskExists(String),
+
+    #[error("background task cancelled. name=`{0}`")]
+    BackgroundTaskCancelled(String),
+
+    #[error("background task executor already started")]
+    BackgroundTaskExecutorStarted,
 
     #[error("db is closed")]
     Closed,
@@ -129,9 +138,6 @@ pub(crate) enum SlateDBError {
 
     #[error("manifest update timeout after {timeout:?}")]
     ManifestUpdateTimeout { timeout: Duration },
-
-    #[error("wal buffer already started")]
-    WalBufferAlreadyStarted,
 
     #[error("cannot seek to a key outside the iterator range. key=`{key:?}`, range=`{range:?}`")]
     SeekKeyOutOfRange { key: Vec<u8>, range: BytesRange },
@@ -459,12 +465,14 @@ impl From<SlateDBError> for Error {
 
             // Internal errors
             SlateDBError::CompactionExecutorFailed => Error::internal(msg),
-            SlateDBError::BackgroundTaskPanic(err) => {
+            SlateDBError::BackgroundTaskPanic(_, err) => {
                 Error::internal(msg).with_source(Box::new(PanicError(err)))
             }
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),
-            SlateDBError::WalBufferAlreadyStarted => Error::internal(msg),
             SlateDBError::ReadChannelError(err) => Error::internal(msg).with_source(Box::new(err)),
+            SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),
+            SlateDBError::BackgroundTaskCancelled(_) => Error::internal(msg),
+            SlateDBError::BackgroundTaskExecutorStarted => Error::internal(msg),
         }
     }
 }
