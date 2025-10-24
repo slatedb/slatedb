@@ -99,6 +99,7 @@ pub struct Compaction {
 #[doc = "Canonical, internal record of a compaction plan.\n\nA plan bundles a stable `id` (ULID), a `compaction_type` (internal vs. external) and the client-facing `Compaction` payload. The compactor tracks plans in two maps: a canonical history keyed by plan id and a runtime view keyed by job id.\n\nNote: `CompactionPlan` is internal-only; `Compaction` remains the public type that clients observe and does not expose the plan id."]
 pub(crate) struct CompactionPlan {
     id: Ulid,
+    #[allow(dead_code)]
     compaction_type: CompactionType,
     compaction: Compaction,
 }
@@ -115,7 +116,8 @@ impl CompactionPlan {
     pub(crate) fn id(&self) -> Ulid {
         self.id
     }
-
+    
+    #[allow(dead_code)]
     pub(crate) fn compaction_type(&self) -> &CompactionType {
         &self.compaction_type
     }

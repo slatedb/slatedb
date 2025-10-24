@@ -201,32 +201,6 @@ typedef struct CSdbScanResult {
 
 #define Checkpoint_VT_METADATA 14
 
-#define LinearCompactionJob_VT_COMPLETED_INPUT_SST_IDS 4
-
-#define LinearCompactionJob_VT_COMPLETED_INPUT_SR_IDS 6
-
-#define CompactionJob_VT_JOB_ID 4
-
-#define CompactionJob_VT_COMPACTION_ID 6
-
-#define CompactionJob_VT_SPEC_TYPE 8
-
-#define CompactionJob_VT_SPEC 10
-
-#define SortedRunCompaction_VT_SORTED_RUNS 6
-
-#define Compaction_VT_STATUS 4
-
-#define Compaction_VT_DESTINATION 6
-
-#define Compaction_VT_OUTPUT_SORTED_RUN 8
-
-#define Compaction_VT_COMPACTION_TYPE 12
-
-#define Compaction_VT_JOB_ATTEMPTS 14
-
-#define CompactionState_VT_RECENT_COMPACTIONS 6
-
 // Initialize logging for SlateDB Go bindings
 // This should be called once before using any other SlateDB functions
 //
