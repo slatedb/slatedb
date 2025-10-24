@@ -6,7 +6,7 @@
 
 use crate::config::{MergeOptions, PutOptions};
 use crate::iter::{IterationOrder, KeyValueIterator};
-use crate::mem_table::{KVTableInternalKey, KVTableInternalKeyRange};
+use crate::mem_table::{KVTableInternalKeyRange, SequencedKey};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -47,9 +47,13 @@ use uuid::Uuid;
 /// means that WAL SSTs could get large if there's a large batch write.
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
-    pub(crate) ops: BTreeMap<KVTableInternalKey, WriteOp>,
+    pub(crate) ops: BTreeMap<SequencedKey, WriteOp>,
     pub(crate) txn_id: Option<Uuid>,
-    pub(crate) seq: u64,
+    /// due to merges, multiple writes may happen for the same key in one batch,
+    /// this write_idx tracks the order in which writes happen within a single
+    /// batch (unrelated to the sequence number of the batch, which is assigned
+    /// atomically by the oracle when the batch is committed).
+    pub(crate) write_idx: u64,
 }
 
 impl Default for WriteBatch {
@@ -139,7 +143,7 @@ impl WriteBatch {
         WriteBatch {
             ops: BTreeMap::new(),
             txn_id: None,
-            seq: 0,
+            write_idx: 0,
         }
     }
 
@@ -147,7 +151,7 @@ impl WriteBatch {
         Self {
             ops: self.ops,
             txn_id: Some(txn_id),
-            seq: self.seq,
+            write_idx: self.write_idx,
         }
     }
 
@@ -205,7 +209,7 @@ impl WriteBatch {
         // extract_if API to support taking in a range to scan)
         self.ops.retain(|k, _| k.user_key != key);
         self.ops.insert(
-            KVTableInternalKey::new(key.clone(), self.seq),
+            SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Put(
                 key.clone(),
                 Bytes::copy_from_slice(value.as_ref()),
@@ -213,7 +217,7 @@ impl WriteBatch {
             ),
         );
 
-        self.seq += 1;
+        self.write_idx += 1;
     }
 
     /// Merge a key-value pair into the batch. Keys must not be empty.
@@ -235,7 +239,7 @@ impl WriteBatch {
 
         let key = Bytes::copy_from_slice(key.as_ref());
         self.ops.insert(
-            KVTableInternalKey::new(key.clone(), self.seq),
+            SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Merge(
                 key.clone(),
                 Bytes::copy_from_slice(value.as_ref()),
@@ -243,7 +247,7 @@ impl WriteBatch {
             ),
         );
 
-        self.seq += 1;
+        self.write_idx += 1;
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
@@ -259,11 +263,11 @@ impl WriteBatch {
         // extract_if API to support taking in a range to scan)
         self.ops.retain(|k, _| k.user_key != key);
         self.ops.insert(
-            KVTableInternalKey::new(key.clone(), self.seq),
+            SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Delete(key),
         );
 
-        self.seq += 1;
+        self.write_idx += 1;
     }
 
     pub(crate) fn keys(&self) -> HashSet<Bytes> {
@@ -277,9 +281,7 @@ impl WriteBatch {
 
 /// Iterator over WriteBatch entries
 pub(crate) struct WriteBatchIterator<'a> {
-    iter: Peekable<
-        Box<dyn Iterator<Item = (&'a KVTableInternalKey, &'a WriteOp)> + Send + Sync + 'a>,
-    >,
+    iter: Peekable<Box<dyn Iterator<Item = (&'a SequencedKey, &'a WriteOp)> + Send + Sync + 'a>>,
     ordering: IterationOrder,
 }
 
@@ -384,7 +386,7 @@ mod tests {
     }])]
     fn test_put_delete_batch(#[case] test_case: Vec<WriteOpTestCase>) {
         let mut batch = WriteBatch::new();
-        let mut expected_ops: BTreeMap<KVTableInternalKey, WriteOp> = BTreeMap::new();
+        let mut expected_ops: BTreeMap<SequencedKey, WriteOp> = BTreeMap::new();
         for (seq, test_case) in test_case.into_iter().enumerate() {
             if let Some(value) = test_case.value {
                 batch.put_with_options(
@@ -393,7 +395,7 @@ mod tests {
                     &test_case.options,
                 );
                 expected_ops.insert(
-                    KVTableInternalKey::new(Bytes::from(test_case.key.clone()), seq as u64),
+                    SequencedKey::new(Bytes::from(test_case.key.clone()), seq as u64),
                     WriteOp::Put(
                         Bytes::from(test_case.key),
                         Bytes::from(value),
@@ -403,7 +405,7 @@ mod tests {
             } else {
                 batch.delete(test_case.key.as_slice());
                 expected_ops.insert(
-                    KVTableInternalKey::new(Bytes::from(test_case.key.clone()), seq as u64),
+                    SequencedKey::new(Bytes::from(test_case.key.clone()), seq as u64),
                     WriteOp::Delete(Bytes::from(test_case.key)),
                 );
             }
@@ -420,7 +422,7 @@ mod tests {
         assert_eq!(batch.ops.len(), 1); // Only one entry due to deduplication
         let op = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match op {
             WriteOp::Put(_, value, _) => assert_eq!(value.as_ref(), b"value2"),
@@ -672,7 +674,7 @@ mod tests {
         assert_eq!(batch.ops.len(), 1);
         let op = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
             .unwrap();
         match op {
             WriteOp::Merge(key, value, options) => {
@@ -699,7 +701,7 @@ mod tests {
         assert_eq!(batch.ops.len(), 1);
         let op = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
             .unwrap();
         match op {
             WriteOp::Merge(key, value, options) => {
@@ -727,15 +729,15 @@ mod tests {
         // And: all three operations should exist with different sequence numbers
         let op1 = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
             .unwrap();
         let op2 = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         let op3 = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 2))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 2))
             .unwrap();
 
         match (op1, op2, op3) {
@@ -764,13 +766,13 @@ mod tests {
         // And: all keys should exist with correct sequence numbers
         assert!(batch
             .ops
-            .contains_key(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0)));
+            .contains_key(&SequencedKey::new(Bytes::from_static(b"key1"), 0)));
         assert!(batch
             .ops
-            .contains_key(&KVTableInternalKey::new(Bytes::from_static(b"key2"), 1)));
+            .contains_key(&SequencedKey::new(Bytes::from_static(b"key2"), 1)));
         assert!(batch
             .ops
-            .contains_key(&KVTableInternalKey::new(Bytes::from_static(b"key3"), 2)));
+            .contains_key(&SequencedKey::new(Bytes::from_static(b"key3"), 2)));
     }
 
     #[test]
@@ -788,7 +790,7 @@ mod tests {
         // Verify the put operation exists
         let put_op = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
             .unwrap();
         match put_op {
             WriteOp::Put(key, value, _) => {
@@ -801,7 +803,7 @@ mod tests {
         // Verify the merge operation exists
         let merge_op = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match merge_op {
             WriteOp::Merge(key, value, _) => {
@@ -827,7 +829,7 @@ mod tests {
         // Verify the delete operation exists
         let delete_op = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 0))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
             .unwrap();
         match delete_op {
             WriteOp::Delete(key) => {
@@ -839,7 +841,7 @@ mod tests {
         // Verify the merge operation exists
         let merge_op = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match merge_op {
             WriteOp::Merge(key, value, _) => {
@@ -864,7 +866,7 @@ mod tests {
 
         let op = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match op {
             WriteOp::Put(key, value, _) => {
@@ -889,7 +891,7 @@ mod tests {
 
         let op = batch
             .ops
-            .get(&KVTableInternalKey::new(Bytes::from_static(b"key1"), 1))
+            .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
             .unwrap();
         match op {
             WriteOp::Delete(key) => {
