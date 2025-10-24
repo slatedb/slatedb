@@ -27,14 +27,16 @@
 //! ## Example
 //!
 //! ```ignore
-//! # use crate::dispatcher::{MessageHandlerExecutor, MessageHandler};
-//! # use crate::error::SlateDBError;
-//! # use crate::clock::DefaultSystemClock;
-//! # use crate::watchable_once_cell::WatchableOnceCell;
+//! # use slatedb::dispatcher::{MessageHandlerExecutor, MessageHandler, MessageFactory};
+//! # use slatedb::error::SlateDBError;
+//! # use slatedb::clock::DefaultSystemClock;
+//! # use slatedb::utils::WatchableOnceCell;
+//! # use std::sync::Arc;
+//! # use std::time::Duration;
 //! # use tokio::sync::mpsc;
 //! # use tokio::runtime::Handle;
-//! # use tokio_util::sync::CancellationToken;
 //! # use futures::stream::BoxStream;
+//! # use futures::StreamExt;
 //! # #[tokio::main]
 //! # async fn main() {
 //! enum Message {
@@ -45,6 +47,12 @@
 //!
 //! #[async_trait::async_trait]
 //! impl MessageHandler<Message> for PrintMessageHandler {
+//!     fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<Message>>)> {
+//!         let mut tickers = Vec::new();
+//!         tickers.push((Duration::from_secs(1), Box::new(|| Message::Say("tick".to_string()))));
+//!         tickers
+//!     }
+//!
 //!     async fn handle(
 //!         &mut self,
 //!         message: Message,
@@ -55,20 +63,16 @@
 //!         Ok(())
 //!     }
 //!
-//!     async fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<Message>>)> {
-//!         let mut tickers = Vec::new();
-//!         tickers.push((Duration::from_secs(1), Box::new(|| Message::Say("tick".to_string()))));
-//!         tickers
-//!     }
-//!
 //!     async fn cleanup(
 //!         &mut self,
-//!         messages: BoxStream<'async_trait, T>,
+//!         mut messages: BoxStream<'async_trait, Message>,
 //!         result: Result<(), SlateDBError>,
 //!     ) -> Result<(), SlateDBError> {
 //!         match result {
-//!             Ok(_) | Err(SlateDBError::BackgroundTaskShutdown) => {
-//!                 messages.for_each(|m| self.handle(m)).await;
+//!             Ok(_) | Err(SlateDBError::Closed) => {
+//!                 while let Some(m) = messages.next().await {
+//!                     let _ = self.handle(m).await;
+//!                 }
 //!             },
 //!             // skipping drain messages on unclean shutdown
 //!             _ => {},
@@ -77,25 +81,25 @@
 //!     }
 //! }
 //!
-//! let clock = DefaultSystemClock::default();
-//! let cancellation_token = CancellationToken::new();
+//! let clock = Arc::new(DefaultSystemClock::default());
 //! let (tx, rx) = mpsc::unbounded_channel();
-//! let error_state = WatchableOnceCell::new(None);
+//! let error_state = WatchableOnceCell::new();
 //! let handle = Handle::current();
 //! let task_executor = MessageHandlerExecutor::new(
 //!     error_state,
 //!     clock,
 //! );
-//! task_executor.spawn_on(
+//! task_executor.add_handler(
 //!     "print_message_handler".to_string(),
 //!     Box::new(PrintMessageHandler),
 //!     rx,
 //!     &handle,
-//! ).expect("failed to spawn task");
-//! let join_handle = task_executor.monitor_on(handle);
-//! tx.send(Message::Say("hello".to_string())).await;
-//! task_executor.shutdown_task("print_message_handler").await;
-//! join_handle.await;
+//! ).expect("failed to add handler");
+//! let join_handle = task_executor.monitor_on(&handle)
+//!     .expect("failed to start monitoring");
+//! tx.send(Message::Say("hello".to_string())).unwrap();
+//! task_executor.shutdown_task("print_message_handler").await.ok();
+//! join_handle.await.ok();
 //! # }
 //! ```
 
