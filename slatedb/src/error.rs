@@ -106,17 +106,14 @@ pub(crate) enum SlateDBError {
     // we need to wrap the panic args in a mutex so that SlateDbError is Sync
     BackgroundTaskPanic(String, Arc<Mutex<Box<dyn Any + Send>>>),
 
-    #[error("background task started. name=`{0}`")]
-    BackgroundTaskStarted(String),
+    #[error("background task exists. name=`{0}`")]
+    BackgroundTaskExists(String),
 
     #[error("background task cancelled. name=`{0}`")]
     BackgroundTaskCancelled(String),
 
     #[error("background task executor already started")]
     BackgroundTaskExecutorStarted,
-
-    #[error("background task executor not started")]
-    BackgroundTaskExecutorNotStarted,
 
     #[error("db is closed")]
     Closed,
@@ -473,10 +470,9 @@ impl From<SlateDBError> for Error {
             }
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),
             SlateDBError::ReadChannelError(err) => Error::internal(msg).with_source(Box::new(err)),
-            SlateDBError::BackgroundTaskStarted(_) => Error::internal(msg),
+            SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskCancelled(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskExecutorStarted => Error::internal(msg),
-            SlateDBError::BackgroundTaskExecutorNotStarted => Error::internal(msg),
         }
     }
 }

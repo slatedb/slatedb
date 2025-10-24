@@ -20,7 +20,7 @@
 //!   (messages, ticks, etc.) and performs work based on those events.
 //!
 //! SlateDB instantiates a [MessageHandlerExecutor] and calls
-//! [MessageHandlerExecutor::spawn_on] for each [MessageHandler]. The DB then calls
+//! [MessageHandlerExecutor::add_handler] for each [MessageHandler]. The DB then calls
 //! [MessageHandlerExecutor::monitor_on] to start the event loop and monitor tasks until
 //! shutdown.
 //!
@@ -357,10 +357,19 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     ) -> Result<(), SlateDBError>;
 }
 
+/// A builder data structure for [MessageHandlerExecutor]. The executor creates a
+/// [MessageHandlerFuture] for each handler it receives in
+/// [MessageHandlerExecutor::add_handler]. The future is used to run the handler's
+/// dispatcher ([MessageDispatcher::run]) and handle cleanup
+/// ([MessageDispatcher::cleanup]).
 struct MessageHandlerFuture {
+    /// The name of the task.
     name: String,
+    /// A future that runs the handler's dispatcher and handles cleanup.
     future: BoxFuture<'static, Result<(), SlateDBError>>,
+    /// A cancellation token used to cancel the handler's dispatcher.
     token: CancellationToken,
+    /// A runtime handle used to spawn the future.
     handle: Handle,
 }
 
@@ -376,19 +385,25 @@ impl std::fmt::Debug for MessageHandlerFuture {
 /// down [MessageDispatcher]s. Think of it as a dispatcher pool.
 ///
 /// Each dispatcher is associated with a name, which is used to identify the dispatcher
-/// in the [MessageHandlerExecutor]. As dispatchers complete, their results are stored in
-/// the [MessageHandlerExecutor]. The first completed dispatcher's results are also used for
-/// [crate::db_state::DbState::error].
+/// in the [MessageHandlerExecutor]. As dispatchers complete, their results are stored
+/// in the [MessageHandlerExecutor]. The first completed dispatcher's results are also
+/// used for [crate::db_state::DbState::error].
 ///
-/// The dispatcher also catches panics, and will convert them to an appropriate
+/// The executor also catches panics, and will convert them to an appropriate
 /// [SlateDBError].
 #[derive(Debug)]
 pub(crate) struct MessageHandlerExecutor {
+    /// A vector of futures for each dispatcher. Set to `None` when executor starts.
     futures: Mutex<Option<Vec<MessageHandlerFuture>>>,
+    /// A map of cancellation tokens for each dispatcher.
     tokens: SkipMap<String, CancellationToken>,
+    /// A map of results or dispatchers that have returned.
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
+    /// A watchable cell that stores the error state of the database.
     error_state: WatchableOnceCell<SlateDBError>,
+    /// A system clock for time keeping.
     clock: Arc<dyn SystemClock>,
+    /// A fail point registry for fail points.
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
 }
@@ -418,26 +433,27 @@ impl MessageHandlerExecutor {
         }
     }
 
-    /// Creates a new [MessageHandlerExecutor] with a custom [FailPointRegistry].
+    /// Sets a custom [FailPointRegistry] for the executor.
     ///
     /// ## Arguments
     ///
-    /// * `error_state`: A [WatchableOnceCell] that stores the error state of the database.
-    /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
     /// * `fp_registry`: A [FailPointRegistry] to use for fail points.
     ///
     /// ## Returns
     ///
-    /// The new [MessageHandlerExecutor].
+    /// The [MessageHandlerExecutor] with the custom [FailPointRegistry].
     #[allow(dead_code)]
     pub(crate) fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
         self.fp_registry = fp_registry;
         self
     }
 
-    /// Spawns a new [MessageDispatcher] for the provided [MessageHandler] on the given
-    /// [Handle]. Calls [MessageDispatcher::run] on the dispatcher in a new task. When
-    /// the dispatcher returns, [MessageDispatcher::cleanup] is called.
+    /// Adds a new [MessageHandlerFuture] for the provided [MessageHandler] on the given
+    /// [Handle]. The future calls [MessageDispatcher::run] on the dispatcher. When
+    /// [MessageDispatcher::run] returns, [MessageDispatcher::cleanup] is called. The
+    /// future is _not_ spawned in this method. Instead, it is added to the executor's
+    /// `futures` list and will be spawned when [MessageHandlerExecutor::monitor_on] is
+    /// called.
     ///
     /// ## Arguments
     ///
@@ -450,8 +466,8 @@ impl MessageHandlerExecutor {
     /// ## Returns
     ///
     /// - `Ok(())` if the dispatcher was successfully spawned.
-    /// - Err([SlateDBError::BackgroundTaskStarted]) if a dispatcher with the same name is already running.
-    /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already running.
+    /// - Err([SlateDBError::BackgroundTaskExists]) if a dispatcher with the same name is
+    ///   already added.
     pub(crate) fn add_handler<T: Send + std::fmt::Debug + 'static>(
         &self,
         name: String,
@@ -466,6 +482,7 @@ impl MessageHandlerExecutor {
         let this_name = name.clone();
         // future that runs the dispatcher and handles cleanup
         let task_future = async move {
+            // catch dispatcher panics using catch_unwind
             let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
             let run_result = unwrap_unwind(this_name.clone(), run_unwind_result);
             this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
@@ -489,7 +506,7 @@ impl MessageHandlerExecutor {
         let mut guard = self.futures.lock();
         if let Some(task_definitions) = guard.as_mut() {
             if task_definitions.iter().any(|t| t.name == name) {
-                return Err(SlateDBError::BackgroundTaskStarted(name));
+                return Err(SlateDBError::BackgroundTaskExists(name));
             }
             task_definitions.push(MessageHandlerFuture {
                 name,
@@ -503,23 +520,26 @@ impl MessageHandlerExecutor {
         }
     }
 
-    /// Spawns a task that monitors for completed [MessageDispatcher]s and stores their
-    /// results.
+    /// Starts all [MessageHandlerFuture]s and spawns a task that monitors for completed
+    /// dispatchers. As dispatchers complete, their results are stored in the executor's
+    /// `results` map.
     ///
     /// ## Arguments
     ///
-    /// * `handle`: The [Handle] to use for spawning the monitor.
+    /// * `handle`: The [Handle] to spawn the monitor on.
     ///
     /// ## Returns
     ///
-    /// A [JoinHandle] that can be used to wait for the monitor to complete.
+    /// - Ok([JoinHandle]) if the monitor was successfully spawned.
+    /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already
+    ///   started.
     pub(crate) fn monitor_on(&self, handle: &Handle) -> Result<JoinHandle<()>, SlateDBError> {
         let mut task_definitions = {
             let mut guard = self.futures.lock();
             if let Some(task_definitions) = guard.take() {
                 task_definitions
             } else {
-                return Err(SlateDBError::BackgroundTaskExecutorNotStarted);
+                return Err(SlateDBError::BackgroundTaskExecutorStarted);
             }
         };
         let mut tasks = JoinMap::new();
