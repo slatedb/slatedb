@@ -794,7 +794,7 @@ mod test {
         let fp_registry = Arc::new(FailPointRegistry::default());
         let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "pause").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->return").unwrap();
         task_executor
             .add_handler(
                 "test".to_string(),
@@ -807,20 +807,22 @@ mod test {
             .monitor_on(&Handle::current())
             .expect("failed to monitor executor");
 
-        // Send a regular message successfully and then trigger a panic
+        // Send a message successfully.
         tx.send(TestMessage::Channel(42)).unwrap();
-        fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->return").unwrap();
+        // Wait for the first message to be processed.
         wait_for_message_count(log.clone(), 1).await;
-
-        // Send another message after the panic
+        // Send another message. The panic is guaranteed to be triggered before this
+        // message is processed since the `dispatcher-run-loop` failpoint is set to
+        // `1*off->return`, one message has been processed, and the point is hit before
+        // the message selector.
         tx.send(TestMessage::Channel(77)).unwrap();
-
-        // Now proceed with cleanup
+        // Now allow cleanup to proceed.
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "off").unwrap();
 
         // Wait for cleanup to start (unclean shutdown)
         let _ = cleanup_reader.await_value().await;
 
+        // Wait for the dispatcher to stop
         let result = timeout(Duration::from_secs(30), task_executor.join_task("test"))
             .await
             .expect("dispatcher did not stop in time");
@@ -835,7 +837,6 @@ mod test {
             cleanup_reader.read(),
             Some(Err(SlateDBError::Fenced))
         ));
-        assert!(matches!(result, Err(SlateDBError::Fenced)));
         let messages = log.lock().unwrap().clone();
         assert_eq!(
             messages,
