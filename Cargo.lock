@@ -1646,9 +1646,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.8.0"
+version = "2.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3954d50fe15b02142bf25d3b8bdadb634ec3948f103d04ffe3031bc8fe9d7058"
+checksum = "4b0f83760fb341a774ed326568e19f5a863af4a952def8c39f9ab92fd95b88e5"
 dependencies = [
  "equivalent",
  "hashbrown 0.15.2",
@@ -3780,6 +3780,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
+ "hashbrown 0.15.2",
  "pin-project-lite",
  "tokio",
 ]

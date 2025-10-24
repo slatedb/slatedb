@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             manifest,
             wal,
             compacted,
-        } => schedule_gc(&admin, manifest, wal, compacted, cancellation_token).await?,
+        } => schedule_gc(&admin, manifest, wal, compacted).await?,
     }
 
     Ok(())
@@ -161,7 +161,6 @@ async fn schedule_gc(
     manifest_schedule: Option<GcSchedule>,
     wal_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
-    cancellation_token: CancellationToken,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(schedule: GcSchedule) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -175,8 +174,6 @@ async fn schedule_gc(
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
     };
 
-    admin
-        .run_gc_in_background(gc_opts, cancellation_token)
-        .await?;
+    admin.run_gc(gc_opts).await?;
     Ok(())
 }

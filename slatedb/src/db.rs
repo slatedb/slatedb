@@ -29,15 +29,17 @@ use object_store::path::Path;
 use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 
+use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::db_transaction::DBTransaction;
+use crate::dispatcher::MessageHandlerExecutor;
+use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio_util::sync::CancellationToken;
 
 use crate::batch::WriteBatch;
-use crate::batch_write::WriteBatchMessage;
+use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
@@ -54,7 +56,7 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
-use crate::mem_table_flush::MemtableFlushMsg;
+use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
 use crate::oracle::Oracle;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -64,7 +66,7 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::utils::{MonotonicSeq, SendSafely};
-use crate::wal_buffer::WalBufferManager;
+use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use log::{info, trace, warn};
 
@@ -97,7 +99,6 @@ pub(crate) struct DbInner {
 }
 
 impl DbInner {
-    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         settings: Settings,
         logical_clock: Arc<dyn LogicalClock>,
@@ -152,7 +153,6 @@ impl DbInner {
             oracle.clone(),
             table_store.clone(),
             mono_clock.clone(),
-            system_clock.clone(),
             settings.l0_sst_size_bytes,
             settings.flush_interval,
         ));
@@ -290,7 +290,7 @@ impl DbInner {
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
             let (wal_size_bytes, imm_memtable_size_bytes) = {
-                let wal_size_bytes = self.wal_buffer.estimated_bytes().await?;
+                let wal_size_bytes = self.wal_buffer.estimated_bytes()?;
                 let imm_memtable_size_bytes = {
                     let guard = self.state.read();
                     // Exclude active memtable to avoid a write lock.
@@ -334,7 +334,7 @@ impl DbInner {
                     guard.state().imm_memtable.back().cloned()
                 };
 
-                let maybe_oldest_unflushed_wal = self.wal_buffer.oldest_unflushed_wal().await;
+                let maybe_oldest_unflushed_wal = self.wal_buffer.oldest_unflushed_wal();
 
                 // There is a window of time after mem_size_bytes is larger than max_unflushed_bytes
                 // but before we get the memtable and wal table. During that time, if the memtable and/or
@@ -542,12 +542,7 @@ impl DbInner {
 
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
-    /// The handle for the flush thread.
-    memtable_flush_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    write_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    compactor_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    garbage_collector_task: Mutex<Option<tokio::task::JoinHandle<Result<(), SlateDBError>>>>,
-    cancellation_token: CancellationToken,
+    task_executor: Arc<MessageHandlerExecutor>,
 }
 
 impl Db {
@@ -635,47 +630,32 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        self.cancellation_token.cancel();
-
-        if let Some(compactor_task) = {
-            let mut maybe_compactor_task = self.compactor_task.lock();
-            maybe_compactor_task.take()
-        } {
-            let result = compactor_task.await.expect("failed to join compactor task");
-            info!("compactor task exited [result={:?}]", result);
+        if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
+            warn!("failed to shutdown compactor task [error={:?}]", e);
         }
 
-        if let Some(garbage_collector_task) = {
-            let mut maybe_garbage_collector_task = self.garbage_collector_task.lock();
-            maybe_garbage_collector_task.take()
-        } {
-            let result = garbage_collector_task
-                .await
-                .expect("failed to join garbage collector task");
-            info!("garbage collector task exited [result={:?}]", result);
+        if let Err(e) = self.task_executor.shutdown_task(GC_TASK_NAME).await {
+            warn!("failed to shutdown garbage collector task [error={:?}]", e);
         }
 
-        if let Some(write_task) = {
-            let mut write_task = self.write_task.lock();
-            write_task.take()
-        } {
-            let result = write_task.await.expect("failed to join write thread");
-            info!("write task exited [result={:?}]", result);
+        if let Err(e) = self
+            .task_executor
+            .shutdown_task(WRITE_BATCH_TASK_NAME)
+            .await
+        {
+            warn!("failed to shutdown writer task [error={:?}]", e);
         }
 
-        // Shutdown the WAL flush thread.
-        let result = self.inner.wal_buffer.close().await;
-        info!("wal buffer task exited [result={:?}]", result);
+        if let Err(e) = self.task_executor.shutdown_task(WAL_BUFFER_TASK_NAME).await {
+            warn!("failed to shutdown wal writer task [error={:?}]", e);
+        }
 
-        // Shutdown the memtable flush thread.
-        if let Some(memtable_flush_task) = {
-            let mut memtable_flush_task = self.memtable_flush_task.lock();
-            memtable_flush_task.take()
-        } {
-            let result = memtable_flush_task
-                .await
-                .expect("failed to join memtable flush thread");
-            info!("mem table flush task exited [result={:?}]", result);
+        if let Err(e) = self
+            .task_executor
+            .shutdown_task(MEMTABLE_FLUSHER_TASK_NAME)
+            .await
+        {
+            warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
         self.inner.state.write().error().write(SlateDBError::Closed);
@@ -1439,17 +1419,11 @@ mod tests {
             .unwrap();
 
         // a sanity check: the wal contains the most recent write
-        assert_ne!(
-            kv_store.inner.wal_buffer.estimated_bytes().await.unwrap(),
-            0
-        );
+        assert_ne!(kv_store.inner.wal_buffer.estimated_bytes().unwrap(), 0);
 
         // and a flush() should clear it
         kv_store.flush().await.unwrap();
-        assert_eq!(
-            kv_store.inner.wal_buffer.estimated_bytes().await.unwrap(),
-            0
-        );
+        assert_eq!(kv_store.inner.wal_buffer.estimated_bytes().unwrap(), 0);
     }
 
     #[tokio::test]
@@ -2177,7 +2151,7 @@ mod tests {
         let stats_registry = StatRegistry::new();
         let cache_stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let part_size = 1024;
-        eprintln!("temp_dir: {:?}", temp_dir.path());
+        info!("temp_dir: {:?}", temp_dir.path());
 
         let cache_storage = Arc::new(FsCacheStorage::new(
             temp_dir.keep(),
@@ -3980,7 +3954,7 @@ mod tests {
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
         let result = db.put(b"foo", b"bar").await.unwrap_err();
-        assert!(result.to_string().contains("background task panic'd"));
+        assert!(result.to_string().contains("background task panicked"));
     }
 
     #[tokio::test]
@@ -4003,7 +3977,7 @@ mod tests {
         let result = db.put(b"foo", b"bar").await.unwrap_err();
         assert_eq!(
             result.to_string(),
-            "Internal error: background task panic'd (failpoint write-wal-sst-io-error panic)"
+            "Internal error: background task panicked. name=`wal_writer` (failpoint write-wal-sst-io-error panic)"
         );
 
         // Close, which flushes the latest manifest to the object store

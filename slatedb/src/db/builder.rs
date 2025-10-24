@@ -108,12 +108,12 @@ use fail_parallel::FailPointRegistry;
 use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::admin::Admin;
+use crate::batch_write::WriteBatchEventHandler;
+use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
@@ -121,8 +121,12 @@ use crate::clock::DefaultLogicalClock;
 use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
 use crate::clock::SystemClock;
+use crate::compactor::CompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
+use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
+use crate::compactor_executor::TokioCompactionExecutor;
+use crate::compactor_stats::CompactionStats;
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
@@ -134,10 +138,13 @@ use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::CoreDbState;
-use crate::dispatcher::MessageDispatcher;
+use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
+use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::mem_table_flush::MemtableFlusher;
+use crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -163,7 +170,6 @@ pub struct DbBuilder<P: Into<Path>> {
     compaction_runtime: Option<Handle>,
     compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     fp_registry: Arc<FailPointRegistry>,
-    cancellation_token: CancellationToken,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
 }
@@ -183,7 +189,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             compaction_runtime: None,
             compaction_scheduler_supplier: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
-            cancellation_token: CancellationToken::new(),
             seed: None,
             sst_block_size: None,
         }
@@ -251,11 +256,6 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Sets the fail point registry to use for the database.
     pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
         self.fp_registry = fp_registry;
-        self
-    }
-
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = cancellation_token;
         self
     }
 
@@ -474,18 +474,29 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup background tasks
         let tokio_handle = Handle::current();
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            inner.clone().state.read().error(),
+            system_clock.clone(),
+        ));
         if inner.wal_enabled {
-            inner.wal_buffer.start_background().await?;
+            inner.wal_buffer.init(task_executor.clone()).await?;
         };
-
-        let memtable_flush_task = inner.spawn_memtable_flush_task(
-            manifest,
-            memtable_flush_rx,
-            &tokio_handle,
-            self.cancellation_token.clone(),
-        );
-        let write_task =
-            inner.spawn_write_task(write_rx, &tokio_handle, self.cancellation_token.clone());
+        task_executor
+            .add_handler(
+                MEMTABLE_FLUSHER_TASK_NAME.to_string(),
+                Box::new(MemtableFlusher::new(inner.clone(), manifest)),
+                memtable_flush_rx,
+                &tokio_handle,
+            )
+            .expect("failed to spawn memtable flusher task");
+        task_executor
+            .add_handler(
+                WRITE_BATCH_TASK_NAME.to_string(),
+                Box::new(WriteBatchEventHandler::new(inner.clone())),
+                write_rx,
+                &tokio_handle,
+            )
+            .expect("failed to spawn write batch event handler task");
 
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -501,60 +512,69 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
         // If either are set, we need to initialize the compactor.
-        let compactor_task = if self.compaction_scheduler_supplier.is_some()
-            || self.settings.compactor_options.is_some()
+        if self.compaction_scheduler_supplier.is_some() || self.settings.compactor_options.is_some()
         {
-            let compactor_options = self.settings.compactor_options.unwrap_or_default();
+            let compactor_options = Arc::new(self.settings.compactor_options.unwrap_or_default());
             let compaction_handle = self
                 .compaction_runtime
                 .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
                 .unwrap_or_else(default_compaction_scheduler_supplier);
-            let compactor = Compactor::new(
-                manifest_store.clone(),
-                uncached_table_store.clone(),
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&compactor_options));
+            let stats = Arc::new(CompactionStats::new(inner.stat_registry.clone()));
+            let executor = Arc::new(TokioCompactionExecutor::new(
+                compaction_handle,
                 compactor_options.clone(),
-                scheduler_supplier,
-                compaction_handle.clone(),
+                tx,
+                uncached_table_store.clone(),
                 rand.clone(),
-                inner.stat_registry.clone(),
+                stats.clone(),
                 system_clock.clone(),
-                inner.clone().state.read().error(),
-                self.cancellation_token.clone(),
-            );
-            let compactor_task = tokio::spawn(async move { compactor.run_async_task().await });
-            Some(compactor_task)
-        } else {
-            None
-        };
+                manifest_store.clone(),
+            ));
+            let handler = CompactorEventHandler::new(
+                manifest_store.clone(),
+                compactor_options.clone(),
+                scheduler,
+                executor,
+                rand.clone(),
+                stats.clone(),
+                system_clock.clone(),
+            )
+            .await
+            .expect("failed to create compactor");
+            task_executor
+                .add_handler(
+                    COMPACTOR_TASK_NAME.to_string(),
+                    Box::new(handler),
+                    rx,
+                    &tokio_handle,
+                )
+                .expect("failed to spawn compactor task");
+        }
 
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
         // If either are set, we need to initialize the garbage collector.
-        let garbage_collector_task =
-            if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
-                let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
-                let gc = GarbageCollector::new(
-                    manifest_store.clone(),
-                    uncached_table_store.clone(),
-                    gc_options,
-                    inner.stat_registry.clone(),
-                    system_clock.clone(),
-                );
-                // Garbage collector only uses tickers, so pass in a dummy rx channel
-                let (_, rx) = mpsc::unbounded_channel();
-                let mut gc_dispatcher = MessageDispatcher::new(
-                    Box::new(gc),
-                    rx,
-                    system_clock.clone(),
-                    self.cancellation_token.clone(),
-                    inner.clone().state.read().error(),
-                );
-                let garbage_collector_task = tokio::spawn(async move { gc_dispatcher.run().await });
-                Some(garbage_collector_task)
-            } else {
-                None
-            };
+        if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
+            let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
+            let gc = GarbageCollector::new(
+                manifest_store.clone(),
+                uncached_table_store.clone(),
+                gc_options,
+                inner.stat_registry.clone(),
+                system_clock.clone(),
+            );
+            // Garbage collector only uses tickers, so pass in a dummy rx channel
+            let (_, rx) = mpsc::unbounded_channel();
+            task_executor
+                .add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)
+                .expect("failed to spawn garbage collector task");
+        }
+
+        // Monitor background tasks
+        task_executor.monitor_on(&tokio_handle)?;
 
         // Replay WAL
         inner.replay_wal().await?;
@@ -569,11 +589,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create and return the Db instance
         Ok(Db {
             inner,
-            memtable_flush_task: Mutex::new(memtable_flush_task),
-            write_task: Mutex::new(write_task),
-            compactor_task: Mutex::new(compactor_task),
-            garbage_collector_task: Mutex::new(garbage_collector_task),
-            cancellation_token: self.cancellation_token,
+            task_executor,
         })
     }
 }
@@ -719,7 +735,6 @@ pub struct CompactorBuilder<P: Into<Path>> {
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
     error_state: WatchableOnceCell<SlateDBError>,
-    cancellation_token: CancellationToken,
 }
 
 #[allow(unused)]
@@ -735,7 +750,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
             error_state: WatchableOnceCell::new(),
-            cancellation_token: CancellationToken::new(),
         }
     }
 
@@ -762,12 +776,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Sets the system clock to use for the compactor.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
-        self
-    }
-
-    /// Sets the cancellation token to use for the compactor.
-    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
-        self.cancellation_token = cancellation_token;
         self
     }
 
@@ -820,7 +828,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.stat_registry,
             self.system_clock,
             self.error_state,
-            self.cancellation_token,
         )
     }
 }

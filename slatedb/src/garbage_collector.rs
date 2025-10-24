@@ -39,6 +39,7 @@ mod wal_gc;
 
 pub const DEFAULT_MIN_AGE: Duration = Duration::from_secs(86_400);
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
+pub(crate) const GC_TASK_NAME: &str = "garbage_collector";
 
 trait GcTask {
     fn resource(&self) -> &str;
@@ -254,18 +255,19 @@ mod tests {
 
     use chrono::{DateTime, Days, TimeDelta, Utc};
     use object_store::{local::LocalFileSystem, path::Path};
+    use tokio::runtime::Handle;
     use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
     use crate::clock::DefaultSystemClock;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
-    use crate::dispatcher::MessageDispatcher;
+    use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
+
     use crate::utils::WatchableOnceCell;
     use crate::{
         db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
@@ -1148,8 +1150,6 @@ mod tests {
             }),
         };
 
-        let cancellation_token = CancellationToken::new();
-
         let gc = GarbageCollector::new(
             manifest_store.clone(),
             table_store.clone(),
@@ -1159,20 +1159,21 @@ mod tests {
         );
         let (_, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(DefaultSystemClock::default());
-        let error_state = WatchableOnceCell::new();
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(gc),
-            rx,
-            clock,
-            cancellation_token.clone(),
-            error_state,
-        );
-        let jh = tokio::spawn(async move { dispatcher.run().await });
-        cancellation_token.cancel();
-        let result = jh.await.unwrap();
+        let executor = MessageHandlerExecutor::new(WatchableOnceCell::new(), clock);
+        executor
+            .add_handler(
+                "garbage_collector".to_string(),
+                Box::new(gc),
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to spawn task");
+        let jh = executor
+            .monitor_on(&Handle::current())
+            .expect("failed to start monitor task");
+        executor.cancel_task(GC_TASK_NAME);
+        let result = executor.join_task(GC_TASK_NAME).await;
         assert!(matches!(result, Ok(())));
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        assert!(cancellation_token.is_cancelled());
+        jh.await.expect("failed to join task");
     }
 }

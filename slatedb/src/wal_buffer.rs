@@ -11,16 +11,14 @@ use tokio::{
         mpsc::{self},
         oneshot,
     },
-    task::JoinHandle,
 };
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use crate::{
-    clock::{MonotonicClock, SystemClock},
+    clock::MonotonicClock,
     db_state::{DbState, SsTableId},
     db_stats::DbStats,
-    dispatcher::{MessageDispatcher, MessageFactory, MessageHandler},
+    dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor},
     error::SlateDBError,
     iter::KeyValueIterator,
     mem_table::KVTable,
@@ -30,6 +28,8 @@ use crate::{
     utils::SendSafely,
     wal_id::WalIdStore,
 };
+
+pub(crate) const WAL_BUFFER_TASK_NAME: &str = "wal_writer";
 
 /// [`WalBufferManager`] buffers write operations in memory before flushing them to persistent storage.
 /// The flush operation only targets Remote storage right now, later we can add an option to flush to local
@@ -57,15 +57,12 @@ use crate::{
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
     wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
-    // WAL buffer will call `record_fatal_error` if it fails
     db_state: Arc<RwLock<DbState>>,
     db_stats: DbStats,
     mono_clock: Arc<MonotonicClock>,
-    system_clock: Arc<dyn SystemClock>,
     table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
     max_flush_interval: Option<Duration>,
-    cancellation_token: CancellationToken,
 }
 
 struct WalBufferManagerInner {
@@ -75,8 +72,8 @@ struct WalBufferManagerInner {
     immutable_wals: VecDeque<(u64, Arc<KVTable>)>,
     /// The channel to send the flush work to the background worker.
     flush_tx: Option<mpsc::UnboundedSender<WalFlushWork>>,
-    /// task handle of the background worker.
-    background_task: Option<JoinHandle<Result<(), SlateDBError>>>,
+    /// task executor for the background worker.
+    task_executor: Option<Arc<MessageHandlerExecutor>>,
     /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
     /// the immutable wal can be recycled in memory.
     last_applied_seq: Option<u64>,
@@ -87,7 +84,6 @@ struct WalBufferManagerInner {
 }
 
 impl WalBufferManager {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         db_state: Arc<RwLock<DbState>>,
@@ -96,7 +92,6 @@ impl WalBufferManager {
         oracle: Arc<Oracle>,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
-        system_clock: Arc<dyn SystemClock>,
         max_wal_bytes_size: usize,
         max_flush_interval: Option<Duration>,
     ) -> Self {
@@ -108,7 +103,7 @@ impl WalBufferManager {
             last_applied_seq: None,
             recent_flushed_wal_id,
             flush_tx: None,
-            background_task: None,
+            task_executor: None,
             oracle,
         };
         Self {
@@ -118,18 +113,15 @@ impl WalBufferManager {
             db_stats,
             table_store,
             mono_clock,
-            system_clock,
             max_wal_bytes_size,
             max_flush_interval,
-            cancellation_token: CancellationToken::new(),
         }
     }
 
-    pub async fn start_background(self: &Arc<Self>) -> Result<(), SlateDBError> {
-        if self.inner.read().background_task.is_some() {
-            return Err(SlateDBError::WalBufferAlreadyStarted);
-        }
-
+    pub async fn init(
+        self: &Arc<Self>,
+        task_executor: Arc<MessageHandlerExecutor>,
+    ) -> Result<(), SlateDBError> {
         let (flush_tx, flush_rx) = mpsc::unbounded_channel();
         {
             let mut inner = self.inner.write();
@@ -139,19 +131,17 @@ impl WalBufferManager {
             max_flush_interval: self.max_flush_interval,
             wal_buffer: self.clone(),
         };
-        let mut dispatcher = MessageDispatcher::new(
+        let result = task_executor.add_handler(
+            WAL_BUFFER_TASK_NAME.to_string(),
             Box::new(wal_flush_handler),
             flush_rx,
-            self.system_clock.clone(),
-            self.cancellation_token.clone(),
-            self.db_state.read().error(),
+            &Handle::current(),
         );
-        let task_handle = Handle::current().spawn(async move { dispatcher.run().await });
         {
             let mut inner = self.inner.write();
-            inner.background_task = Some(task_handle);
+            inner.task_executor = Some(task_executor);
         }
-        Ok(())
+        result
     }
 
     #[cfg(test)]
@@ -171,14 +161,14 @@ impl WalBufferManager {
         inner.recent_flushed_wal_id
     }
 
-    #[allow(unused)] // used in compactor.rs
+    #[cfg(test)] // used in compactor.rs
     pub fn is_empty(&self) -> bool {
         let inner = self.inner.read();
         inner.current_wal.is_empty() && inner.immutable_wals.is_empty()
     }
 
     /// Returns the total size of all unflushed WALs in bytes.
-    pub async fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
+    pub fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
         let inner = self.inner.read();
         let current_wal_size = self.table_store.estimate_encoded_size(
             inner.current_wal.metadata().entry_num,
@@ -200,7 +190,7 @@ impl WalBufferManager {
 
     /// Append row entries to the current WAL. return the last seq number of the WAL.
     /// TODO: validate the seq number is always increasing.
-    pub async fn append(&self, entries: &[RowEntry]) -> Result<Arc<KVTable>, SlateDBError> {
+    pub fn append(&self, entries: &[RowEntry]) -> Result<Arc<KVTable>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
 
         let inner = self.inner.write();
@@ -214,7 +204,7 @@ impl WalBufferManager {
     /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
-    pub async fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
+    pub fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
         // check the size of the current wal
         let (current_wal, need_flush, flush_tx) = {
             let inner = self.inner.read();
@@ -244,7 +234,7 @@ impl WalBufferManager {
                 )?
         }
 
-        let estimated_bytes = self.estimated_bytes().await?;
+        let estimated_bytes = self.estimated_bytes()?;
         self.db_stats
             .wal_buffer_estimated_bytes
             .set(estimated_bytes as i64);
@@ -256,7 +246,7 @@ impl WalBufferManager {
     /// wait for the current WAL to be flushed. If both are empty, it will
     /// still block on the current WAL to ensure that the WAL buffer is not
     /// empty.
-    pub(crate) async fn oldest_unflushed_wal(&self) -> Option<Arc<KVTable>> {
+    pub(crate) fn oldest_unflushed_wal(&self) -> Option<Arc<KVTable>> {
         let (current_wal, oldest_immutable_wal) = {
             let guard = self.inner.read();
             let current_wal = guard.current_wal.clone();
@@ -309,7 +299,7 @@ impl WalBufferManager {
 
     #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     async fn do_flush(&self) -> Result<(), SlateDBError> {
-        self.freeze_current_wal().await?;
+        self.freeze_current_wal()?;
         let flushing_wals = self.flushing_wals();
 
         if flushing_wals.is_empty() {
@@ -339,7 +329,7 @@ impl WalBufferManager {
             wal.notify_durable(result.clone());
         }
 
-        self.maybe_release_immutable_wals().await;
+        self.maybe_release_immutable_wals();
         Ok(())
     }
 
@@ -361,7 +351,7 @@ impl WalBufferManager {
         Ok(())
     }
 
-    async fn freeze_current_wal(&self) -> Result<(), SlateDBError> {
+    fn freeze_current_wal(&self) -> Result<(), SlateDBError> {
         let is_empty = self.inner.read().current_wal.is_empty();
         if is_empty {
             return Ok(());
@@ -378,16 +368,16 @@ impl WalBufferManager {
     /// This information of the last applied seq is used to determine if the immutable wals can be recycled.
     ///
     /// It's the caller's duty to ensure the seq is monotonically increasing.
-    pub async fn track_last_applied_seq(&self, seq: u64) {
+    pub fn track_last_applied_seq(&self, seq: u64) {
         {
             let mut inner = self.inner.write();
             inner.last_applied_seq = Some(seq);
         }
-        self.maybe_release_immutable_wals().await;
+        self.maybe_release_immutable_wals();
     }
 
     /// Recycle the immutable WALs that are applied to the memtable and flushed to the remote storage.
-    async fn maybe_release_immutable_wals(&self) {
+    fn maybe_release_immutable_wals(&self) {
         let mut inner = self.inner.write();
 
         let last_applied_seq = match inner.last_applied_seq {
@@ -419,18 +409,16 @@ impl WalBufferManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn close(&self) -> Result<(), SlateDBError> {
-        self.cancellation_token.cancel();
-        if let Some(background_task) = {
-            let mut inner = self.inner.write();
-            inner.background_task.take()
-        } {
-            background_task
-                .await
-                .expect("failed to join wal buffer task")
-        } else {
-            Ok(())
-        }
+        let task_executor = {
+            let inner = self.inner.read();
+            inner
+                .task_executor
+                .clone()
+                .expect("task executor should be initialized")
+        };
+        task_executor.shutdown_task(WAL_BUFFER_TASK_NAME).await
     }
 }
 
@@ -487,7 +475,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::Closed);
 
         // freeze current WAL to notify writers in the subsequent flushing_wals loop
-        self.wal_buffer.freeze_current_wal().await?;
+        self.wal_buffer.freeze_current_wal()?;
 
         let flushing_wals = self.wal_buffer.flushing_wals();
         for (_, wal) in flushing_wals.iter() {
@@ -549,17 +537,23 @@ mod tests {
         ))));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
-            db_state,
+            db_state.clone(),
             DbStats::new(&StatRegistry::new()),
             0, // recent_flushed_wal_id
             oracle,
             table_store.clone(),
             mono_clock,
-            system_clock,
             1000,                            // max_wal_bytes_size
             Some(Duration::from_millis(10)), // max_flush_interval
         ));
-        wal_buffer.start_background().await.unwrap();
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            db_state.read().error(),
+            system_clock.clone(),
+        ));
+        wal_buffer.init(task_executor.clone()).await.unwrap();
+        task_executor
+            .monitor_on(&Handle::current())
+            .expect("failed to monitor executor");
         (wal_buffer, table_store, test_clock)
     }
 
@@ -583,8 +577,8 @@ mod tests {
             None,
         );
 
-        wal_buffer.append(&[entry1.clone()]).await.unwrap();
-        wal_buffer.append(&[entry2.clone()]).await.unwrap();
+        wal_buffer.append(&[entry1.clone()]).unwrap();
+        wal_buffer.append(&[entry2.clone()]).unwrap();
 
         // Flush the buffer
         wal_buffer.flush().await.unwrap();
@@ -623,7 +617,7 @@ mod tests {
 
         // Append entries until we exceed the size threshold
         let mut seq = 1;
-        while wal_buffer.estimated_bytes().await.unwrap() < 115 * 10 {
+        while wal_buffer.estimated_bytes().unwrap() < 115 * 10 {
             let entry = RowEntry::new(
                 Bytes::from(format!("key{}", seq)),
                 ValueDeletable::Value(Bytes::from(format!("value{}", seq))),
@@ -631,10 +625,9 @@ mod tests {
                 None,
                 None,
             );
-            wal_buffer.append(&[entry]).await.unwrap();
+            wal_buffer.append(&[entry]).unwrap();
             wal_buffer
                 .maybe_trigger_flush()
-                .await
                 .unwrap()
                 .await_durable()
                 .await
@@ -660,13 +653,13 @@ mod tests {
                 None,
                 None,
             );
-            wal_buffer.append(&[entry]).await.unwrap();
+            wal_buffer.append(&[entry]).unwrap();
             wal_buffer.flush().await.unwrap();
         }
         assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 100);
 
-        wal_buffer.track_last_applied_seq(50).await;
+        wal_buffer.track_last_applied_seq(50);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
     }
 
@@ -684,10 +677,10 @@ mod tests {
                 None,
                 None,
             );
-            wal_buffer.append(&[entry]).await.unwrap();
+            wal_buffer.append(&[entry]).unwrap();
             wal_buffer.flush().await.unwrap();
         }
-        wal_buffer.track_last_applied_seq(50).await;
+        wal_buffer.track_last_applied_seq(50);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
         assert_eq!(wal_buffer.recent_flushed_wal_id(), 100);
 
@@ -696,7 +689,7 @@ mod tests {
             let inner = wal_buffer.inner.write();
             inner.oracle.last_remote_persisted_seq.store(80);
         }
-        wal_buffer.track_last_applied_seq(90).await;
+        wal_buffer.track_last_applied_seq(90);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 20);
     }
 }

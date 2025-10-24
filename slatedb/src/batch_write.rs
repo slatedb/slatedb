@@ -33,13 +33,11 @@ use log::warn;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use crate::clock::SystemClock;
 use crate::config::WriteOptions;
-use crate::dispatcher::{MessageDispatcher, MessageHandler};
+use crate::dispatcher::MessageHandler;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::{
@@ -47,6 +45,8 @@ use crate::{
     db::DbInner,
     error::SlateDBError,
 };
+
+pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
 pub(crate) struct WriteBatchMessage {
     pub(crate) batch: WriteBatch,
@@ -66,7 +66,7 @@ impl std::fmt::Debug for WriteBatchMessage {
     }
 }
 
-struct WriteBatchEventHandler {
+pub(crate) struct WriteBatchEventHandler {
     db_inner: Arc<DbInner>,
     is_first_write: bool,
 }
@@ -142,8 +142,8 @@ impl DbInner {
             // would violate the guarantee that batches are written atomically. We do
             // this by appending the entire entry batch in a single call to the WAL buffer,
             // which holds a write lock during the append.
-            let wal_watcher = self.wal_buffer.append(&entries).await?.durable_watcher();
-            self.wal_buffer.maybe_trigger_flush().await?;
+            let wal_watcher = self.wal_buffer.append(&entries)?.durable_watcher();
+            self.wal_buffer.maybe_trigger_flush()?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
             self.write_entries_to_memtable(entries);
@@ -155,7 +155,7 @@ impl DbInner {
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
-        self.wal_buffer.track_last_applied_seq(commit_seq).await;
+        self.wal_buffer.track_last_applied_seq(commit_seq);
 
         // insert a fail point for easier to test the case where the last_committed_seq is not updated.
         // this is useful for testing the case where the reader is not able to see the writes.
@@ -214,23 +214,6 @@ impl DbInner {
                 op.to_row_entry(seq, Some(now), expire_ts)
             })
             .collect::<Vec<_>>()
-    }
-
-    pub(crate) fn spawn_write_task(
-        self: &Arc<Self>,
-        rx: tokio::sync::mpsc::UnboundedReceiver<WriteBatchMessage>,
-        tokio_handle: &Handle,
-        cancellation_token: CancellationToken,
-    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
-        let write_batch_event_handler = WriteBatchEventHandler::new(self.clone());
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(write_batch_event_handler),
-            rx,
-            self.system_clock.clone(),
-            cancellation_token,
-            self.state.write().error(),
-        );
-        Some(tokio_handle.spawn(async move { dispatcher.run().await }))
     }
 }
 
