@@ -514,7 +514,7 @@ mod tests {
         batch.put(b"key3", b"value3");
 
         // Create WriteBatchIterator
-        let wb_iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let wb_iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Create DbIterator with WriteBatch
         let mem_iters: VecDeque<Box<dyn KeyValueIterator + 'static>> = VecDeque::new();

@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashSet;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -52,7 +52,10 @@ pub struct DBTransaction {
     /// The write batch of the transaction, which contains the uncommitted writes.
     /// Users can read data from the write batch during the transaction,
     /// thus providing an MVCC view of the database.
-    write_batch: WriteBatch,
+    ///
+    /// Uses RwLock to allow interior mutability: reads can share access to
+    /// WriteBatch snapshots, while writes get exclusive access.
+    write_batch: RwLock<WriteBatch>,
     /// Reference to the database
     db_inner: Arc<DbInner>,
     /// Isolation level for this transaction
@@ -75,7 +78,7 @@ impl DBTransaction {
             txn_id,
             started_seq: seq,
             txn_manager,
-            write_batch: WriteBatch::new().with_txn_id(txn_id),
+            write_batch: RwLock::new(WriteBatch::new().with_txn_id(txn_id)),
             db_inner,
             isolation_level,
             range_trackers: Mutex::new(Vec::new()),
@@ -119,6 +122,8 @@ impl DBTransaction {
         }
 
         let db_state = self.db_inner.state.read().view();
+        // Clone to avoid holding the lock across await
+        let write_batch = self.write_batch.read().clone();
 
         // For now, delegate to the underlying reader
         self.db_inner
@@ -127,7 +132,7 @@ impl DBTransaction {
                 key,
                 options,
                 &db_state,
-                Some(&self.write_batch),
+                Some(&write_batch),
                 Some(self.started_seq),
             )
             .await
@@ -189,6 +194,10 @@ impl DBTransaction {
         self.db_inner.check_error()?;
         let db_state = self.db_inner.state.read().view();
 
+        // Clone the WriteBatch for snapshot isolation
+        // This is cheap because WriteBatch uses Arc internally
+        let write_batch_snapshot = self.write_batch.read().clone();
+
         // For now, delegate to the underlying reader
         self.db_inner
             .reader
@@ -196,7 +205,7 @@ impl DBTransaction {
                 BytesRange::from(range),
                 options,
                 &db_state,
-                Some(&self.write_batch),
+                Some(&write_batch_snapshot),
                 Some(self.started_seq),
                 range_tracker,
             )
@@ -207,6 +216,8 @@ impl DBTransaction {
     /// Put a key-value pair into the transaction.
     /// The write will be buffered in the transaction's write batch until commit.
     ///
+    /// Uses interior mutability to allow writes without `&mut self`.
+    ///
     /// ## Arguments
     /// - `key`: the key to write
     /// - `value`: the value to write
@@ -214,7 +225,7 @@ impl DBTransaction {
     /// ## Errors
     /// - It's not really possible to have error here, since the write operation is
     ///   buffered in the write batch.
-    pub fn put<K, V>(&mut self, key: K, value: V) -> Result<(), crate::Error>
+    pub fn put<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -225,6 +236,8 @@ impl DBTransaction {
     /// Put a key-value pair into the transaction with custom options.
     /// The write will be buffered in the transaction's write batch until commit.
     ///
+    /// Uses interior mutability to allow writes without `&mut self`.
+    ///
     /// ## Arguments
     /// - `key`: the key to write
     /// - `value`: the value to write
@@ -234,7 +247,7 @@ impl DBTransaction {
     /// - It's not really possible to have error here, since the write operation is
     ///   buffered in the write batch.
     pub fn put_with_options<K, V>(
-        &mut self,
+        &self,
         key: K,
         value: V,
         options: &PutOptions,
@@ -243,12 +256,14 @@ impl DBTransaction {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.write_batch.put_with_options(key, value, options);
+        self.write_batch.write().put_with_options(key, value, options);
         Ok(())
     }
 
     /// Delete a key from the transaction.
     /// The delete will be buffered in the transaction's write batch until commit.
+    ///
+    /// Uses interior mutability to allow writes without `&mut self`.
     ///
     /// ## Arguments
     /// - `key`: the key to delete
@@ -256,8 +271,8 @@ impl DBTransaction {
     /// ## Errors
     /// - It's not really possible to have error here, since the delete operation is
     ///   buffered in the write batch.
-    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), crate::Error> {
-        self.write_batch.delete(key);
+    pub fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), crate::Error> {
+        self.write_batch.write().delete(key);
         Ok(())
     }
 
@@ -277,9 +292,12 @@ impl DBTransaction {
     ///   - Database I/O errors
     ///   - Concurrency conflicts detected during WriteBatch processing
     pub async fn commit(self) -> Result<(), crate::Error> {
+        // Clone the write_batch before consuming self
+        let write_batch = self.write_batch.read().clone();
+
         // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
         // conflict, neither write-write conflict.
-        if self.write_batch.is_empty() {
+        if write_batch.is_empty() {
             return Ok(());
         }
 
@@ -295,7 +313,7 @@ impl DBTransaction {
         }
 
         // Track the write keys from write batch
-        let write_keys = self.write_batch.keys().collect::<HashSet<_>>();
+        let write_keys = write_batch.keys().collect::<HashSet<_>>();
         self.txn_manager.track_write_keys(&self.txn_id, &write_keys);
 
         // Submit the WriteBatch to the database for processing. The batch is sent to a
@@ -303,7 +321,7 @@ impl DBTransaction {
         // sequentially, ensuring no concurrent writes. Both conflict checking & persisting
         // are handled there.
         self.db_inner
-            .write_with_options(self.write_batch.clone(), &WriteOptions::default())
+            .write_with_options(write_batch, &WriteOptions::default())
             .await
             .map_err(Into::into)
     }

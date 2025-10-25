@@ -9,8 +9,9 @@ use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::collections::{btree_map, BTreeMap};
+use std::collections::BTreeMap;
 use std::ops::RangeBounds;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// A batch of write operations (puts and/or deletes). All operations in the
@@ -43,9 +44,14 @@ use uuid::Uuid;
 /// Note that the `WriteBatch` has an unlimited size. This means that batch
 /// writes can exceed `l0_sst_size_bytes` (when `WAL` is disabled). It also
 /// means that WAL SSTs could get large if there's a large batch write.
+///
+/// WriteBatch uses an immutable data structure internally (Arc<BTreeMap>),
+/// allowing cheap clones for snapshot isolation in transactions. When you
+/// clone a WriteBatch, it shares the same underlying data until a modification
+/// occurs (copy-on-write).
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
-    pub(crate) ops: BTreeMap<Bytes, WriteOp>,
+    pub(crate) ops: Arc<BTreeMap<Bytes, WriteOp>>,
     pub(crate) txn_id: Option<Uuid>,
 }
 
@@ -126,7 +132,7 @@ impl WriteOp {
 impl WriteBatch {
     pub fn new() -> Self {
         WriteBatch {
-            ops: BTreeMap::new(),
+            ops: Arc::new(BTreeMap::new()),
             txn_id: None,
         }
     }
@@ -139,6 +145,9 @@ impl WriteBatch {
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.
+    ///
+    /// This uses copy-on-write: if the internal Arc is shared, it will clone
+    /// the BTreeMap before modification.
     ///
     /// # Panics
     /// - if the key is empty
@@ -153,6 +162,9 @@ impl WriteBatch {
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.
+    ///
+    /// This uses copy-on-write: if the internal Arc is shared, it will clone
+    /// the BTreeMap before modification.
     ///
     /// # Panics
     /// - if the key is empty
@@ -176,13 +188,16 @@ impl WriteBatch {
         );
 
         let key = Bytes::copy_from_slice(key);
-        self.ops.insert(
-            key.clone(),
-            WriteOp::Put(key, Bytes::copy_from_slice(value), options.clone()),
-        );
+        let write_op = WriteOp::Put(key.clone(), Bytes::copy_from_slice(value), options.clone());
+
+        // Copy-on-write: if Arc is shared, this will clone the BTreeMap
+        Arc::make_mut(&mut self.ops).insert(key, write_op);
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
+    ///
+    /// This uses copy-on-write: if the internal Arc is shared, it will clone
+    /// the BTreeMap before modification.
     pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
         let key = key.as_ref();
         assert!(!key.is_empty(), "key cannot be empty");
@@ -192,7 +207,10 @@ impl WriteBatch {
         );
 
         let key = Bytes::copy_from_slice(key);
-        self.ops.insert(key.clone(), WriteOp::Delete(key));
+        let write_op = WriteOp::Delete(key.clone());
+
+        // Copy-on-write: if Arc is shared, this will clone the BTreeMap
+        Arc::make_mut(&mut self.ops).insert(key, write_op);
     }
 
     pub(crate) fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
@@ -204,76 +222,153 @@ impl WriteBatch {
     }
 }
 
-/// Iterator over WriteBatch entries
-pub(crate) struct WriteBatchIterator<'a> {
-    iter: btree_map::Range<'a, Bytes, WriteOp>,
+/// Iterator over WriteBatch entries.
+///
+/// Holds an owned WriteBatch (cheap Arc clone) instead of a reference,
+/// allowing it to be used without lifetime constraints.
+pub(crate) struct WriteBatchIterator {
+    batch: WriteBatch,
+    range_start: Option<Bytes>,
+    range_end: Option<Bytes>,
     ordering: IterationOrder,
-    current: Option<(&'a Bytes, &'a WriteOp)>,
+    current_key: Option<Bytes>,
 }
 
-impl<'a> WriteBatchIterator<'a> {
+impl WriteBatchIterator {
     pub fn new(
-        batch: &'a WriteBatch,
+        batch: WriteBatch,
         range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
     ) -> Self {
-        let mut iter = batch.ops.range(range);
-        let current = match ordering {
-            IterationOrder::Ascending => iter.next(),
-            IterationOrder::Descending => iter.next_back(),
+        use std::ops::Bound;
+
+        let range_start = match range.start_bound() {
+            Bound::Included(k) => Some(k.clone()),
+            Bound::Excluded(k) => Some(k.clone()),
+            Bound::Unbounded => None,
         };
 
+        let range_end = match range.end_bound() {
+            Bound::Included(k) => Some(k.clone()),
+            Bound::Excluded(k) => Some(k.clone()),
+            Bound::Unbounded => None,
+        };
+
+        // Find the first key in range
+        let current_key = Self::find_first_key(&batch, &range_start, &range_end, ordering);
+
         Self {
-            iter,
+            batch,
+            range_start,
+            range_end,
             ordering,
-            current,
+            current_key,
+        }
+    }
+
+    fn find_first_key(
+        batch: &WriteBatch,
+        range_start: &Option<Bytes>,
+        range_end: &Option<Bytes>,
+        ordering: IterationOrder,
+    ) -> Option<Bytes> {
+        use std::ops::Bound;
+
+        let start_bound = range_start.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
+        let end_bound = range_end.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
+
+        let mut iter = batch.ops.range((start_bound, end_bound));
+
+        match ordering {
+            IterationOrder::Ascending => iter.next().map(|(k, _)| k.clone()),
+            IterationOrder::Descending => iter.next_back().map(|(k, _)| k.clone()),
         }
     }
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for WriteBatchIterator<'a> {
+impl KeyValueIterator for WriteBatchIterator {
     async fn init(&mut self) -> Result<(), crate::error::SlateDBError> {
         Ok(())
     }
 
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
-        // Return current item (similar to MemTableIterator pattern)
-        let result = self.current.map(|(_, op)| {
+        let current_key = match &self.current_key {
+            Some(key) => key.clone(),
+            None => return Ok(None),
+        };
+
+        // Get the current operation
+        let result = self.batch.ops.get(&current_key).map(|op| {
             // Use u64::MAX as placeholder seq to indicate highest priority
             op.to_row_entry(u64::MAX, None, None)
         });
 
-        // Advance to next entry based on ordering (similar to next_entry_sync)
-        self.current = match self.ordering {
-            IterationOrder::Ascending => self.iter.next(),
-            IterationOrder::Descending => self.iter.next_back(),
-        };
+        // Advance to next key
+        self.current_key = self.find_next_key(&current_key);
 
         Ok(result)
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
-        // Loop similar to MemTableIterator::seek
-        loop {
-            let should_advance = match &self.current {
-                Some((key, _)) => match self.ordering {
-                    // For ascending: advance if current key < target key
-                    IterationOrder::Ascending => key.as_ref() < next_key,
-                    // For descending: advance if current key > target key
-                    IterationOrder::Descending => key.as_ref() > next_key,
-                },
-                None => return Ok(()), // Iterator exhausted
-            };
+        let target_key = Bytes::copy_from_slice(next_key);
 
-            if should_advance {
-                // Advance similar to calling next_entry_sync in MemTableIterator
-                self.current = match self.ordering {
-                    IterationOrder::Ascending => self.iter.next(),
-                    IterationOrder::Descending => self.iter.next_back(),
-                };
-            } else {
-                return Ok(());
+        // Update current_key to the first key >= target (ascending) or <= target (descending)
+        self.current_key = self.find_key_from(&target_key);
+
+        Ok(())
+    }
+}
+
+impl WriteBatchIterator {
+    fn find_next_key(&self, current_key: &Bytes) -> Option<Bytes> {
+        use std::ops::Bound;
+
+        let start_bound = self.range_start.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
+        let end_bound = self.range_end.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
+
+        match self.ordering {
+            IterationOrder::Ascending => {
+                // Find the smallest key > current_key
+                let mut iter = self.batch.ops.range((
+                    Bound::Excluded(current_key),
+                    end_bound,
+                ));
+                iter.next().map(|(k, _)| k.clone())
+            }
+            IterationOrder::Descending => {
+                // Find the largest key < current_key
+                let mut iter = self.batch.ops.range((
+                    start_bound,
+                    Bound::Excluded(current_key),
+                ));
+                iter.next_back().map(|(k, _)| k.clone())
+            }
+        }
+    }
+
+    fn find_key_from(&self, target_key: &Bytes) -> Option<Bytes> {
+        use std::ops::Bound;
+
+        let start_bound = self.range_start.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
+        let end_bound = self.range_end.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
+
+        match self.ordering {
+            IterationOrder::Ascending => {
+                // Find the smallest key >= target_key within range
+                let mut iter = self.batch.ops.range((
+                    Bound::Included(target_key),
+                    end_bound,
+                ));
+                iter.next().map(|(k, _)| k.clone())
+            }
+            IterationOrder::Descending => {
+                // Find the largest key <= target_key within range
+                let mut iter = self.batch.ops.range((
+                    start_bound,
+                    Bound::Included(target_key),
+                ));
+                iter.next_back().map(|(k, _)| k.clone())
             }
         }
     }
@@ -381,7 +476,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.delete(b"key4");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -408,7 +503,7 @@ mod tests {
 
         // Test range [key2, key4)
         let mut iter = WriteBatchIterator::new(
-            &batch,
+            batch.clone(),
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
         );
@@ -425,7 +520,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key2", b"value2");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Descending);
 
         let expected = vec![
             RowEntry::new_value(b"key3", b"value3", u64::MAX),
@@ -443,7 +538,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Seek to key3
         iter.seek(b"key3").await.unwrap();
@@ -464,7 +559,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Descending);
 
         // Seek to key3 (in descending, we want keys <= key3)
         iter.seek(b"key3").await.unwrap();
@@ -481,7 +576,7 @@ mod tests {
     #[tokio::test]
     async fn test_writebatch_iterator_empty_batch() {
         let batch = WriteBatch::new();
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         let result = iter.next_entry().await.unwrap();
         assert!(result.is_none());
@@ -493,7 +588,7 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Seek to key2 (doesn't exist)
         iter.seek(b"key2").await.unwrap();
@@ -515,7 +610,7 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Seek beyond maximum key
         iter.seek(b"key9").await.unwrap();
@@ -533,7 +628,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.delete(b"key4");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -563,7 +658,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Seek before first key
         iter.seek(b"key1").await.unwrap();
@@ -586,7 +681,7 @@ mod tests {
 
         // Range [key2, key4) should include tombstones
         let mut iter = WriteBatchIterator::new(
-            &batch,
+            batch.clone(),
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
         );
