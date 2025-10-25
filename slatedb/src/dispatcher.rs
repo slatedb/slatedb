@@ -795,6 +795,7 @@ mod test {
         let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->return").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "pause").unwrap();
         task_executor
             .add_handler(
                 "test".to_string(),
