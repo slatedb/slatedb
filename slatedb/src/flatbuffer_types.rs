@@ -1,11 +1,9 @@
-use std::collections::{VecDeque};
+use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use chrono::{DateTime, Utc};
-use flatbuffers::{
-    FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset,
-};
+use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
 use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
@@ -20,9 +18,8 @@ use crate::record::RecordCodec;
 #[rustfmt::skip]
 mod root_generated;
 pub use root_generated::{
-    BlockMeta, BlockMetaArgs,
-    ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs, SsTableInfo as FbSsTableInfo,
-    SsTableInfoArgs,
+    BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
+    SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
 };
 
 use crate::config::CompressionCodec;
@@ -31,9 +28,8 @@ use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
-    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs,
-    CompressionFormat, SortedRun as FbSortedRun, SortedRunArgs,
-    Ulid as FbUlid, Uuid, UuidArgs,
+    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat,
+    SortedRun as FbSortedRun, SortedRunArgs, Ulid as FbUlid, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
@@ -579,9 +575,7 @@ pub(crate) mod test_utils {
 mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
-    use crate::flatbuffer_types::{
-        FlatBufferManifestCodec, SsTableIndexOwned,
-    };
+    use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{ExternalDb, Manifest};
     use crate::record::RecordCodec;
     use crate::{checkpoint, error::SlateDBError};

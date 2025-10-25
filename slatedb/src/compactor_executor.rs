@@ -29,24 +29,13 @@ use log::{debug, error};
 use tracing::instrument;
 use ulid::Ulid;
 
-#[derive(Clone, Debug, PartialEq)]
-#[doc = "Specification of how a compaction job should be executed.\n\nJob specs are derived from the parent `Compaction`/`CompactionPlan` and capture execution-time details (e.g., which inputs are already materialized) that the executor can use for progress reporting and resume logic."]
-pub(crate) enum CompactionJobSpec {
-    LinearCompactionJob {
-        #[doc = "ULIDs of L0 SSTs that have been fully read/compacted when the job snapshot is taken (useful for resume/diagnostics)."]
-        completed_input_sst_ids: Vec<Ulid>,
-        #[doc = "IDs of sorted runs that have been fully read/compacted when the job snapshot is taken (useful for resume/diagnostics)."]
-        completed_input_sr_ids: Vec<u32>,
-    },
-}
-
 #[derive(Clone, PartialEq)]
 #[doc = "Execution unit (attempt) for a compaction plan.\n\n- `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is used as the runtime key in `scheduled_compactions`.\n- `compaction_id` is the canonical plan id (ULID) that ties this job attempt back to its `CompactionPlan` entry in the compactor's canonical map.\n\nJobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time metadata for progress reporting, retention, and resume logic."]
-pub(crate) struct CompactionJob {
-    #[doc = "Job id (attempt id). Unique per attempt and used for scheduling/routing."]
+pub(crate) struct CompactorJobAttempt {
+    #[doc = "Job attempt id. Unique per attempt and used for scheduling/routing."]
     pub(crate) id: Ulid,
-    #[doc = "Canonical compaction plan id this job belongs to."]
-    pub(crate) compaction_id: Ulid,
+    #[doc = "Canonical compaction job id this job belongs to."]
+    pub(crate) compactor_job_id: Ulid,
     #[doc = "Destination sorted run id to be produced by this job."]
     pub(crate) destination: u32,
     #[doc = "Input L0 SSTs for this attempt."]
@@ -54,33 +43,30 @@ pub(crate) struct CompactionJob {
     #[doc = "Input existing sorted runs for this attempt."]
     pub(crate) sorted_runs: Vec<SortedRun>,
     #[doc = "Compaction timestamp used by the executor (e.g., for retention decisions)."]
-    pub(crate) compaction_ts: i64,
+    pub(crate) attempt_ts: i64,
     #[doc = "Whether the destination sorted run is the last (newest) run after compaction."]
     pub(crate) is_dest_last_run: bool,
     #[doc = "Optional minimum sequence to retain; lower sequences may be dropped by retention."]
     pub(crate) retention_min_seq: Option<u64>,
-    #[doc = "Execution-time job spec (e.g., progress/resume details)."]
-    pub(crate) spec: CompactionJobSpec,
 }
 
-impl std::fmt::Debug for CompactionJob {
+impl std::fmt::Debug for CompactorJobAttempt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CompactionJob")
+        f.debug_struct("CompactorJobAttempt")
             .field("id", &self.id)
-            .field("compaction_id", &self.compaction_id)
+            .field("compactor_job_id", &self.compactor_job_id)
             .field("destination", &self.destination)
             .field("ssts", &self.ssts)
             .field("sorted_runs", &self.sorted_runs)
-            .field("compaction_ts", &self.compaction_ts)
+            .field("attempt_ts", &self.attempt_ts)
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("estimated_source_bytes", &self.estimated_source_bytes())
             .field("retention_min_seq", &self.retention_min_seq)
-            .field("spec", &self.spec)
             .finish()
     }
 }
 
-impl CompactionJob {
+impl CompactorJobAttempt {
     /// Estimates the total size of the source SSTs and sorted runs.
     pub(crate) fn estimated_source_bytes(&self) -> u64 {
         let sst_size = self.ssts.iter().map(|sst| sst.estimate_size()).sum::<u64>();
@@ -94,7 +80,7 @@ impl CompactionJob {
 }
 
 pub(crate) trait CompactionExecutor {
-    fn start_compaction(&self, compaction: CompactionJob);
+    fn start_compaction(&self, compaction: CompactorJobAttempt);
     fn stop(&self);
     fn is_stopped(&self) -> bool;
 }
@@ -132,7 +118,7 @@ impl TokioCompactionExecutor {
 }
 
 impl CompactionExecutor for TokioCompactionExecutor {
-    fn start_compaction(&self, compaction: CompactionJob) {
+    fn start_compaction(&self, compaction: CompactorJobAttempt) {
         self.inner.start_compaction(compaction);
     }
 
@@ -165,7 +151,7 @@ pub(crate) struct TokioCompactionExecutorInner {
 impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
-        compaction: &'a CompactionJob,
+        compaction: &'a CompactorJobAttempt,
     ) -> Result<RetentionIterator<MergeIterator<'a>>, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
@@ -203,7 +189,7 @@ impl TokioCompactionExecutorInner {
             None,
             None,
             compaction.is_dest_last_run,
-            compaction.compaction_ts,
+            compaction.attempt_ts,
             self.clock.clone(),
             Arc::new(stored_manifest.db_state().sequence_tracker.clone()),
         )
@@ -215,7 +201,7 @@ impl TokioCompactionExecutorInner {
     #[instrument(level = "debug", skip_all, fields(id = %compaction.id))]
     async fn execute_compaction(
         &self,
-        compaction: CompactionJob,
+        compaction: CompactorJobAttempt,
     ) -> Result<SortedRun, SlateDBError> {
         debug!("executing compaction [compaction={:?}]", compaction);
         let mut all_iter = self.load_iterators(&compaction).await?;
@@ -276,7 +262,7 @@ impl TokioCompactionExecutorInner {
         })
     }
 
-    fn start_compaction(self: &Arc<Self>, compaction: CompactionJob) {
+    fn start_compaction(self: &Arc<Self>, compaction: CompactorJobAttempt) {
         let mut tasks = self.tasks.lock();
         if self.is_stopped.load(atomic::Ordering::SeqCst) {
             return;

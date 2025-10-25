@@ -4,14 +4,13 @@ use std::fmt::{Display, Formatter};
 use log::{error, info};
 use ulid::Ulid;
 
-use crate::compactor_executor::CompactionJob;
-use crate::compactor_state::CompactionStatus::Submitted;
+use crate::compactor_executor::CompactorJobAttempt;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(crate) enum SourceId {
+pub enum SourceId {
     SortedRun(u32),
     Sst(Ulid),
 }
@@ -52,8 +51,8 @@ impl SourceId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum CompactionStatus {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CompactorJobStatus {
     Submitted,
     #[allow(dead_code)]
     Pending,
@@ -65,8 +64,8 @@ pub(crate) enum CompactionStatus {
     Failed,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum CompactionType {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum CompactorJobRequestType {
     #[doc = "Signals that the compaction was requested by the DB's compactor."]
     Internal,
     #[doc = "Signals that the compaction was requested by an external process such as the admin CLI."]
@@ -76,9 +75,9 @@ pub(crate) enum CompactionType {
 
 #[derive(Clone, Debug, PartialEq)]
 #[doc = "In-memory description of the inputs to a compaction.\n\nA `CompactionSpec` represents the concrete set of input SSTs and/or Sorted Runs that a particular compaction algorithm (e.g., size-tiered, leveled, etc.) has selected to produce a destination Sorted Run.\n\nThe scheduler constructs a `CompactionSpec` for a planned compaction and passes it, together with the selected `sources`, to `Compaction::new`. Keeping the spec inside the in-memory `Compaction` avoids recomputing or cloning inputs at job creation time and enables encode/decode roundtrips in tests via FlatBuffers."]
-pub(crate) enum CompactionSpec {
+pub(crate) enum CompactorJobInput {
     #[doc = "Compact a combination of L0 SSTs and/or existing sorted runs into a new sorted run with id `destination` carried by the surrounding `Compaction`."]
-    SortedRunCompaction {
+    SortedRunJobInputs {
         #[doc = "L0 SSTs (by handle) that will be compacted."]
         ssts: Vec<SsTableHandle>,
         #[doc = "Existing sorted runs that participate in this compaction."]
@@ -87,65 +86,119 @@ pub(crate) enum CompactionSpec {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Compaction {
-    pub(crate) status: CompactionStatus,
-    pub(crate) sources: Vec<SourceId>,
-    pub(crate) destination: u32,
-    pub(crate) job_attempts: Vec<CompactionJob>,
-    pub(crate) spec: CompactionSpec,
+#[doc = "Specification of how a compaction job should be executed.\n\nJob specs are derived from the parent `Compaction`/`CompactionPlan` and capture execution-time details (e.g., which inputs are already materialized) that the executor can use for progress reporting and resume logic."]
+pub(crate) enum CompactorJobProgress {
+    LinearCompactorJob {
+        #[doc = "ULIDs of L0 SSTs and Sorted Runs that have been fully read/compacted when the job snapshot is taken (useful for resume/diagnostics)."]
+        completed_sources: Vec<SourceId>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompactorJobRequest {
+    sources: Vec<SourceId>,
+    destination: u32,
+}
+
+impl CompactorJobRequest {
+    pub fn new(sources: Vec<SourceId>, destination: u32) -> Self {
+        Self {
+            sources,
+            destination,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn sources(&self) -> &Vec<SourceId> {
+        &self.sources
+    }
+
+    pub fn destination(&self) -> u32 {
+        self.destination
+    }
+}
+
+impl Display for CompactorJobRequest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let displayed_sources: Vec<String> =
+            self.sources().iter().map(|s| format!("{}", s)).collect();
+        write!(f, "{:?} -> {}", displayed_sources, self.destination())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
+pub struct CompactorJobResponse {
+    compactor_job_id: Ulid,
+    status: CompactorJobStatus,
+    completed_sources: Vec<SourceId>,
+}
+
+impl CompactorJobResponse {
+    #[allow(dead_code)]
+    pub fn new(
+        compactor_job_id: Ulid,
+        status: CompactorJobStatus,
+        completed_sources: Vec<SourceId>,
+    ) -> Self {
+        Self {
+            compactor_job_id,
+            status,
+            completed_sources,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn id(&self) -> Ulid {
+        self.compactor_job_id
+    }
+
+    #[allow(dead_code)]
+    pub fn status(&self) -> &CompactorJobStatus {
+        &self.status
+    }
+
+    #[allow(dead_code)]
+    pub fn completed_sources(&self) -> &Vec<SourceId> {
+        &self.completed_sources
+    }
 }
 
 #[derive(Clone)]
 #[doc = "Canonical, internal record of a compaction plan.\n\nA plan bundles a stable `id` (ULID), a `compaction_type` (internal vs. external) and the client-facing `Compaction` payload. The compactor tracks plans in two maps: a canonical history keyed by plan id and a runtime view keyed by job id.\n\nNote: `CompactionPlan` is internal-only; `Compaction` remains the public type that clients observe and does not expose the plan id."]
-pub(crate) struct CompactionPlan {
+pub(crate) struct CompactorJob {
     id: Ulid,
+    job_request_type: CompactorJobRequestType,
+    request: CompactorJobRequest,
+    job_input: CompactorJobInput,
+
+    status: CompactorJobStatus,
+
     #[allow(dead_code)]
-    compaction_type: CompactionType,
-    compaction: Compaction,
+    attempts: Vec<CompactorJobAttempt>,
+
+    #[doc = "Execution-time job spec (e.g., progress/resume details)."]
+    #[allow(dead_code)]
+    progress: CompactorJobProgress,
 }
 
-impl CompactionPlan {
-    pub(crate) fn new(id: Ulid, compaction_type: CompactionType, compaction: Compaction) -> Self {
+impl CompactorJob {
+    pub(crate) fn new(
+        id: Ulid,
+        job_request_type: CompactorJobRequestType,
+        request: CompactorJobRequest,
+        job_input: CompactorJobInput,
+    ) -> Self {
         Self {
             id,
-            compaction_type,
-            compaction,
-        }
-    }
-
-    pub(crate) fn id(&self) -> Ulid {
-        self.id
-    }
-    
-    #[allow(dead_code)]
-    pub(crate) fn compaction_type(&self) -> &CompactionType {
-        &self.compaction_type
-    }
-
-    pub(crate) fn compaction(&self) -> &Compaction {
-        &self.compaction
-    }
-}
-
-impl Display for Compaction {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let displayed_sources: Vec<_> = self.sources.iter().map(|s| format!("{}", s)).collect();
-        write!(
-            f,
-            "{:?} -> {}: {:?}",
-            displayed_sources, self.destination, self.status
-        )
-    }
-}
-
-impl Compaction {
-    pub(crate) fn new(sources: Vec<SourceId>, spec: CompactionSpec, destination: u32) -> Self {
-        Self {
-            status: Submitted,
-            sources,
-            destination,
-            job_attempts: Vec::new(),
-            spec,
+            job_request_type,
+            request,
+            job_input,
+            status: CompactorJobStatus::Submitted,
+            attempts: vec![],
+            progress: CompactorJobProgress::LinearCompactorJob {
+                completed_sources: vec![],
+            },
         }
     }
 
@@ -173,24 +226,90 @@ impl Compaction {
             .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
             .collect()
     }
+
+    pub(crate) fn id(&self) -> Ulid {
+        self.id
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn compactor_job_request_type(&self) -> &CompactorJobRequestType {
+        &self.job_request_type
+    }
+
+    pub(crate) fn compactor_job_request(&self) -> &CompactorJobRequest {
+        &self.request
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn job_input(&self) -> &CompactorJobInput {
+        &self.job_input
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn status(&self) -> &CompactorJobStatus {
+        &self.status
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn progress(&self) -> &CompactorJobProgress {
+        &self.progress
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn job_attempts(&self) -> &Vec<CompactorJobAttempt> {
+        &self.attempts
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn add_job_attempt(&mut self, job_attempt: CompactorJobAttempt) {
+        self.attempts.push(job_attempt);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn remove_job_attempt(&mut self, job_attempt_id: Ulid) {
+        self.attempts
+            .retain(|job_attempt| job_attempt.id != job_attempt_id);
+    }
+
+    pub(crate) fn update_status(&mut self, status: CompactorJobStatus) {
+        self.status = status;
+    }
+}
+
+impl Display for CompactorJob {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let displayed_sources: Vec<_> = self
+            .request
+            .sources()
+            .iter()
+            .map(|s| format!("{}", s))
+            .collect();
+        write!(
+            f,
+            "{:?} -> {}: {:?}",
+            displayed_sources,
+            self.request.destination(),
+            self.status
+        )
+    }
 }
 
 #[doc = "Compaction state persisted in the object store (future work).\n\nThis struct will hold the durable snapshot of compaction plans (queued, in-progress, and completed) keyed by the canonical plan id. Until persistence is implemented, this is used in tests and as a placeholder for wiring to the on-disk format."]
 #[derive(Clone)]
-pub(crate) struct CompactionState {
+pub(crate) struct CompactorStateRecord {
     #[allow(dead_code)]
     pub(crate) compactor_epoch: u64,
     // active_compaction plan queued, in-progress and completed mapped by compaction id in object store
     #[allow(dead_code)]
-    pub(crate) compaction_plans: HashMap<Ulid, CompactionPlan>,
+    pub(crate) jobs: HashMap<Ulid, CompactorJob>,
 }
 
-impl CompactionState {
+impl CompactorStateRecord {
     #[allow(dead_code)]
     pub(crate) fn initial() -> Self {
         Self {
             compactor_epoch: 0,
-            compaction_plans: HashMap::<Ulid, CompactionPlan>::new(),
+            jobs: HashMap::<Ulid, CompactorJob>::new(),
         }
     }
 }
@@ -198,12 +317,12 @@ impl CompactionState {
 #[doc = "Process-local runtime state owned by the compactor.\n\nThis is the in-memory controller view that a single compactor task uses to:\n- keep a fresh `DirtyManifest` (view of `CoreDbState`),\n- track canonical `compaction_plans` by plan id (ULID), and\n- track `scheduled_compactions` by job id for executions owned by this process.\n\nIt validates submissions, records lifecycle transitions (Submitted → Pending → InProgress → Completed/Failed) and mutates the in-memory manifest when jobs finish.\n\nDifference vs `CompactionState`:\n- `CompactorState` is transient, process-local runtime state; it is not persisted and is rebuilt when the process starts.\n- `CompactionState` is the durable, object-store representation (future work) of compaction plans and their statuses across processes, used for recovery/GC and history."]
 pub struct CompactorState {
     manifest: DirtyManifest,
-    // TODO: Add compaction_state during compaction state persistence implementation
-    //compaction_state: DirtyRecord<CompactionState>,
-    compaction_plans: HashMap<Ulid, CompactionPlan>,
+    // TODO: Add CompactorStateRecord during compaction state persistence implementation
+    //compaction_state: DirtyRecord<CompactorStateRecord>,
+    compactor_jobs: HashMap<Ulid, CompactorJob>,
 
-    // In-memory record of compaction plans scheduled by compactor process mapped by compaction job id
-    scheduled_compactions: HashMap<Ulid, CompactionPlan>,
+    // In-memory record of ongoing compaction job scheduled by compactor process mapped by compaction jobAttempt id
+    scheduled_jobs: HashMap<Ulid, CompactorJob>,
 }
 
 impl CompactorState {
@@ -216,13 +335,13 @@ impl CompactorState {
     }
 
     pub(crate) fn num_compactions(&self) -> usize {
-        self.scheduled_compactions.len()
+        self.scheduled_jobs.len()
     }
 
-    pub(crate) fn compactions(&self) -> Vec<Compaction> {
-        self.scheduled_compactions
+    pub(crate) fn compactions(&self) -> Vec<CompactorJobRequest> {
+        self.scheduled_jobs
             .values()
-            .map(|plan| plan.compaction())
+            .map(|job| job.compactor_job_request())
             .cloned()
             .collect()
     }
@@ -230,22 +349,22 @@ impl CompactorState {
     pub(crate) fn new(manifest: DirtyManifest) -> Self {
         Self {
             manifest,
-            scheduled_compactions: HashMap::new(),
-            compaction_plans: HashMap::new(),
+            scheduled_jobs: HashMap::new(),
+            compactor_jobs: HashMap::new(),
         }
     }
 
     pub(crate) fn submit_compaction(
         &mut self,
         id: Ulid,
-        compaction_plan: CompactionPlan,
+        compactor_job: CompactorJob,
     ) -> Result<Ulid, SlateDBError> {
-        let compaction = compaction_plan.compaction().clone();
+        let compactor_request = compactor_job.compactor_job_request();
         if self
-            .scheduled_compactions
+            .scheduled_jobs
             .values()
-            .map(|c| c.compaction())
-            .any(|c| c.destination == compaction.destination)
+            .map(|c| c.compactor_job_request())
+            .any(|c| c.destination() == compactor_request.destination())
         {
             // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
@@ -254,27 +373,27 @@ impl CompactorState {
             .db_state()
             .compacted
             .iter()
-            .any(|sr| sr.id == compaction.destination)
+            .any(|sr| sr.id == compactor_request.destination())
         {
             // the compaction overwrites an existing sr but doesn't include the sr
-            if !compaction.sources.iter().any(|src| match src {
-                SourceId::SortedRun(sr) => *sr == compaction.destination,
+            if !compactor_request.sources().iter().any(|src| match src {
+                SourceId::SortedRun(sr) => *sr == compactor_request.destination(),
                 SourceId::Sst(_) => false,
             }) {
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
-        info!("accepted submitted compaction [compaction={}]", compaction);
+        info!(
+            "accepted submitted compaction [compactor_request={}]",
+            compactor_request
+        );
         // TODO: Add compactionJob attempt to the object store
-        let compaction_id = compaction_plan.id();
-        if let Some(plan) = self.compaction_plans.get_mut(&compaction_id) {
-            plan.compaction.status = CompactionStatus::Pending;
-            self.scheduled_compactions.insert(id, plan.clone());
+        let compactor_job_id = compactor_job.id();
+        if let Some(job) = self.compactor_jobs.get_mut(&compactor_job_id) {
+            job.update_status(CompactorJobStatus::Pending);
+            self.scheduled_jobs.insert(id, job.clone());
         } else {
-            error!(
-                "compaction plan not found [compaction_id={}]",
-                compaction_id
-            );
+            error!("compaction not found [compaction_id={}]", compactor_job_id);
             return Err(SlateDBError::InvalidCompaction);
         }
         Ok(id)
@@ -320,60 +439,88 @@ impl CompactorState {
         self.manifest = remote_manifest;
     }
 
-    pub(crate) fn compaction_submitted(&mut self, compaction_plan: CompactionPlan) {
-        self.compaction_plans
-            .insert(compaction_plan.id(), compaction_plan);
+    pub(crate) fn submit_compactor_job(&mut self, compactor_job: CompactorJob) {
+        self.compactor_jobs
+            .insert(compactor_job.id(), compactor_job);
     }
 
-    pub(crate) fn remove(&mut self, id: &Ulid) {
-        self.compaction_plans.remove(id);
+    pub(crate) fn remove_compactor_job(&mut self, id: &Ulid) {
+        self.compactor_jobs.remove(id);
     }
 
-    pub(crate) fn compaction_started(&mut self, id: Ulid) {
-        if let Some(sched) = self.scheduled_compactions.get(&id) {
-            let plan_id = sched.id();
-            if let Some(plan) = self.compaction_plans.get_mut(&plan_id) {
-                plan.compaction.status = CompactionStatus::InProgress; // update canonical entry
+    fn update_compactor_state(
+        &mut self,
+        job_attempt_id: Ulid,
+        status: CompactorJobStatus,
+    ) -> Result<(), SlateDBError> {
+        if let Some(sched) = self.scheduled_jobs.get_mut(&job_attempt_id) {
+            // mirror status on the scheduled entry
+            sched.update_status(status);
+
+            // update canonical job entry
+            let job_id = sched.id();
+            if let Some(job) = self.compactor_jobs.get_mut(&job_id) {
+                job.update_status(status);
+                Ok(())
             } else {
-                error!("compaction plan not found [compaction_id={}]", plan_id);
+                error!("compactor job not found [job_id={}]", job_id);
+                Err(SlateDBError::InvalidCompaction)
             }
         } else {
-            error!("scheduled compaction job not found [job_id={}]", id);
+            error!(
+                "scheduled compactor job not found [job_attempt_id={}]",
+                job_attempt_id
+            );
+            Err(SlateDBError::InvalidCompaction)
         }
     }
 
-    pub(crate) fn finish_failed_compaction(&mut self, id: Ulid) {
-        // TODO: Add compaction plan to object store with Failed status
-        if let Some(sched) = self.scheduled_compactions.get(&id) {
-            let plan_id = sched.id();
-            if let Some(plan) = self.compaction_plans.get_mut(&plan_id) {
-                plan.compaction.status = CompactionStatus::Failed; // update canonical entry
-            } else {
-                error!("compaction plan not found [compaction_id={}]", plan_id);
-            }
-            self.scheduled_compactions.remove(&id);
-            // This should be removed once persistence is implemented since removal be take care by garbage collection
-            self.compaction_plans.remove(&plan_id);
-        } else {
-            error!("scheduled compaction job not found [job_id={}]", id);
+    pub(crate) fn start_compactor_job(&mut self, job_attempt_id: Ulid) {
+        if let Err(e) = self.update_compactor_state(job_attempt_id, CompactorJobStatus::InProgress)
+        {
+            error!(
+                "failed to start compactor job [job_attempt_id={}, error={:?}]",
+                job_attempt_id, e
+            );
         }
     }
 
-    pub(crate) fn finish_compaction(&mut self, id: Ulid, output_sr: SortedRun) {
-        if let Some(compaction_plan) = self.scheduled_compactions.get(&id) {
-            let compaction = compaction_plan.compaction();
-            info!("finished compaction [compaction={}]", compaction);
+    pub(crate) fn finish_failed_compactor_job(&mut self, job_attempt_id: Ulid) {
+        // Update status first; only remove entries if update succeeded.
+        if let Err(e) = self.update_compactor_state(job_attempt_id, CompactorJobStatus::Failed) {
+            error!(
+                "failed to update compactor job state [job_attempt_id={}, error={:?}]",
+                job_attempt_id, e
+            );
+            return;
+        }
+
+        // Remove from scheduled and canonical maps.
+        if let Some(sched) = self.scheduled_jobs.remove(&job_attempt_id) {
+            let job_id = sched.id();
+            // This should be removed once persistence is implemented since removal will be handled by GC
+            self.compactor_jobs.remove(&job_id);
+        }
+    }
+
+    pub(crate) fn finish_compactor_job(&mut self, id: Ulid, output_sr: SortedRun) {
+        if let Some(job) = self.scheduled_jobs.get(&id) {
+            let compaction_request = job.compactor_job_request();
+            info!(
+                "finished compaction [compaction_request={}]",
+                compaction_request
+            );
             // reconstruct l0
-            let compaction_l0s: HashSet<Ulid> = compaction
-                .sources
+            let compaction_l0s: HashSet<Ulid> = compaction_request
+                .sources()
                 .iter()
                 .filter_map(|id| id.maybe_unwrap_sst())
                 .collect();
-            let compaction_srs: HashSet<u32> = compaction
-                .sources
+            let compaction_srs: HashSet<u32> = compaction_request
+                .sources()
                 .iter()
                 .chain(std::iter::once(&SourceId::SortedRun(
-                    compaction.destination,
+                    compaction_request.destination(),
                 )))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
@@ -404,10 +551,10 @@ impl CompactorState {
                 new_compacted.push(output_sr.clone());
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
-            let first_source = compaction
-                .sources
+            let first_source = compaction_request
+                .sources()
                 .first()
-                .expect("illegal: empty compaction");
+                .expect("illegal: empty compaction request");
             if let Some(compacted_l0) = first_source.maybe_unwrap_sst() {
                 // if there are l0s, the newest must be the first entry in sources
                 // TODO: validate that this is the case
@@ -417,18 +564,13 @@ impl CompactorState {
             db_state.compacted = new_compacted;
             self.manifest.core = db_state;
             // TODO: Add compaction plan to object store with Completed status
-            if let Some(sched) = self.scheduled_compactions.get(&id) {
-                let plan_id = sched.id();
-                if let Some(plan) = self.compaction_plans.get_mut(&plan_id) {
-                    plan.compaction.status = CompactionStatus::Completed; // update canonical entry
-                } else {
-                    error!("compaction plan not found [compaction_id={}]", plan_id);
-                }
-                self.scheduled_compactions.remove(&id);
-                // This should be removed once persistence is implemented since removal be take care by garbage collection
-                self.compaction_plans.remove(&plan_id);
-            } else {
-                error!("scheduled compaction job not found [job_id={}]", id);
+            if let Err(e) = self.update_compactor_state(id, CompactorJobStatus::Completed) {
+                error!("failed to update compactor job state [error={:?}]", e);
+                return;
+            }
+            if let Some(sched) = self.scheduled_jobs.remove(&id) {
+                let job_id = sched.id();
+                self.compactor_jobs.remove(&job_id);
             }
         }
     }
@@ -474,23 +616,26 @@ mod tests {
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction = build_l0_compaction(&state.db_state().l0, 0);
-
+        let request = build_l0_compaction(&state.db_state().l0, 0);
+        let job_input: CompactorJobInput = CompactorJobInput::SortedRunJobInputs {
+            ssts: state.db_state().l0.clone().into(),
+            sorted_runs: vec![],
+        };
         // when:
-        let compaction_plan =
-            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
-        state.compaction_submitted(compaction_plan.clone());
+        let compactor_job = CompactorJob::new(
+            compaction_id,
+            CompactorJobRequestType::Internal,
+            request,
+            job_input,
+        );
+        state.submit_compactor_job(compactor_job.clone());
         let id = state
-            .submit_compaction(compaction_job_id, compaction_plan)
+            .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
 
         // then:
         assert_eq!(id, compaction_job_id);
         assert_eq!(state.compactions().len(), 1);
-        assert_eq!(
-            state.compactions().first().unwrap().status,
-            CompactionStatus::Pending
-        );
     }
 
     #[test]
@@ -501,12 +646,20 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        let compaction_plan =
-            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
-        state.compaction_submitted(compaction_plan.clone());
+        let request = build_l0_compaction(&before_compaction.l0, 0);
+        let job_input: CompactorJobInput = CompactorJobInput::SortedRunJobInputs {
+            ssts: before_compaction.l0.clone().into(),
+            sorted_runs: vec![],
+        };
+        let compactor_job = CompactorJob::new(
+            compaction_id,
+            CompactorJobRequestType::Internal,
+            request,
+            job_input,
+        );
+        state.submit_compactor_job(compactor_job.clone());
         let id = state
-            .submit_compaction(compaction_job_id, compaction_plan)
+            .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
 
         assert_eq!(id, compaction_job_id);
@@ -517,7 +670,7 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(id, sr.clone());
+        state.finish_compactor_job(id, sr.clone());
 
         // then:
         assert_eq!(
@@ -555,12 +708,20 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        let compaction_plan =
-            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
-        state.compaction_submitted(compaction_plan.clone());
+        let request = build_l0_compaction(&before_compaction.l0, 0);
+        let job_input: CompactorJobInput = CompactorJobInput::SortedRunJobInputs {
+            ssts: before_compaction.l0.clone().into(),
+            sorted_runs: vec![],
+        };
+        let compactor_job = CompactorJob::new(
+            compaction_id,
+            CompactorJobRequestType::Internal,
+            request,
+            job_input,
+        );
+        state.submit_compactor_job(compactor_job.clone());
         let id = state
-            .submit_compaction(compaction_job_id, compaction_plan)
+            .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
 
         assert_eq!(id, compaction_job_id);
@@ -571,7 +732,7 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(id, sr.clone());
+        state.finish_compactor_job(id, sr.clone());
 
         // then:
         assert_eq!(state.compactions().len(), 0)
@@ -616,27 +777,30 @@ mod tests {
         let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+        let job_input: CompactorJobInput = CompactorJobInput::SortedRunJobInputs {
             ssts: original_l0s.clone().into(),
             sorted_runs: vec![],
         };
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction = Compaction::new(
+        let request = CompactorJobRequest::new(
             vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
-            spec,
             0,
         );
-        let compaction_plan =
-            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
-        state.compaction_submitted(compaction_plan.clone());
+        let compactor_job = CompactorJob::new(
+            compaction_id,
+            CompactorJobRequestType::Internal,
+            request,
+            job_input,
+        );
+        state.submit_compactor_job(compactor_job.clone());
         let id = state
-            .submit_compaction(compaction_job_id, compaction_plan)
+            .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
 
         assert_eq!(compaction_job_id, id);
 
-        state.finish_compaction(
+        state.finish_compactor_job(
             id,
             SortedRun {
                 id: 0,
@@ -693,31 +857,34 @@ mod tests {
         let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+        let job_input: CompactorJobInput = CompactorJobInput::SortedRunJobInputs {
             ssts: original_l0s.clone().into(),
             sorted_runs: vec![],
         };
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
 
-        let compaction = Compaction::new(
+        let request = CompactorJobRequest::new(
             original_l0s
                 .iter()
                 .map(|h| Sst(h.id.unwrap_compacted_id()))
                 .collect(),
-            spec,
             0,
         );
-        let compaction_plan =
-            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
-        state.compaction_submitted(compaction_plan.clone());
+        let compactor_job = CompactorJob::new(
+            compaction_id,
+            CompactorJobRequestType::Internal,
+            request,
+            job_input,
+        );
+        state.submit_compactor_job(compactor_job.clone());
         let id = state
-            .submit_compaction(compaction_job_id, compaction_plan)
+            .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
 
         assert_eq!(compaction_job_id, id);
 
-        state.finish_compaction(
+        state.finish_compactor_job(
             id,
             SortedRun {
                 id: 0,
@@ -782,26 +949,29 @@ mod tests {
         let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+        let job_input: CompactorJobInput = CompactorJobInput::SortedRunJobInputs {
             ssts: original_l0s.clone().into(),
             sorted_runs: vec![],
         };
         let id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction = Compaction::new(
+        let request = CompactorJobRequest::new(
             original_l0s
                 .iter()
                 .enumerate()
                 .filter(|(i, _e)| i > &2usize)
                 .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
                 .collect::<Vec<SourceId>>(),
-            spec,
             0,
         );
-        let compaction_plan =
-            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
-        state.compaction_submitted(compaction_plan.clone());
-        let result = state.submit_compaction(id, compaction_plan);
+        let compactor_job = CompactorJob::new(
+            compaction_id,
+            CompactorJobRequestType::Internal,
+            request,
+            job_input,
+        );
+        state.submit_compactor_job(compactor_job.clone());
+        let result = state.submit_compaction(id, compactor_job);
         // then:
         assert!(result.is_ok());
         let result_id = result.unwrap();
@@ -829,18 +999,22 @@ mod tests {
 
         // If you need both:
         let sources: Vec<SourceId> = l0_sources.chain(sr_sources).collect();
-        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
+        let job_input: CompactorJobInput = CompactorJobInput::SortedRunJobInputs {
             ssts: original_l0s.clone().into(),
             sorted_runs: original_srs.clone(),
         };
 
         let id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction = Compaction::new(sources, spec, 0);
-        let compaction_plan =
-            CompactionPlan::new(compaction_id, CompactionType::Internal, compaction);
-        state.compaction_submitted(compaction_plan.clone());
-        let result = state.submit_compaction(id, compaction_plan);
+        let request = CompactorJobRequest::new(sources, 0);
+        let compactor_job = CompactorJob::new(
+            compaction_id,
+            CompactorJobRequestType::Internal,
+            request,
+            job_input,
+        );
+        state.submit_compactor_job(compactor_job.clone());
+        let result = state.submit_compaction(id, compactor_job);
 
         // or simply:
         assert!(result.is_ok());
@@ -909,16 +1083,12 @@ mod tests {
         .expect("no manifest found with l0 len");
     }
 
-    fn build_l0_compaction(ssts: &VecDeque<SsTableHandle>, dst: u32) -> Compaction {
+    fn build_l0_compaction(ssts: &VecDeque<SsTableHandle>, dst: u32) -> CompactorJobRequest {
         let sources = ssts
             .iter()
             .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
             .collect();
-        let spec: CompactionSpec = CompactionSpec::SortedRunCompaction {
-            ssts: ssts.clone().into(),
-            sorted_runs: vec![],
-        };
-        Compaction::new(sources, spec, dst)
+        CompactorJobRequest::new(sources, dst)
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
