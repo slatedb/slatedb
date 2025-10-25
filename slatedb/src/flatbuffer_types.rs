@@ -415,10 +415,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(checkpoints_fb_vec.as_ref())
     }
 
-    fn add_bytes_range(
-        &mut self,
-        range: &BytesRange,
-    ) -> WIPOffset<root_generated::BytesRange<'b>> {
+    fn add_bytes_range(&mut self, range: &BytesRange) -> WIPOffset<root_generated::BytesRange<'b>> {
         let start_bound = self.add_bytes_bound(range.start_bound());
         let end_bound = self.add_bytes_bound(range.end_bound());
         root_generated::BytesRange::create(

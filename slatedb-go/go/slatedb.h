@@ -131,17 +131,17 @@ typedef struct CSdbScanResult {
 
 #define SsTableIndex_VT_BLOCK_META 4
 
-#define Uuid_VT_HIGH 4
+#define CompactedSstId_VT_HIGH 4
 
-#define Uuid_VT_LOW 6
+#define CompactedSstId_VT_LOW 6
 
-#define ExternalDb_VT_PATH 4
+#define CompactedSsTable_VT_ID 4
 
-#define ExternalDb_VT_SOURCE_CHECKPOINT_ID 6
+#define CompactedSsTable_VT_INFO 6
 
-#define ExternalDb_VT_FINAL_CHECKPOINT_ID 8
+#define CompactedSsTable_VT_VISIBLE_RANGE 8
 
-#define ExternalDb_VT_SST_IDS 10
+#define SortedRun_VT_SSTS 6
 
 #define BytesBound_VT_KEY 4
 
@@ -150,6 +150,14 @@ typedef struct CSdbScanResult {
 #define BytesRange_VT_START_BOUND 4
 
 #define BytesRange_VT_END_BOUND 6
+
+#define ExternalDb_VT_PATH 4
+
+#define ExternalDb_VT_SOURCE_CHECKPOINT_ID 6
+
+#define ExternalDb_VT_FINAL_CHECKPOINT_ID 8
+
+#define ExternalDb_VT_SST_IDS 10
 
 #define ManifestV1_VT_MANIFEST_ID 4
 
@@ -182,14 +190,6 @@ typedef struct CSdbScanResult {
 #define ManifestV1_VT_RECENT_SNAPSHOT_MIN_SEQ 32
 
 #define ManifestV1_VT_SEQUENCE_TRACKER 34
-
-#define CompactedSsTable_VT_ID 4
-
-#define CompactedSsTable_VT_INFO 6
-
-#define CompactedSsTable_VT_VISIBLE_RANGE 8
-
-#define SortedRun_VT_SSTS 6
 
 #define WriterCheckpoint_VT_EPOCH 4
 
