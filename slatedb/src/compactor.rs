@@ -18,7 +18,7 @@ use crate::compactor_state::{
     SourceId,
 };
 use crate::config::{CheckpointOptions, CompactorOptions};
-use crate::db_state::{SortedRun, SsTableHandle};
+use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};

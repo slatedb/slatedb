@@ -95,6 +95,7 @@ pub(crate) enum CompactorJobProgress {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[doc = "Immutable request that describes a compaction job.\n\nHolds the logical inputs for a compaction the scheduler decided on:\n- `sources`: a set of `SourceId` identifying L0 SSTs and/or existing Sorted Runs\n- `destination`: the Sorted Run id the compaction will produce\n\nMaterialized inputs (actual `SsTableHandle`/`SortedRun` objects) are derived from\n`sources` against the current manifest at execution time."]
 pub struct CompactorJobRequest {
     sources: Vec<SourceId>,
     destination: u32,
@@ -128,6 +129,7 @@ impl Display for CompactorJobRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
+#[doc = "Lightweight response snapshot for a compaction job.\n\nCarries the job id, its status at the time of creation, and any sources\nthat have been fully processed (useful for reporting/testing)."]
 pub struct CompactorJobResponse {
     compactor_job_id: Ulid,
     status: CompactorJobStatus,
@@ -165,11 +167,13 @@ impl CompactorJobResponse {
 }
 
 #[derive(Clone)]
-#[doc = "Canonical, internal record of a compaction plan.\n\nA plan bundles a stable `id` (ULID), a `compaction_type` (internal vs. external) and the client-facing `Compaction` payload. The compactor tracks plans in two maps: a canonical history keyed by plan id and a runtime view keyed by job id.\n\nNote: `CompactionPlan` is internal-only; `Compaction` remains the public type that clients observe and does not expose the plan id."]
+#[doc = "Canonical, internal record of a compactor job.\n\nA job is the unit tracked by the compactor: it has a stable `id` (ULID),\nits `request` (what to compact and where), an origin `job_request_type`,\na `status`, a history of `attempts`, and optional execution-time `progress`.\n\nNotes:\n- Only ids and lightweight request data are stored; inputs are materialized\n  from `request.sources()` against the manifest when needed.\n- Attempts represent retries of the same job; each attempt has its own id."]
 pub(crate) struct CompactorJob {
     id: Ulid,
     job_request_type: CompactorJobRequestType,
+    #[doc = "What to compact (sources) and where to write (destination)."]
     request: CompactorJobRequest,
+    #[doc = "Input interpretation for the executor (e.g., SortedRun job)."]
     job_input: CompactorJobInput,
 
     status: CompactorJobStatus,

@@ -127,7 +127,6 @@ use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::TokioCompactionExecutor;
 use crate::compactor_stats::CompactionStats;
-use crate::compactor_state::CompactionState;
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
