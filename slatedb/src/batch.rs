@@ -9,7 +9,7 @@ use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::collections::BTreeMap;
+use im::OrdMap;
 use std::ops::RangeBounds;
 use uuid::Uuid;
 
@@ -43,9 +43,14 @@ use uuid::Uuid;
 /// Note that the `WriteBatch` has an unlimited size. This means that batch
 /// writes can exceed `l0_sst_size_bytes` (when `WAL` is disabled). It also
 /// means that WAL SSTs could get large if there's a large batch write.
+///
+/// The `WriteBatch` uses an immutable data structure (`im::OrdMap`) for the operations,
+/// making `clone()` cheap (O(1) structural sharing) instead of deep copying the entire map.
+/// This is critical for transaction snapshots where `scan()` needs a consistent view
+/// even if the transaction continues to modify the batch.
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
-    pub(crate) ops: BTreeMap<Bytes, WriteOp>,
+    pub(crate) ops: OrdMap<Bytes, WriteOp>,
     pub(crate) txn_id: Option<Uuid>,
 }
 
@@ -126,7 +131,7 @@ impl WriteOp {
 impl WriteBatch {
     pub fn new() -> Self {
         WriteBatch {
-            ops: BTreeMap::new(),
+            ops: OrdMap::new(),
             txn_id: None,
         }
     }
@@ -176,10 +181,8 @@ impl WriteBatch {
         );
 
         let key = Bytes::copy_from_slice(key);
-        self.ops.insert(
-            key.clone(),
-            WriteOp::Put(key, Bytes::copy_from_slice(value), options.clone()),
-        );
+        let op = WriteOp::Put(key.clone(), Bytes::copy_from_slice(value), options.clone());
+        self.ops = self.ops.update(key, op);
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
@@ -192,7 +195,8 @@ impl WriteBatch {
         );
 
         let key = Bytes::copy_from_slice(key);
-        self.ops.insert(key.clone(), WriteOp::Delete(key));
+        let op = WriteOp::Delete(key.clone());
+        self.ops = self.ops.update(key, op);
     }
 
     pub(crate) fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
@@ -239,11 +243,47 @@ impl WriteBatchIterator {
         range: &BytesRange,
         ordering: IterationOrder,
     ) -> Option<Bytes> {
-        let mut iter = batch.ops.range::<Bytes, _>(range.clone());
+        use std::ops::Bound;
+
+        let start_bound = range.start_bound();
+        let end_bound = range.end_bound();
 
         match ordering {
-            IterationOrder::Ascending => iter.next().map(|(k, _)| k.clone()),
-            IterationOrder::Descending => iter.next_back().map(|(k, _)| k.clone()),
+            IterationOrder::Ascending => {
+                batch.ops.iter()
+                    .find(|(k, _)| {
+                        let in_start = match start_bound {
+                            Bound::Included(s) => *k >= s,
+                            Bound::Excluded(s) => *k > s,
+                            Bound::Unbounded => true,
+                        };
+                        let in_end = match end_bound {
+                            Bound::Included(e) => *k <= e,
+                            Bound::Excluded(e) => *k < e,
+                            Bound::Unbounded => true,
+                        };
+                        in_start && in_end
+                    })
+                    .map(|(k, _)| (*k).clone())
+            }
+            IterationOrder::Descending => {
+                batch.ops.iter()
+                    .rev()
+                    .find(|(k, _)| {
+                        let in_start = match start_bound {
+                            Bound::Included(s) => *k >= s,
+                            Bound::Excluded(s) => *k > s,
+                            Bound::Unbounded => true,
+                        };
+                        let in_end = match end_bound {
+                            Bound::Included(e) => *k <= e,
+                            Bound::Excluded(e) => *k < e,
+                            Bound::Unbounded => true,
+                        };
+                        in_start && in_end
+                    })
+                    .map(|(k, _)| (*k).clone())
+            }
         }
     }
 }
@@ -293,19 +333,32 @@ impl WriteBatchIterator {
         match self.ordering {
             IterationOrder::Ascending => {
                 // Find the smallest key > current_key within the range
-                let mut iter = self
-                    .batch
-                    .ops
-                    .range::<Bytes, _>((Bound::Excluded(current_key), end_bound));
-                iter.next().map(|(k, _)| k.clone())
+                self.batch.ops.iter()
+                    .find(|(k, _)| {
+                        let gt_current = *k > current_key;
+                        let in_end = match end_bound {
+                            Bound::Included(e) => *k <= e,
+                            Bound::Excluded(e) => *k < e,
+                            Bound::Unbounded => true,
+                        };
+                        gt_current && in_end
+                    })
+                    .map(|(k, _)| (*k).clone())
             }
             IterationOrder::Descending => {
                 // Find the largest key < current_key within the range
-                let mut iter = self
-                    .batch
-                    .ops
-                    .range::<Bytes, _>((start_bound, Bound::Excluded(current_key)));
-                iter.next_back().map(|(k, _)| k.clone())
+                self.batch.ops.iter()
+                    .rev()
+                    .find(|(k, _)| {
+                        let lt_current = *k < current_key;
+                        let in_start = match start_bound {
+                            Bound::Included(s) => *k >= s,
+                            Bound::Excluded(s) => *k > s,
+                            Bound::Unbounded => true,
+                        };
+                        lt_current && in_start
+                    })
+                    .map(|(k, _)| (*k).clone())
             }
         }
     }
@@ -320,19 +373,32 @@ impl WriteBatchIterator {
         match self.ordering {
             IterationOrder::Ascending => {
                 // Find the smallest key >= target_key within range
-                let mut iter = self
-                    .batch
-                    .ops
-                    .range::<Bytes, _>((Bound::Included(target_key), end_bound));
-                iter.next().map(|(k, _)| k.clone())
+                self.batch.ops.iter()
+                    .find(|(k, _)| {
+                        let gte_target = *k >= target_key;
+                        let in_end = match end_bound {
+                            Bound::Included(e) => *k <= e,
+                            Bound::Excluded(e) => *k < e,
+                            Bound::Unbounded => true,
+                        };
+                        gte_target && in_end
+                    })
+                    .map(|(k, _)| (*k).clone())
             }
             IterationOrder::Descending => {
                 // Find the largest key <= target_key within range
-                let mut iter = self
-                    .batch
-                    .ops
-                    .range::<Bytes, _>((start_bound, Bound::Included(target_key)));
-                iter.next_back().map(|(k, _)| k.clone())
+                self.batch.ops.iter()
+                    .rev()
+                    .find(|(k, _)| {
+                        let lte_target = *k <= target_key;
+                        let in_start = match start_bound {
+                            Bound::Included(s) => *k >= s,
+                            Bound::Excluded(s) => *k > s,
+                            Bound::Unbounded => true,
+                        };
+                        lte_target && in_start
+                    })
+                    .map(|(k, _)| (*k).clone())
             }
         }
     }
@@ -391,7 +457,7 @@ mod tests {
     }])]
     fn test_put_delete_batch(#[case] test_case: Vec<WriteOpTestCase>) {
         let mut batch = WriteBatch::new();
-        let mut expected_ops: BTreeMap<Bytes, WriteOp> = BTreeMap::new();
+        let mut expected_ops: OrdMap<Bytes, WriteOp> = OrdMap::new();
         for test_case in test_case {
             if let Some(value) = test_case.value {
                 batch.put_with_options(
@@ -399,7 +465,7 @@ mod tests {
                     value.as_slice(),
                     &test_case.options,
                 );
-                expected_ops.insert(
+                expected_ops = expected_ops.update(
                     Bytes::from(test_case.key.clone()),
                     WriteOp::Put(
                         Bytes::from(test_case.key),
@@ -409,7 +475,7 @@ mod tests {
                 );
             } else {
                 batch.delete(test_case.key.as_slice());
-                expected_ops.insert(
+                expected_ops = expected_ops.update(
                     Bytes::from(test_case.key.clone()),
                     WriteOp::Delete(Bytes::from(test_case.key)),
                 );
