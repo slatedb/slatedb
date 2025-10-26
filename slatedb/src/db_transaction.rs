@@ -303,11 +303,8 @@ impl DBTransaction {
             }
         }
 
-        // Move out the write_batch value from DbTransaction.
-        let write_batch = {
-            let mut guard = self.write_batch.write();
-            std::mem::take(&mut *guard)
-        };
+        // Take the write_batch for submission to the database.
+        let write_batch = self.write_batch.read().clone();
 
         // Track the write keys from write batch and clone it for submission
         let write_keys = write_batch.keys().collect::<HashSet<_>>();
