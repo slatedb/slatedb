@@ -11,8 +11,6 @@ use crate::checkpoint;
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
 
-use crate::record::RecordCodec;
-
 #[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
 #[rustfmt::skip]
@@ -29,10 +27,11 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
     CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat,
-    SortedRun as FbSortedRun, SortedRunArgs, Ulid as FbUlid, Uuid, UuidArgs,
+    SortedRun, SortedRunArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
+use crate::record::RecordCodec;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::clamp_allocated_size_bytes;
 
@@ -278,14 +277,6 @@ impl CompactedSstId<'_> {
     }
 }
 
-#[allow(dead_code)]
-impl<'a> FbUlid<'a> {
-    #[inline]
-    pub(crate) fn to_ulid(self) -> Ulid {
-        Ulid::from((self.high(), self.low()))
-    }
-}
-
 struct DbFlatBufferBuilder<'b> {
     builder: FlatBufferBuilder<'b>,
 }
@@ -315,7 +306,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
     }
 
     fn add_compacted_sst_id(&mut self, ulid: &Ulid) -> WIPOffset<CompactedSstId<'b>> {
-        let (high, low) = Self::ulid_parts(ulid);
+        let uidu128 = ulid.0;
+        let high = (uidu128 >> 64) as u64;
+        let low = ((uidu128 << 64) >> 64) as u64;
         CompactedSstId::create(&mut self.builder, &CompactedSstIdArgs { high, low })
     }
 
@@ -368,9 +361,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(compacted_ssts.as_ref())
     }
 
-    fn add_sorted_run(&mut self, sorted_run: &db_state::SortedRun) -> WIPOffset<FbSortedRun<'b>> {
+    fn add_sorted_run(&mut self, sorted_run: &db_state::SortedRun) -> WIPOffset<SortedRun<'b>> {
         let ssts = self.add_compacted_ssts(sorted_run.ssts.iter());
-        FbSortedRun::create(
+        SortedRun::create(
             &mut self.builder,
             &SortedRunArgs {
                 id: sorted_run.id,
@@ -382,8 +375,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn add_sorted_runs(
         &mut self,
         sorted_runs: &[db_state::SortedRun],
-    ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbSortedRun<'b>>>> {
-        let sorted_runs_fbs: Vec<WIPOffset<FbSortedRun>> = sorted_runs
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<SortedRun<'b>>>> {
+        let sorted_runs_fbs: Vec<WIPOffset<SortedRun>> = sorted_runs
             .iter()
             .map(|sr| self.add_sorted_run(sr))
             .collect();
@@ -393,12 +386,6 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn add_uuid(&mut self, uuid: uuid::Uuid) -> WIPOffset<Uuid<'b>> {
         let (high, low) = uuid.as_u64_pair();
         Uuid::create(&mut self.builder, &UuidArgs { high, low })
-    }
-
-    #[inline]
-    fn ulid_parts(u: &ulid::Ulid) -> (u64, u64) {
-        let v = u.0;
-        ((v >> 64) as u64, (v & 0xFFFF_FFFF_FFFF_FFFF) as u64)
     }
 
     fn add_checkpoint(&mut self, checkpoint: &checkpoint::Checkpoint) -> WIPOffset<Checkpoint<'b>> {
@@ -577,7 +564,6 @@ mod tests {
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{ExternalDb, Manifest};
-    use crate::record::RecordCodec;
     use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
 
