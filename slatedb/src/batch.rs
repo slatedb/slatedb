@@ -293,18 +293,18 @@ impl WriteBatchIterator {
         match self.ordering {
             IterationOrder::Ascending => {
                 // Find the smallest key > current_key within the range
-                let mut iter = self.batch.ops.range::<Bytes, _>((
-                    Bound::Excluded(current_key),
-                    end_bound,
-                ));
+                let mut iter = self
+                    .batch
+                    .ops
+                    .range::<Bytes, _>((Bound::Excluded(current_key), end_bound));
                 iter.next().map(|(k, _)| k.clone())
             }
             IterationOrder::Descending => {
                 // Find the largest key < current_key within the range
-                let mut iter = self.batch.ops.range::<Bytes, _>((
-                    start_bound,
-                    Bound::Excluded(current_key),
-                ));
+                let mut iter = self
+                    .batch
+                    .ops
+                    .range::<Bytes, _>((start_bound, Bound::Excluded(current_key)));
                 iter.next_back().map(|(k, _)| k.clone())
             }
         }
@@ -320,18 +320,18 @@ impl WriteBatchIterator {
         match self.ordering {
             IterationOrder::Ascending => {
                 // Find the smallest key >= target_key within range
-                let mut iter = self.batch.ops.range::<Bytes, _>((
-                    Bound::Included(target_key),
-                    end_bound,
-                ));
+                let mut iter = self
+                    .batch
+                    .ops
+                    .range::<Bytes, _>((Bound::Included(target_key), end_bound));
                 iter.next().map(|(k, _)| k.clone())
             }
             IterationOrder::Descending => {
                 // Find the largest key <= target_key within range
-                let mut iter = self.batch.ops.range::<Bytes, _>((
-                    start_bound,
-                    Bound::Included(target_key),
-                ));
+                let mut iter = self
+                    .batch
+                    .ops
+                    .range::<Bytes, _>((start_bound, Bound::Included(target_key)));
                 iter.next_back().map(|(k, _)| k.clone())
             }
         }
