@@ -277,12 +277,11 @@ impl TokioCompactionExecutorInner {
         // TODO: Commenting tests fail due to some receiver channel issues.
         // Would enable it in subsequent PR.
 
-        // #[allow(clippy::disallowed_methods)]
-        // self.worker_tx
-        // .send(CompactorMessage::CompactionStarted {
-        //     id: compaction.id,
-        // })
-        // .expect("failed to send compaction progress");
+        // Notify the compactor that this attempt has started.
+        #[allow(clippy::disallowed_methods)]
+        self.worker_tx
+            .send(CompactorMessage::CompactionStarted { id })
+            .expect("failed to send compaction started msg");
 
         let this = self.clone();
         let this_cleanup = self.clone();

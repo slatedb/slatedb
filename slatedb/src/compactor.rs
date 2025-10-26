@@ -1113,10 +1113,18 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
-            .await
-            .unwrap()
-            .expect("timeout");
+        let msg = loop {
+            if let Ok(Some(m)) =
+                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+                    .await
+            {
+                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
+                    break m;
+                }
+            } else {
+                panic!("timeout waiting for CompactionFinished");
+            }
+        };
         let starting_last_ts = fixture
             .stats_registry
             .lookup(LAST_COMPACTION_TS_SEC)
@@ -1150,10 +1158,18 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
-            .await
-            .unwrap()
-            .expect("timeout");
+        let msg = loop {
+            if let Ok(Some(m)) =
+                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+                    .await
+            {
+                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
+                    break m;
+                }
+            } else {
+                panic!("timeout waiting for CompactionFinished");
+            }
+        };
         // write an l0 before handling compaction finished
         fixture.write_l0().await;
 
@@ -1243,11 +1259,18 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
-            .await
-            .unwrap()
-            .expect("timeout");
-
+        let msg = loop {
+            if let Ok(Some(m)) =
+                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+                    .await
+            {
+                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
+                    break m;
+                }
+            } else {
+                panic!("timeout waiting for CompactionFinished");
+            }
+        };
         // when:
         fixture
             .handler
@@ -1352,13 +1375,18 @@ mod tests {
         fixture.scheduler.inject_compaction(c1.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            fixture.real_executor_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .expect("timeout waiting compaction msg");
+        let msg = loop {
+            if let Ok(Some(m)) =
+                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+                    .await
+            {
+                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
+                    break m;
+                }
+            } else {
+                panic!("timeout waiting for CompactionFinished");
+            }
+        };
         fixture.handler.handle(msg).await.unwrap();
 
         // now highest_id should be 1; build L0-only compaction with dest 0 (below highest)
@@ -1377,13 +1405,18 @@ mod tests {
         fixture.scheduler.inject_compaction(c1.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            fixture.real_executor_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .expect("timeout waiting compaction msg");
+        let msg = loop {
+            if let Ok(Some(m)) =
+                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+                    .await
+            {
+                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
+                    break m;
+                }
+            } else {
+                panic!("timeout waiting for CompactionFinished");
+            }
+        };
         fixture.handler.handle(msg).await.unwrap();
 
         // prepare a mixed compaction: one SR source and one L0 source
