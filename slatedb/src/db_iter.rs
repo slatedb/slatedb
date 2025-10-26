@@ -228,7 +228,7 @@ pub struct DbIterator<'a> {
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
-        write_batch_iter: Option<WriteBatchIterator<'a>>,
+        write_batch_iter: Option<WriteBatchIterator>,
         mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
         l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
         sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,

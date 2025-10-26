@@ -222,14 +222,15 @@ impl WriteBatch {
     }
 }
 
+use crate::bytes_range::BytesRange;
+
 /// Iterator over WriteBatch entries.
 ///
 /// Holds an owned WriteBatch (cheap Arc clone) instead of a reference,
 /// allowing it to be used without lifetime constraints.
 pub(crate) struct WriteBatchIterator {
     batch: WriteBatch,
-    range_start: Option<Bytes>,
-    range_end: Option<Bytes>,
+    range: BytesRange,
     ordering: IterationOrder,
     current_key: Option<Bytes>,
 }
@@ -240,27 +241,12 @@ impl WriteBatchIterator {
         range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
     ) -> Self {
-        use std::ops::Bound;
-
-        let range_start = match range.start_bound() {
-            Bound::Included(k) => Some(k.clone()),
-            Bound::Excluded(k) => Some(k.clone()),
-            Bound::Unbounded => None,
-        };
-
-        let range_end = match range.end_bound() {
-            Bound::Included(k) => Some(k.clone()),
-            Bound::Excluded(k) => Some(k.clone()),
-            Bound::Unbounded => None,
-        };
-
-        // Find the first key in range
-        let current_key = Self::find_first_key(&batch, &range_start, &range_end, ordering);
+        let bytes_range = BytesRange::from(range);
+        let current_key = Self::find_first_key(&batch, &bytes_range, ordering);
 
         Self {
             batch,
-            range_start,
-            range_end,
+            range: bytes_range,
             ordering,
             current_key,
         }
@@ -268,16 +254,10 @@ impl WriteBatchIterator {
 
     fn find_first_key(
         batch: &WriteBatch,
-        range_start: &Option<Bytes>,
-        range_end: &Option<Bytes>,
+        range: &BytesRange,
         ordering: IterationOrder,
     ) -> Option<Bytes> {
-        use std::ops::Bound;
-
-        let start_bound = range_start.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
-        let end_bound = range_end.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
-
-        let mut iter = batch.ops.range((start_bound, end_bound));
+        let mut iter = batch.ops.range::<Bytes, _>(range.clone());
 
         match ordering {
             IterationOrder::Ascending => iter.next().map(|(k, _)| k.clone()),
@@ -324,21 +304,22 @@ impl WriteBatchIterator {
     fn find_next_key(&self, current_key: &Bytes) -> Option<Bytes> {
         use std::ops::Bound;
 
-        let start_bound = self.range_start.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
-        let end_bound = self.range_end.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
+        // Get range bounds directly from BytesRange
+        let start_bound = self.range.start_bound();
+        let end_bound = self.range.end_bound();
 
         match self.ordering {
             IterationOrder::Ascending => {
-                // Find the smallest key > current_key
-                let mut iter = self.batch.ops.range((
+                // Find the smallest key > current_key within the range
+                let mut iter = self.batch.ops.range::<Bytes, _>((
                     Bound::Excluded(current_key),
                     end_bound,
                 ));
                 iter.next().map(|(k, _)| k.clone())
             }
             IterationOrder::Descending => {
-                // Find the largest key < current_key
-                let mut iter = self.batch.ops.range((
+                // Find the largest key < current_key within the range
+                let mut iter = self.batch.ops.range::<Bytes, _>((
                     start_bound,
                     Bound::Excluded(current_key),
                 ));
@@ -350,13 +331,14 @@ impl WriteBatchIterator {
     fn find_key_from(&self, target_key: &Bytes) -> Option<Bytes> {
         use std::ops::Bound;
 
-        let start_bound = self.range_start.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
-        let end_bound = self.range_end.as_ref().map_or(Bound::Unbounded, |k| Bound::Included(k));
+        // Get range bounds directly from BytesRange
+        let start_bound = self.range.start_bound();
+        let end_bound = self.range.end_bound();
 
         match self.ordering {
             IterationOrder::Ascending => {
                 // Find the smallest key >= target_key within range
-                let mut iter = self.batch.ops.range((
+                let mut iter = self.batch.ops.range::<Bytes, _>((
                     Bound::Included(target_key),
                     end_bound,
                 ));
@@ -364,7 +346,7 @@ impl WriteBatchIterator {
             }
             IterationOrder::Descending => {
                 // Find the largest key <= target_key within range
-                let mut iter = self.batch.ops.range((
+                let mut iter = self.batch.ops.range::<Bytes, _>((
                     start_bound,
                     Bound::Included(target_key),
                 ));
@@ -451,7 +433,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(batch.ops, expected_ops);
+        assert_eq!(*batch.ops, expected_ops);
     }
 
     #[test]

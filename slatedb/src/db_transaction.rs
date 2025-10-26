@@ -132,7 +132,7 @@ impl DBTransaction {
                 key,
                 options,
                 &db_state,
-                Some(&write_batch),
+                Some(write_batch),
                 Some(self.started_seq),
             )
             .await
@@ -205,7 +205,7 @@ impl DBTransaction {
                 BytesRange::from(range),
                 options,
                 &db_state,
-                Some(&write_batch_snapshot),
+                Some(write_batch_snapshot),
                 Some(self.started_seq),
                 range_tracker,
             )
@@ -404,7 +404,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin transaction
-        let mut txn = db
+        let txn = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
@@ -430,11 +430,11 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn1.put(b"k1", b"v2").unwrap();
 
         // Begin second transaction
-        let mut txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn2.put(b"k1", b"v3").unwrap();
 
         // Commit first transaction - should succeed
@@ -455,7 +455,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn1.put(b"k1", b"v2").unwrap();
 
         // DB put on the same key
@@ -477,7 +477,7 @@ mod tests {
         db.put(b"k2", b"v2.1").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db
+        let txn1 = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
@@ -485,7 +485,7 @@ mod tests {
         txn1.put(b"k2", b"v2.2").unwrap();
 
         // Begin second transaction
-        let mut txn2 = db
+        let txn2 = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
@@ -513,13 +513,13 @@ mod tests {
         db.put(b"k3", b"v3").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db
+        let txn1 = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
 
         // Begin second transaction
-        let mut txn2 = db
+        let txn2 = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
