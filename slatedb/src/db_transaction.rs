@@ -28,7 +28,7 @@ use crate::DbRead;
 ///
 /// #     let object_store = Arc::new(InMemory::new());
 /// #     let db = Db::open("path/to/db", object_store).await?;
-/// let mut txn = db.begin(IsolationLevel::Snapshot).await?;
+/// let txn = db.begin(IsolationLevel::Snapshot).await?;
 ///
 /// // Read operations
 /// let value = txn.get(b"key").await?;
@@ -52,9 +52,6 @@ pub struct DBTransaction {
     /// The write batch of the transaction, which contains the uncommitted writes.
     /// Users can read data from the write batch during the transaction,
     /// thus providing an MVCC view of the database.
-    ///
-    /// Uses RwLock to allow interior mutability: reads can share access to
-    /// WriteBatch snapshots, while writes get exclusive access.
     write_batch: RwLock<WriteBatch>,
     /// Reference to the database
     db_inner: Arc<DbInner>,
@@ -122,8 +119,9 @@ impl DBTransaction {
         }
 
         let db_state = self.db_inner.state.read().view();
-        // Clone to avoid holding the lock across await
-        let write_batch = self.write_batch.read().clone();
+
+        // Clone the WriteBatch for snapshot isolation
+        let write_batch_cloned = self.write_batch.read().clone();
 
         // For now, delegate to the underlying reader
         self.db_inner
@@ -132,7 +130,7 @@ impl DBTransaction {
                 key,
                 options,
                 &db_state,
-                Some(write_batch),
+                Some(write_batch_cloned),
                 Some(self.started_seq),
             )
             .await
@@ -194,9 +192,9 @@ impl DBTransaction {
         self.db_inner.check_error()?;
         let db_state = self.db_inner.state.read().view();
 
-        // Clone the WriteBatch for snapshot isolation
-        // This is cheap because WriteBatch uses Arc internally
-        let write_batch_snapshot = self.write_batch.read().clone();
+        // Clone the WriteBatch for the scan to ensure that the scan within a transaction
+        // sees a consistent view of the current writes.
+        let write_batch_cloned = self.write_batch.read().clone();
 
         // For now, delegate to the underlying reader
         self.db_inner
@@ -205,7 +203,7 @@ impl DBTransaction {
                 BytesRange::from(range),
                 options,
                 &db_state,
-                Some(write_batch_snapshot),
+                Some(write_batch_cloned),
                 Some(self.started_seq),
                 range_tracker,
             )
@@ -215,8 +213,6 @@ impl DBTransaction {
 
     /// Put a key-value pair into the transaction.
     /// The write will be buffered in the transaction's write batch until commit.
-    ///
-    /// Uses interior mutability to allow writes without `&mut self`.
     ///
     /// ## Arguments
     /// - `key`: the key to write
@@ -236,8 +232,6 @@ impl DBTransaction {
     /// Put a key-value pair into the transaction with custom options.
     /// The write will be buffered in the transaction's write batch until commit.
     ///
-    /// Uses interior mutability to allow writes without `&mut self`.
-    ///
     /// ## Arguments
     /// - `key`: the key to write
     /// - `value`: the value to write
@@ -256,14 +250,14 @@ impl DBTransaction {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.write_batch.write().put_with_options(key, value, options);
+        self.write_batch
+            .write()
+            .put_with_options(key, value, options);
         Ok(())
     }
 
     /// Delete a key from the transaction.
     /// The delete will be buffered in the transaction's write batch until commit.
-    ///
-    /// Uses interior mutability to allow writes without `&mut self`.
     ///
     /// ## Arguments
     /// - `key`: the key to delete
@@ -292,12 +286,9 @@ impl DBTransaction {
     ///   - Database I/O errors
     ///   - Concurrency conflicts detected during WriteBatch processing
     pub async fn commit(self) -> Result<(), crate::Error> {
-        // Clone the write_batch before consuming self
-        let write_batch = self.write_batch.read().clone();
-
         // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
         // conflict, neither write-write conflict.
-        if write_batch.is_empty() {
+        if self.write_batch.read().is_empty() {
             return Ok(());
         }
 
@@ -312,7 +303,13 @@ impl DBTransaction {
             }
         }
 
-        // Track the write keys from write batch
+        // Move out the write_batch value from DbTransaction.
+        let write_batch = {
+            let mut guard = self.write_batch.write();
+            std::mem::take(&mut *guard)
+        };
+
+        // Track the write keys from write batch and clone it for submission
         let write_keys = write_batch.keys().collect::<HashSet<_>>();
         self.txn_manager.track_write_keys(&self.txn_id, &write_keys);
 
@@ -902,5 +899,65 @@ mod tests {
                 test_case.name, i, expected, result
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_txn_scan_sees_concurrent_put_in_same_txn() {
+        // Setup database with initial data
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Put initial data: k1 and k3
+        db.put(b"k1", b"v1").await.unwrap();
+        db.put(b"k3", b"v3").await.unwrap();
+
+        // Begin transaction
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+
+        // Test 1: Scan created before put should NOT see the new key
+        {
+            // Start a scan from k1 to k3 (inclusive)
+            let mut iter = txn.scan(&b"k1"[..]..=&b"k3"[..]).await.unwrap();
+
+            // Put k2 in the transaction (after scan has started)
+            txn.put(b"k2", b"v2").unwrap();
+
+            // Iterate through the results
+            let mut results = Vec::new();
+            while let Some(kv) = iter.next().await.unwrap() {
+                results.push((kv.key.clone(), kv.value.clone()));
+            }
+
+            // The iterator should see k1 and k3 (the snapshot at scan time)
+            // It should NOT see k2 because the scan was created before k2 was put
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].0, Bytes::from_static(b"k1"));
+            assert_eq!(results[0].1, Bytes::from_static(b"v1"));
+            assert_eq!(results[1].0, Bytes::from_static(b"k3"));
+            assert_eq!(results[1].1, Bytes::from_static(b"v3"));
+        } // iter is dropped here
+
+        // Test 2: A new scan after the put should see k2
+        {
+            let mut iter2 = txn.scan(&b"k1"[..]..=&b"k3"[..]).await.unwrap();
+            let mut results2 = Vec::new();
+            while let Some(kv) = iter2.next().await.unwrap() {
+                results2.push((kv.key.clone(), kv.value.clone()));
+            }
+
+            // This new scan should see all three keys including k2
+            assert_eq!(results2.len(), 3);
+            assert_eq!(results2[0].0, Bytes::from_static(b"k1"));
+            assert_eq!(results2[1].0, Bytes::from_static(b"k2"));
+            assert_eq!(results2[1].1, Bytes::from_static(b"v2"));
+            assert_eq!(results2[2].0, Bytes::from_static(b"k3"));
+        } // iter2 is dropped here
+
+        // Commit the transaction
+        txn.commit().await.unwrap();
+
+        // Verify k2 is now in the database
+        let value = db.get(b"k2").await.unwrap();
+        assert_eq!(value, Some(Bytes::from_static(b"v2")));
     }
 }

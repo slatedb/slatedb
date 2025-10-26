@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// A batch of write operations (puts and/or deletes). All operations in the
@@ -44,14 +43,9 @@ use uuid::Uuid;
 /// Note that the `WriteBatch` has an unlimited size. This means that batch
 /// writes can exceed `l0_sst_size_bytes` (when `WAL` is disabled). It also
 /// means that WAL SSTs could get large if there's a large batch write.
-///
-/// WriteBatch uses an immutable data structure internally (Arc<BTreeMap>),
-/// allowing cheap clones for snapshot isolation in transactions. When you
-/// clone a WriteBatch, it shares the same underlying data until a modification
-/// occurs (copy-on-write).
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
-    pub(crate) ops: Arc<BTreeMap<Bytes, WriteOp>>,
+    pub(crate) ops: BTreeMap<Bytes, WriteOp>,
     pub(crate) txn_id: Option<Uuid>,
 }
 
@@ -132,7 +126,7 @@ impl WriteOp {
 impl WriteBatch {
     pub fn new() -> Self {
         WriteBatch {
-            ops: Arc::new(BTreeMap::new()),
+            ops: BTreeMap::new(),
             txn_id: None,
         }
     }
@@ -145,9 +139,6 @@ impl WriteBatch {
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.
-    ///
-    /// This uses copy-on-write: if the internal Arc is shared, it will clone
-    /// the BTreeMap before modification.
     ///
     /// # Panics
     /// - if the key is empty
@@ -162,9 +153,6 @@ impl WriteBatch {
     }
 
     /// Put a key-value pair into the batch. Keys must not be empty.
-    ///
-    /// This uses copy-on-write: if the internal Arc is shared, it will clone
-    /// the BTreeMap before modification.
     ///
     /// # Panics
     /// - if the key is empty
@@ -188,16 +176,13 @@ impl WriteBatch {
         );
 
         let key = Bytes::copy_from_slice(key);
-        let write_op = WriteOp::Put(key.clone(), Bytes::copy_from_slice(value), options.clone());
-
-        // Copy-on-write: if Arc is shared, this will clone the BTreeMap
-        Arc::make_mut(&mut self.ops).insert(key, write_op);
+        self.ops.insert(
+            key.clone(),
+            WriteOp::Put(key, Bytes::copy_from_slice(value), options.clone()),
+        );
     }
 
     /// Delete a key-value pair into the batch. Keys must not be empty.
-    ///
-    /// This uses copy-on-write: if the internal Arc is shared, it will clone
-    /// the BTreeMap before modification.
     pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
         let key = key.as_ref();
         assert!(!key.is_empty(), "key cannot be empty");
@@ -207,10 +192,7 @@ impl WriteBatch {
         );
 
         let key = Bytes::copy_from_slice(key);
-        let write_op = WriteOp::Delete(key.clone());
-
-        // Copy-on-write: if Arc is shared, this will clone the BTreeMap
-        Arc::make_mut(&mut self.ops).insert(key, write_op);
+        self.ops.insert(key.clone(), WriteOp::Delete(key));
     }
 
     pub(crate) fn keys(&self) -> impl Iterator<Item = Bytes> + '_ {
@@ -433,7 +415,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(*batch.ops, expected_ops);
+        assert_eq!(batch.ops, expected_ops);
     }
 
     #[test]
