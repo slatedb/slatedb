@@ -249,41 +249,41 @@ impl WriteBatchIterator {
         let end_bound = range.end_bound();
 
         match ordering {
-            IterationOrder::Ascending => {
-                batch.ops.iter()
-                    .find(|(k, _)| {
-                        let in_start = match start_bound {
-                            Bound::Included(s) => *k >= s,
-                            Bound::Excluded(s) => *k > s,
-                            Bound::Unbounded => true,
-                        };
-                        let in_end = match end_bound {
-                            Bound::Included(e) => *k <= e,
-                            Bound::Excluded(e) => *k < e,
-                            Bound::Unbounded => true,
-                        };
-                        in_start && in_end
-                    })
-                    .map(|(k, _)| (*k).clone())
-            }
-            IterationOrder::Descending => {
-                batch.ops.iter()
-                    .rev()
-                    .find(|(k, _)| {
-                        let in_start = match start_bound {
-                            Bound::Included(s) => *k >= s,
-                            Bound::Excluded(s) => *k > s,
-                            Bound::Unbounded => true,
-                        };
-                        let in_end = match end_bound {
-                            Bound::Included(e) => *k <= e,
-                            Bound::Excluded(e) => *k < e,
-                            Bound::Unbounded => true,
-                        };
-                        in_start && in_end
-                    })
-                    .map(|(k, _)| (*k).clone())
-            }
+            IterationOrder::Ascending => batch
+                .ops
+                .iter()
+                .find(|(k, _)| {
+                    let in_start = match start_bound {
+                        Bound::Included(s) => *k >= s,
+                        Bound::Excluded(s) => *k > s,
+                        Bound::Unbounded => true,
+                    };
+                    let in_end = match end_bound {
+                        Bound::Included(e) => *k <= e,
+                        Bound::Excluded(e) => *k < e,
+                        Bound::Unbounded => true,
+                    };
+                    in_start && in_end
+                })
+                .map(|(k, _)| (*k).clone()),
+            IterationOrder::Descending => batch
+                .ops
+                .iter()
+                .rev()
+                .find(|(k, _)| {
+                    let in_start = match start_bound {
+                        Bound::Included(s) => *k >= s,
+                        Bound::Excluded(s) => *k > s,
+                        Bound::Unbounded => true,
+                    };
+                    let in_end = match end_bound {
+                        Bound::Included(e) => *k <= e,
+                        Bound::Excluded(e) => *k < e,
+                        Bound::Unbounded => true,
+                    };
+                    in_start && in_end
+                })
+                .map(|(k, _)| (*k).clone()),
         }
     }
 }
@@ -333,7 +333,9 @@ impl WriteBatchIterator {
         match self.ordering {
             IterationOrder::Ascending => {
                 // Find the smallest key > current_key within the range
-                self.batch.ops.iter()
+                self.batch
+                    .ops
+                    .iter()
                     .find(|(k, _)| {
                         let gt_current = *k > current_key;
                         let in_end = match end_bound {
@@ -347,7 +349,9 @@ impl WriteBatchIterator {
             }
             IterationOrder::Descending => {
                 // Find the largest key < current_key within the range
-                self.batch.ops.iter()
+                self.batch
+                    .ops
+                    .iter()
                     .rev()
                     .find(|(k, _)| {
                         let lt_current = *k < current_key;
@@ -373,7 +377,9 @@ impl WriteBatchIterator {
         match self.ordering {
             IterationOrder::Ascending => {
                 // Find the smallest key >= target_key within range
-                self.batch.ops.iter()
+                self.batch
+                    .ops
+                    .iter()
                     .find(|(k, _)| {
                         let gte_target = *k >= target_key;
                         let in_end = match end_bound {
@@ -387,7 +393,9 @@ impl WriteBatchIterator {
             }
             IterationOrder::Descending => {
                 // Find the largest key <= target_key within range
-                self.batch.ops.iter()
+                self.batch
+                    .ops
+                    .iter()
                     .rev()
                     .find(|(k, _)| {
                         let lte_target = *k <= target_key;
