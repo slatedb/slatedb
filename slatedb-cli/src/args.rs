@@ -107,6 +107,17 @@ pub(crate) enum CliCommands {
         min_age: Duration,
     },
 
+    SeqToTs {
+        seq: u64,
+        #[arg(long, value_enum, default_value_t = RoundOpt::Down)]
+        round: RoundOpt,
+    },
+    TsToSeq {
+        ts_secs: i64,
+        #[arg(long, value_enum, default_value_t = RoundOpt::Down)]
+        round: RoundOpt,
+    },
+
     /// Schedules a period garbage collection job
     #[command(group(
     ArgGroup::new("gc_config")
@@ -143,6 +154,18 @@ pub(crate) enum GcResource {
     Manifest,
     Wal,
     Compacted,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum RoundOpt {
+    Up,
+    Down,
+}
+
+impl RoundOpt {
+    pub fn as_bool(self) -> bool {
+        matches!(self, RoundOpt::Up)
+    }
 }
 
 fn parse_gc_schedule(s: &str) -> Result<GcSchedule, String> {

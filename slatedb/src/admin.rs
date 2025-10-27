@@ -43,22 +43,6 @@ pub struct Admin {
     pub(crate) rand: Arc<DbRand>,
 }
 
-/// Rounding policy for non-exact sequence/timestamp lookups.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Rounding {
-    Up,
-    Down,
-}
-
-impl From<Rounding> for FindOption {
-    fn from(r: Rounding) -> Self {
-        match r {
-            Rounding::Up => FindOption::RoundUp,
-            Rounding::Down => FindOption::RoundDown,
-        }
-    }
-}
-
 impl Admin {
     /// Read-only access to the latest manifest file
     pub async fn read_manifest(
@@ -297,23 +281,19 @@ impl Admin {
         seq: u64,
         round_up: bool,
     ) -> Result<Option<DateTime<Utc>>, crate::Error> {
-        let manifest_store = ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
-        );
+        let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
         let Some((_id, manifest)) = id_manifest else {
             return Ok(None);
         };
 
-        let rounding = if round_up {
-            Rounding::Up
+        let opt = if round_up {
+            FindOption::RoundUp
         } else {
-            Rounding::Down
+            FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_ts(seq, rounding.into()))
+        Ok(manifest.core.sequence_tracker.find_ts(seq, opt))
     }
 
     /// Returns the sequence for a given timestamp from the latest manifest's sequence tracker.
@@ -323,23 +303,27 @@ impl Admin {
         ts: DateTime<Utc>,
         round_up: bool,
     ) -> Result<Option<u64>, crate::Error> {
-        let manifest_store = ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
-        );
+        let manifest_store = self.manifest_store();
 
         let id_manifest = manifest_store.try_read_latest_manifest().await?;
         let Some((_id, manifest)) = id_manifest else {
             return Ok(None);
         };
 
-        let rounding = if round_up {
-            Rounding::Up
+        let opt = if round_up {
+            FindOption::RoundUp
         } else {
-            Rounding::Down
+            FindOption::RoundDown
         };
-        Ok(manifest.core.sequence_tracker.find_seq(ts, rounding.into()))
+        Ok(manifest.core.sequence_tracker.find_seq(ts, opt))
+    }
+
+    fn manifest_store(&self) -> ManifestStore {
+        ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.system_clock.clone(),
+        )
     }
 
     /// Clone a database. If no db already exists at the specified path, then this will create

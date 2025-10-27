@@ -1,4 +1,5 @@
 use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
+use chrono::{TimeZone, Utc};
 use object_store::path::Path;
 use slatedb::admin::{self, Admin, AdminBuilder};
 use slatedb::config::{
@@ -58,6 +59,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             wal,
             compacted,
         } => schedule_gc(&admin, manifest, wal, compacted).await?,
+
+        CliCommands::SeqToTs { seq, round } => exec_seq_to_ts(&admin, seq, round.as_bool()).await?,
+        CliCommands::TsToSeq { ts_secs, round } => {
+            exec_ts_to_seq(&admin, ts_secs, round.as_bool()).await?
+        }
     }
 
     Ok(())
@@ -175,5 +181,25 @@ async fn schedule_gc(
     };
 
     admin.run_gc(gc_opts).await?;
+    Ok(())
+}
+
+async fn exec_seq_to_ts(admin: &Admin, seq: u64, round_up: bool) -> Result<(), Box<dyn Error>> {
+    match admin.get_timestamp_for_sequence(seq, round_up).await? {
+        Some(ts) => println!("{}", ts.to_rfc3339()),
+        None => println!("not found"),
+    }
+    Ok(())
+}
+
+async fn exec_ts_to_seq(admin: &Admin, ts_secs: i64, round_up: bool) -> Result<(), Box<dyn Error>> {
+    let ts = Utc
+        .timestamp_opt(ts_secs, 0)
+        .single()
+        .ok_or("invalid unix seconds")?;
+    match admin.get_sequence_for_timestamp(ts, round_up).await? {
+        Some(seq) => println!("{}", seq),
+        None => println!("not found"),
+    }
     Ok(())
 }

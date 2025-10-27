@@ -21,7 +21,7 @@ pub(crate) struct TrackedSeq {
 
 /// Rounding behavior for non-exact matches in sequence-timestamp lookups.
 #[allow(dead_code)]
-#[derive(PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FindOption {
     /// Round up to the next higher value when no exact match is found.
     RoundUp,
