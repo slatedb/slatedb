@@ -605,7 +605,7 @@ impl CompactorEventHandler {
         let result = self.state.submit_compaction(id, compactor_job.clone());
         match result {
             Ok(_) => {
-                // TODO: Add compaction plan to object store with Pending status
+                // TODO(sujeetsawala): Add compaction plan to object store with Pending status
                 self.start_compaction(id, compactor_job).await?;
             }
             Err(err) => {
