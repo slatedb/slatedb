@@ -10,8 +10,10 @@ use crate::mem_table::{KVTableInternalKeyRange, SequencedKey};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
-use rpds::{RedBlackTreeMap, RedBlackTreeMapSync};
-use std::collections::{BTreeMap, HashSet};
+#[cfg(test)]
+use rpds::RedBlackTreeMap;
+use rpds::RedBlackTreeMapSync;
+use std::collections::HashSet;
 use std::iter::Peekable;
 use std::ops::RangeBounds;
 use uuid::Uuid;
@@ -148,6 +150,23 @@ impl WriteBatch {
         }
     }
 
+    /// Remove all existing ops for the given user key from the batch.
+    fn remove_ops_by_key(&mut self, key: &Bytes) {
+        // Find the contiguous range of entries for this user key and delete them in place.
+        let start = SequencedKey::new(key.clone(), u64::MAX);
+        let end = SequencedKey::new(key.clone(), 0);
+
+        let keys_to_remove: Vec<SequencedKey> = self
+            .ops
+            .range(start..=end)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for k in keys_to_remove {
+            self.ops = self.ops.remove(&k);
+        }
+    }
+
     pub(crate) fn with_txn_id(self, txn_id: Uuid) -> Self {
         Self {
             ops: self.ops,
@@ -204,11 +223,8 @@ impl WriteBatch {
 
         let key = Bytes::copy_from_slice(key.as_ref());
         // put will overwrite the existing key so we can safely
-        // remove all previous entries. unfortunately, rust BTree doesn't have
-        // a more efficient way than scanning the entire map to remove
-        // a set of keys (though there is a proposal to amend the
-        // extract_if API to support taking in a range to scan)
-        // self.ops.retain(|k, _| k.user_key != key);
+        // remove all previous entries.
+        self.remove_ops_by_key(&key);
         self.ops = self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Put(
@@ -257,12 +273,9 @@ impl WriteBatch {
 
         let key = Bytes::copy_from_slice(key.as_ref());
 
-        // deletes will overwrite the existing key so we can safely
-        // remove all previous entries. unfortunately, rust BTree doesn't have
-        // a more efficient way than scanning the entire map to remove
-        // a set of keys (though there is a proposal to amend the
-        // extract_if API to support taking in a range to scan)
-        // self.ops.retain(|k, _| k.user_key != key);
+        // delete will overwrite the existing key so we can safely
+        // remove all previous entries.
+        self.remove_ops_by_key(&key);
         self.ops = self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Delete(key),
