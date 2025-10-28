@@ -27,7 +27,7 @@ flate2 = { workspace = true, optional = true }
 flatbuffers = { workspace = true }
 foyer = { workspace = true, features = ["serde"], optional = true }
 futures = { workspace = true }
-im = { workspace = true }
+rpds = { workspace = true }
 log = { workspace = true }
 lz4_flex = { workspace = true, optional = true }
 moka = { workspace = true, features = ["future"], optional = true }
