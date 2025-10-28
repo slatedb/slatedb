@@ -11,6 +11,7 @@ use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::{BTreeMap, HashSet};
+use std::iter::Peekable;
 use std::ops::RangeBounds;
 use uuid::Uuid;
 
@@ -283,14 +284,8 @@ impl WriteBatch {
 /// Holds an owned WriteBatch instead of a reference,
 /// allowing it to be used without lifetime constraints.
 pub(crate) struct WriteBatchIterator {
-    batch: WriteBatch,
-    iter_state: IterState,
+    iter: Peekable<Box<dyn Iterator<Item = (SequencedKey, WriteOp)> + Send + Sync>>,
     ordering: IterationOrder,
-}
-
-struct IterState {
-    keys: Vec<SequencedKey>,
-    current_idx: usize,
 }
 
 impl WriteBatchIterator {
@@ -300,17 +295,17 @@ impl WriteBatchIterator {
         ordering: IterationOrder,
     ) -> Self {
         let range = KVTableInternalKeyRange::from(range);
-        let keys: Vec<SequencedKey> = match ordering {
-            IterationOrder::Ascending => batch.ops.range(range).map(|(k, _)| k.clone()).collect(),
-            IterationOrder::Descending => batch.ops.range(range).rev().map(|(k, _)| k.clone()).collect(),
+        let iter: Box<dyn Iterator<Item = (SequencedKey, WriteOp)> + Send + Sync> = match ordering {
+            IterationOrder::Ascending => {
+                Box::new(batch.ops.range(range).map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>().into_iter())
+            }
+            IterationOrder::Descending => {
+                Box::new(batch.ops.range(range).rev().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>().into_iter())
+            }
         };
 
         Self {
-            batch,
-            iter_state: IterState {
-                keys,
-                current_idx: 0,
-            },
+            iter: iter.peekable(),
             ordering,
         }
     }
@@ -323,24 +318,19 @@ impl KeyValueIterator for WriteBatchIterator {
     }
 
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
-        if self.iter_state.current_idx >= self.iter_state.keys.len() {
-            return Ok(None);
-        }
-
-        let key = &self.iter_state.keys[self.iter_state.current_idx];
-        self.iter_state.current_idx += 1;
-
-        Ok(self.batch.ops.get(key).map(|op| op.to_row_entry(u64::MAX, None, None)))
+        Ok(self
+            .iter
+            .next()
+            .map(|(_, op)| op.to_row_entry(u64::MAX, None, None)))
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
-        while self.iter_state.current_idx < self.iter_state.keys.len() {
-            let key = &self.iter_state.keys[self.iter_state.current_idx];
+        while let Some((key, _)) = self.iter.peek() {
             if match self.ordering {
                 IterationOrder::Ascending => key.user_key.as_ref() < next_key,
                 IterationOrder::Descending => key.user_key.as_ref() > next_key,
             } {
-                self.iter_state.current_idx += 1;
+                self.iter.next();
             } else {
                 break;
             }
