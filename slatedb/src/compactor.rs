@@ -609,7 +609,7 @@ impl CompactorEventHandler {
                 self.start_compaction(id, compactor_job).await?;
             }
             Err(err) => {
-                // TODO: Add compaction plan to object store with Failed status
+                // TODO(sujeetsawala): Add compaction plan to object store with Failed status
                 self.state.remove_compactor_job(&compactor_job.id());
                 warn!("invalid compaction [error={:?}]", err);
             }
