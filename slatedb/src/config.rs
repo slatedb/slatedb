@@ -166,6 +166,7 @@ use crate::error::SlateDBError;
 
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
+use crate::merge_operator::MergeOperatorType;
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -389,6 +390,43 @@ pub struct PutOptions {
 }
 
 impl PutOptions {
+    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+        match self.ttl {
+            Ttl::Default => match default {
+                None => None,
+                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+            },
+            Ttl::NoExpiry => None,
+            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
+        }
+    }
+
+    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+        // for overflow, we will just assume no TTL
+        if ttl > i64::MAX as u64 {
+            return None;
+        };
+        let expire_ts = now + (ttl as i64);
+        if expire_ts < now {
+            return None;
+        };
+
+        Some(expire_ts)
+    }
+}
+
+/// Configuration for client merge operations. `MergeOptions` is supplied for each
+/// merge operand inserted into the database.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct MergeOptions {
+    /// The time-to-live (ttl) for this merge operand. This behaves the same as
+    /// [`PutOptions::ttl`], where the latest non-expired value or merge operand
+    /// dictates the canonical TTL for a key.
+    pub ttl: Ttl,
+}
+
+impl MergeOptions {
+    // TODO(agavra): deduplicate this with PutOptions::expire_ts_from
     pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
         match self.ttl {
             Ttl::Default => match default {
@@ -778,6 +816,9 @@ pub struct DbReaderOptions {
 
     #[serde(skip)]
     pub block_cache: Option<Arc<dyn DbCache>>,
+
+    #[serde(skip)]
+    pub merge_operator: Option<MergeOperatorType>,
 }
 
 impl Default for DbReaderOptions {
@@ -787,6 +828,7 @@ impl Default for DbReaderOptions {
             checkpoint_lifetime: Duration::from_secs(10 * 60),
             max_memtable_bytes: 64 * 1024 * 1024,
             block_cache: default_block_cache(),
+            merge_operator: None,
         }
     }
 }
