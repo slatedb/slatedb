@@ -232,10 +232,6 @@ impl<T: Clone> StoredRecord<T> {
         })
     }
 
-    pub(crate) fn new(id: u64, record: T, store: Arc<RecordStore<T>>) -> Self {
-        Self { id, record, store }
-    }
-
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
@@ -262,6 +258,27 @@ impl<T: Clone> StoredRecord<T> {
         self.id = id;
         self.record = new_val;
         Ok(&self.record)
+    }
+
+    pub(crate) async fn try_load(store: Arc<RecordStore<T>>) -> Result<Option<Self>, SlateDBError> {
+        let Some((id, val)) = store.try_read_latest().await? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            id,
+            record: val,
+            store,
+        }))
+    }
+
+    /// Load the current record from the supplied record store. If successful,
+    /// this method returns a [`Result`] with an instance of [`StoredRecord`].
+    /// If no records could be found, the error [`LatestRecordMissing`] is returned.
+    #[allow(dead_code)]
+    pub(crate) async fn load(store: Arc<RecordStore<T>>) -> Result<Self, SlateDBError> {
+        Self::try_load(store)
+            .await?
+            .ok_or_else(|| SlateDBError::LatestRecordMissing)
     }
 
     pub(crate) async fn update(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
@@ -531,7 +548,11 @@ mod tests {
 
         // Create another view B from latest
         let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
-        let mut b: StoredRecord<TestVal> = StoredRecord::new(id_b, val_b, Arc::clone(&store));
+        let mut b: StoredRecord<TestVal> = StoredRecord {
+            id: id_b,
+            record: val_b,
+            store: Arc::clone(&store),
+        };
 
         // A updates first
         let mut dirty = a.prepare_dirty();
@@ -650,7 +671,11 @@ mod tests {
 
         // writer B bumps to epoch 2
         let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
-        let sb = StoredRecord::new(id_b, val_b, Arc::clone(&store));
+        let sb = StoredRecord {
+            id: id_b,
+            record: val_b,
+            store: Arc::clone(&store),
+        };
         let mut fb = FenceableRecord::init(
             sb,
             TokioDuration::from_secs(5),
