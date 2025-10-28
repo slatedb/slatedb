@@ -10,6 +10,7 @@ use crate::mem_table::{KVTableInternalKeyRange, SequencedKey};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
+use rpds::{RedBlackTreeMap, RedBlackTreeMapSync};
 use std::collections::{BTreeMap, HashSet};
 use std::iter::Peekable;
 use std::ops::RangeBounds;
@@ -47,7 +48,7 @@ use uuid::Uuid;
 /// means that WAL SSTs could get large if there's a large batch write.
 #[derive(Clone, Debug)]
 pub struct WriteBatch {
-    pub(crate) ops: BTreeMap<SequencedKey, WriteOp>,
+    pub(crate) ops: RedBlackTreeMapSync<SequencedKey, WriteOp>,
     pub(crate) txn_id: Option<Uuid>,
     /// due to merges, multiple writes may happen for the same key in one batch,
     /// this write_idx tracks the order in which writes happen within a single
@@ -141,7 +142,7 @@ impl WriteOp {
 impl WriteBatch {
     pub fn new() -> Self {
         WriteBatch {
-            ops: BTreeMap::new(),
+            ops: RedBlackTreeMapSync::new_sync(),
             txn_id: None,
             write_idx: 0,
         }
@@ -207,8 +208,8 @@ impl WriteBatch {
         // a more efficient way than scanning the entire map to remove
         // a set of keys (though there is a proposal to amend the
         // extract_if API to support taking in a range to scan)
-        self.ops.retain(|k, _| k.user_key != key);
-        self.ops.insert(
+        // self.ops.retain(|k, _| k.user_key != key);
+        self.ops = self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Put(
                 key.clone(),
@@ -238,7 +239,7 @@ impl WriteBatch {
         self.assert_kv(&key, &value);
 
         let key = Bytes::copy_from_slice(key.as_ref());
-        self.ops.insert(
+        self.ops = self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Merge(
                 key.clone(),
@@ -261,8 +262,8 @@ impl WriteBatch {
         // a more efficient way than scanning the entire map to remove
         // a set of keys (though there is a proposal to amend the
         // extract_if API to support taking in a range to scan)
-        self.ops.retain(|k, _| k.user_key != key);
-        self.ops.insert(
+        // self.ops.retain(|k, _| k.user_key != key);
+        self.ops = self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Delete(key),
         );
@@ -296,12 +297,23 @@ impl WriteBatchIterator {
     ) -> Self {
         let range = KVTableInternalKeyRange::from(range);
         let iter: Box<dyn Iterator<Item = (SequencedKey, WriteOp)> + Send + Sync> = match ordering {
-            IterationOrder::Ascending => {
-                Box::new(batch.ops.range(range).map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>().into_iter())
-            }
-            IterationOrder::Descending => {
-                Box::new(batch.ops.range(range).rev().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>().into_iter())
-            }
+            IterationOrder::Ascending => Box::new(
+                batch
+                    .ops
+                    .range(range)
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            ),
+            IterationOrder::Descending => Box::new(
+                batch
+                    .ops
+                    .range(range)
+                    .rev()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            ),
         };
 
         Self {
@@ -393,7 +405,7 @@ mod tests {
     }])]
     fn test_put_delete_batch(#[case] test_case: Vec<WriteOpTestCase>) {
         let mut batch = WriteBatch::new();
-        let mut expected_ops: BTreeMap<SequencedKey, WriteOp> = BTreeMap::new();
+        let mut expected_ops: RedBlackTreeMap<SequencedKey, WriteOp> = RedBlackTreeMap::new();
         for (seq, test_case) in test_case.into_iter().enumerate() {
             if let Some(value) = test_case.value {
                 batch.put_with_options(
@@ -401,7 +413,7 @@ mod tests {
                     value.as_slice(),
                     &test_case.options,
                 );
-                expected_ops.insert(
+                expected_ops = expected_ops.insert(
                     SequencedKey::new(Bytes::from(test_case.key.clone()), seq as u64),
                     WriteOp::Put(
                         Bytes::from(test_case.key),
@@ -411,7 +423,7 @@ mod tests {
                 );
             } else {
                 batch.delete(test_case.key.as_slice());
-                expected_ops.insert(
+                expected_ops = expected_ops.insert(
                     SequencedKey::new(Bytes::from(test_case.key.clone()), seq as u64),
                     WriteOp::Delete(Bytes::from(test_case.key)),
                 );
@@ -426,7 +438,7 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key1", b"value2"); // Should overwrite previous
 
-        assert_eq!(batch.ops.len(), 1); // Only one entry due to deduplication
+        assert_eq!(batch.ops.size(), 1); // Only one entry due to deduplication
         let op = batch
             .ops
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 1))
@@ -678,7 +690,7 @@ mod tests {
         batch.merge(b"key1", b"value1");
 
         // Then: the batch should contain one merge operation with default options
-        assert_eq!(batch.ops.len(), 1);
+        assert_eq!(batch.ops.size(), 1);
         let op = batch
             .ops
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
@@ -705,7 +717,7 @@ mod tests {
         batch.merge_with_options(b"key1", b"value1", &merge_options);
 
         // Then: the batch should contain one merge operation with the custom options
-        assert_eq!(batch.ops.len(), 1);
+        assert_eq!(batch.ops.size(), 1);
         let op = batch
             .ops
             .get(&SequencedKey::new(Bytes::from_static(b"key1"), 0))
@@ -731,7 +743,7 @@ mod tests {
         batch.merge(b"key1", b"value3");
 
         // Then: all merge operations should be preserved (not deduplicated)
-        assert_eq!(batch.ops.len(), 3);
+        assert_eq!(batch.ops.size(), 3);
 
         // And: all three operations should exist with different sequence numbers
         let op1 = batch
@@ -768,7 +780,7 @@ mod tests {
         batch.merge(b"key3", b"value3");
 
         // Then: all merge operations should be preserved
-        assert_eq!(batch.ops.len(), 3);
+        assert_eq!(batch.ops.size(), 3);
 
         // And: all keys should exist with correct sequence numbers
         assert!(batch
@@ -792,7 +804,7 @@ mod tests {
         batch.merge(b"key1", b"merge_value");
 
         // Then: both operations should remain (merge accumulates on top of put)
-        assert_eq!(batch.ops.len(), 2);
+        assert_eq!(batch.ops.size(), 2);
 
         // Verify the put operation exists
         let put_op = batch
@@ -831,7 +843,7 @@ mod tests {
         batch.merge(b"key1", b"merge_value");
 
         // Then: both operations should remain (merge accumulates on top of delete)
-        assert_eq!(batch.ops.len(), 2);
+        assert_eq!(batch.ops.size(), 2);
 
         // Verify the delete operation exists
         let delete_op = batch
@@ -869,7 +881,7 @@ mod tests {
         batch.put(b"key1", b"put_value");
 
         // Then: only the put operation should remain (merge is deduplicated by put)
-        assert_eq!(batch.ops.len(), 1);
+        assert_eq!(batch.ops.size(), 1);
 
         let op = batch
             .ops
@@ -894,7 +906,7 @@ mod tests {
         batch.delete(b"key1");
 
         // Then: only the delete operation should remain (merge is deduplicated by delete)
-        assert_eq!(batch.ops.len(), 1);
+        assert_eq!(batch.ops.size(), 1);
 
         let op = batch
             .ops
