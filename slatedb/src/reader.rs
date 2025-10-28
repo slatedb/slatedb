@@ -640,10 +640,8 @@ mod tests {
                             ValueDeletable::Tombstone => {
                                 batch.delete(entry.key);
                             }
-                            ValueDeletable::Merge(_v) => {
-                                // Note: WriteBatch doesn't support merge() yet, but we can store
-                                // the row entry directly for testing purposes once merge is implemented
-                                panic!("Merge in WriteBatch not yet implemented - use Memtable/L0/SR layers for now");
+                            ValueDeletable::Merge(v) => {
+                                batch.merge(entry.key, v.as_ref());
                             }
                         }
                     }
@@ -1051,9 +1049,65 @@ mod tests {
         expected: Some(b"uncommitted"),
         description: "dirty read should see uncommitted data", now: None, dirty: true, last_committed_seq: Some(50), max_seq: None,
     })]
-    // ========================================
-    // MERGE OPERATOR TESTS FOR GET OPERATIONS
-    // ========================================
+    // NOTE: for tests that use WriteBatch, the order in which the merge operations are listed
+    // in the test case is important. The first merge should be the "oldest" that happened because
+    // the WriteBatch assumes all sequence numbers are u64::MAX.
+    // Test 33: WriteBatch with merge operations merges with memtable value
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"wb_merge", u64::MAX).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"mem_value", 50),
+            TestEntry::value(b"key1", b"l0_value", 40).with_location(LayerLocation::L0Sst(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"mem_valuewb_merge"),  // Merge("mem_value", "wb_merge") = "mem_valuewb_merge"
+        description: "[MERGE] write batch merge should merge with memtable value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 34: WriteBatch with multiple merge operations for same key
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"merge1", u64::MAX).with_location(LayerLocation::WriteBatch),
+            TestEntry::merge(b"key1", b"merge2", u64::MAX).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"base", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"basemerge1merge2"),  // Merge(base, merge1, merge2) = "basemerge1merge2"
+        description: "[MERGE] multiple write batch merges should merge with base value", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 35: WriteBatch merge with tombstone clears history
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"old_merge", u64::MAX).with_location(LayerLocation::WriteBatch),
+            TestEntry::tombstone(b"key1", 90).with_location(LayerLocation::WriteBatch),
+            TestEntry::merge(b"key1", b"new_merge", u64::MAX).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"base", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"new_merge"),  // Tombstone clears history, only merge after tombstone applies
+        description: "[MERGE] write batch tombstone should clear merge history", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 36: WriteBatch merge with value acts as new base
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"old_merge", u64::MAX).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"new_base", 90).with_location(LayerLocation::WriteBatch),
+            TestEntry::merge(b"key1", b"merge", u64::MAX).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"old_base", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        query_key: b"key1",
+        expected: Some(b"new_basemerge"),  // Value acts as barrier, only Merge("new_base", "merge") applies
+        description: "[MERGE] write batch value should act as new base for subsequent merges", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 37: WriteBatch merges without base values
+    #[case(LayerPriorityTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"merge1", u64::MAX).with_location(LayerLocation::WriteBatch),
+            TestEntry::merge(b"key1", b"merge2", u64::MAX).with_location(LayerLocation::WriteBatch),
+        ],
+        query_key: b"key1",
+        expected: Some(b"merge1merge2"),  // Only merge operands, no base value
+        description: "[MERGE] write batch merges without base values should merge together", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
     // Test 33: Single merge operand without base value acts as base
     #[case(LayerPriorityTestCase {
         entries: vec![
@@ -1262,7 +1316,14 @@ mod tests {
 
         let actual = result.as_ref().map(|b| b.as_ref());
         let expected = test_case.expected;
-        assert_eq!(actual, expected, "Failed test: {}", test_case.description);
+        assert_eq!(
+            actual,
+            expected,
+            "Failed test: {}\nActual: {:?}\nExpected: {:?}",
+            test_case.description,
+            actual.map(|b| String::from_utf8_lossy(b)),
+            expected.map(|b| String::from_utf8_lossy(b))
+        );
 
         Ok(())
     }
@@ -1591,6 +1652,87 @@ mod tests {
         range_end: b"key4",
         expected: vec![(b"key1", b"ab"), (b"key3", b"xy")],  // key2 tombstoned
         description: "[MERGE SCAN] should handle mix of values, merges, and tombstones", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 24: Scan with WriteBatch merge operations
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"wb_merge", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"base", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"normal", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"basewb_merge"), (b"key2", b"normal")],  // key1: Merge("base", "wb_merge")
+        description: "[MERGE SCAN] should merge write batch operands with base values", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 25: Scan with multiple WriteBatch merge operations for same key
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"merge1", 80).with_location(LayerLocation::WriteBatch),
+            TestEntry::merge(b"key1", b"merge2", 90).with_location(LayerLocation::WriteBatch),
+            TestEntry::merge(b"key1", b"merge3", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"base", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"normal", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"basemerge1merge2merge3"), (b"key2", b"normal")],  // Multiple merges applied in sequence
+        description: "[MERGE SCAN] should apply multiple write batch merges in sequence", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 26: Scan with WriteBatch tombstone clearing merge history
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"old_merge", 80).with_location(LayerLocation::WriteBatch),
+            TestEntry::tombstone(b"key1", 90).with_location(LayerLocation::WriteBatch),
+            TestEntry::merge(b"key1", b"new_merge", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"base", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"normal", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"new_merge"), (b"key2", b"normal")],  // Tombstone clears history
+        description: "[MERGE SCAN] write batch tombstone should clear merge history", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 27: Scan with WriteBatch value acting as new base for merges
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"old_merge", 80).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"new_base", 90).with_location(LayerLocation::WriteBatch),
+            TestEntry::merge(b"key1", b"final_merge", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"old_base", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::value(b"key2", b"normal", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"new_basefinal_merge"), (b"key2", b"normal")],  // Value acts as barrier
+        description: "[MERGE SCAN] write batch value should act as new base for subsequent merges", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 28: Scan with WriteBatch merges across multiple keys
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"1_merge", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key1", b"1_base", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::merge(b"key2", b"2_merge", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key2", b"2_base", 50).with_location(LayerLocation::L0Sst(0)),
+            TestEntry::merge(b"key3", b"3_merge", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key3", b"3_base", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key4",
+        expected: vec![(b"key1", b"1_base1_merge"), (b"key2", b"2_base2_merge"), (b"key3", b"3_base3_merge")],
+        description: "[MERGE SCAN] should merge write batch operands for multiple keys", now: None, dirty: true, last_committed_seq: None, max_seq: None,
+    })]
+    // Test 29: Scan with WriteBatch merges without base values
+    #[case(ScanTestCase {
+        entries: vec![
+            TestEntry::merge(b"key1", b"merge1", 90).with_location(LayerLocation::WriteBatch),
+            TestEntry::merge(b"key1", b"merge2", 100).with_location(LayerLocation::WriteBatch),
+            TestEntry::value(b"key2", b"normal", 50).with_location(LayerLocation::L0Sst(0)),
+        ],
+        range_start: b"key1",
+        range_end: b"key3",
+        expected: vec![(b"key1", b"merge1merge2"), (b"key2", b"normal")],  // Only merge operands, no base value
+        description: "[MERGE SCAN] should merge write batch operands without base values", now: None, dirty: true, last_committed_seq: None, max_seq: None,
     })]
     async fn test_scan_with_options_layer_priority(
         #[case] test_case: ScanTestCase,
