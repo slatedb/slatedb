@@ -760,7 +760,6 @@ mod tests {
         use object_store::ObjectStore;
         use std::sync::Arc;
 
-        // Create a runtime for running async code inside a normal test
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         rt.block_on(async {
@@ -780,21 +779,15 @@ mod tests {
                 .await?;
             db.close().await?;
 
-            // Way before first timestamp with round_down=false should be None
             let long_ago = Utc.timestamp_opt(1, 0).single().unwrap();
-            let seq_before_first = admin
-                .get_sequence_for_timestamp(long_ago, /*round_up=*/ false)
-                .await?;
+            let seq_before_first = admin.get_sequence_for_timestamp(long_ago, false).await?;
             assert!(
                 seq_before_first.is_none(),
                 "round-down before first ts should yield None"
             );
 
-            // Now with round_down=false should round down to latest -> Some(seq)
             let now = Utc::now();
-            let seq_latest = admin
-                .get_sequence_for_timestamp(now, /*round_up=*/ false)
-                .await?;
+            let seq_latest = admin.get_sequence_for_timestamp(now, false).await?;
             assert!(
                 seq_latest.is_some(),
                 "round-down at/after last ts should yield Some(seq)"
