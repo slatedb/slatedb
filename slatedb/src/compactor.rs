@@ -620,7 +620,7 @@ impl CompactorEventHandler {
     async fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
-        // TODO: Fetch and Run Pending Compactions from object store
+        // TODO(sujeetsawala): Fetch and Run Pending Compactions from object store
         // self.run_pending_compactions().await?;
         self.maybe_schedule_compactions().await?;
         Ok(())
