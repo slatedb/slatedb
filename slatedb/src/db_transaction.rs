@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::batch::WriteBatch;
 use crate::bytes_range::BytesRange;
-use crate::config::{PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
@@ -256,6 +256,30 @@ impl DBTransaction {
         Ok(())
     }
 
+    /// Merge a key-value pair into the transaction.
+    pub fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.merge_with_options(key, value, &MergeOptions::default())
+    }
+
+    /// Merge a key-value pair into the transaction with custom options.
+    pub fn merge_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        options: &MergeOptions,
+    ) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.write_batch.write().merge_with_options(key, value, options);
+        Ok(())
+    }
+
     /// Delete a key from the transaction.
     /// The delete will be buffered in the transaction's write batch until commit.
     ///
@@ -306,8 +330,8 @@ impl DBTransaction {
         // Take the write_batch for submission to the database.
         let write_batch = self.write_batch.read().clone();
 
-        // Track the write keys from write batch and clone it for submission
-        let write_keys = write_batch.keys().collect::<HashSet<_>>();
+        // Track the write keys from write batch
+        let write_keys = write_batch.keys();
         self.txn_manager.track_write_keys(&self.txn_id, &write_keys);
 
         // Submit the WriteBatch to the database for processing. The batch is sent to a
