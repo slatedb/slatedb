@@ -321,7 +321,7 @@ impl CompactorStateRecord {
 #[doc = "Process-local runtime state owned by the compactor.\n\nThis is the in-memory controller view that a single compactor task uses to:\n- keep a fresh `DirtyManifest` (view of `CoreDbState`),\n- track canonical `compaction_plans` by plan id (ULID), and\n- track `scheduled_compactions` by job id for executions owned by this process.\n\nIt validates submissions, records lifecycle transitions (Submitted → Pending → InProgress → Completed/Failed) and mutates the in-memory manifest when jobs finish.\n\nDifference vs `CompactionState`:\n- `CompactorState` is transient, process-local runtime state; it is not persisted and is rebuilt when the process starts.\n- `CompactionState` is the durable, object-store representation (future work) of compaction plans and their statuses across processes, used for recovery/GC and history."]
 pub struct CompactorState {
     manifest: DirtyManifest,
-    // TODO: Add CompactorStateRecord during compaction state persistence implementation
+    // TODO(sujeet): Add CompactorStateRecord during compaction state persistence implementation
     //compaction_state: DirtyRecord<CompactorStateRecord>,
     compactor_jobs: HashMap<Ulid, CompactorJob>,
 
@@ -391,7 +391,7 @@ impl CompactorState {
             "accepted submitted compaction [compactor_request={}]",
             compactor_request
         );
-        // TODO: Add compactionJob attempt to the object store
+        // TODO(sujeet): Add compactionJob attempt to the object store
         let compactor_job_id = compactor_job.id();
         if let Some(job) = self.compactor_jobs.get_mut(&compactor_job_id) {
             job.update_status(CompactorJobStatus::Pending);
@@ -567,7 +567,7 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.core = db_state;
-            // TODO: Add compaction plan to object store with Completed status
+            // TODO(sujeet): Add compaction plan to object store with Completed status
             if let Err(e) = self.update_compactor_state(id, CompactorJobStatus::Completed) {
                 error!("failed to update compactor job state [error={:?}]", e);
                 return;
@@ -575,6 +575,8 @@ impl CompactorState {
             if let Some(sched) = self.scheduled_jobs.remove(&id) {
                 let job_id = sched.id();
                 self.compactor_jobs.remove(&job_id);
+            } else {
+                error!("scheduled compactor job not found [job_id={}]", id);
             }
         }
     }

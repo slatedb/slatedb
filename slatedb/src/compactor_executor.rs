@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 
 use crate::clock::SystemClock;
 use crate::compactor::CompactorMessage;
-use crate::compactor::CompactorMessage::CompactionFinished;
+use crate::compactor::CompactorMessage::CompactionJobAttemptFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -222,7 +222,7 @@ impl TokioCompactionExecutorInner {
                 // not already an error (i.e. if the DB is not already shut down).
                 #[allow(clippy::disallowed_methods)]
                 self.worker_tx
-                    .send(CompactorMessage::CompactionProgress {
+                    .send(CompactorMessage::CompactionJobAttemptProgress {
                         id: compaction.id,
                         bytes_processed: all_iter.total_bytes_processed(),
                     })
@@ -273,14 +273,12 @@ impl TokioCompactionExecutorInner {
 
         let id = compaction.id;
 
-        // TODO: Add compaction plan to object store with InProgress status
-        // TODO: Commenting tests fail due to some receiver channel issues.
-        // Would enable it in subsequent PR.
+        // TODO(sujeetsawala): Add compaction plan to object store with InProgress status
 
         // Notify the compactor that this attempt has started.
         #[allow(clippy::disallowed_methods)]
         self.worker_tx
-            .send(CompactorMessage::CompactionStarted { id })
+            .send(CompactorMessage::CompactionJobAttemptStarted { id })
             .expect("failed to send compaction started msg");
 
         let this = self.clone();
@@ -301,7 +299,7 @@ impl TokioCompactionExecutorInner {
                 #[allow(clippy::disallowed_methods)]
                 this_cleanup
                     .worker_tx
-                    .send(CompactionFinished { id, result })
+                    .send(CompactionJobAttemptFinished { id, result })
                     .expect("failed to send compaction finished msg");
                 this_cleanup.stats.running_compactions.dec();
             },

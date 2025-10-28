@@ -118,18 +118,18 @@ impl CompactionProgressTracker {
 
 #[derive(Debug)]
 pub(crate) enum CompactorMessage {
-    CompactionFinished {
+    CompactionJobAttemptFinished {
         id: Ulid,
         result: Result<SortedRun, SlateDBError>,
     },
     /// Sent when an [`CompactionExecutor`] wishes to alert the compactor about starting a compaction.
     #[allow(dead_code)]
-    CompactionStarted {
+    CompactionJobAttemptStarted {
         id: Ulid,
     },
     /// Sent when an [`CompactionExecutor`] wishes to alert the compactor of progress. This
     /// information is only used for reporting purposes, and can be an estimate.
-    CompactionProgress {
+    CompactionJobAttemptProgress {
         id: Ulid,
         /// The total number of bytes processed so far.
         bytes_processed: u64,
@@ -288,8 +288,8 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
         match message {
             CompactorMessage::LogStats => self.handle_log_ticker(),
             CompactorMessage::PollManifest => self.handle_ticker().await,
-            CompactorMessage::CompactionStarted { id } => self.compaction_started(id),
-            CompactorMessage::CompactionFinished { id, result } => match result {
+            CompactorMessage::CompactionJobAttemptStarted { id } => self.compaction_started(id),
+            CompactorMessage::CompactionJobAttemptFinished { id, result } => match result {
                 Ok(sr) => self
                     .finish_compaction(id, sr)
                     .await
@@ -299,7 +299,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                     self.finish_failed_compaction(id);
                 }
             },
-            CompactorMessage::CompactionProgress {
+            CompactorMessage::CompactionJobAttemptProgress {
                 id,
                 bytes_processed,
             } => {
@@ -1113,18 +1113,19 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = loop {
-            if let Ok(Some(m)) =
-                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
                     .await
-            {
-                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
-                    break m;
-                }
-            } else {
-                panic!("timeout waiting for CompactionFinished");
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
             }
-        };
+        })
+        .await
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         let starting_last_ts = fixture
             .stats_registry
             .lookup(LAST_COMPACTION_TS_SEC)
@@ -1158,18 +1159,19 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = loop {
-            if let Ok(Some(m)) =
-                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
                     .await
-            {
-                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
-                    break m;
-                }
-            } else {
-                panic!("timeout waiting for CompactionFinished");
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
             }
-        };
+        })
+        .await
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         // write an l0 before handling compaction finished
         fixture.write_l0().await;
 
@@ -1213,7 +1215,7 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         let job = fixture.assert_started_compaction(1).pop().unwrap();
-        let msg = CompactorMessage::CompactionFinished {
+        let msg = CompactorMessage::CompactionJobAttemptFinished {
             id: job.id,
             result: Err(SlateDBError::InvalidDBState),
         };
@@ -1259,18 +1261,19 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = loop {
-            if let Ok(Some(m)) =
-                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
                     .await
-            {
-                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
-                    break m;
-                }
-            } else {
-                panic!("timeout waiting for CompactionFinished");
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
             }
-        };
+        })
+        .await
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         // when:
         fixture
             .handler
@@ -1375,18 +1378,19 @@ mod tests {
         fixture.scheduler.inject_compaction(c1.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = loop {
-            if let Ok(Some(m)) =
-                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
                     .await
-            {
-                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
-                    break m;
-                }
-            } else {
-                panic!("timeout waiting for CompactionFinished");
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
             }
-        };
+        })
+        .await
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         fixture.handler.handle(msg).await.unwrap();
 
         // now highest_id should be 1; build L0-only compaction with dest 0 (below highest)
@@ -1405,18 +1409,19 @@ mod tests {
         fixture.scheduler.inject_compaction(c1.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = loop {
-            if let Ok(Some(m)) =
-                tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
                     .await
-            {
-                if matches!(m, CompactorMessage::CompactionFinished { .. }) {
-                    break m;
-                }
-            } else {
-                panic!("timeout waiting for CompactionFinished");
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
             }
-        };
+        })
+        .await
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         fixture.handler.handle(msg).await.unwrap();
 
         // prepare a mixed compaction: one SR source and one L0 source

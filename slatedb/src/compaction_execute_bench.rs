@@ -268,13 +268,13 @@ impl CompactionExecuteBench {
         system_clock: Arc<dyn SystemClock>,
     ) -> CompactorJobAttempt {
         let state = manifest.db_state();
-        let compaction = compactor_job.compactor_job_request();
+        let compactor_job_request = compactor_job.compactor_job_request();
         let srs_by_id: HashMap<_, _> = state
             .compacted
             .iter()
             .map(|sr| (sr.id, sr.clone()))
             .collect();
-        let srs: Vec<_> = compaction
+        let srs: Vec<_> = compactor_job_request
             .sources()
             .iter()
             .map(|sr| {
@@ -351,19 +351,19 @@ impl CompactionExecuteBench {
             sorted_runs: CompactorJob::get_sorted_runs(db_state, &sources),
         };
 
-        let compaction_job = source_sr_ids.map(|_source_sr_ids| {
+        let compactor_job = source_sr_ids.map(|_source_sr_ids| {
             let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
             let request = CompactorJobRequest::new(sources, destination_sr_id);
             CompactorJob::new(id, CompactorJobRequestType::Internal, request, job_input)
         });
 
         info!("load compaction job");
-        let job = match &compaction_job {
-            Some(compaction_job) => {
+        let job = match &compactor_job {
+            Some(compactor_job) => {
                 info!("load job from existing compaction");
                 CompactionExecuteBench::load_compaction_as_job(
                     &manifest,
-                    compaction_job,
+                    compactor_job,
                     false,
                     self.rand.clone(),
                     self.system_clock.clone(),
@@ -386,7 +386,7 @@ impl CompactionExecuteBench {
         #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
         while let Some(msg) = rx.recv().await {
-            if let CompactorMessage::CompactionFinished { id: _, result } = msg {
+            if let CompactorMessage::CompactionJobAttemptFinished { id: _, result } = msg {
                 match result {
                     Ok(_) => {
                         let elapsed_ms = self
