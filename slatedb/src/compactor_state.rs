@@ -66,36 +66,58 @@ pub enum CompactorJobStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum CompactorJobRequestType {
-    #[doc = "Signals that the compaction was requested by the DB's compactor."]
+    /// Signals that the compaction was requested by the DB's compactor.
     Internal,
-    #[doc = "Signals that the compaction was requested by an external process such as the admin CLI."]
+    /// Signals that the compaction was requested by an external process such as the admin CLI.
     #[allow(dead_code)]
     External,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[doc = "In-memory description of the inputs to a compaction.\n\nA `CompactionSpec` represents the concrete set of input SSTs and/or Sorted Runs that a particular compaction algorithm (e.g., size-tiered, leveled, etc.) has selected to produce a destination Sorted Run.\n\nThe scheduler constructs a `CompactionSpec` for a planned compaction and passes it, together with the selected `sources`, to `Compaction::new`. Keeping the spec inside the in-memory `Compaction` avoids recomputing or cloning inputs at job creation time and enables encode/decode roundtrips in tests via FlatBuffers."]
+/// In-memory description of the inputs to a compaction.
+///
+/// A `CompactionSpec` represents the concrete set of input SSTs and/or Sorted Runs
+/// that a particular compaction algorithm (e.g., size-tiered, leveled, etc.) has
+/// selected to produce a destination Sorted Run.
+///
+/// The scheduler constructs a `CompactionSpec` for a planned compaction and passes it,
+/// together with the selected `sources`, to `Compaction::new`. Keeping the spec inside
+/// the in-memory `Compaction` avoids recomputing or cloning inputs at job creation time
+/// and enables encode/decode roundtrips in tests via FlatBuffers.
 pub(crate) enum CompactorJobInput {
-    #[doc = "Compact a combination of L0 SSTs and/or existing sorted runs into a new sorted run with id `destination` carried by the surrounding `Compaction`."]
+    /// Compact a combination of L0 SSTs and/or existing sorted runs into a new sorted run
+    /// with id `destination` carried by the surrounding `Compaction`.
     SortedRunJobInputs {
-        #[doc = "L0 SSTs (by handle) that will be compacted."]
+        /// L0 SSTs (by handle) that will be compacted.
         ssts: Vec<SsTableHandle>,
-        #[doc = "Existing sorted runs that participate in this compaction."]
+        /// Existing sorted runs that participate in this compaction.
         sorted_runs: Vec<SortedRun>,
     },
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[doc = "Specification of how a compaction job should be executed.\n\nJob specs are derived from the parent `Compaction`/`CompactionPlan` and capture execution-time details (e.g., which inputs are already materialized) that the executor can use for progress reporting and resume logic."]
+/// Specification of how a compaction job should be executed.
+///
+/// Job specs are derived from the parent `Compaction`/`CompactionPlan` and capture
+/// execution-time details (e.g., which inputs are already materialized) that the executor
+/// can use for progress reporting and resume logic.
 pub(crate) enum CompactorJobProgress {
     LinearCompactorJob {
-        #[doc = "ULIDs of L0 SSTs and Sorted Runs that have been fully read/compacted when the job snapshot is taken (useful for resume/diagnostics)."]
+        /// ULIDs of L0 SSTs and Sorted Runs that have been fully read/compacted when the job
+        /// snapshot is taken (useful for resume/diagnostics).
         completed_sources: Vec<SourceId>,
     },
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[doc = "Immutable request that describes a compaction job.\n\nHolds the logical inputs for a compaction the scheduler decided on:\n- `sources`: a set of `SourceId` identifying L0 SSTs and/or existing Sorted Runs\n- `destination`: the Sorted Run id the compaction will produce\n\nMaterialized inputs (actual `SsTableHandle`/`SortedRun` objects) are derived from\n`sources` against the current manifest at execution time."]
+/// Immutable request that describes a compaction job.
+///
+/// Holds the logical inputs for a compaction the scheduler decided on:
+/// - `sources`: a set of `SourceId` identifying L0 SSTs and/or existing Sorted Runs
+/// - `destination`: the Sorted Run id the compaction will produce
+///
+/// Materialized inputs (actual `SsTableHandle`/`SortedRun` objects) are derived from
+/// `sources` against the current manifest at execution time.
 pub struct CompactorJobRequest {
     sources: Vec<SourceId>,
     destination: u32,
@@ -129,7 +151,10 @@ impl Display for CompactorJobRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
-#[doc = "Lightweight response snapshot for a compaction job.\n\nCarries the job id, its status at the time of creation, and any sources\nthat have been fully processed (useful for reporting/testing)."]
+/// Lightweight response snapshot for a compaction job.
+///
+/// Carries the job id, its status at the time of creation, and any sources that have been
+/// fully processed (useful for reporting/testing).
 pub struct CompactorJobResponse {
     compactor_job_id: Ulid,
     status: CompactorJobStatus,
@@ -167,13 +192,22 @@ impl CompactorJobResponse {
 }
 
 #[derive(Clone)]
-#[doc = "Canonical, internal record of a compactor job.\n\nA job is the unit tracked by the compactor: it has a stable `id` (ULID),\nits `request` (what to compact and where), an origin `job_request_type`,\na `status`, a history of `attempts`, and optional execution-time `progress`.\n\nNotes:\n- Only ids and lightweight request data are stored; inputs are materialized\n  from `request.sources()` against the manifest when needed.\n- Attempts represent retries of the same job; each attempt has its own id."]
+/// Canonical, internal record of a compactor job.
+///
+/// A job is the unit tracked by the compactor: it has a stable `id` (ULID), its `request`
+/// (what to compact and where), an origin `job_request_type`, a `status`, a history of
+/// `attempts`, and optional execution-time `progress`.
+///
+/// Notes:
+/// - Only ids and lightweight request data are stored; inputs are materialized from
+///   `request.sources()` against the manifest when needed.
+/// - Attempts represent retries of the same job; each attempt has its own id.
 pub(crate) struct CompactorJob {
     id: Ulid,
     job_request_type: CompactorJobRequestType,
-    #[doc = "What to compact (sources) and where to write (destination)."]
+    /// What to compact (sources) and where to write (destination).
     request: CompactorJobRequest,
-    #[doc = "Input interpretation for the executor (e.g., SortedRun job)."]
+    /// Input interpretation for the executor (e.g., SortedRun job).
     job_input: CompactorJobInput,
 
     status: CompactorJobStatus,
@@ -181,7 +215,7 @@ pub(crate) struct CompactorJob {
     #[allow(dead_code)]
     attempts: Vec<CompactorJobAttempt>,
 
-    #[doc = "Execution-time job spec (e.g., progress/resume details)."]
+    /// Execution-time job spec (e.g., progress/resume details).
     #[allow(dead_code)]
     progress: CompactorJobProgress,
 }
@@ -298,7 +332,11 @@ impl Display for CompactorJob {
     }
 }
 
-#[doc = "Compaction state persisted in the object store (future work).\n\nThis struct will hold the durable snapshot of compaction plans (queued, in-progress, and completed) keyed by the canonical plan id. Until persistence is implemented, this is used in tests and as a placeholder for wiring to the on-disk format."]
+/// Compaction state persisted in the object store (future work).
+///
+/// This struct will hold the durable snapshot of compaction plans (queued, in-progress, and
+/// completed) keyed by the canonical plan id. Until persistence is implemented, this is used
+/// in tests and as a placeholder for wiring to the on-disk format.
 #[derive(Clone)]
 pub(crate) struct CompactorStateRecord {
     #[allow(dead_code)]
@@ -318,7 +356,21 @@ impl CompactorStateRecord {
     }
 }
 
-#[doc = "Process-local runtime state owned by the compactor.\n\nThis is the in-memory controller view that a single compactor task uses to:\n- keep a fresh `DirtyManifest` (view of `CoreDbState`),\n- track canonical `compaction_plans` by plan id (ULID), and\n- track `scheduled_compactions` by job id for executions owned by this process.\n\nIt validates submissions, records lifecycle transitions (Submitted → Pending → InProgress → Completed/Failed) and mutates the in-memory manifest when jobs finish.\n\nDifference vs `CompactionState`:\n- `CompactorState` is transient, process-local runtime state; it is not persisted and is rebuilt when the process starts.\n- `CompactionState` is the durable, object-store representation (future work) of compaction plans and their statuses across processes, used for recovery/GC and history."]
+/// Process-local runtime state owned by the compactor.
+///
+/// This is the in-memory controller view that a single compactor task uses to:
+/// - keep a fresh `DirtyManifest` (view of `CoreDbState`),
+/// - track canonical `compaction_plans` by plan id (ULID), and
+/// - track `scheduled_compactions` by job id for executions owned by this process.
+///
+/// It validates submissions, records lifecycle transitions (Submitted → Pending → InProgress →
+/// Completed/Failed) and mutates the in-memory manifest when jobs finish.
+///
+/// Difference vs `CompactionState`:
+/// - `CompactorState` is transient, process-local runtime state; it is not persisted and is
+///   rebuilt when the process starts.
+/// - `CompactionState` is the durable, object-store representation (future work) of compaction
+///   plans and their statuses across processes, used for recovery/GC and history.
 pub struct CompactorState {
     manifest: DirtyManifest,
     // TODO(sujeet): Add CompactorStateRecord during compaction state persistence implementation

@@ -30,23 +30,31 @@ use tracing::instrument;
 use ulid::Ulid;
 
 #[derive(Clone, PartialEq)]
-#[doc = "Execution unit (attempt) for a compaction plan.\n\n- `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is used as the runtime key in `scheduled_compactions`.\n- `compaction_id` is the canonical plan id (ULID) that ties this job attempt back to its `CompactionPlan` entry in the compactor's canonical map.\n\nJobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time metadata for progress reporting, retention, and resume logic."]
+/// Execution unit (attempt) for a compaction plan.
+///
+/// - `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is
+///   used as the runtime key in `scheduled_compactions`.
+/// - `compaction_id` is the canonical plan id (ULID) that ties this job attempt back to its
+///   `CompactionPlan` entry in the compactor's canonical map.
+///
+/// Jobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time
+/// metadata for progress reporting, retention, and resume logic.
 pub(crate) struct CompactorJobAttempt {
-    #[doc = "Job attempt id. Unique per attempt and used for scheduling/routing."]
+    /// Job attempt id. Unique per attempt and used for scheduling/routing.
     pub(crate) id: Ulid,
-    #[doc = "Canonical compaction job id this job belongs to."]
+    /// Canonical compaction job id this job belongs to.
     pub(crate) compactor_job_id: Ulid,
-    #[doc = "Destination sorted run id to be produced by this job."]
+    /// Destination sorted run id to be produced by this job.
     pub(crate) destination: u32,
-    #[doc = "Input L0 SSTs for this attempt."]
+    /// Input L0 SSTs for this attempt.
     pub(crate) ssts: Vec<SsTableHandle>,
-    #[doc = "Input existing sorted runs for this attempt."]
+    /// Input existing sorted runs for this attempt.
     pub(crate) sorted_runs: Vec<SortedRun>,
-    #[doc = "Compaction timestamp used by the executor (e.g., for retention decisions)."]
+    /// Compaction timestamp used by the executor (e.g., for retention decisions).
     pub(crate) attempt_ts: i64,
-    #[doc = "Whether the destination sorted run is the last (newest) run after compaction."]
+    /// Whether the destination sorted run is the last (newest) run after compaction.
     pub(crate) is_dest_last_run: bool,
-    #[doc = "Optional minimum sequence to retain; lower sequences may be dropped by retention."]
+    /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
     pub(crate) retention_min_seq: Option<u64>,
 }
 
