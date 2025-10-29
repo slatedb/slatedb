@@ -29,7 +29,6 @@ use log::{debug, error};
 use tracing::instrument;
 use ulid::Ulid;
 
-#[derive(Clone, PartialEq)]
 /// Execution unit (attempt) for a compaction plan.
 ///
 /// - `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is
@@ -39,6 +38,7 @@ use ulid::Ulid;
 ///
 /// Jobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time
 /// metadata for progress reporting, retention, and resume logic.
+#[derive(Clone, PartialEq)]
 pub(crate) struct CompactorJobAttempt {
     /// Job attempt id. Unique per attempt and used for scheduling/routing.
     pub(crate) id: Ulid,

@@ -73,7 +73,7 @@ pub(crate) enum CompactorJobRequestType {
     External,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+
 /// In-memory description of the inputs to a compaction.
 ///
 /// A `CompactionSpec` represents the concrete set of input SSTs and/or Sorted Runs
@@ -84,6 +84,7 @@ pub(crate) enum CompactorJobRequestType {
 /// together with the selected `sources`, to `Compaction::new`. Keeping the spec inside
 /// the in-memory `Compaction` avoids recomputing or cloning inputs at job creation time
 /// and enables encode/decode roundtrips in tests via FlatBuffers.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CompactorJobInput {
     /// Compact a combination of L0 SSTs and/or existing sorted runs into a new sorted run
     /// with id `destination` carried by the surrounding `Compaction`.
@@ -95,12 +96,13 @@ pub(crate) enum CompactorJobInput {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+
 /// Specification of how a compaction job should be executed.
 ///
 /// Job specs are derived from the parent `Compaction`/`CompactionPlan` and capture
 /// execution-time details (e.g., which inputs are already materialized) that the executor
 /// can use for progress reporting and resume logic.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CompactorJobProgress {
     LinearCompactorJob {
         /// ULIDs of L0 SSTs and Sorted Runs that have been fully read/compacted when the job
@@ -109,7 +111,6 @@ pub(crate) enum CompactorJobProgress {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
 /// Immutable request that describes a compaction job.
 ///
 /// Holds the logical inputs for a compaction the scheduler decided on:
@@ -118,6 +119,7 @@ pub(crate) enum CompactorJobProgress {
 ///
 /// Materialized inputs (actual `SsTableHandle`/`SortedRun` objects) are derived from
 /// `sources` against the current manifest at execution time.
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompactorJobRequest {
     sources: Vec<SourceId>,
     destination: u32,
@@ -149,12 +151,12 @@ impl Display for CompactorJobRequest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)]
 /// Lightweight response snapshot for a compaction job.
 ///
 /// Carries the job id, its status at the time of creation, and any sources that have been
 /// fully processed (useful for reporting/testing).
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
 pub struct CompactorJobResponse {
     compactor_job_id: Ulid,
     status: CompactorJobStatus,
@@ -191,7 +193,7 @@ impl CompactorJobResponse {
     }
 }
 
-#[derive(Clone)]
+
 /// Canonical, internal record of a compactor job.
 ///
 /// A job is the unit tracked by the compactor: it has a stable `id` (ULID), its `request`
@@ -202,6 +204,7 @@ impl CompactorJobResponse {
 /// - Only ids and lightweight request data are stored; inputs are materialized from
 ///   `request.sources()` against the manifest when needed.
 /// - Attempts represent retries of the same job; each attempt has its own id.
+#[derive(Clone)]
 pub(crate) struct CompactorJob {
     id: Ulid,
     job_request_type: CompactorJobRequestType,
