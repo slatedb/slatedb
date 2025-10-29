@@ -251,6 +251,17 @@ impl<T: Clone> StoredRecord<T> {
         }
     }
 
+    /// Refreshes this `StoredRecord` with the latest value from the backing store.
+    ///
+    /// On success, updates this instance's id and value to the latest persisted
+    /// version and returns a reference to the updated value.
+    ///
+    /// Returns `SlateDBError::InvalidDBState` if no record currently exists in the
+    /// store. This typically indicates that the record has not been initialized or
+    /// the underlying data was removed unexpectedly.
+    ///
+    /// This method does not create any records; it is commonly used after a
+    /// version conflict to load the current latest state before retrying.
     pub(crate) async fn refresh(&mut self) -> Result<&T, SlateDBError> {
         let Some((id, new_val)) = self.store.try_read_latest().await? else {
             return Err(InvalidDBState);
@@ -260,6 +271,15 @@ impl<T: Clone> StoredRecord<T> {
         Ok(&self.record)
     }
 
+    /// Attempts to load the latest stored record from the given `RecordStore`.
+    ///
+    /// Returns `Ok(Some(StoredRecord<T>))` when a record exists, or `Ok(None)` when
+    /// no records are present in the store. This method does not create any new
+    /// records and is useful when callers need to proceed conditionally based on
+    /// the presence of persisted state.
+    ///
+    /// For a variant that treats a missing record as an error, use [`load`], which
+    /// maps the absence of a record to `SlateDBError::LatestRecordMissing`.
     pub(crate) async fn try_load(store: Arc<RecordStore<T>>) -> Result<Option<Self>, SlateDBError> {
         let Some((id, val)) = store.try_read_latest().await? else {
             return Ok(None);
