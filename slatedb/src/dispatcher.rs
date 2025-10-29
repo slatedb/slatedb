@@ -103,7 +103,10 @@
 //! # }
 //! ```
 
-use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    any::Any, future::Future, mem::take, panic::AssertUnwindSafe, pin::Pin, sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use crossbeam_skiplist::SkipMap;
@@ -401,8 +404,10 @@ pub(crate) struct MessageHandlerExecutor {
     futures: Mutex<Option<Vec<MessageHandlerFuture>>>,
     /// A map of cancellation tokens for each dispatcher.
     tokens: SkipMap<String, CancellationToken>,
-    /// A map of results or dispatchers that have returned.
+    /// A map of (task name, results) or dispatchers that have returned.
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
+    /// A list of (task name, panic payloads) that have occurred.
+    panics: Mutex<Vec<(String, Box<dyn Any + Send>)>>,
     /// A watchable cell that stores the error state of the database.
     error_state: WatchableOnceCell<SlateDBError>,
     /// A system clock for time keeping.
@@ -433,6 +438,7 @@ impl MessageHandlerExecutor {
             clock,
             tokens: SkipMap::new(),
             results: Arc::new(SkipMap::new()),
+            panics: Mutex::new(Vec::new()),
             fp_registry: Arc::new(FailPointRegistry::new()),
         }
     }
@@ -623,6 +629,12 @@ impl MessageHandlerExecutor {
     pub(crate) async fn shutdown_task(&self, name: &str) -> Result<(), SlateDBError> {
         self.cancel_task(name);
         self.join_task(name).await
+    }
+
+    pub(crate) fn panics(&self) -> impl Iterator<Item = (String, Box<dyn Any + Send>)> + '_ {
+        let mut guard = self.panics.lock();
+        let panics = take(&mut *guard);
+        panics.into_iter()
     }
 }
 

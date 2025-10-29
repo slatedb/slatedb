@@ -20,6 +20,7 @@
 //! }
 //! ```
 
+use std::any::Any;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -1193,6 +1194,32 @@ impl Db {
     /// Get the metrics registry for the database.
     pub fn metrics(&self) -> Arc<StatRegistry> {
         self.inner.stat_registry.clone()
+    }
+
+    /// SlateDB runs background tasks to perform activities such as write-ahead log (WAL)
+    /// flushes, memtable flushes, SSTable compactions, garbage collection, and so on. If
+    /// a background task panics, user-facing operations will fail with a [crate::Error]
+    /// of kind [crate::ErrorKind::Closed] and a reason of [crate::CloseReason::Panic].
+    /// Users that wish to retrieve the panic payloads may call [crate::Db::panics].
+    ///
+    /// ## Returns
+    ///
+    /// An iterator of _(task name, payload)_ pairs. The task name is a string that
+    /// uniquely identifies the background task. The payload is a `Box<dyn Any + Send>`
+    /// from the panic. Names of the tasks are defined as follows:
+    ///
+    /// - Writing data to in-memory buffers: [crate::batch_write::WRITE_BATCH_TASK_NAME]
+    /// - Flushing data to the write-ahead log (WAL): [crate::wal_buffer::WAL_BUFFER_TASK_NAME]
+    /// - Flushing memtables to object storage: [crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME]
+    /// - Compacting SSTables: [crate::compactor::COMPACTOR_TASK_NAME]
+    /// - Polling for new checkpoints: [crate::db_reader::DB_READER_TASK_NAME]
+    /// - Garbage collecting old data: [crate::garbage_collector::GC_TASK_NAME]
+    ///
+    /// ## Note
+    /// Each panic is returned only once. Subsequent calls will return new panics, but
+    /// previously returned panics will not be returned again.
+    pub fn panics(&self) -> impl Iterator<Item = (String, Box<dyn Any + Send>)> + '_ {
+        self.task_executor.panics()
     }
 
     /// Begin a new transaction with the specified isolation level.
