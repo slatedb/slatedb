@@ -232,10 +232,6 @@ impl<T: Clone> StoredRecord<T> {
         })
     }
 
-    pub(crate) fn new(id: u64, record: T, store: Arc<RecordStore<T>>) -> Self {
-        Self { id, record, store }
-    }
-
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
@@ -255,6 +251,17 @@ impl<T: Clone> StoredRecord<T> {
         }
     }
 
+    /// Refreshes this `StoredRecord` with the latest value from the backing store.
+    ///
+    /// On success, updates this instance's id and value to the latest persisted
+    /// version and returns a reference to the updated value.
+    ///
+    /// Returns `SlateDBError::InvalidDBState` if no record currently exists in the
+    /// store. This typically indicates that the record has not been initialized or
+    /// the underlying data was removed unexpectedly.
+    ///
+    /// This method does not create any records; it is commonly used after a
+    /// version conflict to load the current latest state before retrying.
     pub(crate) async fn refresh(&mut self) -> Result<&T, SlateDBError> {
         let Some((id, new_val)) = self.store.try_read_latest().await? else {
             return Err(InvalidDBState);
@@ -262,6 +269,36 @@ impl<T: Clone> StoredRecord<T> {
         self.id = id;
         self.record = new_val;
         Ok(&self.record)
+    }
+
+    /// Attempts to load the latest stored record from the given `RecordStore`.
+    ///
+    /// Returns `Ok(Some(StoredRecord<T>))` when a record exists, or `Ok(None)` when
+    /// no records are present in the store. This method does not create any new
+    /// records and is useful when callers need to proceed conditionally based on
+    /// the presence of persisted state.
+    ///
+    /// For a variant that treats a missing record as an error, use [`load`], which
+    /// maps the absence of a record to `SlateDBError::LatestRecordMissing`.
+    pub(crate) async fn try_load(store: Arc<RecordStore<T>>) -> Result<Option<Self>, SlateDBError> {
+        let Some((id, val)) = store.try_read_latest().await? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            id,
+            record: val,
+            store,
+        }))
+    }
+
+    /// Load the current record from the supplied record store. If successful,
+    /// this method returns a [`Result`] with an instance of [`StoredRecord`].
+    /// If no records could be found, the error [`LatestRecordMissing`] is returned.
+    #[allow(dead_code)]
+    pub(crate) async fn load(store: Arc<RecordStore<T>>) -> Result<Self, SlateDBError> {
+        Self::try_load(store)
+            .await?
+            .ok_or_else(|| SlateDBError::LatestRecordMissing)
     }
 
     pub(crate) async fn update(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
@@ -531,7 +568,11 @@ mod tests {
 
         // Create another view B from latest
         let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
-        let mut b: StoredRecord<TestVal> = StoredRecord::new(id_b, val_b, Arc::clone(&store));
+        let mut b: StoredRecord<TestVal> = StoredRecord {
+            id: id_b,
+            record: val_b,
+            store: Arc::clone(&store),
+        };
 
         // A updates first
         let mut dirty = a.prepare_dirty();
@@ -650,7 +691,11 @@ mod tests {
 
         // writer B bumps to epoch 2
         let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
-        let sb = StoredRecord::new(id_b, val_b, Arc::clone(&store));
+        let sb = StoredRecord {
+            id: id_b,
+            record: val_b,
+            store: Arc::clone(&store),
+        };
         let mut fb = FenceableRecord::init(
             sb,
             TokioDuration::from_secs(5),
