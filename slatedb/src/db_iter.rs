@@ -203,21 +203,21 @@ impl<'a> KeyValueIterator for ScanIterator<'a> {
     }
 }
 
-pub struct DbIterator<'a> {
+pub struct DbIterator {
     range: BytesRange,
-    iter: Box<dyn KeyValueIterator + 'a>,
+    iter: Box<dyn KeyValueIterator + 'static>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
     range_tracker: Option<Arc<DbIteratorRangeTracker>>,
 }
 
-impl<'a> DbIterator<'a> {
+impl DbIterator {
     pub(crate) async fn new(
         range: BytesRange,
         write_batch_iter: Option<WriteBatchIterator>,
-        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
+        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
         now: i64,
@@ -227,7 +227,7 @@ impl<'a> DbIterator<'a> {
         // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
         // not have an real committed sequence number yet.
         let write_batch_iter = write_batch_iter
-            .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'a>)
+            .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'static>)
             .unwrap_or_else(|| Box::new(EmptyIterator::new()));
 
         // Apply the max_seq filter to all the iterators. Please note that we should apply this filter BEFORE
@@ -250,13 +250,13 @@ impl<'a> DbIterator<'a> {
                 mem_iters,
                 l0_iters,
                 sr_iters,
-            )) as Box<dyn KeyValueIterator + 'a>,
+            )) as Box<dyn KeyValueIterator + 'static>,
             None => Box::new(ScanIterator::new(
                 write_batch_iter,
                 mem_iters,
                 l0_iters,
                 sr_iters,
-            )?) as Box<dyn KeyValueIterator + 'a>,
+            )?) as Box<dyn KeyValueIterator + 'static>,
         };
 
         if let Some(merge_operator) = merge_operator {
