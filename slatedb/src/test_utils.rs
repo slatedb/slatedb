@@ -205,7 +205,7 @@ pub(crate) fn decode_codec_entries(
 pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
     table: &BTreeMap<Bytes, Bytes>,
     range: T,
-    iter: &mut DbIterator,
+    iter: &mut DbIterator<'_>,
 ) {
     let mut expected = table.range(range);
     loop {

@@ -25,11 +25,11 @@ pub(crate) trait DbStateReader {
     fn core(&self) -> &CoreDbState;
 }
 
-struct IteratorSources {
+struct IteratorSources<'a> {
     write_batch_iter: Option<WriteBatchIterator>,
-    mem_iters: Vec<Box<dyn KeyValueIterator + 'static>>,
-    l0_iters: VecDeque<Box<dyn KeyValueIterator + 'static>>,
-    sr_iters: VecDeque<Box<dyn KeyValueIterator + 'static>>,
+    mem_iters: Vec<Box<dyn KeyValueIterator + 'a>>,
+    l0_iters: VecDeque<Box<dyn KeyValueIterator + 'a>>,
+    sr_iters: VecDeque<Box<dyn KeyValueIterator + 'a>>,
 }
 
 pub(crate) struct Reader {
@@ -81,14 +81,14 @@ impl Reader {
         max_seq
     }
 
-    async fn build_iterator_sources(
+    async fn build_iterator_sources<'a>(
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
         write_batch: Option<WriteBatch>,
         sst_iter_options: SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
-    ) -> Result<IteratorSources, SlateDBError> {
+    ) -> Result<IteratorSources<'a>, SlateDBError> {
         let write_batch_iter = write_batch
             .map(|batch| WriteBatchIterator::new(batch, range.clone(), IterationOrder::Ascending));
 
@@ -100,8 +100,7 @@ impl Reader {
         let mem_iters = memtables
             .iter()
             .map(|table| {
-                Box::new(table.range_ascending(range.clone()))
-                    as Box<dyn KeyValueIterator + 'static>
+                Box::new(table.range_ascending(range.clone())) as Box<dyn KeyValueIterator + 'a>
             })
             .collect::<Vec<_>>();
 
@@ -346,7 +345,7 @@ impl Reader {
     /// - `max_seq`: Optional upper bound on the sequence number visibility for
     ///   the scan. If provided, entries with a greater sequence number are
     ///   filtered out by the iterator construction.
-    pub(crate) async fn scan_with_options(
+    pub(crate) async fn scan_with_options<'a>(
         &self,
         range: BytesRange,
         options: &ScanOptions,
@@ -354,7 +353,7 @@ impl Reader {
         write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
-    ) -> Result<DbIterator, SlateDBError> {
+    ) -> Result<DbIterator<'a>, SlateDBError> {
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
 
