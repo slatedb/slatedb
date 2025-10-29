@@ -73,7 +73,6 @@ pub(crate) enum CompactorJobRequestType {
     External,
 }
 
-
 /// In-memory description of the inputs to a compaction.
 ///
 /// A `CompactionSpec` represents the concrete set of input SSTs and/or Sorted Runs
@@ -95,7 +94,6 @@ pub(crate) enum CompactorJobInput {
         sorted_runs: Vec<SortedRun>,
     },
 }
-
 
 /// Specification of how a compaction job should be executed.
 ///
@@ -192,7 +190,6 @@ impl CompactorJobResponse {
         &self.completed_sources
     }
 }
-
 
 /// Canonical, internal record of a compactor job.
 ///
