@@ -1047,9 +1047,9 @@ impl Db {
     ///
     /// impl MergeOperator for StringConcatMergeOperator {
     ///     fn merge(&self, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
-    ///         let mut result = existing_value.unwrap_or_default();
+    ///         let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
     ///         result.extend_from_slice(&value);
-    ///         Ok(result)
+    ///         Ok(Bytes::from(result))
     ///     }
     /// }
     ///
@@ -1101,9 +1101,9 @@ impl Db {
     ///
     /// impl MergeOperator for StringConcatMergeOperator {
     ///     fn merge(&self, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
-    ///         let mut result = existing_value.unwrap_or_default();
+    ///         let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
     ///         result.extend_from_slice(&value);
-    ///         Ok(result)
+    ///         Ok(Bytes::from(result))
     ///     }
     /// }
     ///
