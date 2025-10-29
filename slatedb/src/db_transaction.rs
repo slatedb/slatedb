@@ -276,7 +276,9 @@ impl DBTransaction {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.write_batch.write().merge_with_options(key, value, options);
+        self.write_batch
+            .write()
+            .merge_with_options(key, value, options);
         Ok(())
     }
 
