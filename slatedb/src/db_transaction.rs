@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -52,7 +53,7 @@ pub struct DBTransaction {
     /// The write batch of the transaction, which contains the uncommitted writes.
     /// Users can read data from the write batch during the transaction,
     /// thus providing an MVCC view of the database.
-    write_batch: RwLock<WriteBatch>,
+    write_batch: Arc<RefCell<WriteBatch>>,
     /// Reference to the database
     db_inner: Arc<DbInner>,
     /// Isolation level for this transaction
@@ -75,7 +76,7 @@ impl DBTransaction {
             txn_id,
             started_seq: seq,
             txn_manager,
-            write_batch: RwLock::new(WriteBatch::new().with_txn_id(txn_id)),
+            write_batch: Arc::new(RefCell::new(WriteBatch::new().with_txn_id(txn_id))),
             db_inner,
             isolation_level,
             range_trackers: Mutex::new(Vec::new()),
@@ -121,7 +122,7 @@ impl DBTransaction {
         let db_state = self.db_inner.state.read().view();
 
         // Clone the WriteBatch for snapshot isolation
-        let write_batch_cloned = self.write_batch.read().clone();
+        let write_batch_cloned = self.write_batch.borrow().clone();
 
         // For now, delegate to the underlying reader
         self.db_inner
@@ -194,7 +195,7 @@ impl DBTransaction {
 
         // Clone the WriteBatch for the scan to ensure that the scan within a transaction
         // sees a consistent view of the current writes.
-        let write_batch_cloned = self.write_batch.read().clone();
+        let write_batch_cloned = self.write_batch.borrow().clone();
 
         // For now, delegate to the underlying reader
         self.db_inner
@@ -251,7 +252,7 @@ impl DBTransaction {
         V: AsRef<[u8]>,
     {
         self.write_batch
-            .write()
+            .borrow_mut()
             .put_with_options(key, value, options);
         Ok(())
     }
@@ -276,7 +277,9 @@ impl DBTransaction {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.write_batch.write().merge_with_options(key, value, options);
+        self.write_batch
+            .borrow_mut()
+            .merge_with_options(key, value, options);
         Ok(())
     }
 
@@ -290,7 +293,7 @@ impl DBTransaction {
     /// - It's not really possible to have error here, since the delete operation is
     ///   buffered in the write batch.
     pub fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), crate::Error> {
-        self.write_batch.write().delete(key);
+        self.write_batch.borrow_mut().delete(key);
         Ok(())
     }
 
@@ -312,7 +315,7 @@ impl DBTransaction {
     pub async fn commit(self) -> Result<(), crate::Error> {
         // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
         // conflict, neither write-write conflict.
-        if self.write_batch.read().is_empty() {
+        if self.write_batch.borrow().is_empty() {
             return Ok(());
         }
 
@@ -328,7 +331,7 @@ impl DBTransaction {
         }
 
         // Take the write_batch for submission to the database.
-        let write_batch = self.write_batch.read().clone();
+        let write_batch = self.write_batch.borrow().clone();
 
         // Track the write keys from write batch
         let write_keys = write_batch.keys();
