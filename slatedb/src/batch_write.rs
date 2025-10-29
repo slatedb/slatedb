@@ -130,7 +130,12 @@ impl DbInner {
         }
 
         let entries = batch
-            .extract_entries(commit_seq, now, self.settings.default_ttl, None)
+            .extract_entries(
+                commit_seq,
+                now,
+                self.settings.default_ttl,
+                self.settings.merge_operator.clone(),
+            )
             .await?;
 
         let durable_watcher = if self.wal_enabled {

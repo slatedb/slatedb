@@ -5,7 +5,9 @@ use crate::filter_iterator::FilterIterator;
 use crate::iter::{EmptyIterator, KeyValueIterator};
 use crate::map_iter::MapIterator;
 use crate::merge_iterator::MergeIterator;
-use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
+use crate::merge_operator::{
+    MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
+};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
 use async_trait::async_trait;
@@ -123,39 +125,23 @@ impl<'a> KeyValueIterator for GetIterator<'a> {
         Ok(())
     }
 
-    async fn next(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
-        // Note the Get iterator should not advance past tombstones, which is
-        // the default behavior of the KeyValueIterator::next method, because
-        // the iterators are sequentially chained instead of merged.
-        let next = self.next_entry().await?;
-        if let Some(entry) = next {
-            match entry.value {
-                ValueDeletable::Value(v) => {
-                    return Ok(Some(KeyValue {
-                        key: entry.key,
-                        value: v,
-                    }));
-                }
-                ValueDeletable::Merge(value) => {
-                    return Ok(Some(KeyValue {
-                        key: entry.key,
-                        value,
-                    }))
-                }
-                ValueDeletable::Tombstone => return Ok(None),
-            }
-        }
-
-        Ok(None)
-    }
-
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while self.idx < self.iters.len() {
             // initialization is idempotent, so we can call it multiple times
             self.iters[self.idx].init().await?;
             let result = self.iters[self.idx].next_entry().await?;
-            if result.is_some() {
-                return Ok(result);
+            if let Some(entry) = result {
+                // Note: The Get iterator should not advance past tombstones, which is
+                // why we filter them out here. When a tombstone is encountered, we return None
+                // so the iterator stops without advancing to the next iterator in the chain.
+                match &entry.value {
+                    ValueDeletable::Tombstone => {
+                        return Ok(None);
+                    }
+                    _ => {
+                        return Ok(Some(entry));
+                    }
+                }
             }
             self.idx += 1;
         }
@@ -275,6 +261,9 @@ impl<'a> DbIterator<'a> {
 
         if let Some(merge_operator) = merge_operator {
             iter = Box::new(MergeOperatorIterator::new(merge_operator, iter, true, now));
+        } else {
+            // When no merge operator is configured, wrap with iterator that errors on merge operands
+            iter = Box::new(MergeOperatorRequiredIterator::new(iter));
         }
 
         iter.init().await?;
