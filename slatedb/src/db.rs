@@ -2262,7 +2262,7 @@ mod tests {
     async fn test_should_allow_iterating_behind_box_dyn() {
         #[async_trait]
         trait IteratorSupplier {
-            async fn iterator<'a>(&'a self) -> Box<dyn IteratorTrait + 'a>;
+            async fn iterator(&self) -> Box<dyn IteratorTrait>;
         }
 
         struct DbHolder {
@@ -2271,7 +2271,7 @@ mod tests {
 
         #[async_trait]
         impl IteratorSupplier for DbHolder {
-            async fn iterator<'a>(&'a self) -> Box<dyn IteratorTrait + 'a> {
+            async fn iterator(&self) -> Box<dyn IteratorTrait> {
                 let range = BytesRange::new_empty();
                 let iter = self
                     .db
@@ -2289,7 +2289,7 @@ mod tests {
         }
 
         #[async_trait]
-        impl IteratorTrait for DbIterator<'_> {
+        impl IteratorTrait for DbIterator {
             async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
                 DbIterator::next(self).await
             }
