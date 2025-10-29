@@ -536,7 +536,7 @@ impl CompactorEventHandler {
             is_dest_last_run,
         };
 
-        // TODO: Add job attempt to compaction
+        // TODO(sujeetsawala): Add job attempt to compaction
 
         self.progress_tracker
             .add_job(id, job.estimated_source_bytes());

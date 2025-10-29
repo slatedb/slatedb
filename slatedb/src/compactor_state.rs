@@ -373,7 +373,7 @@ impl CompactorStateRecord {
 ///   plans and their statuses across processes, used for recovery/GC and history.
 pub struct CompactorState {
     manifest: DirtyManifest,
-    // TODO(sujeet): Add CompactorStateRecord during compaction state persistence implementation
+    // TODO(sujeetsawala): Add CompactorStateRecord during compaction state persistence implementation
     //compaction_state: DirtyRecord<CompactorStateRecord>,
     compactor_jobs: HashMap<Ulid, CompactorJob>,
 
@@ -443,7 +443,7 @@ impl CompactorState {
             "accepted submitted compaction [compactor_request={}]",
             compactor_request
         );
-        // TODO(sujeet): Add compactionJob attempt to the object store
+        // TODO(sujeetsawala): Add compactionJob attempt to the object store
         let compactor_job_id = compactor_job.id();
         if let Some(job) = self.compactor_jobs.get_mut(&compactor_job_id) {
             job.update_status(CompactorJobStatus::Pending);
@@ -619,7 +619,7 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.core = db_state;
-            // TODO(sujeet): Add compaction plan to object store with Completed status
+            // TODO(sujeetsawala): Add compaction plan to object store with Completed status
             if let Err(e) = self.update_compactor_state(id, CompactorJobStatus::Completed) {
                 error!("failed to update compactor job state [error={:?}]", e);
                 return;
