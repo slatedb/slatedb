@@ -239,6 +239,7 @@ pub fn convert_reader_options(c_opts: *const CSdbReaderOptions) -> DbReaderOptio
         checkpoint_lifetime,
         max_memtable_bytes,
         block_cache: defaults.block_cache,
+        merge_operator: defaults.merge_operator,
     }
 }
 

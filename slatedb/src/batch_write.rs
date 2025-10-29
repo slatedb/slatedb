@@ -30,7 +30,6 @@ use fail_parallel::fail_point;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::warn;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::instrument;
@@ -171,7 +170,7 @@ impl DbInner {
             self.txn_manager
                 .track_recent_committed_txn(txn_id, commit_seq);
         } else {
-            let write_keys = batch.keys().collect::<HashSet<_>>();
+            let write_keys = batch.keys();
             self.txn_manager
                 .track_recent_committed_write_batch(&write_keys, commit_seq);
         }
@@ -210,6 +209,9 @@ impl DbInner {
                 let expire_ts = match &op {
                     WriteOp::Put(_, _, opts) => opts.expire_ts_from(self.settings.default_ttl, now),
                     WriteOp::Delete(_) => None,
+                    WriteOp::Merge(_, _, opts) => {
+                        opts.expire_ts_from(self.settings.default_ttl, now)
+                    }
                 };
                 op.to_row_entry(seq, Some(now), expire_ts)
             })

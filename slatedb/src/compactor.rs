@@ -605,11 +605,11 @@ impl CompactorEventHandler {
         let result = self.state.submit_compaction(id, compactor_job.clone());
         match result {
             Ok(_) => {
-                // TODO: Add compaction plan to object store with Pending status
+                // TODO(sujeetsawala): Add compaction plan to object store with Pending status
                 self.start_compaction(id, compactor_job).await?;
             }
             Err(err) => {
-                // TODO: Add compaction plan to object store with Failed status
+                // TODO(sujeetsawala): Add compaction plan to object store with Failed status
                 self.state.remove_compactor_job(&compactor_job.id());
                 warn!("invalid compaction [error={:?}]", err);
             }
@@ -620,7 +620,7 @@ impl CompactorEventHandler {
     async fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
-        // TODO: Fetch and Run Pending Compactions from object store
+        // TODO(sujeetsawala): Fetch and Run Pending Compactions from object store
         // self.run_pending_compactions().await?;
         self.maybe_schedule_compactions().await?;
         Ok(())
