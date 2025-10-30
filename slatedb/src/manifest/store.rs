@@ -251,10 +251,10 @@ impl StoredManifest {
     /// manifest store's path then this fn returns None. Otherwise, on success it returns a
     /// Result with an instance of StoredManifest.
     pub(crate) async fn try_load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
-        let Some((id, manifest)) = store.inner.try_read_latest().await? else {
+        let Some(inner) = StoredRecord::<Manifest>::try_load(Arc::clone(&store.inner)).await?
+        else {
             return Ok(None);
         };
-        let inner = StoredRecord::new(id, manifest.clone(), Arc::clone(&store.inner));
         Ok(Some(Self {
             inner,
             clock: Arc::clone(&store.clock),
@@ -265,7 +265,13 @@ impl StoredManifest {
     /// this method returns a [`Result`] with an instance of [`StoredManifest`].
     /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
     pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
-        Self::try_load(store).await?.ok_or(LatestManifestMissing)
+        StoredRecord::<Manifest>::try_load(Arc::clone(&store.inner))
+            .await?
+            .map(|inner| Self {
+                inner,
+                clock: Arc::clone(&store.clock),
+            })
+            .ok_or(LatestManifestMissing)
     }
 
     #[allow(dead_code)]

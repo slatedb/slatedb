@@ -21,8 +21,8 @@ pub(crate) struct TrackedSeq {
 
 /// Rounding behavior for non-exact matches in sequence-timestamp lookups.
 #[allow(dead_code)]
-#[derive(PartialEq)]
-pub(crate) enum FindOption {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FindOption {
     /// Round up to the next higher value when no exact match is found.
     RoundUp,
     /// Round down to the next lower value when no exact match is found.
@@ -707,5 +707,95 @@ mod tests {
             assert_eq!(decoded.sequence_numbers, tracker.sequence_numbers);
             assert_eq!(decoded.timestamps, tracker.timestamps);
         });
+    }
+    #[test]
+    fn admin_seq_tracker_seq_to_ts_rounding() -> Result<(), crate::Error> {
+        use crate::admin::AdminBuilder;
+        use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+        use crate::db::Db;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use object_store::ObjectStore;
+        use std::sync::Arc;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let path = Path::from("/tmp/test_admin_seq_tracker_seq_to_ts");
+
+            let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+
+            let db = Db::builder(path.clone(), object_store.clone())
+                .with_settings(Settings::default())
+                .build()
+                .await?;
+            db.put(b"k1", b"v1").await?;
+            db.put(b"k2", b"v2").await?;
+            db.put(b"k3", b"v3").await?;
+
+            db.create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+                .await?;
+            db.close().await?;
+
+            let ts_first = admin.get_timestamp_for_sequence(0, true).await?;
+            assert!(ts_first.is_some());
+
+            let ts_after_last = admin.get_timestamp_for_sequence(u64::MAX, true).await?;
+            assert!(ts_after_last.is_none());
+
+            Ok::<_, crate::Error>(())
+        })?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn admin_seq_tracker_ts_to_seq_rounding() -> Result<(), crate::Error> {
+        use crate::admin::AdminBuilder;
+        use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+        use crate::db::Db;
+        use chrono::{TimeZone, Utc};
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use object_store::ObjectStore;
+        use std::sync::Arc;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let path = Path::from("/tmp/test_admin_seq_tracker_ts_to_seq");
+
+            let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+
+            let db = Db::builder(path.clone(), object_store.clone())
+                .with_settings(Settings::default())
+                .build()
+                .await?;
+            db.put(b"a", b"1").await?;
+            db.put(b"b", b"2").await?;
+
+            db.create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+                .await?;
+            db.close().await?;
+
+            let long_ago = Utc.timestamp_opt(1, 0).single().unwrap();
+            let seq_before_first = admin.get_sequence_for_timestamp(long_ago, false).await?;
+            assert!(
+                seq_before_first.is_none(),
+                "round-down before first ts should yield None"
+            );
+
+            let now = Utc::now();
+            let seq_latest = admin.get_sequence_for_timestamp(now, false).await?;
+            assert!(
+                seq_latest.is_some(),
+                "round-down at/after last ts should yield Some(seq)"
+            );
+
+            Ok::<_, crate::Error>(())
+        })?;
+
+        Ok(())
     }
 }
