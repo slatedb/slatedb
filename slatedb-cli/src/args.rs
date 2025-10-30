@@ -1,4 +1,5 @@
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
+use slatedb::FindOption;
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
@@ -109,13 +110,13 @@ pub(crate) enum CliCommands {
 
     SeqToTs {
         seq: u64,
-        #[arg(long, value_enum, default_value_t = RoundOpt::Down)]
-        round: RoundOpt,
+        #[arg(long, value_parser = parse_find_option, default_value = "down")]
+        round: FindOption,
     },
     TsToSeq {
         ts_secs: i64,
-        #[arg(long, value_enum, default_value_t = RoundOpt::Down)]
-        round: RoundOpt,
+        #[arg(long, value_parser = parse_find_option, default_value = "down")]
+        round: FindOption,
     },
 
     /// Schedules a period garbage collection job
@@ -154,18 +155,6 @@ pub(crate) enum GcResource {
     Manifest,
     Wal,
     Compacted,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum RoundOpt {
-    Up,
-    Down,
-}
-
-impl RoundOpt {
-    pub fn as_bool(self) -> bool {
-        matches!(self, RoundOpt::Up)
-    }
 }
 
 fn parse_gc_schedule(s: &str) -> Result<GcSchedule, String> {
@@ -210,6 +199,14 @@ pub(crate) struct GcSchedule {
 
 pub(crate) fn parse_args() -> CliArgs {
     CliArgs::parse()
+}
+
+fn parse_find_option(s: &str) -> Result<FindOption, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "up" | "roundup" => Ok(FindOption::RoundUp),
+        "down" | "rounddown" => Ok(FindOption::RoundDown),
+        _ => Err("Invalid find option".to_string()),
+    }
 }
 
 #[cfg(test)]

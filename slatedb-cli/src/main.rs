@@ -5,6 +5,7 @@ use slatedb::admin::{self, Admin, AdminBuilder};
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
+use slatedb::FindOption;
 use std::error::Error;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -60,9 +61,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             compacted,
         } => schedule_gc(&admin, manifest, wal, compacted).await?,
 
-        CliCommands::SeqToTs { seq, round } => exec_seq_to_ts(&admin, seq, round.as_bool()).await?,
+        CliCommands::SeqToTs { seq, round } => {
+            exec_seq_to_ts(&admin, seq, matches!(round, FindOption::RoundUp)).await?
+        }
         CliCommands::TsToSeq { ts_secs, round } => {
-            exec_ts_to_seq(&admin, ts_secs, round.as_bool()).await?
+            exec_ts_to_seq(&admin, ts_secs, matches!(round, FindOption::RoundUp)).await?
         }
     }
 
