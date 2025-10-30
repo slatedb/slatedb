@@ -10,7 +10,9 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
+use crate::seq_tracker::FindOption;
 use crate::utils::{IdGenerator, WatchableOnceCell};
+use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -270,6 +272,58 @@ impl Admin {
             })
             .await
             .map_err(Into::into)
+    }
+
+    /// Returns the timestamp or sequence from the latest manifest's sequence tracker.
+    /// When `round_up` is true, uses the next higher value; otherwise the previous one.
+    pub async fn get_timestamp_for_sequence(
+        &self,
+        seq: u64,
+        round_up: bool,
+    ) -> Result<Option<DateTime<Utc>>, crate::Error> {
+        let manifest_store = self.manifest_store();
+
+        let id_manifest = manifest_store.try_read_latest_manifest().await?;
+        let Some((_id, manifest)) = id_manifest else {
+            return Ok(None);
+        };
+
+        let opt = if round_up {
+            FindOption::RoundUp
+        } else {
+            FindOption::RoundDown
+        };
+        Ok(manifest.core.sequence_tracker.find_ts(seq, opt))
+    }
+
+    /// Returns the sequence for a given timestamp from the latest manifest's sequence tracker.
+    /// When `round_up` is true, uses the next higher value; otherwise the previous one.
+    pub async fn get_sequence_for_timestamp(
+        &self,
+        ts: DateTime<Utc>,
+        round_up: bool,
+    ) -> Result<Option<u64>, crate::Error> {
+        let manifest_store = self.manifest_store();
+
+        let id_manifest = manifest_store.try_read_latest_manifest().await?;
+        let Some((_id, manifest)) = id_manifest else {
+            return Ok(None);
+        };
+
+        let opt = if round_up {
+            FindOption::RoundUp
+        } else {
+            FindOption::RoundDown
+        };
+        Ok(manifest.core.sequence_tracker.find_seq(ts, opt))
+    }
+
+    fn manifest_store(&self) -> ManifestStore {
+        ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.system_clock.clone(),
+        )
     }
 
     /// Clone a database. If no db already exists at the specified path, then this will create
