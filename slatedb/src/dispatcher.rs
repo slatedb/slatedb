@@ -103,7 +103,7 @@
 //! # }
 //! ```
 
-use std::{any::Any, future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use crossbeam_skiplist::SkipMap;
@@ -113,7 +113,7 @@ use futures::{
     stream::{BoxStream, FuturesUnordered},
     FutureExt, StreamExt,
 };
-use log::warn;
+use log::error;
 use parking_lot::Mutex;
 use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
@@ -403,9 +403,6 @@ pub(crate) struct MessageHandlerExecutor {
     tokens: SkipMap<String, CancellationToken>,
     /// A map of (task name, results) for dispatchers that have returned.
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
-    /// A list of (task name, panic payloads) that have occurred.
-    #[allow(clippy::type_complexity)]
-    panics: Arc<Mutex<Vec<(String, Box<dyn Any + Send>)>>>,
     /// A watchable cell that stores the error state of the database.
     error_state: WatchableOnceCell<SlateDBError>,
     /// A system clock for time keeping.
@@ -436,7 +433,6 @@ impl MessageHandlerExecutor {
             clock,
             tokens: SkipMap::new(),
             results: Arc::new(SkipMap::new()),
-            panics: Arc::new(Mutex::new(Vec::new())),
             fp_registry: Arc::new(FailPointRegistry::new()),
         }
     }
@@ -476,6 +472,8 @@ impl MessageHandlerExecutor {
     /// - `Ok(())` if the dispatcher was successfully spawned.
     /// - Err([SlateDBError::BackgroundTaskExists]) if a dispatcher with the same name is
     ///   already added.
+    /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already
+    ///   started.
     pub(crate) fn add_handler<T: Send + std::fmt::Debug + 'static>(
         &self,
         name: String,
@@ -488,34 +486,33 @@ impl MessageHandlerExecutor {
             .with_fp_registry(self.fp_registry.clone());
         let this_error_state = self.error_state.clone();
         let this_name = name.clone();
-        let this_panics = self.panics.clone();
         // future that runs the dispatcher and handles cleanup
         let task_future = async move {
             // catch dispatcher panics using catch_unwind
             let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
             let (run_result, run_maybe_panic) =
                 split_unwind_result(this_name.clone(), run_unwind_result);
-            // if the dispatcher panicked, add it to the panics list
-            if let Some(payload) = run_maybe_panic {
-                let mut guard = this_panics.lock();
-                guard.push((this_name.clone(), payload));
+            if let Err(ref err) = run_result {
+                error!(
+                    "background task panicked unexpectedly. [task_name={}, error={:?}, panic={:?}]",
+                    this_name,
+                    err,
+                    run_maybe_panic.map(|p| panic_string(&p))
+                );
             }
-            // set the error state or mark a clean shutdown
             this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
-            // error_state is write-once, so re-read error_state to get the first error
+            // re-read the error since it might have already been set by another task
             let final_error_state = Err(this_error_state
                 .reader()
                 .read()
                 .expect("error state was unexpectedly empty"));
-            // catch cleanup panics using catch_unwind
             let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(final_error_state))
                 .catch_unwind()
                 .await;
-            // if the cleanup failed, log it but don't set error_state/panics
             let (cleanup_result, cleanup_maybe_panic) =
                 split_unwind_result(this_name.clone(), cleanup_unwind_result);
             if let Err(err) = cleanup_result {
-                warn!(
+                error!(
                     "background task failed to clean up on shutdown [name={}, error={:?}, panic={:?}]",
                     this_name.clone(),
                     err,
@@ -524,7 +521,6 @@ impl MessageHandlerExecutor {
             }
             run_result
         };
-        // add the future to the executor's list of task definitions
         let mut guard = self.futures.lock();
         if let Some(task_definitions) = guard.as_mut() {
             if task_definitions.iter().any(|t| t.name == name) {
@@ -583,16 +579,19 @@ impl MessageHandlerExecutor {
             .iter()
             .map(|e| e.value().clone())
             .collect::<Vec<_>>();
-        let this_panics = self.panics.clone();
         // future that runs until all tasks are completed
         let monitor_future = async move {
             while !tasks.is_empty() {
                 if let Some((name, join_result)) = tasks.join_next().await {
                     let (task_result, task_maybe_panic) =
                         split_join_result(name.clone(), join_result);
-                    if let Some(payload) = task_maybe_panic {
-                        let mut guard = this_panics.lock();
-                        guard.push((name.clone(), payload));
+                    if let Err(ref err) = task_result {
+                        error!(
+                            "background task failed [name={}, error={:?}, panic={:?}]",
+                            name,
+                            err,
+                            task_maybe_panic.map(|p| panic_string(&p))
+                        );
                     }
                     this_error_state
                         .write(task_result.clone().err().unwrap_or(SlateDBError::Closed));
@@ -749,32 +748,6 @@ mod test {
             while let Some(m) = messages.next().await {
                 self.log.lock().unwrap().push((Phase::Cleanup, m));
             }
-            Ok(())
-        }
-    }
-
-    #[derive(Clone)]
-    struct PanicHandler {
-        cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
-    }
-
-    #[async_trait::async_trait]
-    impl MessageHandler<u8> for PanicHandler {
-        fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<u8>>)> {
-            vec![]
-        }
-
-        async fn handle(&mut self, _message: u8) -> Result<(), SlateDBError> {
-            panic!("intentional panic in handler");
-        }
-
-        async fn cleanup(
-            &mut self,
-            mut messages: BoxStream<'async_trait, u8>,
-            result: Result<(), SlateDBError>,
-        ) -> Result<(), SlateDBError> {
-            self.cleanup_called.write(result);
-            while messages.next().await.is_some() {}
             Ok(())
         }
     }
@@ -1178,6 +1151,33 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_executor_catches_panic_from_run_loop() {
+        #[derive(Clone)]
+        struct PanicHandler {
+            cleanup_called: WatchableOnceCell<Result<(), SlateDBError>>,
+        }
+
+        #[async_trait::async_trait]
+        impl MessageHandler<u8> for PanicHandler {
+            fn tickers(&mut self) -> Vec<(Duration, Box<MessageFactory<u8>>)> {
+                vec![]
+            }
+
+            async fn handle(&mut self, _message: u8) -> Result<(), SlateDBError> {
+                panic!("intentional panic in handler");
+            }
+
+            async fn cleanup(
+                &mut self,
+                mut messages: BoxStream<'async_trait, u8>,
+                result: Result<(), SlateDBError>,
+            ) -> Result<(), SlateDBError> {
+                // Record the shutdown result and drain any pending messages
+                self.cleanup_called.write(result);
+                while messages.next().await.is_some() {}
+                Ok(())
+            }
+        }
+
         let cleanup_called = WatchableOnceCell::new();
         let mut cleanup_reader = cleanup_called.reader();
         let (tx, rx) = mpsc::unbounded_channel::<u8>();

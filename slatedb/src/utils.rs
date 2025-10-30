@@ -97,9 +97,6 @@ where
         let result = match outcome {
             Ok(result) => result,
             Err(payload) => {
-                if let Some(err) = payload.downcast_ref::<SlateDBError>() {
-                    return Err(err.clone());
-                }
                 error!(
                     "spawned task panicked. [name={}, panic={}]",
                     name,
