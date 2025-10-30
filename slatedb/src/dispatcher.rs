@@ -486,6 +486,7 @@ impl MessageHandlerExecutor {
             .with_fp_registry(self.fp_registry.clone());
         let this_error_state = self.error_state.clone();
         let this_name = name.clone();
+        let this_fp_registry = self.fp_registry.clone();
         // future that runs the dispatcher and handles cleanup
         let task_future = async move {
             // catch dispatcher panics using catch_unwind
@@ -500,6 +501,9 @@ impl MessageHandlerExecutor {
                     run_maybe_panic.map(|p| panic_string(&p))
                 );
             }
+            fail_point!(this_fp_registry.clone(), "executor-wrapper-before-write", |_| {
+                panic!("failpoint: executor-wrapper-before-write");
+            });
             this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
             // re-read the error since it might have already been set by another task
             let final_error_state = Err(this_error_state
@@ -1224,5 +1228,56 @@ mod test {
             cleanup_reader.read(),
             Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_executor_panic_in_wrapper() {
+        let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
+        let cleanup_called = WatchableOnceCell::new();
+        let cleanup_reader = cleanup_called.reader();
+        let (tx, rx) = mpsc::unbounded_channel::<TestMessage>();
+        drop(tx); // no messages needed
+        let clock = Arc::new(DefaultSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
+        let error_state = WatchableOnceCell::new();
+        let fp_registry = Arc::new(FailPointRegistry::default());
+        let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone())
+            .with_fp_registry(fp_registry.clone());
+
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "executor-wrapper-before-write",
+            "panic",
+        )
+        .unwrap();
+
+        // Spawn the task and monitor
+        task_executor
+            .add_handler(
+                "test".to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to spawn task");
+        task_executor
+            .monitor_on(&Handle::current())
+            .expect("failed to monitor executor");
+
+        // Cancel to exit run() cleanly, then `async move`` wrapper panics at the fail point
+        task_executor.cancel_task("test");
+
+        // Wait for task result
+        let result = timeout(Duration::from_secs(30), task_executor.join_task("test"))
+            .await
+            .expect("dispatcher did not stop in time");
+
+        // Assertions: panic result, error_state set to panic, cleanup not called
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        assert!(matches!(
+            error_state.reader().read(),
+            Some(SlateDBError::BackgroundTaskPanic(_))
+        ));
+        assert!(cleanup_reader.read().is_none());
     }
 }

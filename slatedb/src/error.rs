@@ -224,7 +224,8 @@ impl From<foyer::Error> for SlateDBError {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Represents the reason that a database instance has been closed.
-#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {
     /// The database has been shutdown cleanly.
     Clean,
@@ -242,7 +243,7 @@ pub enum CloseReason {
 /// decide how to proceed. Adding new [ErrorKind]s requires an RFC, and should happen very
 /// infrequently.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// A transaction conflict occurred. The transaction must be retried or dropped.
     Transaction,
