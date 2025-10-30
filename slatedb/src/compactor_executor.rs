@@ -211,7 +211,10 @@ impl TokioCompactionExecutorInner {
         &self,
         compactor_job_attempt: CompactorJobAttempt,
     ) -> Result<SortedRun, SlateDBError> {
-        debug!("executing compaction [compaction={:?}]", compactor_job_attempt);
+        debug!(
+            "executing compaction [compaction={:?}]",
+            compactor_job_attempt
+        );
         let mut all_iter = self.load_iterators(&compactor_job_attempt).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
