@@ -103,10 +103,7 @@
 //! # }
 //! ```
 
-use std::{
-    any::Any, future::Future, mem::take, panic::AssertUnwindSafe, pin::Pin, sync::Arc,
-    time::Duration,
-};
+use std::{any::Any, future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use crossbeam_skiplist::SkipMap;
@@ -654,23 +651,6 @@ impl MessageHandlerExecutor {
         self.cancel_task(name);
         self.join_task(name).await
     }
-
-    /// Retrieves panic payloads for any background tasks that have panicked.
-    ///
-    /// ## Returns
-    ///
-    /// An iterator of _(task name, payload)_ pairs. The task name is a string that
-    /// uniquely identifies the background task. The payload is a `Box<dyn Any + Send>`
-    /// from the panic.
-    ///
-    /// ## Note
-    /// Each panic is returned only once. Subsequent calls will return new panics, but
-    /// previously returned panics will not be returned again.
-    pub(crate) fn panics(&self) -> impl Iterator<Item = (String, Box<dyn Any + Send>)> + '_ {
-        let mut guard = self.panics.lock();
-        let panics = take(&mut *guard);
-        panics.into_iter()
-    }
 }
 
 #[cfg(all(test, feature = "test-util"))]
@@ -679,7 +659,7 @@ mod test {
     use crate::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
     use crate::dispatcher::{MessageFactory, MessageHandlerExecutor};
     use crate::error::SlateDBError;
-    use crate::utils::{panic_string, WatchableOnceCell};
+    use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
     use futures::stream::BoxStream;
     use futures::StreamExt;
@@ -1244,115 +1224,5 @@ mod test {
             cleanup_reader.read(),
             Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_executor_records_panic_payload_from_handler_and_sets_error() {
-        let cleanup_called = WatchableOnceCell::new();
-        let mut cleanup_reader = cleanup_called.reader();
-        let (tx, rx) = mpsc::unbounded_channel::<u8>();
-        let clock = Arc::new(DefaultSystemClock::new());
-        let handler = PanicHandler { cleanup_called };
-        let error_state = WatchableOnceCell::new();
-        let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone());
-
-        task_executor
-            .add_handler(
-                "panic_handler".to_string(),
-                Box::new(handler),
-                rx,
-                &Handle::current(),
-            )
-            .expect("failed to spawn task");
-
-        task_executor
-            .monitor_on(&Handle::current())
-            .expect("failed to monitor executor");
-
-        // Trigger panic inside the run loop via handle()
-        tx.send(1u8).unwrap();
-
-        // Wait for cleanup to observe the panic result
-        let _ = timeout(Duration::from_secs(30), cleanup_reader.await_value())
-            .await
-            .expect("timeout waiting for cleanup result");
-
-        // Verify task result cell and error state report a panic
-        let result = timeout(
-            Duration::from_secs(30),
-            task_executor.join_task("panic_handler"),
-        )
-        .await
-        .expect("dispatcher did not stop in time");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskPanic(_))
-        ));
-
-        // Verify the panic payload is recorded and only emitted once
-        let mut panics: Vec<_> = task_executor.panics().collect();
-        assert_eq!(panics.len(), 1);
-        let (name, payload) = panics.remove(0);
-        assert_eq!(name, "panic_handler");
-        assert_eq!(panic_string(&payload), "intentional panic in handler");
-
-        // Subsequent calls should be empty (payloads are one-shot)
-        assert_eq!(task_executor.panics().count(), 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_monitor_joinmap_records_panic_and_result_cell() {
-        use super::MessageHandlerFuture;
-
-        let error_state = WatchableOnceCell::new();
-        let clock = Arc::new(DefaultSystemClock::new());
-        let executor = MessageHandlerExecutor::new(error_state.clone(), clock);
-
-        // Inject a task future that panics at the top level so JoinMap sees a panic
-        let fut_name = "join_panic_task".to_string();
-        let task_future = async move {
-            panic!("top-level join panic payload");
-            #[allow(unreachable_code)]
-            Ok(())
-        };
-
-        {
-            let mut guard = executor.futures.lock();
-            let defs = guard.as_mut().expect("executor already started");
-            defs.push(MessageHandlerFuture {
-                name: fut_name.clone(),
-                future: Box::pin(task_future),
-                token: CancellationToken::new(),
-                handle: Handle::current(),
-            });
-        }
-
-        // Start the monitor and wait for it to process the panic
-        let monitor = executor
-            .monitor_on(&Handle::current())
-            .expect("failed to start monitor");
-
-        // Await the per-task result cell being set
-        let result = timeout(Duration::from_secs(30), executor.join_task(&fut_name))
-            .await
-            .expect("join did not complete in time");
-        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
-
-        // Error state is set to panic
-        assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskPanic(_))
-        ));
-
-        // Panic payload captured via executor.panics()
-        let mut panics: Vec<_> = executor.panics().collect();
-        assert_eq!(panics.len(), 1);
-        let (name, payload) = panics.remove(0);
-        assert_eq!(name, fut_name);
-        assert_eq!(panic_string(&payload), "top-level join panic payload");
-
-        // Monitor task finishes once all tasks are handled
-        monitor.await.expect("monitor join failed");
     }
 }
