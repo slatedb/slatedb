@@ -512,7 +512,7 @@ impl CompactorEventHandler {
     ) -> Result<(), SlateDBError> {
         self.log_compaction_state();
         let db_state = self.state.db_state();
-        let compaction = compactor_job.compactor_job_request();
+        let request = compactor_job.compactor_job_request();
         let (ssts, sorted_runs) = match &compactor_job.job_input() {
             CompactorJobInput::SortedRunJobInputs { ssts, sorted_runs } => {
                 (ssts.to_vec(), sorted_runs.to_vec())
@@ -523,12 +523,12 @@ impl CompactorEventHandler {
             || db_state
                 .compacted
                 .last()
-                .is_some_and(|sr| compaction.destination() == sr.id);
+                .is_some_and(|sr| request.destination() == sr.id);
 
         let job = CompactorJobAttempt {
             id,
             compactor_job_id: compactor_job.id(),
-            destination: compaction.destination(),
+            destination: request.destination(),
             ssts,
             sorted_runs,
             attempt_ts: db_state.last_l0_clock_tick,

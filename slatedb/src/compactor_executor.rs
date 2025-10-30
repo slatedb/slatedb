@@ -206,13 +206,13 @@ impl TokioCompactionExecutorInner {
         Ok(retention_iter)
     }
 
-    #[instrument(level = "debug", skip_all, fields(id = %compaction.id))]
+    #[instrument(level = "debug", skip_all, fields(id = %compactor_job_attempt.id))]
     async fn execute_compaction(
         &self,
-        compaction: CompactorJobAttempt,
+        compactor_job_attempt: CompactorJobAttempt,
     ) -> Result<SortedRun, SlateDBError> {
-        debug!("executing compaction [compaction={:?}]", compaction);
-        let mut all_iter = self.load_iterators(&compaction).await?;
+        debug!("executing compaction [compaction={:?}]", compactor_job_attempt);
+        let mut all_iter = self.load_iterators(&compactor_job_attempt).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
@@ -231,7 +231,7 @@ impl TokioCompactionExecutorInner {
                 #[allow(clippy::disallowed_methods)]
                 self.worker_tx
                     .send(CompactorMessage::CompactionJobAttemptProgress {
-                        id: compaction.id,
+                        id: compactor_job_attempt.id,
                         bytes_processed: all_iter.total_bytes_processed(),
                     })
                     .expect("failed to send compaction progress");
@@ -265,21 +265,21 @@ impl TokioCompactionExecutorInner {
         }
 
         Ok(SortedRun {
-            id: compaction.destination,
+            id: compactor_job_attempt.destination,
             ssts: output_ssts,
         })
     }
 
-    fn start_compaction(self: &Arc<Self>, compaction: CompactorJobAttempt) {
+    fn start_compaction(self: &Arc<Self>, compactor_job_attempt: CompactorJobAttempt) {
         let mut tasks = self.tasks.lock();
         if self.is_stopped.load(atomic::Ordering::SeqCst) {
             return;
         }
-        let dst = compaction.destination;
+        let dst = compactor_job_attempt.destination;
         self.stats.running_compactions.inc();
         assert!(!tasks.contains_key(&dst));
 
-        let id = compaction.id;
+        let id = compactor_job_attempt.id;
 
         // TODO(sujeetsawala): Add compaction plan to object store with InProgress status
 
@@ -311,7 +311,7 @@ impl TokioCompactionExecutorInner {
                     .expect("failed to send compaction finished msg");
                 this_cleanup.stats.running_compactions.dec();
             },
-            async move { this.execute_compaction(compaction).await },
+            async move { this.execute_compaction(compactor_job_attempt).await },
         );
         tasks.insert(dst, TokioCompactionTask { task });
     }
