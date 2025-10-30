@@ -39,11 +39,7 @@ use crate::config::WriteOptions;
 use crate::dispatcher::MessageHandler;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
-use crate::{
-    batch::{WriteBatch, WriteOp},
-    db::DbInner,
-    error::SlateDBError,
-};
+use crate::{batch::WriteBatch, db::DbInner, error::SlateDBError};
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
@@ -133,7 +129,9 @@ impl DbInner {
             }
         }
 
-        let entries = self.extract_row_entries(&batch, commit_seq, now);
+        let entries = batch
+            .extract_entries(commit_seq, now, self.settings.default_ttl, None)
+            .await?;
 
         let durable_watcher = if self.wal_enabled {
             // WAL entries must be appended to the wal buffer atomically. Otherwise,
@@ -198,24 +196,6 @@ impl DbInner {
         let memtable = guard.memtable();
         entries.into_iter().for_each(|entry| memtable.put(entry));
         memtable.table().durable_watcher()
-    }
-
-    /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set.
-    fn extract_row_entries(&self, batch: &WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
-        batch
-            .ops
-            .values()
-            .map(|op| {
-                let expire_ts = match &op {
-                    WriteOp::Put(_, _, opts) => opts.expire_ts_from(self.settings.default_ttl, now),
-                    WriteOp::Delete(_) => None,
-                    WriteOp::Merge(_, _, opts) => {
-                        opts.expire_ts_from(self.settings.default_ttl, now)
-                    }
-                };
-                op.to_row_entry(seq, Some(now), expire_ts)
-            })
-            .collect::<Vec<_>>()
     }
 }
 

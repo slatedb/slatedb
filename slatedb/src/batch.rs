@@ -5,8 +5,10 @@
 //! atomically to the database.
 
 use crate::config::{MergeOptions, PutOptions};
+use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::mem_table::{KVTableInternalKeyRange, SequencedKey};
+use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -290,14 +292,44 @@ impl WriteBatch {
     pub(crate) fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }
+
+    /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set,
+    /// applying the merge operator to any mergeable entries.
+    pub(crate) async fn extract_entries(
+        &self,
+        seq: u64,
+        now: i64,
+        default_ttl: Option<u64>,
+        merger: Option<MergeOperatorType>,
+    ) -> Result<Vec<RowEntry>, SlateDBError> {
+        let mut it: Box<dyn KeyValueIterator> = Box::new(WriteBatchIterator::new_with_seq_and_ttl(
+            self,
+            ..,
+            IterationOrder::Ascending,
+            seq,
+            now,
+            default_ttl,
+        ));
+        if let Some(ref merge_operator) = merger {
+            it = Box::new(MergeOperatorIterator::new(
+                merge_operator.clone(),
+                it,
+                false,
+                now,
+            ));
+        }
+
+        let mut entries = Vec::new();
+        while let Some(entry) = it.next_entry().await? {
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
 }
 
-/// Iterator over WriteBatch entries.
-///
-/// Holds an owned WriteBatch instead of a reference,
-/// allowing it to be used without lifetime constraints.
+/// Iterator over `WriteBatch` entries.
 pub(crate) struct WriteBatchIterator {
-    iter: Peekable<Box<dyn Iterator<Item = (SequencedKey, WriteOp)> + Send + Sync>>,
+    iter: Peekable<Box<dyn Iterator<Item = (SequencedKey, RowEntry)> + Send + Sync>>,
     ordering: IterationOrder,
 }
 
@@ -308,18 +340,53 @@ impl WriteBatchIterator {
         ordering: IterationOrder,
     ) -> Self {
         let range = KVTableInternalKeyRange::from(range);
-
-        // Clone the entries from the BTreeMap into a Vec
-        let entries: Vec<(SequencedKey, WriteOp)> = batch
+        let mut entries: Vec<(SequencedKey, RowEntry)> = batch
             .ops
             .range(range)
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), v.to_row_entry(u64::MAX, None, None)))
             .collect();
 
-        let iter: Box<dyn Iterator<Item = (SequencedKey, WriteOp)> + Send + Sync> = match ordering {
-            IterationOrder::Ascending => Box::new(entries.into_iter()),
-            IterationOrder::Descending => Box::new(entries.into_iter().rev()),
-        };
+        if matches!(ordering, IterationOrder::Descending) {
+            entries.reverse();
+        }
+
+        let iter: Box<dyn Iterator<Item = (SequencedKey, RowEntry)> + Send + Sync> =
+            Box::new(entries.into_iter());
+
+        Self {
+            iter: iter.peekable(),
+            ordering,
+        }
+    }
+
+    pub(crate) fn new_with_seq_and_ttl(
+        batch: &WriteBatch,
+        range: impl RangeBounds<Bytes>,
+        ordering: IterationOrder,
+        seq: u64,
+        now: i64,
+        default_ttl: Option<u64>,
+    ) -> Self {
+        let range = KVTableInternalKeyRange::from(range);
+        let mut entries: Vec<(SequencedKey, RowEntry)> = batch
+            .ops
+            .range(range)
+            .map(|(k, v)| {
+                let expire_ts = match v {
+                    WriteOp::Put(_, _, opts) => opts.expire_ts_from(default_ttl, now),
+                    WriteOp::Merge(_, _, opts) => opts.expire_ts_from(default_ttl, now),
+                    WriteOp::Delete(_) => None,
+                };
+                (k.clone(), v.to_row_entry(seq, Some(now), expire_ts))
+            })
+            .collect();
+
+        if matches!(ordering, IterationOrder::Descending) {
+            entries.reverse();
+        }
+
+        let iter: Box<dyn Iterator<Item = (SequencedKey, RowEntry)> + Send + Sync> =
+            Box::new(entries.into_iter());
 
         Self {
             iter: iter.peekable(),
@@ -335,10 +402,7 @@ impl KeyValueIterator for WriteBatchIterator {
     }
 
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
-        Ok(self
-            .iter
-            .next()
-            .map(|(_, op)| op.to_row_entry(u64::MAX, None, None)))
+        Ok(self.iter.next().map(|(_, entry)| entry))
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
@@ -1102,5 +1166,132 @@ mod tests {
         ];
 
         assert_iterator(&mut iter, expected).await;
+    }
+
+    // Tests for extract_entries
+    struct StringConcatMergeOperator;
+
+    impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
+        fn merge(
+            &self,
+            existing_value: Option<Bytes>,
+            operand: Bytes,
+        ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {
+            match existing_value {
+                Some(base) => {
+                    let mut merged = base.to_vec();
+                    merged.extend_from_slice(&operand);
+                    Ok(Bytes::from(merged))
+                }
+                None => Ok(operand),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn should_extract_entries_no_merges() {
+        // Given: a WriteBatch with no merge operations
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value1");
+        batch.put(b"key2", b"value2");
+        batch.delete(b"key3");
+
+        // When: extracting entries
+        let result = batch.extract_entries(100, 1000, None, None).await.unwrap();
+
+        // Then: should return entries for all operations without merging
+        let mut entries = result.into_iter().collect::<Vec<_>>();
+        entries.sort_by_key(|e| e.key.clone());
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].key, Bytes::from_static(b"key1"));
+        assert_eq!(
+            entries[0].value,
+            ValueDeletable::Value(Bytes::from_static(b"value1"))
+        );
+        assert_eq!(entries[1].key, Bytes::from_static(b"key2"));
+        assert_eq!(
+            entries[1].value,
+            ValueDeletable::Value(Bytes::from_static(b"value2"))
+        );
+        assert_eq!(entries[2].key, Bytes::from_static(b"key3"));
+        assert_eq!(entries[2].value, ValueDeletable::Tombstone);
+    }
+
+    #[tokio::test]
+    async fn should_extract_entries_multiple_merges() {
+        // Given: a WriteBatch with multiple merge operations for the same key
+        let mut batch = WriteBatch::new();
+        batch.merge(b"key1", b"merge1");
+        batch.merge(b"key1", b"merge2");
+        batch.merge(b"key1", b"merge3");
+
+        // When: extracting entries with a merge operator
+        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
+            as crate::merge_operator::MergeOperatorType);
+        let result = batch
+            .extract_entries(100, 1000, None, merge_operator)
+            .await
+            .unwrap();
+
+        // Then: should return merged entry
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key, Bytes::from_static(b"key1"));
+        assert_eq!(
+            result[0].value,
+            ValueDeletable::Merge(Bytes::from_static(b"merge1merge2merge3"))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_extract_entries_delete_then_merge() {
+        // Given: a WriteBatch with a delete followed by merges
+        let mut batch = WriteBatch::new();
+        batch.delete(b"key1");
+        batch.merge(b"key1", b"merge1");
+        batch.merge(b"key1", b"merge2");
+
+        // When: extracting entries with a merge operator
+        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
+            as crate::merge_operator::MergeOperatorType);
+        let result = batch
+            .extract_entries(100, 1000, None, merge_operator)
+            .await
+            .unwrap();
+
+        // Then: should return merged entry (delete gets merged with merges)
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key, Bytes::from_static(b"key1"));
+        // The delete (tombstone) gets converted to empty bytes, then merged
+        assert_eq!(
+            result[0].value,
+            ValueDeletable::Value(Bytes::from_static(b"merge1merge2"))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_extract_entries_value_then_merge() {
+        // Given: a WriteBatch with a put followed by merges
+        let mut batch = WriteBatch::new();
+        batch.put(b"key1", b"value");
+        batch.merge(b"key1", b"merge1");
+        batch.merge(b"key1", b"merge2");
+
+        // When: extracting entries with a merge operator
+        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
+            as crate::merge_operator::MergeOperatorType);
+        let result = batch
+            .extract_entries(100, 1000, None, merge_operator)
+            .await
+            .unwrap();
+
+        // Then: should return merged entry
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key, Bytes::from_static(b"key1"));
+        // Value gets merged with merges
+        assert_eq!(
+            result[0].value,
+            ValueDeletable::Value(Bytes::from_static(b"valuemerge1merge2"))
+        );
     }
 }
