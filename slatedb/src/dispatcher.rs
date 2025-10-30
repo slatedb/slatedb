@@ -124,7 +124,7 @@ use tokio_util::{sync::CancellationToken, task::JoinMap};
 use crate::{
     clock::{SystemClock, SystemClockTicker},
     error::SlateDBError,
-    utils::{flatten_task_result, panic_string, WatchableOnceCell},
+    utils::{panic_string, split_join_result, split_unwind_result, WatchableOnceCell},
 };
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
@@ -407,7 +407,7 @@ pub(crate) struct MessageHandlerExecutor {
     /// A map of (task name, results) or dispatchers that have returned.
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
     /// A list of (task name, panic payloads) that have occurred.
-    panics: Mutex<Vec<(String, Box<dyn Any + Send>)>>,
+    panics: Arc<Mutex<Vec<(String, Box<dyn Any + Send>)>>>,
     /// A watchable cell that stores the error state of the database.
     error_state: WatchableOnceCell<SlateDBError>,
     /// A system clock for time keeping.
@@ -438,7 +438,7 @@ impl MessageHandlerExecutor {
             clock,
             tokens: SkipMap::new(),
             results: Arc::new(SkipMap::new()),
-            panics: Mutex::new(Vec::new()),
+            panics: Arc::new(Mutex::new(Vec::new())),
             fp_registry: Arc::new(FailPointRegistry::new()),
         }
     }
@@ -490,34 +490,46 @@ impl MessageHandlerExecutor {
             .with_fp_registry(self.fp_registry.clone());
         let this_error_state = self.error_state.clone();
         let this_name = name.clone();
+        let this_panics = self.panics.clone();
         // future that runs the dispatcher and handles cleanup
         let task_future = async move {
             // catch dispatcher panics using catch_unwind
             let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
-            let run_result = flatten_task_result(this_name.clone(), &run_unwind_result);
-            // set the error state (or mark a clean shutdown) if it's unset
+            let (run_result, run_maybe_panic) =
+                split_unwind_result(this_name.clone(), run_unwind_result);
+            // if the dispatcher panicked, add it to the panics list
+            if let Some(payload) = run_maybe_panic {
+                let mut guard = this_panics.lock();
+                guard.push((this_name.clone(), payload));
+            }
+            // set the error state or mark a clean shutdown
             this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
-            // re-read the error since it might have already been set by another task
+            // error_state is write-once, so re-read error_state to get the first error
             let final_error_state = Err(this_error_state
                 .reader()
                 .read()
                 .expect("error state was unexpectedly empty"));
+            // catch cleanup panics using catch_unwind
             let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(final_error_state))
                 .catch_unwind()
                 .await;
-            let cleanup_result = flatten_task_result(this_name.clone(), &cleanup_unwind_result);
-            if let Err(payload) = cleanup_unwind_result {
-                warn!(
-                    "background task failed to clean up on shutdown [name={}, panic={:?}]",
-                    this_name.clone(),
-                    panic_string(&payload),
-                );
-            } else if let Err(err) = cleanup_result {
-                warn!(
-                    "background task failed to clean up on shutdown [name={}, error={:?}]",
-                    this_name.clone(),
-                    err,
-                );
+            // if the cleanup failed, log it but don't set error_state/panics
+            match cleanup_unwind_result {
+                Err(payload) => {
+                    warn!(
+                        "background task failed to clean up on shutdown [name={}, panic={:?}]",
+                        this_name.clone(),
+                        panic_string(&payload),
+                    );
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        "background task failed to clean up on shutdown [name={}, error={:?}]",
+                        this_name.clone(),
+                        e,
+                    );
+                }
+                _ => {}
             }
             run_result
         };
@@ -578,14 +590,17 @@ impl MessageHandlerExecutor {
             .iter()
             .map(|e| e.value().clone())
             .collect::<Vec<_>>();
+        let this_panics = self.panics.clone();
         // future that runs until all tasks are completed
         let monitor_future = async move {
             while !tasks.is_empty() {
                 if let Some((name, join_result)) = tasks.join_next().await {
-                    let task_result = flatten_task_result(
-                        name.clone(),
-                        &join_result.map_err(|e| Box::new(e) as Box<dyn Any + Send>),
-                    );
+                    let (task_result, task_maybe_panic) =
+                        split_join_result(name.clone(), join_result);
+                    if let Some(payload) = task_maybe_panic {
+                        let mut guard = this_panics.lock();
+                        guard.push((name.clone(), payload));
+                    }
                     let entry = this_results
                         .get(&name)
                         .expect("result cell isn't set when expected");
@@ -642,6 +657,17 @@ impl MessageHandlerExecutor {
         self.join_task(name).await
     }
 
+    /// Retrieves the panics of the background tasks.
+    ///
+    /// ## Returns
+    ///
+    /// An iterator of _(task name, payload)_ pairs. The task name is a string that
+    /// uniquely identifies the background task. The payload is a `Box<dyn Any + Send>`
+    /// from the panic.
+    ///
+    /// ## Note
+    /// Each panic is returned only once. Subsequent calls will return new panics, but
+    /// previously returned panics will not be returned again.
     pub(crate) fn panics(&self) -> impl Iterator<Item = (String, Box<dyn Any + Send>)> + '_ {
         let mut guard = self.panics.lock();
         let panics = take(&mut *guard);

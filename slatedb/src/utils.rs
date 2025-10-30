@@ -531,9 +531,10 @@ pub fn panic_string(panic: &(dyn Any + Send)) -> String {
     }
 }
 
-/// Flattens task results from a Tokio join handle
-/// (`Result<Result<(), SlateDBError>, tokio::task::JoinError>`) or a `catch_unwind`
-/// (`Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>`).
+/// Splits a `catch_unwind` result
+/// (`Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>`) into a
+/// `Result<(), SlateDBError>` and an optional `Box<dyn std::any::Any + Send>`
+/// containing the panic payload.
 ///
 /// # Arguments
 ///
@@ -542,25 +543,54 @@ pub fn panic_string(panic: &(dyn Any + Send)) -> String {
 ///
 /// # Returns
 ///
-/// - Ok(()) if the task completed successfully
-/// - Err(SlateDBError:: .. ) if the task completed with an error or panicked with a SlateDBError
-/// - Err(SlateDBError::BackgroundTaskCancelled) if the task was cancelled
-/// - Err(SlateDBError::BackgroundTaskPanic) if the task panicked with a non-SlateDBError
-pub(crate) fn flatten_task_result(
+/// - (Ok(()), None) if the task completed successfully
+/// - (Err(SlateDBError:: .. ), None) if the task completed with an error
+/// - (Err(SlateDBError::BackgroundTaskPanic), Some(payload)) if the task panicked
+pub(crate) fn split_unwind_result(
     name: String,
-    task_result: &Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>,
-) -> Result<(), SlateDBError> {
-    match task_result {
-        Ok(task_result) => task_result.clone(),
-        Err(payload) => {
-            if let Some(err) = payload.downcast_ref::<SlateDBError>() {
-                return Err(err.clone());
-            } else if let Some(join_error) = payload.downcast_ref::<tokio::task::JoinError>() {
-                if join_error.is_cancelled() {
-                    return Err(SlateDBError::BackgroundTaskCancelled(name));
-                }
+    unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>,
+) -> (
+    Result<(), SlateDBError>,
+    Option<Box<dyn std::any::Any + Send>>,
+) {
+    match unwind_result {
+        Ok(result) => (result.clone(), None),
+        Err(payload) => (Err(SlateDBError::BackgroundTaskPanic(name)), Some(payload)),
+    }
+}
+
+/// Splits a `join` result
+/// (`Result<Result<(), SlateDBError>, tokio::task::JoinError>`) into a
+/// `Result<(), SlateDBError>` and an optional `Box<dyn std::any::Any + Send>`
+/// containing the panic payload.
+///
+/// # Arguments
+///
+/// * `name`: The name of the task
+/// * `join_result`: The result of the join handle
+///
+/// # Returns
+///
+/// - (Ok(()), None) if the task completed successfully
+/// - (Err(SlateDBError:: .. ), None) if the task completed with an error
+/// - (Err(SlateDBError::BackgroundTaskCancelled), None) if the task was cancelled
+/// - (Err(SlateDBError::BackgroundTaskPanic), Some(payload)) if the task panicked
+pub(crate) fn split_join_result(
+    name: String,
+    join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError>,
+) -> (
+    Result<(), SlateDBError>,
+    Option<Box<dyn std::any::Any + Send>>,
+) {
+    match join_result {
+        Ok(task_result) => (task_result.clone(), None),
+        Err(join_error) => {
+            if join_error.is_cancelled() {
+                (Err(SlateDBError::BackgroundTaskCancelled(name)), None)
+            } else {
+                let payload = join_error.into_panic();
+                (Err(SlateDBError::BackgroundTaskPanic(name)), Some(payload))
             }
-            Err(SlateDBError::BackgroundTaskPanic(name))
         }
     }
 }
@@ -1187,88 +1217,135 @@ mod tests {
     }
 
     #[test]
-    fn test_flatten_task_result_ok_ok() {
-        // Given: a task that completed successfully
-        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+    fn test_split_unwind_result_ok_ok() {
+        // Given: a successful unwind result
+        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
             Ok(Ok(()));
 
-        // When: we flatten the result
-        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
+        // When: we split the result
+        let (result, payload) = super::split_unwind_result("test".to_string(), unwind_result);
 
-        // Then: it should return Ok(())
+        // Then: result should be Ok and payload should be None
         assert!(result.is_ok());
+        assert!(payload.is_none());
     }
 
     #[test]
-    fn test_flatten_task_result_ok_error() {
-        // Given: a task that completed with a SlateDBError
-        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+    fn test_split_unwind_result_ok_error() {
+        // Given: an unwind result with a task error
+        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
             Ok(Err(SlateDBError::Fenced));
 
-        // When: we flatten the result
-        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
+        // When: we split the result
+        let (result, payload) = super::split_unwind_result("test".to_string(), unwind_result);
 
-        // Then: it should return the error
+        // Then: result should be the error and payload should be None
         assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert!(payload.is_none());
     }
 
     #[test]
-    fn test_flatten_task_result_panic_slatedb_error() {
-        // Given: a task that panicked with a SlateDBError
-        let error = SlateDBError::InvalidDBState;
-        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
-            Err(Box::new(error.clone()));
+    fn test_split_unwind_result_panic() {
+        // Given: an unwind result that panicked with a non-SlateDBError (e.g., a string)
+        let panic_msg = "something went wrong";
+        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+            Err(Box::new(panic_msg));
 
-        // When: we flatten the result
-        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
+        // When: we split the result
+        let (result, payload) = super::split_unwind_result("test_task".to_string(), unwind_result);
 
-        // Then: it should return the SlateDBError
-        assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
-    }
-
-    #[tokio::test]
-    async fn test_flatten_task_result_cancelled_task() {
-        // Given: a cancelled task
-        let handle = tokio::spawn(async {
-            // Task that will be cancelled
-            tokio::time::sleep(Duration::from_secs(1000)).await;
-            Ok::<(), SlateDBError>(())
-        });
-        handle.abort();
-        let join_result = handle.await;
-
-        // The join result should be a JoinError
-        assert!(join_result.is_err());
-        let join_error = join_result.unwrap_err();
-        assert!(join_error.is_cancelled());
-
-        // Create the task_result with the JoinError
-        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
-            Err(Box::new(join_error));
-
-        // When: we flatten the result
-        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
-
-        // Then: it should return BackgroundTaskCancelled
-        assert!(matches!(
-            result,
-            Err(SlateDBError::BackgroundTaskCancelled(ref name)) if name == "test_task"
-        ));
-    }
-
-    #[test]
-    fn test_flatten_task_result_panic_with_string() {
-        // Given: a task that panicked with a string (common panic type)
-        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
-            Err(Box::new("panic message".to_string()));
-
-        // When: we flatten the result
-        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
-
-        // Then: it should return BackgroundTaskPanic
+        // Then: result should be BackgroundTaskPanic and payload should contain the original panic
         assert!(matches!(
             result,
             Err(SlateDBError::BackgroundTaskPanic(ref name)) if name == "test_task"
         ));
+        assert!(payload.is_some());
+        // Verify the payload contains the original panic message
+        if let Some(p) = payload {
+            if let Some(msg) = p.downcast_ref::<&str>() {
+                assert_eq!(msg, &panic_msg);
+            } else {
+                panic!("expected &str, got {:?}", p);
+            }
+        }
+    }
+
+    #[test]
+    fn test_split_join_result_ok_ok() {
+        // Given: a successful join result
+        let join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError> = Ok(Ok(()));
+
+        // When: we split the result
+        let (result, payload) = super::split_join_result("test".to_string(), join_result);
+
+        // Then: result should be Ok and payload should be None
+        assert!(result.is_ok());
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_split_join_result_ok_error() {
+        // Given: a join result with a task error
+        let join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError> =
+            Ok(Err(SlateDBError::Fenced));
+
+        // When: we split the result
+        let (result, payload) = super::split_join_result("test".to_string(), join_result);
+
+        // Then: result should be the error and payload should be None
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert!(payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_split_join_result_cancelled() {
+        // Given: a join result from a cancelled task
+        let handle = tokio::spawn(async {
+            // Wait forever
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+
+        // Cancel the task
+        handle.abort();
+        let join_result = handle.await;
+
+        // When: we split the result
+        let (result, payload) = super::split_join_result("test_task".to_string(), join_result);
+
+        // Then: result should be BackgroundTaskCancelled and payload should be None
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskCancelled(ref name)) if name == "test_task"
+        ));
+        assert!(payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_split_join_result_panic() {
+        // Given: a join result from a task that panicked with a non-SlateDBError
+        let handle = tokio::spawn(async {
+            panic!("something went wrong");
+        });
+
+        let join_result = handle.await;
+
+        // When: we split the result
+        let (result, payload) = super::split_join_result("test_task".to_string(), join_result);
+
+        // Then: result should be BackgroundTaskPanic and payload should contain the original panic
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskPanic(ref name)) if name == "test_task"
+        ));
+        assert!(payload.is_some());
+        if let Some(p) = payload {
+            if let Some(msg) = p.downcast_ref::<&str>() {
+                assert_eq!(msg, &"something went wrong");
+            } else {
+                panic!("expected &str, got {:?}", p);
+            }
+        }
     }
 }
