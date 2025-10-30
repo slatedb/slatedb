@@ -48,6 +48,7 @@ pub use error::{CloseReason, Error, ErrorKind};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
+pub use seq_tracker::FindOption;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 

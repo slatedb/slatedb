@@ -1,4 +1,5 @@
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
+use slatedb::FindOption;
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
@@ -107,6 +108,20 @@ pub(crate) enum CliCommands {
         min_age: Duration,
     },
 
+    /// Converts a sequence number to its corresponding timestamp using the latest manifest's sequence tracker.
+    SeqToTs {
+        seq: u64,
+        #[arg(long, value_parser = parse_find_option, default_value = "down")]
+        round: FindOption,
+    },
+
+    /// Converts a timestamp (in seconds) to its corresponding sequence number using the latest manifest's sequence tracker.
+    TsToSeq {
+        ts_secs: i64,
+        #[arg(long, value_parser = parse_find_option, default_value = "down")]
+        round: FindOption,
+    },
+
     /// Schedules a period garbage collection job
     #[command(group(
     ArgGroup::new("gc_config")
@@ -187,6 +202,14 @@ pub(crate) struct GcSchedule {
 
 pub(crate) fn parse_args() -> CliArgs {
     CliArgs::parse()
+}
+
+fn parse_find_option(s: &str) -> Result<FindOption, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "up" | "roundup" => Ok(FindOption::RoundUp),
+        "down" | "rounddown" => Ok(FindOption::RoundDown),
+        _ => Err("Invalid find option".to_string()),
+    }
 }
 
 #[cfg(test)]
