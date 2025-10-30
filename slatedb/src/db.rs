@@ -1341,6 +1341,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
     use crate::types::RowEntry;
+    use crate::utils::panic_string;
     use crate::{proptest_util, test_utils, KeyValue};
     use futures::{future, future::join_all, StreamExt};
     use object_store::memory::InMemory;
@@ -4006,6 +4007,15 @@ mod tests {
             result.to_string(),
             "Internal error: background task panicked. name=`wal_writer`"
         );
+
+        let panics = db.panics().collect::<Vec<_>>();
+        assert_eq!(panics.len(), 1);
+        assert_eq!(panics[0].0, WAL_BUFFER_TASK_NAME);
+        assert_eq!(
+            panic_string(&panics[0].1),
+            "failpoint write-wal-sst-io-error panic"
+        );
+        assert_eq!(db.panics().collect::<Vec<_>>().len(), 0); // no more panics
 
         // Close, which flushes the latest manifest to the object store
         // TODO: it might make sense to return an error if there're unflushed wals in memory

@@ -404,7 +404,7 @@ pub(crate) struct MessageHandlerExecutor {
     futures: Mutex<Option<Vec<MessageHandlerFuture>>>,
     /// A map of cancellation tokens for each dispatcher.
     tokens: SkipMap<String, CancellationToken>,
-    /// A map of (task name, results) or dispatchers that have returned.
+    /// A map of (task name, results) for dispatchers that have returned.
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
     /// A list of (task name, panic payloads) that have occurred.
     panics: Arc<Mutex<Vec<(String, Box<dyn Any + Send>)>>>,
@@ -514,25 +514,19 @@ impl MessageHandlerExecutor {
                 .catch_unwind()
                 .await;
             // if the cleanup failed, log it but don't set error_state/panics
-            match cleanup_unwind_result {
-                Err(payload) => {
-                    warn!(
-                        "background task failed to clean up on shutdown [name={}, panic={:?}]",
-                        this_name.clone(),
-                        panic_string(&payload),
-                    );
-                }
-                Ok(Err(e)) => {
-                    warn!(
-                        "background task failed to clean up on shutdown [name={}, error={:?}]",
-                        this_name.clone(),
-                        e,
-                    );
-                }
-                _ => {}
+            let (cleanup_result, cleanup_maybe_panic) =
+                split_unwind_result(this_name.clone(), cleanup_unwind_result);
+            if let Err(err) = cleanup_result {
+                warn!(
+                    "background task failed to clean up on shutdown [name={}, error={:?}, panic={:?}]",
+                    this_name.clone(),
+                    err,
+                    cleanup_maybe_panic.map(|p| panic_string(&p))
+                );
             }
             run_result
         };
+        // add the future to the executor's list of task definitions
         let mut guard = self.futures.lock();
         if let Some(task_definitions) = guard.as_mut() {
             if task_definitions.iter().any(|t| t.name == name) {
@@ -657,7 +651,7 @@ impl MessageHandlerExecutor {
         self.join_task(name).await
     }
 
-    /// Retrieves the panics of the background tasks.
+    /// Retrieves panic payloads for any background tasks that have panicked.
     ///
     /// ## Returns
     ///
