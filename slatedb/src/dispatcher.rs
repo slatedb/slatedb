@@ -578,6 +578,7 @@ impl MessageHandlerExecutor {
                 &task_definition.handle,
             );
         }
+        let this_error_state = self.error_state.clone();
         let this_results = self.results.clone();
         let this_tokens = self
             .tokens
@@ -595,6 +596,8 @@ impl MessageHandlerExecutor {
                         let mut guard = this_panics.lock();
                         guard.push((name.clone(), payload));
                     }
+                    this_error_state
+                        .write(task_result.clone().err().unwrap_or(SlateDBError::Closed));
                     let entry = this_results
                         .get(&name)
                         .expect("result cell isn't set when expected");
