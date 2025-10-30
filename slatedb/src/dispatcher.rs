@@ -407,6 +407,7 @@ pub(crate) struct MessageHandlerExecutor {
     /// A map of (task name, results) for dispatchers that have returned.
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
     /// A list of (task name, panic payloads) that have occurred.
+    #[allow(clippy::type_complexity)]
     panics: Arc<Mutex<Vec<(String, Box<dyn Any + Send>)>>>,
     /// A watchable cell that stores the error state of the database.
     error_state: WatchableOnceCell<SlateDBError>,

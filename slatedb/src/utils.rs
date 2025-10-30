@@ -523,10 +523,10 @@ where
 #[allow(dead_code)]
 pub fn panic_string(panic: &Box<dyn Any + Send>) -> String {
     if let Some(result) = panic.downcast_ref::<Result<(), SlateDBError>>() {
-        return match result {
+        match result {
             Ok(()) => "ok".to_string(),
             Err(e) => e.to_string(),
-        };
+        }
     } else if let Some(err) = panic.downcast_ref::<SlateDBError>() {
         err.to_string()
     } else if let Some(err) = panic.downcast_ref::<Box<dyn std::error::Error>>() {
@@ -538,7 +538,7 @@ pub fn panic_string(panic: &Box<dyn Any + Send>) -> String {
     } else {
         format!(
             "task panicked with unknown type [type_id=`{:?}`]",
-            panic.type_id()
+            (**panic).type_id()
         )
     }
 }

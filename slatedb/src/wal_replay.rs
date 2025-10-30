@@ -168,6 +168,7 @@ impl WalReplayIterator<'_> {
         true
     }
 
+    #[allow(clippy::panic)]
     async fn advance_current_iter(&mut self) -> Result<(), SlateDBError> {
         let next_iter = if let Some(join_handle) = self.next_iters.pop_front() {
             match join_handle.await {
