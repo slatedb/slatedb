@@ -399,6 +399,7 @@ impl From<SlateDBError> for Error {
             // Closed
             SlateDBError::Closed => Error::closed(msg, CloseReason::Clean),
             SlateDBError::Fenced => Error::closed(msg, CloseReason::Fenced),
+            SlateDBError::BackgroundTaskPanic(_) => Error::closed(msg, CloseReason::Panic),
 
             // Unavailable errors
             SlateDBError::IoError(err) => Error::unavailable(msg).with_source(Box::new(err)),
@@ -465,7 +466,6 @@ impl From<SlateDBError> for Error {
 
             // Internal errors
             SlateDBError::CompactionExecutorFailed => Error::internal(msg),
-            SlateDBError::BackgroundTaskPanic(_) => Error::internal(msg),
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),
             SlateDBError::ReadChannelError(err) => Error::internal(msg).with_source(Box::new(err)),
             SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),
