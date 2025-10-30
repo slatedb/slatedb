@@ -937,13 +937,15 @@ mod tests {
         // Begin transaction
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
 
-        // Test 1: Scan created before put should NOT see the new key
+        // Test 1: Scan created before put should NOT see the new key or updated value for an existing key
         {
             // Start a scan from k1 to k3 (inclusive)
             let mut iter = txn.scan(&b"k1"[..]..=&b"k3"[..]).await.unwrap();
 
             // Put k2 in the transaction (after scan has started)
             txn.put(b"k2", b"v2").unwrap();
+            // Update k3 within the transaction after the scan has started
+            txn.put(b"k3", b"v3_updated").unwrap();
 
             // Iterate through the results
             let mut results = Vec::new();
@@ -968,12 +970,13 @@ mod tests {
                 results2.push((kv.key.clone(), kv.value.clone()));
             }
 
-            // This new scan should see all three keys including k2
+            // This new scan should see all three keys and the updated value for k3
             assert_eq!(results2.len(), 3);
             assert_eq!(results2[0].0, Bytes::from_static(b"k1"));
             assert_eq!(results2[1].0, Bytes::from_static(b"k2"));
             assert_eq!(results2[1].1, Bytes::from_static(b"v2"));
             assert_eq!(results2[2].0, Bytes::from_static(b"k3"));
+            assert_eq!(results2[2].1, Bytes::from_static(b"v3_updated"));
         } // iter2 is dropped here
 
         // Commit the transaction
