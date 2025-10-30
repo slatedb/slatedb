@@ -3,7 +3,6 @@ use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
@@ -13,7 +12,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
@@ -95,9 +94,13 @@ where
     //       details.
     let wrapped = AssertUnwindSafe(future).catch_unwind().map(move |outcome| {
         let result = match outcome {
-            Ok(Ok(val)) => Ok(val),
-            Ok(Err(e)) => Err(e),
-            Err(panic) => Err(BackgroundTaskPanic(name, Arc::new(Mutex::new(panic)))),
+            Ok(result) => result,
+            Err(payload) => {
+                if let Some(err) = payload.downcast_ref::<SlateDBError>() {
+                    return Err(err.clone());
+                }
+                Err(SlateDBError::BackgroundTaskPanic(name))
+            }
         };
         cleanup_fn(&result);
         result
@@ -528,36 +531,9 @@ pub fn panic_string(panic: &(dyn Any + Send)) -> String {
     }
 }
 
-/// Unwraps a tokio task join result, converting any panics to SlateDBErrors.
-///
-/// # Arguments
-///
-/// * `name`: The name of the task
-/// * `join_result`: The result of the task join
-///
-/// # Returns
-///
-/// - Ok() if the task completed successfully
-/// - Err(SlateDBError:: .. ) if the task completed with an error or panicked with a SlateDBError
-/// - Err(SlateDBError::BackgroundTaskCancelled) if the task was cancelled
-/// - Err(SlateDBError::BackgroundTaskPanic) if the task panicked with a non-SlateDBError
-pub(crate) fn unwrap_join(
-    name: String,
-    join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError>,
-) -> Result<(), SlateDBError> {
-    match join_result {
-        Ok(task_result) => task_result,
-        Err(join_error) => {
-            if join_error.is_cancelled() {
-                Err(SlateDBError::BackgroundTaskCancelled(name))
-            } else {
-                unwrap_unwind(name, Err(join_error.into_panic()))
-            }
-        }
-    }
-}
-
-/// Unwraps a catch_unwind result, converting any panics to SlateDBErrors.
+/// Flattens task results from a Tokio join handle
+/// (`Result<Result<(), SlateDBError>, tokio::task::JoinError>`) or a `catch_unwind`
+/// (`Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>`).
 ///
 /// # Arguments
 ///
@@ -566,22 +542,26 @@ pub(crate) fn unwrap_join(
 ///
 /// # Returns
 ///
-/// - Ok() if the task completed successfully
+/// - Ok(()) if the task completed successfully
 /// - Err(SlateDBError:: .. ) if the task completed with an error or panicked with a SlateDBError
+/// - Err(SlateDBError::BackgroundTaskCancelled) if the task was cancelled
 /// - Err(SlateDBError::BackgroundTaskPanic) if the task panicked with a non-SlateDBError
-pub(crate) fn unwrap_unwind(
+pub(crate) fn flatten_task_result(
     name: String,
-    unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>,
+    task_result: &Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>,
 ) -> Result<(), SlateDBError> {
-    match unwind_result {
-        Ok(task_result) => task_result,
-        Err(payload) => match payload.downcast::<SlateDBError>() {
-            Ok(err) => Err(*err.clone()),
-            Err(payload) => Err(SlateDBError::BackgroundTaskPanic(
-                name,
-                Arc::new(Mutex::new(payload)),
-            )),
-        },
+    match task_result {
+        Ok(task_result) => task_result.clone(),
+        Err(payload) => {
+            if let Some(err) = payload.downcast_ref::<SlateDBError>() {
+                return Err(err.clone());
+            } else if let Some(join_error) = payload.downcast_ref::<tokio::task::JoinError>() {
+                if join_error.is_cancelled() {
+                    return Err(SlateDBError::BackgroundTaskCancelled(name));
+                }
+            }
+            Err(SlateDBError::BackgroundTaskPanic(name))
+        }
     }
 }
 
@@ -594,8 +574,7 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, panic_string, spawn_bg_task, unwrap_join, unwrap_unwind, BitReader,
-        BitWriter, WatchableOnceCell,
+        compute_max_parallel, panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -704,13 +683,10 @@ mod tests {
         );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
-        assert!(matches!(
-            result,
-            Err(SlateDBError::BackgroundTaskPanic(_, _))
-        ));
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
             captor.captured(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_, _)))
+            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
     }
 
@@ -1211,91 +1187,88 @@ mod tests {
     }
 
     #[test]
-    fn test_unwrap_join_ok_ok() {
-        let join_result = Ok(Ok(()));
-        let result = unwrap_join("test".to_string(), join_result);
+    fn test_flatten_task_result_ok_ok() {
+        // Given: a task that completed successfully
+        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+            Ok(Ok(()));
+
+        // When: we flatten the result
+        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
+
+        // Then: it should return Ok(())
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_unwrap_join_ok_err() {
-        let join_result = Ok(Err(SlateDBError::ChecksumMismatch));
-        let result = unwrap_join("test".to_string(), join_result);
-        assert!(matches!(result, Err(SlateDBError::ChecksumMismatch)));
+    fn test_flatten_task_result_ok_error() {
+        // Given: a task that completed with a SlateDBError
+        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+            Ok(Err(SlateDBError::Fenced));
+
+        // When: we flatten the result
+        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
+
+        // Then: it should return the error
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+    }
+
+    #[test]
+    fn test_flatten_task_result_panic_slatedb_error() {
+        // Given: a task that panicked with a SlateDBError
+        let error = SlateDBError::InvalidDBState;
+        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+            Err(Box::new(error.clone()));
+
+        // When: we flatten the result
+        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
+
+        // Then: it should return the SlateDBError
+        assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
     }
 
     #[tokio::test]
-    async fn test_unwrap_join_err_cancelled() {
-        let jh = tokio::spawn(async move {
-            std::future::pending::<()>().await;
+    async fn test_flatten_task_result_cancelled_task() {
+        // Given: a cancelled task
+        let handle = tokio::spawn(async {
+            // Task that will be cancelled
+            tokio::time::sleep(Duration::from_secs(1000)).await;
             Ok::<(), SlateDBError>(())
         });
-        jh.abort();
-        let join_result = jh.await;
-        let result = unwrap_join("test".to_string(), join_result);
-        match result {
-            Ok(_) => panic!("expected Err"),
-            Err(SlateDBError::BackgroundTaskCancelled(task_name)) => {
-                assert_eq!(task_name, "test");
-            }
-            Err(e) => panic!("expected BackgroundTaskCancelled, got: {}", e),
-        }
-    }
+        handle.abort();
+        let join_result = handle.await;
 
-    #[tokio::test]
-    async fn test_unwrap_join_err_other() {
-        let jh = tokio::spawn(async move { panic!("boom") });
-        let join_result = jh.await;
-        let result = unwrap_join("test".to_string(), join_result);
-        match result {
-            Ok(_) => panic!("expected Err"),
-            Err(SlateDBError::BackgroundTaskPanic(task_name, payload)) => {
-                assert_eq!(task_name, "test");
-                let guard = payload.lock().expect("mutex poisoned");
-                match guard.downcast_ref::<&str>() {
-                    Some(s) => assert_eq!(*s, "boom"),
-                    None => panic!("expected BackgroundTaskPanic(test, boom), got None"),
-                }
-            }
-            Err(e) => panic!("expected BackgroundTaskPanic(test, boom), got: {:?}", e),
-        }
+        // The join result should be a JoinError
+        assert!(join_result.is_err());
+        let join_error = join_result.unwrap_err();
+        assert!(join_error.is_cancelled());
+
+        // Create the task_result with the JoinError
+        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+            Err(Box::new(join_error));
+
+        // When: we flatten the result
+        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
+
+        // Then: it should return BackgroundTaskCancelled
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskCancelled(ref name)) if name == "test_task"
+        ));
     }
 
     #[test]
-    fn test_unwrap_unwind_ok_ok() {
-        let result = unwrap_unwind("test".to_string(), Ok(Ok(())));
-        assert!(result.is_ok());
-    }
+    fn test_flatten_task_result_panic_with_string() {
+        // Given: a task that panicked with a string (common panic type)
+        let task_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+            Err(Box::new("panic message".to_string()));
 
-    #[test]
-    fn test_unwrap_unwind_ok_err() {
-        let result = unwrap_unwind("test".to_string(), Ok(Err(SlateDBError::ChecksumMismatch)));
-        assert!(matches!(result, Err(SlateDBError::ChecksumMismatch)));
-    }
+        // When: we flatten the result
+        let result = crate::utils::flatten_task_result("test_task".to_string(), &task_result);
 
-    #[test]
-    fn test_unwrap_unwind_err_slate_db_error() {
-        let result = unwrap_unwind(
-            "test".to_string(),
-            Err(Box::new(SlateDBError::ChecksumMismatch)),
-        );
-        assert!(matches!(result, Err(SlateDBError::ChecksumMismatch)));
-    }
-
-    #[test]
-    fn test_unwrap_unwind_err_other() {
-        let result = unwrap_unwind("test".to_string(), Err(Box::new("boom")));
-        match result {
-            Ok(_) => panic!("expected Err"),
-            Err(SlateDBError::BackgroundTaskPanic(task_name, payload)) => {
-                assert_eq!(task_name, "test");
-                let guard = payload.lock().expect("mutex poisoned");
-                match guard.downcast_ref::<&str>() {
-                    Some(s) => assert_eq!(*s, "boom"),
-                    None => panic!("expected BackgroundTaskPanic(test, boom), got None"),
-                }
-            }
-            Err(e) => panic!("expected BackgroundTaskPanic(test, boom), got: {:?}", e),
-        }
+        // Then: it should return BackgroundTaskPanic
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskPanic(ref name)) if name == "test_task"
+        ));
     }
 }

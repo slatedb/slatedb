@@ -124,7 +124,7 @@ use tokio_util::{sync::CancellationToken, task::JoinMap};
 use crate::{
     clock::{SystemClock, SystemClockTicker},
     error::SlateDBError,
-    utils::{unwrap_join, unwrap_unwind, WatchableOnceCell},
+    utils::{flatten_task_result, panic_string, WatchableOnceCell},
 };
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
@@ -494,7 +494,8 @@ impl MessageHandlerExecutor {
         let task_future = async move {
             // catch dispatcher panics using catch_unwind
             let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
-            let run_result = unwrap_unwind(this_name.clone(), run_unwind_result);
+            let run_result = flatten_task_result(this_name.clone(), &run_unwind_result);
+            // set the error state (or mark a clean shutdown) if it's unset
             this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
             // re-read the error since it might have already been set by another task
             let final_error_state = Err(this_error_state
@@ -504,11 +505,18 @@ impl MessageHandlerExecutor {
             let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(final_error_state))
                 .catch_unwind()
                 .await;
-            if let Err(cleanup_error) = unwrap_unwind(this_name.clone(), cleanup_unwind_result) {
+            let cleanup_result = flatten_task_result(this_name.clone(), &cleanup_unwind_result);
+            if let Err(payload) = cleanup_unwind_result {
                 warn!(
-                    "background task failed to clean up on shutdown [name={}, error={:?}",
+                    "background task failed to clean up on shutdown [name={}, panic={:?}]",
                     this_name.clone(),
-                    cleanup_error,
+                    panic_string(&payload),
+                );
+            } else if let Err(err) = cleanup_result {
+                warn!(
+                    "background task failed to clean up on shutdown [name={}, error={:?}]",
+                    this_name.clone(),
+                    err,
                 );
             }
             run_result
@@ -574,7 +582,10 @@ impl MessageHandlerExecutor {
         let monitor_future = async move {
             while !tasks.is_empty() {
                 if let Some((name, join_result)) = tasks.join_next().await {
-                    let task_result = unwrap_join(name.clone(), join_result);
+                    let task_result = flatten_task_result(
+                        name.clone(),
+                        &join_result.map_err(|e| Box::new(e) as Box<dyn Any + Send>),
+                    );
                     let entry = this_results
                         .get(&name)
                         .expect("result cell isn't set when expected");
@@ -1201,17 +1212,14 @@ mod test {
             .expect("dispatcher did not stop in time");
 
         // Check final state
-        assert!(matches!(
-            result,
-            Err(SlateDBError::BackgroundTaskPanic(_, _))
-        ));
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
             error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskPanic(_, _))
+            Some(SlateDBError::BackgroundTaskPanic(_))
         ));
         assert!(matches!(
             cleanup_reader.read(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_, _)))
+            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
     }
 }

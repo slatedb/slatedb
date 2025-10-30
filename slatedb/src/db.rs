@@ -4004,7 +4004,7 @@ mod tests {
         let result = db.put(b"foo", b"bar").await.unwrap_err();
         assert_eq!(
             result.to_string(),
-            "Internal error: background task panicked. name=`wal_writer` (failpoint write-wal-sst-io-error panic)"
+            "Internal error: background task panicked. name=`wal_writer`"
         );
 
         // Close, which flushes the latest manifest to the object store
