@@ -41,6 +41,9 @@ pub(crate) enum SlateDBError {
     #[error("failed to find manifest with id. id=`{0}`")]
     ManifestMissing(u64),
 
+    #[error("failed to find latest record")]
+    LatestRecordMissing,
+
     #[error("failed to find latest manifest")]
     LatestManifestMissing,
 
@@ -458,6 +461,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
             SlateDBError::FileVersionExists => Error::data(msg),
+            SlateDBError::LatestRecordMissing => Error::data(msg),
 
             // Internal errors
             SlateDBError::CompactionExecutorFailed => Error::internal(msg),

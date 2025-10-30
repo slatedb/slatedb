@@ -3365,6 +3365,7 @@ dependencies = [
 name = "slatedb-cli"
 version = "0.8.2"
 dependencies = [
+ "chrono",
  "clap",
  "humantime",
  "object_store",
