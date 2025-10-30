@@ -6,6 +6,7 @@ use crate::error::SlateDBError;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
+use log::error;
 use rand::{Rng, RngCore};
 use std::any::Any;
 use std::future::Future;
@@ -99,6 +100,11 @@ where
                 if let Some(err) = payload.downcast_ref::<SlateDBError>() {
                     return Err(err.clone());
                 }
+                error!(
+                    "spawned task panicked. [name={}, panic={}]",
+                    name,
+                    panic_string(&payload)
+                );
                 Err(SlateDBError::BackgroundTaskPanic(name))
             }
         };
