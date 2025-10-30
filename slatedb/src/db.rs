@@ -3976,7 +3976,9 @@ mod tests {
         // Trigger a WAL write, which should not advance the manifest WAL ID
         let result = db.put(b"foo", b"bar").await.unwrap_err();
         assert_eq!(result.kind(), crate::ErrorKind::Closed(CloseReason::Panic));
-        assert!(result.to_string().contains("background task panicked. name=`wal_writer`"));
+        assert!(result
+            .to_string()
+            .contains("background task panicked. name=`wal_writer`"));
 
         // Close, which flushes the latest manifest to the object store
         // TODO: it might make sense to return an error if there're unflushed wals in memory

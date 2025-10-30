@@ -501,9 +501,13 @@ impl MessageHandlerExecutor {
                     run_maybe_panic.map(|p| panic_string(&p))
                 );
             }
-            fail_point!(this_fp_registry.clone(), "executor-wrapper-before-write", |_| {
-                panic!("failpoint: executor-wrapper-before-write");
-            });
+            fail_point!(
+                this_fp_registry.clone(),
+                "executor-wrapper-before-write",
+                |_| {
+                    panic!("failpoint: executor-wrapper-before-write");
+                }
+            );
             this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
             // re-read the error since it might have already been set by another task
             let final_error_state = Err(this_error_state
