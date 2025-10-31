@@ -486,7 +486,7 @@ impl MessageHandlerExecutor {
             .with_fp_registry(self.fp_registry.clone());
         let this_error_state = self.error_state.clone();
         let this_name = name.clone();
-        #[allow(dead_code)]
+        #[allow(unused_variables)]
         let this_fp_registry = self.fp_registry.clone();
         // future that runs the dispatcher and handles cleanup
         let task_future = async move {
