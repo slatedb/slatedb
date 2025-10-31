@@ -474,6 +474,7 @@ impl MessageHandlerExecutor {
     ///   already added.
     /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already
     ///   started.
+    #[allow(clippy::panic)] // for failpoint
     pub(crate) fn add_handler<T: Send + std::fmt::Debug + 'static>(
         &self,
         name: String,
