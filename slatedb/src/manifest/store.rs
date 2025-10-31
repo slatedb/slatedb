@@ -4,8 +4,7 @@ use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
-    CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
-    ManifestVersionExists,
+    CheckpointMissing, InvalidDBState, LatestRecordMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{ExternalDb, Manifest};
@@ -119,13 +118,10 @@ impl FenceableManifest {
     ) -> Result<(), SlateDBError> {
         let mut dirty = self.inner.prepare_dirty()?;
         if dirty.id() != manifest.id() {
-            return Err(SlateDBError::ManifestVersionExists);
+            return Err(SlateDBError::FileVersionExists);
         }
         dirty.value = Manifest::from(manifest);
-        self.inner.update(dirty).await.map_err(|e| match e {
-            SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
-            other => other,
-        })
+        self.inner.update(dirty).await
     }
 
     pub(crate) fn new_checkpoint(
@@ -191,7 +187,7 @@ impl FenceableManifest {
                 return Ok(());
             };
             match self.update_manifest(dirty).await {
-                Err(SlateDBError::ManifestVersionExists) => {
+                Err(SlateDBError::FileVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -263,7 +259,7 @@ impl StoredManifest {
 
     /// Load the current manifest from the supplied manifest store. If successful,
     /// this method returns a [`Result`] with an instance of [`StoredManifest`].
-    /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
+    /// If no manifests could be found, the error [`LatestRecordMissing`] is returned.
     pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
         StoredRecord::<Manifest>::try_load(Arc::clone(&store.inner))
             .await?
@@ -271,7 +267,7 @@ impl StoredManifest {
                 inner,
                 clock: Arc::clone(&store.clock),
             })
-            .ok_or(LatestManifestMissing)
+            .ok_or(LatestRecordMissing)
     }
 
     #[allow(dead_code)]
@@ -450,15 +446,12 @@ impl StoredManifest {
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
         if manifest.id() != self.id() {
-            return Err(ManifestVersionExists);
+            return Err(SlateDBError::FileVersionExists);
         }
         let manifest = manifest.into();
         let mut dirty = self.inner.prepare_dirty();
         dirty.value = manifest;
-        self.inner.update(dirty).await.map_err(|e| match e {
-            SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
-            other => other,
-        })
+        self.inner.update(dirty).await
     }
 
     /// Apply an update to a stored manifest repeatedly retrying the update
@@ -480,7 +473,7 @@ impl StoredManifest {
             };
 
             return match self.update_manifest(dirty).await {
-                Err(SlateDBError::ManifestVersionExists) => {
+                Err(SlateDBError::FileVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -604,7 +597,7 @@ impl ManifestStore {
     pub(crate) async fn read_latest_manifest(&self) -> Result<(u64, Manifest), SlateDBError> {
         self.try_read_latest_manifest()
             .await?
-            .ok_or(LatestManifestMissing)
+            .ok_or(LatestRecordMissing)
     }
 
     pub(crate) async fn try_read_manifest(
@@ -675,7 +668,7 @@ mod tests {
 
         assert!(matches!(
             result.unwrap_err(),
-            error::SlateDBError::ManifestVersionExists
+            error::SlateDBError::FileVersionExists
         ));
     }
 
@@ -815,7 +808,7 @@ mod tests {
 
         let result = sm.update_manifest(stale).await;
 
-        assert!(matches!(result, Err(SlateDBError::ManifestVersionExists)));
+        assert!(matches!(result, Err(SlateDBError::FileVersionExists)));
     }
 
     #[tokio::test]
