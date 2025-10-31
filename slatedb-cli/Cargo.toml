@@ -9,6 +9,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 humantime = { workspace = true }
 object_store = { workspace = true }

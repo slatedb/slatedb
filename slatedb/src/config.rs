@@ -605,6 +605,14 @@ pub struct Settings {
     ///
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
+
+    /// The merge operator to use for the database. If not set, the database will not support merge operations.
+    ///
+    /// The merge operator allows applications to bypass the traditional read/modify/write cycle
+    /// by expressing partial updates using an associative operator. Merge operands are combined
+    /// during reads and compactions to produce the final result.
+    #[serde(skip)]
+    pub merge_operator: Option<MergeOperatorType>,
 }
 
 // Implement Debug manually for DbOptions.
@@ -633,6 +641,14 @@ impl std::fmt::Debug for Settings {
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("filter_bits_per_key", &self.filter_bits_per_key)
             .field("default_ttl", &self.default_ttl)
+            .field(
+                "merge_operator",
+                &self
+                    .merge_operator
+                    .as_ref()
+                    .map(|_| "Some(merge_operator)")
+                    .unwrap_or("None"),
+            )
             .finish()
     }
 }
@@ -792,6 +808,7 @@ impl Default for Settings {
             garbage_collector_options: None,
             filter_bits_per_key: 10,
             default_ttl: None,
+            merge_operator: None,
         }
     }
 }

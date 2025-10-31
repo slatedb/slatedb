@@ -145,6 +145,7 @@ use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::mem_table_flush::MemtableFlusher;
 use crate::mem_table_flush::MEMTABLE_FLUSHER_TASK_NAME;
+use crate::merge_operator::MergeOperatorType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
@@ -172,6 +173,7 @@ pub struct DbBuilder<P: Into<Path>> {
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
+    merge_operator: Option<MergeOperatorType>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -191,6 +193,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
             sst_block_size: None,
+            merge_operator: None,
         }
     }
 
@@ -289,6 +292,22 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the merge operator to use for the database. The merge operator allows
+    /// applications to bypass the traditional read/modify/write cycle by expressing
+    /// partial updates using an associative operator.
+    ///
+    /// # Arguments
+    ///
+    /// * `merge_operator` - An Arc-wrapped merge operator implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
+        self.merge_operator = Some(merge_operator);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         let path = self.path.into();
@@ -332,6 +351,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         let system_clock = self
             .system_clock
             .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
+
+        let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -451,9 +472,11 @@ impl<P: Into<Path>> DbBuilder<P> {
         let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Create the database inner state
+        let mut settings = self.settings.clone();
+        settings.merge_operator = merge_operator.clone();
         let inner = Arc::new(
             DbInner::new(
-                self.settings.clone(),
+                settings,
                 logical_clock,
                 system_clock.clone(),
                 rand.clone(),
@@ -463,6 +486,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 write_tx,
                 stat_registry,
                 self.fp_registry.clone(),
+                merge_operator,
             )
             .await?,
         );
