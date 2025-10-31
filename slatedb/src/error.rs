@@ -120,6 +120,9 @@ pub(crate) enum SlateDBError {
     #[error("merge operator error")]
     MergeOperatorError(#[from] MergeOperatorError),
 
+    #[error("merge operator missing. A merge operator is required to read merge operands")]
+    MergeOperatorMissing,
+
     #[error("checkpoint missing. checkpoint_id=`{0}`")]
     CheckpointMissing(Uuid),
 
@@ -434,6 +437,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidClockTick { .. } => Error::invalid(msg),
             SlateDBError::InvalidDeletion => Error::invalid(msg),
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
+            SlateDBError::MergeOperatorMissing => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
 
             // Data errors
