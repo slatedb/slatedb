@@ -35,6 +35,7 @@ pub(crate) enum SlateDBError {
     #[error("file already exists")]
     FileVersionExists,
 
+    #[allow(dead_code)]
     #[error("manifest file already exists")]
     ManifestVersionExists,
 
@@ -44,6 +45,7 @@ pub(crate) enum SlateDBError {
     #[error("failed to find latest record")]
     LatestRecordMissing,
 
+    #[allow(dead_code)]
     #[error("failed to find latest manifest")]
     LatestManifestMissing,
 

@@ -78,7 +78,7 @@ impl MemtableFlusher {
         loop {
             self.load_manifest().await?;
             let result = self.write_checkpoint(options).await;
-            if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
+            if matches!(result, Err(SlateDBError::FileVersionExists)) {
                 debug!("conflicting manifest version. updating and retrying write again.");
             } else {
                 return result;
@@ -89,7 +89,7 @@ impl MemtableFlusher {
     pub(crate) async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             let result = self.write_manifest().await;
-            if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
+            if matches!(result, Err(SlateDBError::FileVersionExists)) {
                 debug!("conflicting manifest version. updating and retrying write again.");
                 self.load_manifest().await?;
             } else {
