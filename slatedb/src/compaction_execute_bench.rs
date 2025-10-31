@@ -18,8 +18,10 @@ use crate::bytes_generator::OrderedBytesGenerator;
 use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
-use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
-use crate::compactor_state::{Compaction, SourceId};
+use crate::compactor_executor::{CompactionExecutor, CompactorJobAttempt, TokioCompactionExecutor};
+use crate::compactor_state::{
+    CompactorJob, CompactorJobInput, CompactorJobRequest, CompactorJobRequestType, SourceId,
+};
 use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -210,7 +212,8 @@ impl CompactionExecuteBench {
         table_store: &Arc<TableStore>,
         is_dest_last_run: bool,
         rand: Arc<DbRand>,
-    ) -> Result<CompactionJob, SlateDBError> {
+        system_clock: Arc<dyn SystemClock>,
+    ) -> Result<CompactorJobAttempt, SlateDBError> {
         let sst_ids: Vec<SsTableId> = (0u32..num_ssts as u32)
             .map(CompactionExecuteBench::sst_id)
             .collect();
@@ -245,12 +248,13 @@ impl CompactionExecuteBench {
             .into_iter()
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
-        Ok(CompactionJob {
-            id: rand.rng().gen_uuid(),
+        Ok(CompactorJobAttempt {
+            id: rand.rng().gen_ulid(system_clock.as_ref()),
+            compactor_job_id: rand.rng().gen_ulid(system_clock.as_ref()),
             destination: 0,
             ssts,
             sorted_runs: vec![],
-            compaction_ts: manifest.db_state().last_l0_clock_tick,
+            attempt_ts: manifest.db_state().last_l0_clock_tick,
             retention_min_seq: Some(manifest.db_state().recent_snapshot_min_seq),
             is_dest_last_run,
         })
@@ -258,18 +262,20 @@ impl CompactionExecuteBench {
 
     fn load_compaction_as_job(
         manifest: &StoredManifest,
-        compaction: &Compaction,
+        compactor_job: &CompactorJob,
         is_dest_last_run: bool,
         rand: Arc<DbRand>,
-    ) -> CompactionJob {
+        system_clock: Arc<dyn SystemClock>,
+    ) -> CompactorJobAttempt {
         let state = manifest.db_state();
+        let compactor_job_request = compactor_job.compactor_job_request();
         let srs_by_id: HashMap<_, _> = state
             .compacted
             .iter()
             .map(|sr| (sr.id, sr.clone()))
             .collect();
-        let srs: Vec<_> = compaction
-            .sources
+        let srs: Vec<_> = compactor_job_request
+            .sources()
             .iter()
             .map(|sr| {
                 srs_by_id
@@ -279,12 +285,13 @@ impl CompactionExecuteBench {
             })
             .collect();
         info!("loaded compaction job");
-        CompactionJob {
-            id: rand.rng().gen_uuid(),
+        CompactorJobAttempt {
+            id: rand.rng().gen_ulid(system_clock.as_ref()),
+            compactor_job_id: compactor_job.id(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
-            compaction_ts: state.last_l0_clock_tick,
+            attempt_ts: state.last_l0_clock_tick,
             retention_min_seq: Some(state.recent_snapshot_min_seq),
             is_dest_last_run,
         }
@@ -307,12 +314,6 @@ impl CompactionExecuteBench {
             self.path.clone(),
             None,
         ));
-        let compaction = source_sr_ids.map(|source_sr_ids| {
-            Compaction::new(
-                source_sr_ids.into_iter().map(SourceId::SortedRun).collect(),
-                destination_sr_id,
-            )
-        });
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();
         let registry = Arc::new(StatRegistry::new());
@@ -336,16 +337,36 @@ impl CompactionExecuteBench {
             manifest_store.clone(),
         );
 
-        info!("load compaction job");
         let manifest = StoredManifest::load(manifest_store).await?;
-        let job = match &compaction {
-            Some(compaction) => {
+        let db_state = manifest.db_state();
+
+        let sources: Vec<SourceId> = source_sr_ids
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(SourceId::SortedRun)
+            .collect();
+        let job_input = CompactorJobInput::SortedRunJobInputs {
+            ssts: vec![],
+            sorted_runs: CompactorJob::get_sorted_runs(db_state, &sources),
+        };
+
+        let compactor_job = source_sr_ids.map(|_source_sr_ids| {
+            let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
+            let request = CompactorJobRequest::new(sources, destination_sr_id);
+            CompactorJob::new(id, CompactorJobRequestType::Internal, request, job_input)
+        });
+
+        info!("load compaction job");
+        let job = match &compactor_job {
+            Some(compactor_job) => {
                 info!("load job from existing compaction");
                 CompactionExecuteBench::load_compaction_as_job(
                     &manifest,
-                    compaction,
+                    compactor_job,
                     false,
                     self.rand.clone(),
+                    self.system_clock.clone(),
                 )
             }
             None => {
@@ -355,6 +376,7 @@ impl CompactionExecuteBench {
                     &table_store,
                     false,
                     self.rand.clone(),
+                    self.system_clock.clone(),
                 )
                 .await?
             }
@@ -364,7 +386,7 @@ impl CompactionExecuteBench {
         #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
         while let Some(msg) = rx.recv().await {
-            if let CompactorMessage::CompactionFinished { id: _, result } = msg {
+            if let CompactorMessage::CompactionJobAttemptFinished { id: _, result } = msg {
                 match result {
                     Ok(_) => {
                         let elapsed_ms = self

@@ -67,6 +67,41 @@ pub trait MergeOperator {
 
 pub(crate) type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
 
+/// An iterator that ensures merge operands are not returned when no merge operator is configured.
+pub(crate) struct MergeOperatorRequiredIterator<T: KeyValueIterator> {
+    delegate: T,
+}
+
+impl<T: KeyValueIterator> MergeOperatorRequiredIterator<T> {
+    pub(crate) fn new(delegate: T) -> Self {
+        Self { delegate }
+    }
+}
+
+#[async_trait]
+impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorRequiredIterator<T> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.delegate.init().await
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        let next_entry = self.delegate.next_entry().await?;
+        if let Some(entry) = next_entry {
+            match &entry.value {
+                ValueDeletable::Merge(_) => {
+                    return Err(SlateDBError::MergeOperatorMissing);
+                }
+                _ => return Ok(Some(entry)),
+            }
+        }
+        Ok(None)
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.delegate.seek(next_key).await
+    }
+}
+
 /// An iterator that merges mergeable entries into a single value.
 ///
 /// It is expected that this is the top level iterator in a merge scan, and therefore
