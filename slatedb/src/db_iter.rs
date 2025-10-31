@@ -214,7 +214,7 @@ pub struct DbIterator<'a> {
 impl<'a> DbIterator<'a> {
     pub(crate) async fn new(
         range: BytesRange,
-        write_batch_iter: Option<WriteBatchIterator<'a>>,
+        write_batch_iter: Option<WriteBatchIterator>,
         mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
         l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
         sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
@@ -503,7 +503,7 @@ mod tests {
         batch.put(b"key3", b"value3");
 
         // Create WriteBatchIterator
-        let wb_iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let wb_iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Create DbIterator with WriteBatch
         let mem_iters: VecDeque<Box<dyn KeyValueIterator + 'static>> = VecDeque::new();

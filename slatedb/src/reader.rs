@@ -26,7 +26,7 @@ pub(crate) trait DbStateReader {
 }
 
 struct IteratorSources<'a> {
-    write_batch_iter: Option<WriteBatchIterator<'a>>,
+    write_batch_iter: Option<WriteBatchIterator>,
     mem_iters: Vec<Box<dyn KeyValueIterator + 'a>>,
     l0_iters: VecDeque<Box<dyn KeyValueIterator + 'a>>,
     sr_iters: VecDeque<Box<dyn KeyValueIterator + 'a>>,
@@ -85,7 +85,7 @@ impl Reader {
         &self,
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
-        write_batch: Option<&'a WriteBatch>,
+        write_batch: Option<WriteBatch>,
         sst_iter_options: SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
     ) -> Result<IteratorSources<'a>, SlateDBError> {
@@ -274,7 +274,7 @@ impl Reader {
         key: K,
         options: &ReadOptions,
         db_state: &(dyn DbStateReader + Sync + Send),
-        write_batch: Option<&WriteBatch>,
+        write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
     ) -> Result<Option<Bytes>, SlateDBError> {
         let now = get_now_for_read(self.mono_clock.clone(), options.durability_filter).await?;
@@ -350,7 +350,7 @@ impl Reader {
         range: BytesRange,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
-        write_batch: Option<&'a WriteBatch>,
+        write_batch: Option<WriteBatch>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
     ) -> Result<DbIterator<'a>, SlateDBError> {
@@ -1309,7 +1309,7 @@ mod tests {
                 test_case.query_key,
                 &read_options,
                 &test_db_state,
-                write_batch.as_ref(),
+                write_batch,
                 test_case.max_seq,
             )
             .await?;
@@ -1783,7 +1783,7 @@ mod tests {
                 range,
                 &scan_options,
                 &test_db_state,
-                write_batch.as_ref(),
+                write_batch,
                 test_case.max_seq,
                 None,
             )
