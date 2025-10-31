@@ -113,7 +113,7 @@ use futures::{
     stream::{BoxStream, FuturesUnordered},
     FutureExt, StreamExt,
 };
-use log::warn;
+use log::error;
 use parking_lot::Mutex;
 use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
@@ -121,7 +121,7 @@ use tokio_util::{sync::CancellationToken, task::JoinMap};
 use crate::{
     clock::{SystemClock, SystemClockTicker},
     error::SlateDBError,
-    utils::{unwrap_join, unwrap_unwind, WatchableOnceCell},
+    utils::{panic_string, split_join_result, split_unwind_result, WatchableOnceCell},
 };
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
@@ -401,7 +401,7 @@ pub(crate) struct MessageHandlerExecutor {
     futures: Mutex<Option<Vec<MessageHandlerFuture>>>,
     /// A map of cancellation tokens for each dispatcher.
     tokens: SkipMap<String, CancellationToken>,
-    /// A map of results or dispatchers that have returned.
+    /// A map of (task name, results) for dispatchers that have returned.
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
     /// A watchable cell that stores the error state of the database.
     error_state: WatchableOnceCell<SlateDBError>,
@@ -472,6 +472,9 @@ impl MessageHandlerExecutor {
     /// - `Ok(())` if the dispatcher was successfully spawned.
     /// - Err([SlateDBError::BackgroundTaskExists]) if a dispatcher with the same name is
     ///   already added.
+    /// - Err([SlateDBError::BackgroundTaskExecutorStarted]) if the executor is already
+    ///   started.
+    #[allow(clippy::panic)] // for failpoint
     pub(crate) fn add_handler<T: Send + std::fmt::Debug + 'static>(
         &self,
         name: String,
@@ -484,11 +487,29 @@ impl MessageHandlerExecutor {
             .with_fp_registry(self.fp_registry.clone());
         let this_error_state = self.error_state.clone();
         let this_name = name.clone();
+        #[allow(unused_variables)]
+        let this_fp_registry = self.fp_registry.clone();
         // future that runs the dispatcher and handles cleanup
         let task_future = async move {
             // catch dispatcher panics using catch_unwind
             let run_unwind_result = AssertUnwindSafe(dispatcher.run()).catch_unwind().await;
-            let run_result = unwrap_unwind(this_name.clone(), run_unwind_result);
+            let (run_result, run_maybe_panic) =
+                split_unwind_result(this_name.clone(), run_unwind_result);
+            if let Err(ref err) = run_result {
+                error!(
+                    "background task panicked unexpectedly. [task_name={}, error={:?}, panic={:?}]",
+                    this_name,
+                    err,
+                    run_maybe_panic.map(|p| panic_string(&p))
+                );
+            }
+            fail_point!(
+                this_fp_registry.clone(),
+                "executor-wrapper-before-write",
+                |_| {
+                    panic!("failpoint: executor-wrapper-before-write");
+                }
+            );
             this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
             // re-read the error since it might have already been set by another task
             let final_error_state = Err(this_error_state
@@ -498,11 +519,14 @@ impl MessageHandlerExecutor {
             let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(final_error_state))
                 .catch_unwind()
                 .await;
-            if let Err(cleanup_error) = unwrap_unwind(this_name.clone(), cleanup_unwind_result) {
-                warn!(
-                    "background task failed to clean up on shutdown [name={}, error={:?}",
+            let (cleanup_result, cleanup_maybe_panic) =
+                split_unwind_result(this_name.clone(), cleanup_unwind_result);
+            if let Err(err) = cleanup_result {
+                error!(
+                    "background task failed to clean up on shutdown [name={}, error={:?}, panic={:?}]",
                     this_name.clone(),
-                    cleanup_error,
+                    err,
+                    cleanup_maybe_panic.map(|p| panic_string(&p))
                 );
             }
             run_result
@@ -558,6 +582,7 @@ impl MessageHandlerExecutor {
                 &task_definition.handle,
             );
         }
+        let this_error_state = self.error_state.clone();
         let this_results = self.results.clone();
         let this_tokens = self
             .tokens
@@ -568,7 +593,18 @@ impl MessageHandlerExecutor {
         let monitor_future = async move {
             while !tasks.is_empty() {
                 if let Some((name, join_result)) = tasks.join_next().await {
-                    let task_result = unwrap_join(name.clone(), join_result);
+                    let (task_result, task_maybe_panic) =
+                        split_join_result(name.clone(), join_result);
+                    if let Err(ref err) = task_result {
+                        error!(
+                            "background task failed [name={}, error={:?}, panic={:?}]",
+                            name,
+                            err,
+                            task_maybe_panic.map(|p| panic_string(&p))
+                        );
+                    }
+                    this_error_state
+                        .write(task_result.clone().err().unwrap_or(SlateDBError::Closed));
                     let entry = this_results
                         .get(&name)
                         .expect("result cell isn't set when expected");
@@ -1189,17 +1225,65 @@ mod test {
             .expect("dispatcher did not stop in time");
 
         // Check final state
-        assert!(matches!(
-            result,
-            Err(SlateDBError::BackgroundTaskPanic(_, _))
-        ));
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
             error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskPanic(_, _))
+            Some(SlateDBError::BackgroundTaskPanic(_))
         ));
         assert!(matches!(
             cleanup_reader.read(),
-            Some(Err(SlateDBError::BackgroundTaskPanic(_, _)))
+            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_executor_panic_in_wrapper() {
+        let log = Arc::new(Mutex::new(Vec::<(Phase, TestMessage)>::new()));
+        let cleanup_called = WatchableOnceCell::new();
+        let cleanup_reader = cleanup_called.reader();
+        let (tx, rx) = mpsc::unbounded_channel::<TestMessage>();
+        drop(tx); // no messages needed
+        let clock = Arc::new(DefaultSystemClock::new());
+        let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
+        let error_state = WatchableOnceCell::new();
+        let fp_registry = Arc::new(FailPointRegistry::default());
+        let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone())
+            .with_fp_registry(fp_registry.clone());
+
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "executor-wrapper-before-write",
+            "panic",
+        )
+        .unwrap();
+
+        // Spawn the task and monitor
+        task_executor
+            .add_handler(
+                "test".to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .expect("failed to spawn task");
+        task_executor
+            .monitor_on(&Handle::current())
+            .expect("failed to monitor executor");
+
+        // Cancel to exit run() cleanly, then `async move`` wrapper panics at the fail point
+        task_executor.cancel_task("test");
+
+        // Wait for task result
+        let result = timeout(Duration::from_secs(30), task_executor.join_task("test"))
+            .await
+            .expect("dispatcher did not stop in time");
+
+        // Assertions: panic result, error_state set to panic, cleanup not called
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        assert!(matches!(
+            error_state.reader().read(),
+            Some(SlateDBError::BackgroundTaskPanic(_))
+        ));
+        assert!(cleanup_reader.read().is_none());
     }
 }
