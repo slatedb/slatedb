@@ -160,59 +160,148 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 The persistent state contains the complete view of all compaction activity:
 
 ```rust
-pub(crate) struct CompactionJob {
-    pub(crate) id: Ulid,
-    pub(crate) destination: u32,
-    pub(crate) ssts: Vec<SsTableHandle>,
-    pub(crate) sorted_runs: Vec<SortedRun>,
-    pub(crate) compaction_ts: i64,
-    pub(crate) is_dest_last_run: bool,
-    pub(crate) completed_input_sst_ids: Vec<Ulid>;
-    pub(crate) completed_input_sr_ids: Vec<u32>;
-    pub(crate) output_sr: SortedRun;
+pub enum CompactorJobStatus {
+    Submitted,
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
 }
 
-pub(crate) enum CompactionType {
+pub(crate) enum CompactorJobRequestType {
+    /// Signals that the compaction was requested by the DB's compactor.
     Internal,
+    /// Signals that the compaction was requested by an external process such as the admin CLI.
     External,
 }
 
-pub struct Compaction {
-    pub(crate) status: CompactionStatus,
-    pub(crate) sources: Vec<SourceId>,
+/// In-memory description of the inputs to a compaction.
+///
+/// A `CompactionSpec` represents the concrete set of input SSTs and/or Sorted Runs
+/// that a particular compaction algorithm (e.g., size-tiered, leveled, etc.) has
+/// selected to produce a destination Sorted Run.
+///
+/// The scheduler constructs a `CompactionSpec` for a planned compaction and passes it,
+/// together with the selected `sources`, to `Compaction::new`. Keeping the spec inside
+/// the in-memory `Compaction` avoids recomputing or cloning inputs at job creation time
+/// and enables encode/decode roundtrips in tests via FlatBuffers.
+pub(crate) enum CompactorJobInput {
+    /// Compact a combination of L0 SSTs and/or existing sorted runs into a new sorted run
+    /// with id `destination` carried by the surrounding `Compaction`.
+    SortedRunJobInputs {
+        /// L0 SSTs (by handle) that will be compacted.
+        ssts: Vec<SsTableHandle>,
+        /// Existing sorted runs that participate in this compaction.
+        sorted_runs: Vec<SortedRun>,
+    },
+}
+
+/// Specification of how a compaction job should be executed.
+///
+/// Job specs are derived from the parent `Compaction`/`CompactionPlan` and capture
+/// execution-time details (e.g., which inputs are already materialized) that the executor
+/// can use for progress reporting and resume logic.
+pub(crate) enum CompactorJobProgress {
+    LinearCompactorJob {
+        /// ULIDs of L0 SSTs and Sorted Runs that have been fully read/compacted when the job
+        /// snapshot is taken (useful for resume/diagnostics).
+        completed_sources: Vec<SourceId>,
+    },
+}
+
+/// Immutable request that describes a compaction job.
+///
+/// Holds the logical inputs for a compaction the scheduler decided on:
+/// - `sources`: a set of `SourceId` identifying L0 SSTs and/or existing Sorted Runs
+/// - `destination`: the Sorted Run id the compaction will produce
+///
+/// Materialized inputs (actual `SsTableHandle`/`SortedRun` objects) are derived from
+/// `sources` against the current manifest at execution time.
+pub struct CompactorJobRequest {
+    sources: Vec<SourceId>,
+    destination: u32,
+}
+
+/// Lightweight response snapshot for a compaction job.
+///
+/// Carries the job id, its status at the time of creation, and any sources that have been
+/// fully processed (useful for reporting/testing).
+pub struct CompactorJobResponse {
+    compactor_job_id: Ulid,
+    status: CompactorJobStatus,
+    completed_sources: Vec<SourceId>,
+}
+
+pub(crate) struct CompactorJob {
+    id: Ulid,
+    job_request_type: CompactorJobRequestType,
+    /// What to compact (sources) and where to write (destination).
+    request: CompactorJobRequest,
+    /// Input interpretation for the executor (e.g., SortedRun job).
+    job_input: CompactorJobInput,
+
+    status: CompactorJobStatus,
+
+    attempts: Vec<CompactorJobAttempt>,
+
+    /// Execution-time job spec (e.g., progress/resume details).
+    progress: CompactorJobProgress,
+}
+
+/// `CompactionStateRecord` is the durable, object-store representation of compaction
+pub(crate) struct CompactorStateRecord {
+    pub(crate) compactor_epoch: u64,
+    // active_compaction plan queued, in-progress and completed mapped by compaction id in object store
+    pub(crate) jobs: HashMap<Ulid, CompactorJob>,
+}
+
+/// Process-local runtime state owned by the compactor.
+///
+/// This is the in-memory controller view that a single compactor task uses to:
+/// - keep a fresh `DirtyManifest` (view of `CoreDbState`),
+/// - track canonical `compaction_plans` by plan id (ULID), and
+/// - track `scheduled_compactions` by job id for executions owned by this process.
+///
+/// It validates submissions, records lifecycle transitions (Submitted → Pending → InProgress →
+/// Completed/Failed) and mutates the in-memory manifest when jobs finish.
+///
+
+/// - `CompactorState` is transient, process-local runtime state; it is not persisted and is rebuilt when the process starts.
+pub struct CompactorState {
+    manifest: DirtyManifest,
+
+    compaction_state: DirtyRecord<CompactorStateRecord>,
+
+    // In-memory record of ongoing compaction job scheduled by compactor process mapped by compaction jobAttempt id
+    scheduled_jobs: HashMap<Ulid, CompactorJob>,
+}
+
+/// Execution unit (attempt) for a compaction plan.
+///
+/// - `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is
+///   used as the runtime key in `scheduled_compactions`.
+/// - `compaction_id` is the canonical plan id (ULID) that ties this job attempt back to its
+///   `CompactionPlan` entry in the compactor's canonical map.
+///
+/// Jobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time
+/// metadata for progress reporting, retention, and resume logic.
+pub(crate) struct CompactorJobAttempt {
+    /// Job attempt id. Unique per attempt and used for scheduling/routing.
+    pub(crate) id: Ulid,
+    /// Canonical compaction job id this job belongs to.
+    pub(crate) compactor_job_id: Ulid,
+    /// Destination sorted run id to be produced by this job.
     pub(crate) destination: u32,
-    pub(crate) compaction_id: Ulid,
-    pub(crate) compaction_type: CompactionType,
-    pub(crate) job_attempts: Vec<CompactionJob>;
-}
-
-pub(crate) CompactorState {
-    manifest: DirtyManifest
-    compaction_state: DirtyCompactionState
-}
-
-pub(crate) struct CompactionState {
-    compactor_epoch: u64,
-    // active_compactions queued, in-progress and completed
-    compactions: HashMap<Ulid, Compaction>,
-}
-
-pub(crate) struct DirtyCompactionState {
-    id: u64,
-    compactor_epoch: u64,
-    compaction_state: CompactionState,
-}
-
-pub(crate) struct StoredCompactionState {
-    id: u64,
-    compaction_state: CompactionState,
-    compaction_state_store: Arc<CompactionStateStore>,
-}
-
-pub(crate) struct FenceableCompactionState {
-    compaction_state: StoredCompactionState,
-    local_epoch: u64,
-    stored_epoch: fn(&CompactionState) -> u64,
+    /// Input L0 SSTs for this attempt.
+    pub(crate) ssts: Vec<SsTableHandle>,
+    /// Input existing sorted runs for this attempt.
+    pub(crate) sorted_runs: Vec<SortedRun>,
+    /// Compaction timestamp used by the executor (e.g., for retention decisions).
+    pub(crate) attempt_ts: i64,
+    /// Whether the destination sorted run is the last (newest) run after compaction.
+    pub(crate) is_dest_last_run: bool,
+    /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
+    pub(crate) retention_min_seq: Option<u64>,
 }
 ```
 
@@ -796,3 +885,7 @@ Using **AWS S3 Standard** pricing:
 - Persistent state provides foundation for multi-compactor coordination and work distribution.
 - Define a minimum time boundary between compaction file updates to prevent excessive writes to the file (see https://github.com/slatedb/slatedb/pull/695#discussion_r2229977189)
 - Add last_key to SST metadata to enable efficient range-based SST filtering during compaction source selection and range query execution.
+
+## Updates
+
+- 2025-11-01: updated the in-memory data-models for compactor
