@@ -303,49 +303,6 @@ pub(crate) struct CompactorJobAttempt {
     /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
     pub(crate) retention_min_seq: Option<u64>,
 }
-
-pub(crate) enum CompactionType {
-    Internal,
-    External,
-}
-
-pub struct Compaction {
-    pub(crate) status: CompactionStatus,
-    pub(crate) sources: Vec<SourceId>,
-    pub(crate) destination: u32,
-    pub(crate) compaction_id: Ulid,
-    pub(crate) compaction_type: CompactionType,
-    pub(crate) job_attempts: Vec<CompactionJob>;
-}
-
-pub(crate) CompactorState {
-    manifest: DirtyManifest
-    compaction_state: DirtyCompactionState
-}
-
-pub(crate) struct CompactionState {
-    compactor_epoch: u64,
-    // active_compactions queued, in-progress and completed
-    compactions: HashMap<Ulid, Compaction>,
-}
-
-pub(crate) struct DirtyCompactionState {
-    id: u64,
-    compactor_epoch: u64,
-    compaction_state: CompactionState,
-}
-
-pub(crate) struct StoredCompactionState {
-    id: u64,
-    compaction_state: CompactionState,
-    compaction_state_store: Arc<CompactionStateStore>,
-}
-
-pub(crate) struct FenceableCompactionState {
-    compaction_state: StoredCompactionState,
-    local_epoch: u64,
-    stored_epoch: fn(&CompactionState) -> u64,
-}
 ```
 
 ### Persisting Internal Compactions
@@ -928,3 +885,7 @@ Using **AWS S3 Standard** pricing:
 - Persistent state provides foundation for multi-compactor coordination and work distribution.
 - Define a minimum time boundary between compaction file updates to prevent excessive writes to the file (see https://github.com/slatedb/slatedb/pull/695#discussion_r2229977189)
 - Add last_key to SST metadata to enable efficient range-based SST filtering during compaction source selection and range query execution.
+
+## Updates
+
+- 2025-11-01: updated the in-memory data-models for compactor
