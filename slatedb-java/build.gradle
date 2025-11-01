@@ -1,0 +1,206 @@
+plugins {
+    id 'java-library'
+    id 'groovy'
+}
+
+group = 'com.slatedb'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(24)
+    }
+    sourceCompatibility = 24
+    targetCompatibility = 24
+    withSourcesJar()
+    withJavadocJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Production dependencies (keep minimal)
+    implementation 'org.slf4j:slf4j-api:2.0.9'
+    implementation 'com.fasterxml.jackson.core:jackson-core:2.16.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.16.0'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.16.0'
+    
+    // Test dependencies
+    testImplementation 'org.spockframework:spock-core:2.3-groovy-4.0'
+    testImplementation 'org.spockframework:spock-junit4:2.3-groovy-4.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'ch.qos.logback:logback-classic:1.4.11'
+    
+    // Groovy for Spock tests
+    testImplementation 'org.apache.groovy:groovy:4.0.28'
+}
+
+// Go bindings library integration  
+// Try CI path first, then fallback to local development path
+def slatedbGoPath = file('../slatedb-go').exists() ? '../slatedb-go' : '../slatedb-go'
+def workspaceTargetPath = file('../target/release').exists() ? '../target/release' : '../target/release'
+
+task buildGoBindings(type: Exec) {
+    description = 'Build Go bindings native library using Cargo (if upstream available)'
+    workingDir slatedbGoPath
+    
+    // Use different commands based on OS
+    if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+        commandLine 'cmd', '/c', 'cargo', 'build', '--release'
+    } else {
+        commandLine 'cargo', 'build', '--release'
+    }
+    
+    // Only run if Go bindings Cargo.toml exists
+    onlyIf { file("${slatedbGoPath}/Cargo.toml").exists() }
+}
+
+task copyGoBindingsLib(type: Copy, dependsOn: buildGoBindings) {
+    description = 'Copy Go bindings native library to resources directory'
+    
+    from workspaceTargetPath
+    into 'src/main/resources/native'
+    
+    // Copy platform-specific Go bindings libraries
+    include '**/libslatedb_go.so'     // Linux
+    include '**/libslatedb_go.dylib'  // macOS
+    include '**/slatedb_go.dll'       // Windows
+    
+    // Keep original names since Java FFI will load by name
+    
+    // Only copy if we actually built or if upstream target exists
+    onlyIf { buildGoBindings.didWork || file(workspaceTargetPath).exists() }
+}
+
+sourcesJar {
+    dependsOn copyGoBindingsLib
+}
+
+task checkNativeLibrary {
+    description = 'Check if native library is available for tests'
+    doFirst {
+        def nativeDir = file('src/main/resources/native')
+        def hasLibrary = nativeDir.exists() && (
+            file("${nativeDir}/libslatedb_go.so").exists() ||
+            file("${nativeDir}/libslatedb_go.dylib").exists() ||
+            file("${nativeDir}/slatedb_go.dll").exists()
+        )
+        
+        if (!hasLibrary) {
+            def upstreamExists = file("${slatedbGoPath}/Cargo.toml").exists()
+            if (!upstreamExists) {
+                throw new GradleException(
+                    "No native library found and upstream SlateDB Go project not available.\n" +
+                    "To run tests, either:\n" +
+                    "1. Ensure upstream SlateDB Go project exists at: ${slatedbGoPath}\n" +
+                    "2. Or obtain a pre-compiled native library for your platform\n" +
+                    "\nCurrent native directory: ${nativeDir.absolutePath}"
+                )
+            }
+        }
+    }
+}
+
+// Ensure Go bindings library is built before compiling Java
+compileJava {
+    dependsOn copyGoBindingsLib
+    
+    // Enable Java FFI preview features
+    options.compilerArgs.addAll([
+        '--enable-preview'
+    ])
+}
+
+// Ensure resources are processed after Go bindings library is copied
+processResources {
+    dependsOn copyGoBindingsLib
+}
+
+compileTestJava {
+    // Enable Java FFI preview features for tests
+    options.compilerArgs.addAll([
+        '--enable-preview'
+    ])
+}
+
+test {
+    dependsOn checkNativeLibrary
+    useJUnitPlatform()
+    
+    // Enable Java FFI preview features
+    jvmArgs '--enable-preview'
+    
+    // Configure test properties for E2E tests
+    systemProperty 'slatedb.test.s3.bucket', 
+                   findProperty('slatedb.test.s3.bucket') ?: 'slatedb-sdk-dev'
+    systemProperty 'slatedb.test.aws.region', 
+                   findProperty('slatedb.test.aws.region') ?: 'us-east-1'
+    
+    // AWS credentials from environment or properties
+    if (findProperty('slatedb.test.aws.accessKey')) {
+        systemProperty 'slatedb.test.aws.accessKey', findProperty('slatedb.test.aws.accessKey')
+    }
+    if (findProperty('slatedb.test.aws.secretKey')) {
+        systemProperty 'slatedb.test.aws.secretKey', findProperty('slatedb.test.aws.secretKey')
+    }
+    
+    // Test configuration
+    systemProperty 'java.library.path', file('src/main/resources/native').absolutePath
+    
+    // Set environment variables for E2E tests
+    environment 'AWS_ACCESS_KEY_ID', findProperty('slatedb.test.aws.accessKey') ?: System.getenv('AWS_ACCESS_KEY_ID') 
+    environment 'AWS_SECRET_ACCESS_KEY', findProperty('slatedb.test.aws.secretKey') ?: System.getenv('AWS_SECRET_ACCESS_KEY')
+    environment 'AWS_DEFAULT_REGION', findProperty('slatedb.test.aws.region') ?: 'eu-west-2'
+    
+    // Test output
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat = 'full'
+        showCauses = true
+        showExceptions = true
+        showStackTraces = true
+    }
+}
+
+
+// Clean task to remove native artifacts
+clean {
+    doLast {
+        delete 'src/main/resources/native'
+    }
+}
+
+// Javadoc configuration
+javadoc {
+    options.addStringOption('-enable-preview', '-quiet')
+    options.addStringOption('-source', '24')
+    options.addStringOption('Xdoclint:none', '-quiet')
+    options.addBooleanOption('html5', true)
+    failOnError = false
+}
+
+
+// Task to display project information
+task info {
+    description = 'Display project information'
+    doLast {
+        println "SlateDB Java Client"
+        println "=================="
+        println "Version: $version"
+        println "Group: $group"
+        println "Java Version: ${java.toolchain.languageVersion.get()}"
+        println ""
+        println "Available tasks:"
+        println "  build          - Build the project"
+        println "  test           - Run all tests (unit + E2E)"
+        println "  buildGoBindings - Build Go bindings native library"
+        println "  clean          - Clean build artifacts"
+        println ""
+        println "E2E Test Configuration:"
+        println "  S3 Bucket: ${findProperty('slatedb.test.s3.bucket') ?: 'slatedb-sdk-dev'}"
+        println "  AWS Region: ${findProperty('slatedb.test.aws.region') ?: 'us-east-1'}"
+        println "  AWS Creds: ${findProperty('slatedb.test.aws.accessKey') ? 'Configured' : 'Not configured'}"
+    }
+}
