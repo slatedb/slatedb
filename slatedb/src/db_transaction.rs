@@ -50,8 +50,13 @@ pub struct DBTransaction {
     /// Reference to the transaction manager
     txn_manager: Arc<TransactionManager>,
     /// The write batch of the transaction, which contains the uncommitted writes.
-    /// Users can read data from the write batch during the transaction,
-    /// thus providing an MVCC view of the database.
+    /// Users can read data from the write batch during the transaction, thus providing
+    /// an MVCC view of the database.
+    ///
+    /// DBTransaction is not intended for concurrent use; we use `RwLock` (not `RefCell`) for
+    /// interior mutability to preserve `Sync` in async contexts. `RefCell` is `!Sync` and would
+    /// make `DBTransaction` `!Sync`, which is incompatible with async code using the `DbRead`
+    /// trait.
     write_batch: RwLock<WriteBatch>,
     /// Reference to the database
     db_inner: Arc<DbInner>,
