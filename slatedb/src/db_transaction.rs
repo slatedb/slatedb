@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashSet;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -28,7 +28,7 @@ use crate::DbRead;
 ///
 /// #     let object_store = Arc::new(InMemory::new());
 /// #     let db = Db::open("path/to/db", object_store).await?;
-/// let mut txn = db.begin(IsolationLevel::Snapshot).await?;
+/// let txn = db.begin(IsolationLevel::Snapshot).await?;
 ///
 /// // Read operations
 /// let value = txn.get(b"key").await?;
@@ -50,9 +50,14 @@ pub struct DBTransaction {
     /// Reference to the transaction manager
     txn_manager: Arc<TransactionManager>,
     /// The write batch of the transaction, which contains the uncommitted writes.
-    /// Users can read data from the write batch during the transaction,
-    /// thus providing an MVCC view of the database.
-    write_batch: WriteBatch,
+    /// Users can read data from the write batch during the transaction, thus providing
+    /// an MVCC view of the database.
+    ///
+    /// DBTransaction is not intended for concurrent use; we use `RwLock` (not `RefCell`) for
+    /// interior mutability to preserve `Sync` in async contexts. `RefCell` is `!Sync` and would
+    /// make `DBTransaction` `!Sync`, which is incompatible with async code using the `DbRead`
+    /// trait.
+    write_batch: RwLock<WriteBatch>,
     /// Reference to the database
     db_inner: Arc<DbInner>,
     /// Isolation level for this transaction
@@ -75,7 +80,7 @@ impl DBTransaction {
             txn_id,
             started_seq: seq,
             txn_manager,
-            write_batch: WriteBatch::new().with_txn_id(txn_id),
+            write_batch: RwLock::new(WriteBatch::new().with_txn_id(txn_id)),
             db_inner,
             isolation_level,
             range_trackers: Mutex::new(Vec::new()),
@@ -120,6 +125,9 @@ impl DBTransaction {
 
         let db_state = self.db_inner.state.read().view();
 
+        // Clone the WriteBatch for snapshot isolation
+        let write_batch_cloned = self.write_batch.read().clone();
+
         // For now, delegate to the underlying reader
         self.db_inner
             .reader
@@ -127,7 +135,7 @@ impl DBTransaction {
                 key,
                 options,
                 &db_state,
-                Some(&self.write_batch),
+                Some(write_batch_cloned),
                 Some(self.started_seq),
             )
             .await
@@ -189,6 +197,10 @@ impl DBTransaction {
         self.db_inner.check_error()?;
         let db_state = self.db_inner.state.read().view();
 
+        // Clone the WriteBatch for the scan to ensure that the scan within a transaction
+        // sees a consistent view of the current writes.
+        let write_batch_cloned = self.write_batch.read().clone();
+
         // For now, delegate to the underlying reader
         self.db_inner
             .reader
@@ -196,7 +208,7 @@ impl DBTransaction {
                 BytesRange::from(range),
                 options,
                 &db_state,
-                Some(&self.write_batch),
+                Some(write_batch_cloned),
                 Some(self.started_seq),
                 range_tracker,
             )
@@ -214,7 +226,7 @@ impl DBTransaction {
     /// ## Errors
     /// - It's not really possible to have error here, since the write operation is
     ///   buffered in the write batch.
-    pub fn put<K, V>(&mut self, key: K, value: V) -> Result<(), crate::Error>
+    pub fn put<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -234,7 +246,7 @@ impl DBTransaction {
     /// - It's not really possible to have error here, since the write operation is
     ///   buffered in the write batch.
     pub fn put_with_options<K, V>(
-        &mut self,
+        &self,
         key: K,
         value: V,
         options: &PutOptions,
@@ -243,12 +255,14 @@ impl DBTransaction {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.write_batch.put_with_options(key, value, options);
+        self.write_batch
+            .write()
+            .put_with_options(key, value, options);
         Ok(())
     }
 
     /// Merge a key-value pair into the transaction.
-    pub fn merge<K, V>(&mut self, key: K, value: V) -> Result<(), crate::Error>
+    pub fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -258,7 +272,7 @@ impl DBTransaction {
 
     /// Merge a key-value pair into the transaction with custom options.
     pub fn merge_with_options<K, V>(
-        &mut self,
+        &self,
         key: K,
         value: V,
         options: &MergeOptions,
@@ -267,7 +281,9 @@ impl DBTransaction {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.write_batch.merge_with_options(key, value, options);
+        self.write_batch
+            .write()
+            .merge_with_options(key, value, options);
         Ok(())
     }
 
@@ -280,8 +296,8 @@ impl DBTransaction {
     /// ## Errors
     /// - It's not really possible to have error here, since the delete operation is
     ///   buffered in the write batch.
-    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), crate::Error> {
-        self.write_batch.delete(key);
+    pub fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), crate::Error> {
+        self.write_batch.write().delete(key);
         Ok(())
     }
 
@@ -303,7 +319,7 @@ impl DBTransaction {
     pub async fn commit(self) -> Result<(), crate::Error> {
         // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
         // conflict, neither write-write conflict.
-        if self.write_batch.is_empty() {
+        if self.write_batch.read().is_empty() {
             return Ok(());
         }
 
@@ -318,8 +334,11 @@ impl DBTransaction {
             }
         }
 
+        // Take the write_batch for submission to the database.
+        let write_batch = self.write_batch.read().clone();
+
         // Track the write keys from write batch
-        let write_keys = self.write_batch.keys();
+        let write_keys = write_batch.keys();
         self.txn_manager.track_write_keys(&self.txn_id, &write_keys);
 
         // Submit the WriteBatch to the database for processing. The batch is sent to a
@@ -327,7 +346,7 @@ impl DBTransaction {
         // sequentially, ensuring no concurrent writes. Both conflict checking & persisting
         // are handled there.
         self.db_inner
-            .write_with_options(self.write_batch.clone(), &WriteOptions::default())
+            .write_with_options(write_batch, &WriteOptions::default())
             .await
             .map_err(Into::into)
     }
@@ -410,7 +429,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin transaction
-        let mut txn = db
+        let txn = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
@@ -436,11 +455,11 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn1.put(b"k1", b"v2").unwrap();
 
         // Begin second transaction
-        let mut txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn2.put(b"k1", b"v3").unwrap();
 
         // Commit first transaction - should succeed
@@ -461,7 +480,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn1.put(b"k1", b"v2").unwrap();
 
         // DB put on the same key
@@ -483,7 +502,7 @@ mod tests {
         db.put(b"k2", b"v2.1").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db
+        let txn1 = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
@@ -491,7 +510,7 @@ mod tests {
         txn1.put(b"k2", b"v2.2").unwrap();
 
         // Begin second transaction
-        let mut txn2 = db
+        let txn2 = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
@@ -519,13 +538,13 @@ mod tests {
         db.put(b"k3", b"v3").await.unwrap();
 
         // Begin first transaction
-        let mut txn1 = db
+        let txn1 = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
 
         // Begin second transaction
-        let mut txn2 = db
+        let txn2 = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
@@ -908,5 +927,68 @@ mod tests {
                 test_case.name, i, expected, result
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_txn_scan_sees_concurrent_put_in_same_txn() {
+        // Setup database with initial data
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_db", object_store).await.unwrap();
+
+        // Put initial data: k1 and k3
+        db.put(b"k1", b"v1").await.unwrap();
+        db.put(b"k3", b"v3").await.unwrap();
+
+        // Begin transaction
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+
+        // Test 1: Scan created before put should NOT see the new key or updated value for an existing key
+        {
+            // Start a scan from k1 to k3 (inclusive)
+            let mut iter = txn.scan(&b"k1"[..]..=&b"k3"[..]).await.unwrap();
+
+            // Put k2 in the transaction (after scan has started)
+            txn.put(b"k2", b"v2").unwrap();
+            // Update k3 within the transaction after the scan has started
+            txn.put(b"k3", b"v3_updated").unwrap();
+
+            // Iterate through the results
+            let mut results = Vec::new();
+            while let Some(kv) = iter.next().await.unwrap() {
+                results.push((kv.key.clone(), kv.value.clone()));
+            }
+
+            // The iterator should see k1 and k3 (the snapshot at scan time)
+            // It should NOT see k2 because the scan was created before k2 was put
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].0, Bytes::from_static(b"k1"));
+            assert_eq!(results[0].1, Bytes::from_static(b"v1"));
+            assert_eq!(results[1].0, Bytes::from_static(b"k3"));
+            assert_eq!(results[1].1, Bytes::from_static(b"v3"));
+        } // iter is dropped here
+
+        // Test 2: A new scan after the put should see k2
+        {
+            let mut iter2 = txn.scan(&b"k1"[..]..=&b"k3"[..]).await.unwrap();
+            let mut results2 = Vec::new();
+            while let Some(kv) = iter2.next().await.unwrap() {
+                results2.push((kv.key.clone(), kv.value.clone()));
+            }
+
+            // This new scan should see all three keys and the updated value for k3
+            assert_eq!(results2.len(), 3);
+            assert_eq!(results2[0].0, Bytes::from_static(b"k1"));
+            assert_eq!(results2[1].0, Bytes::from_static(b"k2"));
+            assert_eq!(results2[1].1, Bytes::from_static(b"v2"));
+            assert_eq!(results2[2].0, Bytes::from_static(b"k3"));
+            assert_eq!(results2[2].1, Bytes::from_static(b"v3_updated"));
+        } // iter2 is dropped here
+
+        // Commit the transaction
+        txn.commit().await.unwrap();
+
+        // Verify k2 is now in the database
+        let value = db.get(b"k2").await.unwrap();
+        assert_eq!(value, Some(Bytes::from_static(b"v2")));
     }
 }

@@ -45,8 +45,8 @@ use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::clock::{LogicalClock, SystemClock};
 use crate::config::{
-    FlushOptions, FlushType, PreloadLevel, PutOptions, ReadOptions, ScanOptions, Settings,
-    WriteOptions,
+    FlushOptions, FlushType, MergeOptions, PreloadLevel, PutOptions, ReadOptions, ScanOptions,
+    Settings, WriteOptions,
 };
 use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
@@ -111,6 +111,7 @@ impl DbInner {
         write_notifier: UnboundedSender<WriteBatchMessage>,
         stat_registry: Arc<StatRegistry>,
         fp_registry: Arc<FailPointRegistry>,
+        merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
@@ -141,7 +142,7 @@ impl DbInner {
             db_stats: db_stats.clone(),
             mono_clock: mono_clock.clone(),
             oracle: oracle.clone(),
-            merge_operator: None,
+            merge_operator,
         };
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
@@ -1021,6 +1022,123 @@ impl Db {
         self.write_with_options(batch, options).await
     }
 
+    /// Merge a value into the database with default `MergeOptions` and `WriteOptions`.
+    ///
+    /// Merge operations allow applications to bypass the traditional read/modify/write cycle
+    /// by expressing partial updates using an associative operator. The merge operator must
+    /// be configured when opening the database.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to merge into
+    /// - `value`: the merge operand to apply
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error merging the value, or if no merge operator is configured.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error, MergeOperator, MergeOperatorError};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    /// use bytes::Bytes;
+    ///
+    /// struct StringConcatMergeOperator;
+    ///
+    /// impl MergeOperator for StringConcatMergeOperator {
+    ///     fn merge(&self, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+    ///         let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
+    ///         result.extend_from_slice(&value);
+    ///         Ok(Bytes::from(result))
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::builder("test_db", object_store)
+    ///         .with_merge_operator(Arc::new(StringConcatMergeOperator))
+    ///         .build()
+    ///         .await?;
+    ///     db.merge(b"key", b"value").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let mut batch = WriteBatch::new();
+        batch.merge(key, value);
+        self.write(batch).await
+    }
+
+    /// Merge a value into the database with custom `MergeOptions` and `WriteOptions`.
+    ///
+    /// Merge operations allow applications to bypass the traditional read/modify/write cycle
+    /// by expressing partial updates using an associative operator. The merge operator must
+    /// be configured when opening the database.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to merge into
+    /// - `value`: the merge operand to apply
+    /// - `merge_opts`: the merge options to use
+    /// - `write_opts`: the write options to use
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error merging the value, or if no merge operator is configured.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error, MergeOperator, MergeOperatorError, config::{MergeOptions, WriteOptions}};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    /// use bytes::Bytes;
+    ///
+    /// struct StringConcatMergeOperator;
+    ///
+    /// impl MergeOperator for StringConcatMergeOperator {
+    ///     fn merge(&self, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+    ///         let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
+    ///         result.extend_from_slice(&value);
+    ///         Ok(Bytes::from(result))
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::builder("test_db", object_store)
+    ///         .with_merge_operator(Arc::new(StringConcatMergeOperator))
+    ///         .build()
+    ///         .await?;
+    ///     db.merge_with_options(
+    ///         b"key",
+    ///         b"value",
+    ///         &MergeOptions::default(),
+    ///         &WriteOptions::default()
+    ///     ).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn merge_with_options<K, V>(
+        &self,
+        key: K,
+        value: V,
+        merge_opts: &MergeOptions,
+        write_opts: &WriteOptions,
+    ) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let mut batch = WriteBatch::new();
+        batch.merge_with_options(key, value, merge_opts);
+        self.write_with_options(batch, write_opts).await
+    }
+
     /// Write a batch of put/delete operations atomically to the database. Batch writes
     /// block other gets and writes until the batch is written to the WAL (or memtable if
     /// WAL is disabled).
@@ -1314,7 +1432,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
     use crate::types::RowEntry;
-    use crate::{proptest_util, test_utils, KeyValue};
+    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use futures::{future, future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -3975,10 +4093,10 @@ mod tests {
 
         // Trigger a WAL write, which should not advance the manifest WAL ID
         let result = db.put(b"foo", b"bar").await.unwrap_err();
-        assert_eq!(
-            result.to_string(),
-            "Internal error: background task panicked. name=`wal_writer` (failpoint write-wal-sst-io-error panic)"
-        );
+        assert_eq!(result.kind(), crate::ErrorKind::Closed(CloseReason::Panic));
+        assert!(result
+            .to_string()
+            .contains("background task panicked. name=`wal_writer`"));
 
         // Close, which flushes the latest manifest to the object store
         // TODO: it might make sense to return an error if there're unflushed wals in memory
@@ -4694,6 +4812,7 @@ mod tests {
             l0_sst_size_bytes,
             compactor_options,
             compression_codec: None,
+            merge_operator: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             default_ttl: ttl,
@@ -4817,5 +4936,165 @@ mod tests {
             );
             assert!(recent_min_seq > snapshot_seq);
         }
+    }
+
+    // Merge operator test helpers
+    struct StringConcatMergeOperator;
+
+    impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
+        fn merge(
+            &self,
+            existing_value: Option<Bytes>,
+            value: Bytes,
+        ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {
+            match existing_value {
+                Some(existing) => {
+                    let mut merged = existing.to_vec();
+                    merged.extend_from_slice(&value);
+                    Ok(Bytes::from(merged))
+                }
+                None => Ok(value),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn should_merge_operand_into_empty_key() {
+        // Given: Database with merge operator, empty key
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_1", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        // When: Merging a value
+        db.merge(b"key1", b"value1").await.unwrap();
+
+        // Then: Value is stored and retrievable
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("value1")));
+    }
+
+    #[tokio::test]
+    async fn should_merge_multiple_operands_into_same_key() {
+        // Given: Database with merge operator, key with initial merge
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_2", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        // When: Merging multiple operands to the same key
+        db.merge(b"key1", b"a").await.unwrap();
+        db.merge(b"key1", b"b").await.unwrap();
+        db.merge(b"key1", b"c").await.unwrap();
+
+        // Then: All operands are merged correctly when read
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("abc")));
+    }
+
+    #[tokio::test]
+    async fn should_persist_merge_operands_across_flush() {
+        // Given: Database with merge operator, merge operands in memtable
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_3", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        db.merge(b"key1", b"a").await.unwrap();
+        db.merge(b"key1", b"b").await.unwrap();
+
+        // When: Flushing memtable and reading
+        db.flush().await.unwrap();
+
+        // Then: Merged result is correct after flush
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("ab")));
+
+        // Verify it still works after additional merges post-flush
+        db.merge(b"key1", b"c").await.unwrap();
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("abc")));
+    }
+
+    #[tokio::test]
+    async fn should_error_when_merging_without_merge_operator() {
+        // Given: Database without merge operator configured
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_merge_4", object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        // When: Attempting to merge and then reading
+        // Note: Merge writes succeed, but reads will fail to merge operands
+        db.merge(b"key1", b"value1").await.unwrap();
+
+        // Then: Reading should fail because merge operator is required at read time
+        // The merge operand is stored but can't be merged without an operator
+        let result = db.get(b"key1").await;
+
+        // Verify that reading fails with MergeOperatorMissing error
+        assert!(
+            result.is_err(),
+            "Reading merge operand without merge operator should error"
+        );
+        match result {
+            Err(e) => {
+                // Expected: reading merge operands without a merge operator should error with MergeOperatorMissing
+                let error_string = format!("{}", e);
+                assert!(
+                    error_string.contains("merge operator missing")
+                        || error_string.contains("MergeOperatorMissing"),
+                    "Error should be MergeOperatorMissing, got: {:?}",
+                    e
+                );
+            }
+            Ok(_) => unreachable!("Should have errored"),
+        }
+    }
+
+    #[tokio::test]
+    async fn should_merge_operands_after_reopen() {
+        // Given: Database with merge operator, merge operands written
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_merge_5";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        db.merge(b"key1", b"a").await.unwrap();
+        db.merge(b"key1", b"b").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // When: Closing and reopening database, then reading
+        let db_reopened = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        // Then: Merged result is correct after reopen
+        let result = db_reopened.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("ab")));
+
+        // Verify additional merges work after reopen
+        db_reopened.merge(b"key1", b"c").await.unwrap();
+        let result = db_reopened.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("abc")));
     }
 }

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,15 +9,16 @@ use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
 use tracing::instrument;
 use ulid::Ulid;
-use uuid::Uuid;
 
 use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
-use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
-use crate::compactor_state::SourceId;
-use crate::compactor_state::{Compaction, CompactorState};
+use crate::compactor_executor::{CompactionExecutor, CompactorJobAttempt, TokioCompactionExecutor};
+use crate::compactor_state::{
+    CompactorJob, CompactorJobInput, CompactorJobRequest, CompactorJobRequestType, CompactorState,
+    SourceId,
+};
 use crate::config::{CheckpointOptions, CompactorOptions};
-use crate::db_state::{SortedRun, SsTableHandle};
+use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -38,11 +38,11 @@ pub trait CompactionSchedulerSupplier: Send + Sync {
 }
 
 pub trait CompactionScheduler: Send + Sync {
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
+    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactorJobRequest>;
     fn validate_compaction(
         &self,
         _state: &CompactorState,
-        _compaction: &Compaction,
+        _compaction: &CompactorJobRequest,
     ) -> Result<(), Error> {
         Ok(())
     }
@@ -57,7 +57,7 @@ pub(crate) struct CompactionProgressTracker {
     /// for each compaction job. Can be an estimate.
     ///
     /// (processed_bytes, total_bytes)
-    processed_bytes: SkipMap<Uuid, (u64, u64)>,
+    processed_bytes: SkipMap<Ulid, (u64, u64)>,
 }
 
 impl CompactionProgressTracker {
@@ -72,7 +72,7 @@ impl CompactionProgressTracker {
     /// # Arguments
     /// * `id` - The ID of the compaction job.
     /// * `total_bytes` - The total number of bytes to be processed for the compaction job.
-    pub fn add_job(&mut self, id: Uuid, total_bytes: u64) {
+    pub fn add_job(&mut self, id: Ulid, total_bytes: u64) {
         self.processed_bytes.insert(id, (0, total_bytes));
     }
 
@@ -80,7 +80,7 @@ impl CompactionProgressTracker {
     ///
     /// # Arguments
     /// * `id` - The ID of the compaction job.
-    pub fn remove_job(&mut self, id: Uuid) {
+    pub fn remove_job(&mut self, id: Ulid) {
         self.processed_bytes.remove(&id);
     }
 
@@ -89,7 +89,7 @@ impl CompactionProgressTracker {
     /// # Arguments
     /// * `id` - The ID of the compaction job.
     /// * `bytes_processed` - The total number of bytes processed so far.
-    pub fn update_progress(&mut self, id: Uuid, bytes_processed: u64) {
+    pub fn update_progress(&mut self, id: Ulid, bytes_processed: u64) {
         if let Some((_, total_bytes)) = self.processed_bytes.get(&id).map(|entry| *entry.value()) {
             self.processed_bytes
                 .insert(id, (bytes_processed, total_bytes));
@@ -118,14 +118,19 @@ impl CompactionProgressTracker {
 
 #[derive(Debug)]
 pub(crate) enum CompactorMessage {
-    CompactionFinished {
-        id: Uuid,
+    CompactionJobAttemptFinished {
+        id: Ulid,
         result: Result<SortedRun, SlateDBError>,
+    },
+    /// Sent when an [`CompactionExecutor`] wishes to alert the compactor about starting a compaction.
+    #[allow(dead_code)]
+    CompactionJobAttemptStarted {
+        id: Ulid,
     },
     /// Sent when an [`CompactionExecutor`] wishes to alert the compactor of progress. This
     /// information is only used for reporting purposes, and can be an estimate.
-    CompactionProgress {
-        id: Uuid,
+    CompactionJobAttemptProgress {
+        id: Ulid,
         /// The total number of bytes processed so far.
         bytes_processed: u64,
     },
@@ -283,7 +288,8 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
         match message {
             CompactorMessage::LogStats => self.handle_log_ticker(),
             CompactorMessage::PollManifest => self.handle_ticker().await,
-            CompactorMessage::CompactionFinished { id, result } => match result {
+            CompactorMessage::CompactionJobAttemptStarted { id } => self.compaction_started(id),
+            CompactorMessage::CompactionJobAttemptFinished { id, result } => match result {
                 Ok(sr) => self
                     .finish_compaction(id, sr)
                     .await
@@ -293,7 +299,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                     self.finish_failed_compaction(id);
                 }
             },
-            CompactorMessage::CompactionProgress {
+            CompactorMessage::CompactionJobAttemptProgress {
                 id,
                 bytes_processed,
             } => {
@@ -432,15 +438,15 @@ impl CompactorEventHandler {
         }
     }
 
-    fn validate_compaction(&self, compaction: &Compaction) -> Result<(), SlateDBError> {
+    fn validate_compaction(&self, compaction: &CompactorJobRequest) -> Result<(), SlateDBError> {
         // Validate compaction sources exist
-        if compaction.sources.is_empty() {
-            warn!("submitted compaction is empty: {:?}", compaction.sources);
+        if compaction.sources().is_empty() {
+            warn!("submitted compaction is empty: {:?}", compaction.sources());
             return Err(SlateDBError::InvalidCompaction);
         }
 
         let has_only_l0 = compaction
-            .sources
+            .sources()
             .iter()
             .all(|s| matches!(s, SourceId::Sst(_)));
 
@@ -452,9 +458,9 @@ impl CompactorEventHandler {
                 .compacted
                 .first()
                 .map_or(0, |sr| sr.id + 1);
-            if compaction.destination < highest_id {
+            if compaction.destination() < highest_id {
                 warn!("compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
-                compaction.destination, highest_id);
+                compaction.destination(), highest_id);
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
@@ -465,65 +471,73 @@ impl CompactorEventHandler {
     }
 
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
-        let compactions = self.scheduler.maybe_schedule_compaction(&self.state);
-        for compaction in compactions.iter() {
+        let compactor_job_requests = self.scheduler.maybe_schedule_compaction(&self.state);
+        for compactor_job_request in compactor_job_requests.iter() {
             if self.state.num_compactions() >= self.options.max_concurrent_compactions {
                 info!(
                     "already running {} compactions, which is at the max {}. Won't run compaction {:?}",
                     self.state.num_compactions(),
                     self.options.max_concurrent_compactions,
-                    compaction
+                    compactor_job_request
                 );
                 break;
             }
-            self.submit_compaction(compaction.clone()).await?;
+            // Pass compactor job in here
+            let compactor_job_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
+            let job_input = CompactorJobInput::SortedRunJobInputs {
+                ssts: CompactorJob::get_ssts(
+                    self.state.db_state(),
+                    compactor_job_request.sources(),
+                ),
+                sorted_runs: CompactorJob::get_sorted_runs(
+                    self.state.db_state(),
+                    compactor_job_request.sources(),
+                ),
+            };
+            let compactor_job: CompactorJob = CompactorJob::new(
+                compactor_job_id,
+                CompactorJobRequestType::Internal,
+                compactor_job_request.clone(),
+                job_input,
+            );
+            self.submit_compaction(compactor_job).await?;
         }
         Ok(())
     }
 
     async fn start_compaction(
         &mut self,
-        id: Uuid,
-        compaction: Compaction,
+        id: Ulid,
+        compactor_job: CompactorJob,
     ) -> Result<(), SlateDBError> {
         self.log_compaction_state();
         let db_state = self.state.db_state();
-        let compacted_sst_iter = db_state.compacted.iter().flat_map(|sr| sr.ssts.iter());
-        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
-            .l0
-            .iter()
-            .chain(compacted_sst_iter)
-            .map(|sst| (sst.id.unwrap_compacted_id(), sst))
-            .collect();
-        let srs_by_id: HashMap<u32, &SortedRun> =
-            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
-        let ssts: Vec<SsTableHandle> = compaction
-            .sources
-            .iter()
-            .filter_map(|s| s.maybe_unwrap_sst())
-            .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
-            .collect();
-        let sorted_runs: Vec<SortedRun> = compaction
-            .sources
-            .iter()
-            .filter_map(|s| s.maybe_unwrap_sorted_run())
-            .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
-            .collect();
+        let request = compactor_job.compactor_job_request();
+        let (ssts, sorted_runs) = match &compactor_job.job_input() {
+            CompactorJobInput::SortedRunJobInputs { ssts, sorted_runs } => {
+                (ssts.to_vec(), sorted_runs.to_vec())
+            }
+        };
         // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
         let is_dest_last_run = db_state.compacted.is_empty()
             || db_state
                 .compacted
                 .last()
-                .is_some_and(|sr| compaction.destination == sr.id);
-        let job = CompactionJob {
+                .is_some_and(|sr| request.destination() == sr.id);
+
+        let job = CompactorJobAttempt {
             id,
-            destination: compaction.destination,
+            compactor_job_id: compactor_job.id(),
+            destination: request.destination(),
             ssts,
             sorted_runs,
-            compaction_ts: db_state.last_l0_clock_tick,
+            attempt_ts: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
         };
+
+        // TODO(sujeetsawala): Add job attempt to compaction
+
         self.progress_tracker
             .add_job(id, job.estimated_source_bytes());
         let this_executor = self.executor.clone();
@@ -548,18 +562,23 @@ impl CompactorEventHandler {
     }
 
     // state writers
-    fn finish_failed_compaction(&mut self, id: Uuid) {
-        self.state.finish_failed_compaction(id);
+    fn finish_failed_compaction(&mut self, id: Ulid) {
+        self.state.finish_failed_compactor_job(id);
         self.progress_tracker.remove_job(id);
+    }
+
+    fn compaction_started(&mut self, id: Ulid) {
+        self.state.start_compactor_job(id);
+        self.log_compaction_state();
     }
 
     #[instrument(level = "debug", skip_all, fields(id = %id))]
     async fn finish_compaction(
         &mut self,
-        id: Uuid,
+        id: Ulid,
         output_sr: SortedRun,
     ) -> Result<(), SlateDBError> {
-        self.state.finish_compaction(id, output_sr);
+        self.state.finish_compactor_job(id, output_sr);
         self.progress_tracker.remove_job(id);
         self.log_compaction_state();
         self.write_manifest_safely().await?;
@@ -571,21 +590,27 @@ impl CompactorEventHandler {
     }
 
     #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
-    async fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
+    async fn submit_compaction(&mut self, compactor_job: CompactorJob) -> Result<(), SlateDBError> {
+        let request = compactor_job.compactor_job_request();
         // Validate the candidate compaction; skip invalid ones
-        if let Err(e) = self.validate_compaction(&compaction) {
+        if let Err(e) = self.validate_compaction(request) {
             warn!("invalid compaction [error={:?}]", e);
             return Ok(());
         }
 
-        let id = self.rand.rng().gen_uuid();
+        self.state.submit_compactor_job(compactor_job.clone());
+        // Generate a compactionJob id
+        let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
         tracing::Span::current().record("id", tracing::field::display(&id));
-        let result = self.state.submit_compaction(id, compaction.clone());
+        let result = self.state.submit_compaction(id, compactor_job.clone());
         match result {
             Ok(_) => {
-                self.start_compaction(id, compaction).await?;
+                // TODO(sujeetsawala): Add compaction plan to object store with Pending status
+                self.start_compaction(id, compactor_job).await?;
             }
             Err(err) => {
+                // TODO(sujeetsawala): Add compaction plan to object store with Failed status
+                self.state.remove_compactor_job(&compactor_job.id());
                 warn!("invalid compaction [error={:?}]", err);
             }
         }
@@ -595,6 +620,8 @@ impl CompactorEventHandler {
     async fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
+        // TODO(sujeetsawala): Fetch and Run Pending Compactions from object store
+        // self.run_pending_compactions().await?;
         self.maybe_schedule_compactions().await?;
         Ok(())
     }
@@ -645,6 +672,7 @@ pub mod stats {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::future::Future;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -659,8 +687,8 @@ mod tests {
     use super::*;
     use crate::clock::DefaultSystemClock;
     use crate::compactor::stats::CompactionStats;
-    use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
-    use crate::compactor_state::{Compaction, CompactorState, SourceId};
+    use crate::compactor_executor::{CompactionExecutor, TokioCompactionExecutor};
+    use crate::compactor_state::{CompactorState, SourceId};
     use crate::compactor_stats::LAST_COMPACTION_TS_SEC;
     use crate::config::{
         PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
@@ -1053,21 +1081,20 @@ mod tests {
             }
         }
 
-        async fn build_l0_compaction(&mut self) -> Compaction {
-            let l0_ids_to_compact: Vec<SourceId> = self
-                .latest_db_state()
-                .await
+        async fn build_l0_compaction(&mut self) -> CompactorJobRequest {
+            let db_state = self.latest_db_state().await;
+            let l0_ids_to_compact: Vec<SourceId> = db_state
                 .l0
                 .iter()
                 .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
                 .collect();
-            Compaction::new(l0_ids_to_compact, 0)
+            CompactorJobRequest::new(l0_ids_to_compact, 0)
         }
 
-        fn assert_started_compaction(&self, num: usize) -> Vec<CompactionJob> {
-            let compactions = self.executor.pop_jobs();
-            assert_eq!(num, compactions.len());
-            compactions
+        fn assert_started_compaction(&self, num: usize) -> Vec<CompactorJobAttempt> {
+            let attempts = self.executor.pop_jobs();
+            assert_eq!(num, attempts.len());
+            attempts
         }
 
         fn assert_and_forward_compactions(&self, num: usize) {
@@ -1086,10 +1113,19 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
-            .await
-            .unwrap()
-            .expect("timeout");
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
+                    .await
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
+            }
+        })
+        .await
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         let starting_last_ts = fixture
             .stats_registry
             .lookup(LAST_COMPACTION_TS_SEC)
@@ -1123,10 +1159,19 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
-            .await
-            .unwrap()
-            .expect("timeout");
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
+                    .await
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
+            }
+        })
+        .await
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         // write an l0 before handling compaction finished
         fixture.write_l0().await;
 
@@ -1154,7 +1199,7 @@ mod tests {
         assert_eq!(
             db_state.l0_last_compacted.unwrap(),
             compaction
-                .sources
+                .sources()
                 .first()
                 .and_then(|id| id.maybe_unwrap_sst())
                 .unwrap()
@@ -1170,7 +1215,7 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         let job = fixture.assert_started_compaction(1).pop().unwrap();
-        let msg = CompactorMessage::CompactionFinished {
+        let msg = CompactorMessage::CompactionJobAttemptFinished {
             id: job.id,
             result: Err(SlateDBError::InvalidDBState),
         };
@@ -1216,11 +1261,19 @@ mod tests {
         fixture.scheduler.inject_compaction(compaction.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(Duration::from_millis(10), fixture.real_executor_rx.recv())
-            .await
-            .unwrap()
-            .expect("timeout");
-
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
+                    .await
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
+            }
+        })
+        .await
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         // when:
         fixture
             .handler
@@ -1242,7 +1295,7 @@ mod tests {
             .iter()
             .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
             .collect();
-        assert_eq!(l0_ids, compaction.sources);
+        assert_eq!(&l0_ids, compaction.sources());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1302,7 +1355,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_compaction_empty_sources_rejected() {
         let fixture = CompactorEventHandlerTestFixture::new().await;
-        let c = Compaction::new(Vec::new(), 0);
+        let c = CompactorJobRequest::new(Vec::new(), 0);
         let err = fixture.handler.validate_compaction(&c).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
@@ -1325,13 +1378,19 @@ mod tests {
         fixture.scheduler.inject_compaction(c1.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            fixture.real_executor_rx.recv(),
-        )
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
+                    .await
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
+            }
+        })
         .await
-        .unwrap()
-        .expect("timeout waiting compaction msg");
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         fixture.handler.handle(msg).await.unwrap();
 
         // now highest_id should be 1; build L0-only compaction with dest 0 (below highest)
@@ -1350,13 +1409,19 @@ mod tests {
         fixture.scheduler.inject_compaction(c1.clone());
         fixture.handler.handle_ticker().await;
         fixture.assert_and_forward_compactions(1);
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            fixture.real_executor_rx.recv(),
-        )
+        let msg = tokio::time::timeout(Duration::from_millis(10), async {
+            match fixture.real_executor_rx.recv().await {
+                Some(m @ CompactorMessage::CompactionJobAttemptFinished { .. }) => m,
+                Some(_) => fixture
+                    .real_executor_rx
+                    .recv()
+                    .await
+                    .expect("channel closed before CompactionJobAttemptFinished"),
+                None => panic!("channel closed before receiving any message"),
+            }
+        })
         .await
-        .unwrap()
-        .expect("timeout waiting compaction msg");
+        .expect("timeout waiting for CompactionJobAttemptFinished");
         fixture.handler.handle(msg).await.unwrap();
 
         // prepare a mixed compaction: one SR source and one L0 source
@@ -1364,7 +1429,7 @@ mod tests {
         let state = fixture.latest_db_state().await;
         let sr_id = state.compacted.first().unwrap().id;
         let l0_ulid = state.l0.front().unwrap().id.unwrap_compacted_id();
-        let mixed = Compaction::new(
+        let mixed = CompactorJobRequest::new(
             vec![SourceId::SortedRun(sr_id), SourceId::Sst(l0_ulid)],
             sr_id,
         );
@@ -1475,7 +1540,7 @@ mod tests {
     }
 
     struct MockSchedulerInner {
-        compaction: Vec<Compaction>,
+        compaction: Vec<CompactorJobRequest>,
     }
 
     #[derive(Clone)]
@@ -1490,21 +1555,21 @@ mod tests {
             }
         }
 
-        fn inject_compaction(&self, compaction: Compaction) {
+        fn inject_compaction(&self, compaction: CompactorJobRequest) {
             let mut inner = self.inner.lock();
             inner.compaction.push(compaction);
         }
     }
 
     impl CompactionScheduler for MockScheduler {
-        fn maybe_schedule_compaction(&self, _state: &CompactorState) -> Vec<Compaction> {
+        fn maybe_schedule_compaction(&self, _state: &CompactorState) -> Vec<CompactorJobRequest> {
             let mut inner = self.inner.lock();
             std::mem::take(&mut inner.compaction)
         }
     }
 
     struct MockExecutorInner {
-        jobs: Vec<CompactionJob>,
+        jobs: Vec<CompactorJobAttempt>,
     }
 
     #[derive(Clone)]
@@ -1519,14 +1584,14 @@ mod tests {
             }
         }
 
-        fn pop_jobs(&self) -> Vec<CompactionJob> {
+        fn pop_jobs(&self) -> Vec<CompactorJobAttempt> {
             let mut guard = self.inner.lock();
             std::mem::take(&mut guard.jobs)
         }
     }
 
     impl CompactionExecutor for MockExecutor {
-        fn start_compaction(&self, compaction: CompactionJob) {
+        fn start_compaction(&self, compaction: CompactorJobAttempt) {
             let mut guard = self.inner.lock();
             guard.jobs.push(compaction);
         }
