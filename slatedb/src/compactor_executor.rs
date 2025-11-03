@@ -17,6 +17,9 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
+use crate::merge_operator::{
+    MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
+};
 use crate::rand::DbRand;
 use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -107,6 +110,7 @@ impl TokioCompactionExecutor {
         stats: Arc<CompactionStats>,
         clock: Arc<dyn SystemClock>,
         manifest_store: Arc<ManifestStore>,
+        merge_operator: Option<MergeOperatorType>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioCompactionExecutorInner {
@@ -120,6 +124,7 @@ impl TokioCompactionExecutor {
                 clock,
                 is_stopped: AtomicBool::new(false),
                 manifest_store,
+                merge_operator,
             }),
         }
     }
@@ -154,13 +159,14 @@ pub(crate) struct TokioCompactionExecutorInner {
     clock: Arc<dyn SystemClock>,
     is_stopped: AtomicBool,
     manifest_store: Arc<ManifestStore>,
+    merge_operator: Option<MergeOperatorType>,
 }
 
 impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         compaction: &'a CompactorJobAttempt,
-    ) -> Result<RetentionIterator<MergeIterator<'a>>, SlateDBError> {
+    ) -> Result<RetentionIterator<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,
@@ -190,6 +196,16 @@ impl TokioCompactionExecutorInner {
         let sr_merge_iter = MergeIterator::new(sr_iters)?.with_dedup(false);
 
         let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])?.with_dedup(false);
+        let merge_iter = if let Some(merge_operator) = self.merge_operator.clone() {
+            Box::new(MergeOperatorIterator::new(
+                merge_operator,
+                merge_iter,
+                false,
+                compaction.attempt_ts,
+            ))
+        } else {
+            Box::new(MergeOperatorRequiredIterator::new(merge_iter)) as Box<dyn KeyValueIterator>
+        };
 
         let stored_manifest = StoredManifest::load(self.manifest_store.clone()).await?;
         let mut retention_iter = RetentionIterator::new(
