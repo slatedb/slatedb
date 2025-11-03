@@ -1485,7 +1485,7 @@ mod tests {
             };
 
             let empty_l0 = core_db_state.l0.is_empty();
-            let compaction_ran = core_db_state.compacted.len() > 0;
+            let compaction_ran = !core_db_state.compacted.is_empty();
             if empty_wal && empty_memtable && empty_l0 && compaction_ran {
                 return Some(core_db_state);
             }
