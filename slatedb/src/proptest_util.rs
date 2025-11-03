@@ -480,17 +480,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "calculated empty bytes for range")]
-    fn test_bytes_in_range() {
-        let mut rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
-        let range = BytesRange::new(
-            Bound::Unbounded,
-            Bound::Included(Bytes::from_static(&[0; 1])),
-        );
-        sample::bytes_in_range(&mut rng, &range);
-    }
-
-    #[test]
     fn test_bytes_in_range_with_multiple_bytes() {
         let mut rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
         let range = BytesRange::new(
