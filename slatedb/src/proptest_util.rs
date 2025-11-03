@@ -406,7 +406,8 @@ pub(crate) mod sample {
                     // Prevent this by using Excluded(0) as the min len so we get a non-empty
                     // result no matter what.
                     Unbounded => Excluded(0),
-                    Included(b) | Excluded(b) => Included(b.len()),
+                    Included(b) => Included(b.len()),
+                    Excluded(b) => Excluded(b.len()),
                 };
                 let max_len = range.end_bound().map(|b| b.len());
                 let result = minvalue_bytes(rng, min_len, max_len);
