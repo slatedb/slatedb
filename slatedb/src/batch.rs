@@ -149,6 +149,25 @@ impl WriteBatch {
         }
     }
 
+    /// Remove all existing ops for the given user key from the batch.
+    fn remove_ops_by_key(&mut self, key: &Bytes) {
+        // Find the contiguous range of entries for this user key and delete them in place.
+        let start = SequencedKey::new(key.clone(), u64::MAX);
+        let end = SequencedKey::new(key.clone(), 0);
+
+        // Collect keys to remove
+        let keys_to_remove: Vec<SequencedKey> = self
+            .ops
+            .range(start..=end)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        // Remove them
+        for k in keys_to_remove {
+            self.ops.remove(&k);
+        }
+    }
+
     pub(crate) fn with_txn_id(self, txn_id: Uuid) -> Self {
         Self {
             ops: self.ops,
@@ -205,11 +224,8 @@ impl WriteBatch {
 
         let key = Bytes::copy_from_slice(key.as_ref());
         // put will overwrite the existing key so we can safely
-        // remove all previous entries. unfortunately, rust BTree doesn't have
-        // a more efficient way than scanning the entire map to remove
-        // a set of keys (though there is a proposal to amend the
-        // extract_if API to support taking in a range to scan)
-        self.ops.retain(|k, _| k.user_key != key);
+        // remove all previous entries.
+        self.remove_ops_by_key(&key);
         self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Put(
@@ -258,12 +274,9 @@ impl WriteBatch {
 
         let key = Bytes::copy_from_slice(key.as_ref());
 
-        // deletes will overwrite the existing key so we can safely
-        // remove all previous entries. unfortunately, rust BTree doesn't have
-        // a more efficient way than scanning the entire map to remove
-        // a set of keys (though there is a proposal to amend the
-        // extract_if API to support taking in a range to scan)
-        self.ops.retain(|k, _| k.user_key != key);
+        // delete will overwrite the existing key so we can safely
+        // remove all previous entries.
+        self.remove_ops_by_key(&key);
         self.ops.insert(
             SequencedKey::new(key.clone(), self.write_idx),
             WriteOp::Delete(key),
@@ -314,34 +327,31 @@ impl WriteBatch {
     }
 }
 
-/// Iterator over WriteBatch entries
-pub(crate) struct WriteBatchIterator<'a> {
-    iter: Peekable<Box<dyn Iterator<Item = (&'a SequencedKey, RowEntry)> + Send + Sync + 'a>>,
+/// Iterator over `WriteBatch` entries.
+pub(crate) struct WriteBatchIterator {
+    iter: Peekable<Box<dyn Iterator<Item = (SequencedKey, RowEntry)> + Send + Sync>>,
     ordering: IterationOrder,
 }
 
-impl<'a> WriteBatchIterator<'a> {
+impl WriteBatchIterator {
     pub(crate) fn new(
-        batch: &'a WriteBatch,
+        batch: WriteBatch,
         range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
     ) -> Self {
         let range = KVTableInternalKeyRange::from(range);
-        let iter: Box<dyn Iterator<Item = _> + Send + Sync + 'a> = match ordering {
-            IterationOrder::Ascending => Box::new(
-                batch
-                    .ops
-                    .range(range)
-                    .map(|(k, v)| (k, v.to_row_entry(u64::MAX, None, None))),
-            ),
-            IterationOrder::Descending => Box::new(
-                batch
-                    .ops
-                    .range(range)
-                    .rev()
-                    .map(|(k, v)| (k, v.to_row_entry(u64::MAX, None, None))),
-            ),
-        };
+        let mut entries: Vec<(SequencedKey, RowEntry)> = batch
+            .ops
+            .range(range)
+            .map(|(k, v)| (k.clone(), v.to_row_entry(u64::MAX, None, None)))
+            .collect();
+
+        if matches!(ordering, IterationOrder::Descending) {
+            entries.reverse();
+        }
+
+        let iter: Box<dyn Iterator<Item = (SequencedKey, RowEntry)> + Send + Sync> =
+            Box::new(entries.into_iter());
 
         Self {
             iter: iter.peekable(),
@@ -350,7 +360,7 @@ impl<'a> WriteBatchIterator<'a> {
     }
 
     pub(crate) fn new_with_seq_and_ttl(
-        batch: &'a WriteBatch,
+        batch: &WriteBatch,
         range: impl RangeBounds<Bytes>,
         ordering: IterationOrder,
         seq: u64,
@@ -358,28 +368,25 @@ impl<'a> WriteBatchIterator<'a> {
         default_ttl: Option<u64>,
     ) -> Self {
         let range = KVTableInternalKeyRange::from(range);
-        let iter: Box<dyn Iterator<Item = _> + Send + Sync + 'a> = match ordering {
-            IterationOrder::Ascending => Box::new(batch.ops.range(range).map(move |(k, v)| {
+        let mut entries: Vec<(SequencedKey, RowEntry)> = batch
+            .ops
+            .range(range)
+            .map(|(k, v)| {
                 let expire_ts = match v {
                     WriteOp::Put(_, _, opts) => opts.expire_ts_from(default_ttl, now),
                     WriteOp::Merge(_, _, opts) => opts.expire_ts_from(default_ttl, now),
                     WriteOp::Delete(_) => None,
                 };
-                (k, v.to_row_entry(seq, Some(now), expire_ts))
-            })),
-            IterationOrder::Descending => {
-                // need to copy the logic from Ascending in order to satisfy the lifetimes
-                // of the parameters passed in (default_ttl and now)
-                Box::new(batch.ops.range(range).rev().map(move |(k, v)| {
-                    let expire_ts = match v {
-                        WriteOp::Put(_, _, opts) => opts.expire_ts_from(default_ttl, now),
-                        WriteOp::Merge(_, _, opts) => opts.expire_ts_from(default_ttl, now),
-                        WriteOp::Delete(_) => None,
-                    };
-                    (k, v.to_row_entry(seq, Some(now), expire_ts))
-                }))
-            }
-        };
+                (k.clone(), v.to_row_entry(seq, Some(now), expire_ts))
+            })
+            .collect();
+
+        if matches!(ordering, IterationOrder::Descending) {
+            entries.reverse();
+        }
+
+        let iter: Box<dyn Iterator<Item = (SequencedKey, RowEntry)> + Send + Sync> =
+            Box::new(entries.into_iter());
 
         Self {
             iter: iter.peekable(),
@@ -389,7 +396,7 @@ impl<'a> WriteBatchIterator<'a> {
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for WriteBatchIterator<'a> {
+impl KeyValueIterator for WriteBatchIterator {
     async fn init(&mut self) -> Result<(), crate::error::SlateDBError> {
         Ok(())
     }
@@ -401,8 +408,8 @@ impl<'a> KeyValueIterator for WriteBatchIterator<'a> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
         while let Some((key, _)) = self.iter.peek() {
             if match self.ordering {
-                IterationOrder::Ascending => key.user_key < next_key,
-                IterationOrder::Descending => key.user_key > next_key,
+                IterationOrder::Ascending => key.user_key.as_ref() < next_key,
+                IterationOrder::Descending => key.user_key.as_ref() > next_key,
             } {
                 self.iter.next();
             } else {
@@ -519,7 +526,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.delete(b"key4");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -546,7 +553,7 @@ mod tests {
 
         // Test range [key2, key4)
         let mut iter = WriteBatchIterator::new(
-            &batch,
+            batch.clone(),
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
         );
@@ -563,7 +570,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key2", b"value2");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Descending);
 
         let expected = vec![
             RowEntry::new_value(b"key3", b"value3", u64::MAX),
@@ -581,7 +588,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Seek to key3
         iter.seek(b"key3").await.unwrap();
@@ -602,7 +609,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.put(b"key5", b"value5");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Descending);
 
         // Seek to key3 (in descending, we want keys <= key3)
         iter.seek(b"key3").await.unwrap();
@@ -619,7 +626,7 @@ mod tests {
     #[tokio::test]
     async fn test_writebatch_iterator_empty_batch() {
         let batch = WriteBatch::new();
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         let result = iter.next_entry().await.unwrap();
         assert!(result.is_none());
@@ -631,7 +638,7 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Seek to key2 (doesn't exist)
         iter.seek(b"key2").await.unwrap();
@@ -653,7 +660,7 @@ mod tests {
         batch.put(b"key1", b"value1");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Seek beyond maximum key
         iter.seek(b"key9").await.unwrap();
@@ -671,7 +678,7 @@ mod tests {
         batch.put(b"key3", b"value3");
         batch.delete(b"key4");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", u64::MAX),
@@ -701,7 +708,7 @@ mod tests {
         batch.put(b"key2", b"value2");
         batch.put(b"key3", b"value3");
 
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Seek before first key
         iter.seek(b"key1").await.unwrap();
@@ -724,7 +731,7 @@ mod tests {
 
         // Range [key2, key4) should include tombstones
         let mut iter = WriteBatchIterator::new(
-            &batch,
+            batch.clone(),
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
         );
@@ -992,7 +999,7 @@ mod tests {
         batch.delete(b"key3");
 
         // When: creating an iterator
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Then: the iterator should return all operations in order
         let expected = vec![
@@ -1032,7 +1039,7 @@ mod tests {
         batch.merge(b"key1", b"merge3");
 
         // When: creating an iterator
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
 
         // Then: the iterator should return all merge operations
         let expected = vec![
@@ -1071,7 +1078,7 @@ mod tests {
         batch.merge(b"key1", b"merge3");
 
         // When: creating a descending iterator
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Descending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Descending);
 
         // Then: the iterator should return operations in descending order
         let expected = vec![
@@ -1111,7 +1118,7 @@ mod tests {
 
         // When: creating an iterator with a range filter
         let mut iter = WriteBatchIterator::new(
-            &batch,
+            batch.clone(),
             BytesRange::from(Bytes::from_static(b"key2")..Bytes::from_static(b"key4")),
             IterationOrder::Ascending,
         );
@@ -1137,7 +1144,7 @@ mod tests {
         batch.merge(b"key5", b"merge5");
 
         // When: creating an iterator and seeking to key3
-        let mut iter = WriteBatchIterator::new(&batch, .., IterationOrder::Ascending);
+        let mut iter = WriteBatchIterator::new(batch.clone(), .., IterationOrder::Ascending);
         iter.seek(b"key3").await.unwrap();
 
         // Then: the iterator should return key3 and key5
