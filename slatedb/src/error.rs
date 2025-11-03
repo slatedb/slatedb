@@ -1,7 +1,5 @@
 use object_store::path::Path;
-use std::any::Any;
 use std::ops::Bound;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error as ThisError;
@@ -105,9 +103,7 @@ pub(crate) enum SlateDBError {
     ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
 
     #[error("background task panicked. name=`{0}`")]
-    // we need to wrap the panic args in an Arc so SlateDbError is Clone
-    // we need to wrap the panic args in a mutex so that SlateDbError is Sync
-    BackgroundTaskPanic(String, Arc<Mutex<Box<dyn Any + Send>>>),
+    BackgroundTaskPanic(String),
 
     #[error("background task exists. name=`{0}`")]
     BackgroundTaskExists(String),
@@ -231,7 +227,8 @@ impl From<foyer::Error> for SlateDBError {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Represents the reason that a database instance has been closed.
-#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {
     /// The database has been shutdown cleanly.
     Clean,
@@ -249,7 +246,7 @@ pub enum CloseReason {
 /// decide how to proceed. Adding new [ErrorKind]s requires an RFC, and should happen very
 /// infrequently.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// A transaction conflict occurred. The transaction must be retried or dropped.
     Transaction,
@@ -406,6 +403,7 @@ impl From<SlateDBError> for Error {
             // Closed
             SlateDBError::Closed => Error::closed(msg, CloseReason::Clean),
             SlateDBError::Fenced => Error::closed(msg, CloseReason::Fenced),
+            SlateDBError::BackgroundTaskPanic(_) => Error::closed(msg, CloseReason::Panic),
 
             // Unavailable errors
             SlateDBError::IoError(err) => Error::unavailable(msg).with_source(Box::new(err)),
@@ -473,33 +471,11 @@ impl From<SlateDBError> for Error {
 
             // Internal errors
             SlateDBError::CompactionExecutorFailed => Error::internal(msg),
-            SlateDBError::BackgroundTaskPanic(_, err) => {
-                Error::internal(msg).with_source(Box::new(PanicError(err)))
-            }
             SlateDBError::SeekKeyOutOfKeyRange { .. } => Error::internal(msg),
             SlateDBError::ReadChannelError(err) => Error::internal(msg).with_source(Box::new(err)),
             SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskCancelled(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskExecutorStarted => Error::internal(msg),
         }
-    }
-}
-
-#[derive(Debug)]
-struct PanicError(Arc<Mutex<Box<dyn Any + Send>>>);
-impl std::error::Error for PanicError {}
-impl std::fmt::Display for PanicError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let guard = self.0.lock().expect("Failed to lock panic error");
-        if let Some(err) = guard.downcast_ref::<SlateDBError>() {
-            write!(f, "{err}")?;
-        } else if let Some(err) = guard.downcast_ref::<Box<dyn std::error::Error>>() {
-            write!(f, "{err}")?;
-        } else if let Some(err) = guard.downcast_ref::<String>() {
-            write!(f, "{err}")?;
-        } else {
-            write!(f, "irrecoverable panic")?;
-        }
-        Ok(())
     }
 }

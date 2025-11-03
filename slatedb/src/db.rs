@@ -1432,7 +1432,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
     use crate::types::RowEntry;
-    use crate::{proptest_util, test_utils, KeyValue};
+    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use futures::{future, future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -4093,10 +4093,10 @@ mod tests {
 
         // Trigger a WAL write, which should not advance the manifest WAL ID
         let result = db.put(b"foo", b"bar").await.unwrap_err();
-        assert_eq!(
-            result.to_string(),
-            "Internal error: background task panicked. name=`wal_writer` (failpoint write-wal-sst-io-error panic)"
-        );
+        assert_eq!(result.kind(), crate::ErrorKind::Closed(CloseReason::Panic));
+        assert!(result
+            .to_string()
+            .contains("background task panicked. name=`wal_writer`"));
 
         // Close, which flushes the latest manifest to the object store
         // TODO: it might make sense to return an error if there're unflushed wals in memory

@@ -5,9 +5,11 @@ use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
+use crate::utils::panic_string;
+use log::error;
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::task;
 use tokio::task::JoinHandle;
 
@@ -174,12 +176,16 @@ impl WalReplayIterator<'_> {
                 Ok(Ok(sst_iter)) => sst_iter,
                 Ok(Err(slate_err)) => return Err(slate_err),
                 Err(join_err) => {
-                    return Err(SlateDBError::BackgroundTaskPanic(
-                        "wal_replay".to_string(),
-                        Arc::new(Mutex::new(join_err.try_into_panic().unwrap_or_else(|_| {
-                            Box::new("Load of SST iterator panicked or was cancelled")
-                        }))),
-                    ))
+                    let task_name = format!("wal_replay[{:?}]", self.wal_id_range);
+                    if let Ok(panic_err) = join_err.try_into_panic() {
+                        error!(
+                            "wal_replay task panicked unexpectedly. [task_name={}, panic={}]",
+                            task_name,
+                            panic_string(&panic_err),
+                        );
+                        return Err(SlateDBError::BackgroundTaskPanic(task_name));
+                    }
+                    return Err(SlateDBError::BackgroundTaskCancelled(task_name));
                 }
             }
         } else {
