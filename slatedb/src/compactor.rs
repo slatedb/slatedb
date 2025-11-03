@@ -733,7 +733,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (manifest_store, table_store) = build_test_stores(os.clone());
+        let (_, table_store) = build_test_stores(os.clone());
         let mut expected = HashMap::<Vec<u8>, Vec<u8>>::new();
         for i in 0..4 {
             let k = vec![b'a' + i as u8; 16];
@@ -749,7 +749,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, manifest_store).await;
+        let db_state = await_compaction(&db).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -814,7 +814,7 @@ mod tests {
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
-        let db_state = await_compaction(&db, manifest_store.clone()).await.unwrap();
+        let db_state = await_compaction(&db).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
 
@@ -901,7 +901,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (manifest_store, table_store) = build_test_stores(os.clone());
+        let (_, table_store) = build_test_stores(os.clone());
 
         let value = &[b'a'; 64];
 
@@ -959,7 +959,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, manifest_store).await;
+        let db_state = await_compaction(&db).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1328,7 +1328,6 @@ mod tests {
             .await
             .unwrap();
 
-        let (manifest_store, _) = build_test_stores(os.clone());
         for i in 0..4 {
             let k = vec![b'a' + i as u8; 16];
             let v = vec![b'b' + i as u8; 48];
@@ -1341,9 +1340,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        await_compaction(&db, manifest_store)
-            .await
-            .expect("db was not compacted");
+        await_compaction(&db).await.expect("db was not compacted");
 
         // then:
         let metrics = db.metrics();
@@ -1475,20 +1472,20 @@ mod tests {
 
     /// Waits until all writes have made their way to L1 or below. No data is allowed in
     /// in-memory WALs, in-memory memtables, or L0 SSTs on object storage.
-    async fn await_compaction(db: &Db, manifest_store: Arc<ManifestStore>) -> Option<CoreDbState> {
+    async fn await_compaction(db: &Db) -> Option<CoreDbState> {
         run_for(Duration::from_secs(10), || async {
-            let (empty_wal, empty_memtable) = {
-                let db_state = db.inner.state.read();
+            let (empty_wal, empty_memtable, core_db_state) = {
+                let db_state = db.inner.state.write();
                 let cow_db_state = db_state.state();
                 (
                     db.inner.wal_buffer.is_empty(),
                     db_state.memtable().is_empty() && cow_db_state.imm_memtable.is_empty(),
+                    db_state.state().core().clone(),
                 )
             };
 
-            let core_db_state = get_db_state(manifest_store.clone()).await;
             let empty_l0 = core_db_state.l0.is_empty();
-            let compaction_ran = core_db_state.l0_last_compacted.is_some();
+            let compaction_ran = core_db_state.compacted.len() > 0;
             if empty_wal && empty_memtable && empty_l0 && compaction_ran {
                 return Some(core_db_state);
             }
