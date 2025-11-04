@@ -105,7 +105,7 @@ pub struct CSdbScanOptions {
 /// Contains the iterator and a reference to the database to ensure proper lifetime management
 pub struct CSdbIterator {
     pub db_ptr: *mut SlateDbFFI, // Keep DB alive via pointer reference
-    pub iter: DbIterator,        // Iterator with transmuted lifetime
+    pub iter: DbIterator,
 }
 
 impl CSdbIterator {
