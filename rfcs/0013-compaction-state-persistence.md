@@ -888,3 +888,4 @@ Using **AWS S3 Standard** pricing:
 ## Updates
 
 - 2025-11-01: updated the in-memory data-models for compactor
+- 2025-11-04: updated the nomenclature of data-models and added future extension items
