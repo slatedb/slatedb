@@ -102,7 +102,7 @@ pub(crate) enum CompactorJobInput {
 /// can use for progress reporting and resume logic.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CompactorJobProgress {
-    LinearCompactorJob {
+    LinearCompactorJobProgress {
         /// ULIDs of L0 SSTs and Sorted Runs that have been fully read/compacted when the job
         /// snapshot is taken (useful for resume/diagnostics).
         completed_sources: Vec<SourceId>,
@@ -234,7 +234,7 @@ impl CompactorJob {
             job_input,
             status: CompactorJobStatus::Submitted,
             attempts: vec![],
-            progress: CompactorJobProgress::LinearCompactorJob {
+            progress: CompactorJobProgress::LinearCompactorJobProgress {
                 completed_sources: vec![],
             },
         }
