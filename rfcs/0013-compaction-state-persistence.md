@@ -8,27 +8,27 @@
   - [Non-Goals](#non-goals)
   - [Constraints](#constraints)
   - [References](#references)
-  - [ProblemStatement](#problemstatement)
+- [Problem Statement](#problem-statement)
     - [Core Architecture Issues](#core-architecture-issues)
     - [Operational Limitations](#operational-limitations)
     - [Impact](#impact)
   - [Proposal](#proposal)
     - [Core Strategy: Iterator-Based Persistence](#core-strategy-iterator-based-persistence)
-  - [Workflow](#workflow)
+- [Workflow](#workflow)
     - [Current Compaction Workflow](#current-compaction-workflow)
-    - [Proposed CompactionState Structure](#proposed-compactionstate-structure)
+    - [Proposed CompactorStateRecord Structure](#proposed-compactorstaterecord-structure)
     - [Persisting Internal Compactions](#persisting-internal-compactions)
     - [Persisting External Compactions](#persisting-external-compactions)
     - [Resuming Partial Compactions](#resuming-partial-compactions)
-  - [Key Design Decisions](#key-design-decisions)
+- [Key Design Decisions](#key-design-decisions)
     - [1. Persistence Boundaries](#1-persistence-boundaries)
     - [2. Enhanced Job Model](#2-enhanced-job-model)
     - [3. State Management Pattern](#3-state-management-pattern)
     - [4. Recovery Strategy](#4-recovery-strategy)
-    - [5. Migrate `compaction_epoch` from Manifest to CompactionState](#5-migrate-compaction_epoch-from-manifest-to-compactionstate)
+    - [5. Migrate `compaction_epoch` from Manifest to CompactorStateRecord](#5-migrate-compaction_epoch-from-manifest-to-compactorstaterecord)
   - [Persistent State Storage](#persistent-state-storage)
     - [Object Store Layout](#object-store-layout)
-  - [Protocol for State Management of Manifest and CompactionState](#protocol-for-state-management-of-manifest-and-compactionstate)
+- [Protocol for State Management of Manifest and CompactorStateRecord](#protocol-for-state-management-of-manifest-and-compactorstaterecord)
     - [On startup...](#on-startup)
     - [On compaction initiation...](#on-compaction-initiation)
     - [On compaction job progress...](#on-compaction-job-progress)
@@ -69,11 +69,11 @@ This RFC proposes the goals & design for compaction state persistence along with
 
 ## Goals
 
-- Provide a mechanism to track progress of a `CompactionJob`
-- Allow retrying compactions based on the state of the `CompactionJob`
+- Provide a mechanism to track progress of a `CompactionJobAttempt`
+- Allow retrying compactions based on the state of the `CompactionJobAttempt`
 - Improve observability around compactions
-- Separate out compaction related details from `Manifest` into a separate `CompactionState`
-- Coordination between `Manifest` and `CompactionState`
+- Separate out compaction related details from `Manifest` into a separate `CompactorStateRecord`
+- Coordination between `Manifest` and `CompactorStateRecord`
 - Coordination mechanism between externally triggered compactions and the main compaction process.
 - Refactor Manifest store so that it can be used to store both ,manifest and .compactor files.
 
@@ -101,10 +101,10 @@ This RFC extends discussions in the below github issue. It also addresses severa
 
 ### **Core Architecture Issues**
 1. **1:1 Compaction:Job Cardinality**: Cannot retry failed compactions - entire compaction fails if job fails
-2. **No Progress Tracking**: `CompactionJob` state isn't persisted, making progress invisible
+2. **No Progress Tracking**: `CompactionJobAttempt` state isn't persisted, making progress invisible
 3. **No State Persistence**: All compaction state is lost on restart
 
-### **Operational Limitations** 
+### **Operational Limitations**
 5. **Manual Compaction Gaps**: No coordination mechanism for operator-triggered compactions ([Issue #288](https://github.com/slatedb/slatedb/issues/288))
 6. **GC Coordination Issues**: Garbage collector needs better visibility into ongoing compactions ([Issue #604](https://github.com/slatedb/slatedb/issues/604))
 7. **Limited Observability**: Limited visibility into compaction progress and failures
@@ -150,13 +150,13 @@ Rather than complex chunking mechanisms, we leverage SlateDB's existing iterator
 
 10. When a task completes compaction execution, the task returns the `{destinationId, outputSSTs}` to the worker channel to act upon the compaction terminal state
 
-11. The worker task executes the `finishCompaction()` upon successful `CompactionCompletion` and updates the manifests and trigger scheduling of next compactions by calling `maybeScheduleCompaction()`
+11. The worker task writes the manifest upon upon successful completion and executes the `finishCompaction()`. It then triggers scheduling of next jobs by calling `maybeScheduleCompaction()`
 
-12. In case of failure, the compaction_state is updated by calling `finishFailedCompaction()`
+12. In case of failure, the compactor state is updated by calling `finishFailedCompaction()`
 
 13. GC clears the orphaned states and SSTs during it's run.
 
-### **Proposed CompactionState Structure**
+### **Proposed CompactorStateRecord Structure**
 The persistent state contains the complete view of all compaction activity:
 
 ```rust
@@ -177,17 +177,15 @@ pub(crate) enum CompactorJobRequestType {
 
 /// In-memory description of the inputs to a compaction.
 ///
-/// A `CompactionSpec` represents the concrete set of input SSTs and/or Sorted Runs
-/// that a particular compaction algorithm (e.g., size-tiered, leveled, etc.) has
-/// selected to produce a destination Sorted Run.
+/// The compaction scheduler selects the concrete set of input SSTs and/or Sorted Runs
+/// (e.g., for size-tiered, leveled, etc.) to produce a destination Sorted Run.
 ///
-/// The scheduler constructs a `CompactionSpec` for a planned compaction and passes it,
-/// together with the selected `sources`, to `Compaction::new`. Keeping the spec inside
-/// the in-memory `Compaction` avoids recomputing or cloning inputs at job creation time
-/// and enables encode/decode roundtrips in tests via FlatBuffers.
+/// The compactor turns this selection into a `CompactorJobRequest` and a matching
+/// `CompactorJobInput`, avoiding recomputation/cloning at job creation time and enabling
+/// encode/decode roundtrips in tests via FlatBuffers.
 pub(crate) enum CompactorJobInput {
     /// Compact a combination of L0 SSTs and/or existing sorted runs into a new sorted run
-    /// with id `destination` carried by the surrounding `Compaction`.
+    /// with id `destination` carried by the surrounding job.
     SortedRunJobInputs {
         /// L0 SSTs (by handle) that will be compacted.
         ssts: Vec<SsTableHandle>,
@@ -198,9 +196,9 @@ pub(crate) enum CompactorJobInput {
 
 /// Specification of how a compaction job should be executed.
 ///
-/// Job specs are derived from the parent `Compaction`/`CompactionPlan` and capture
-/// execution-time details (e.g., which inputs are already materialized) that the executor
-/// can use for progress reporting and resume logic.
+/// Job specs are derived from the scheduler's decision and the `CompactorJobRequest`, and
+/// capture execution-time details (e.g., which inputs are already materialized) that the
+/// executor can use for progress reporting and resume logic.
 pub(crate) enum CompactorJobProgress {
     LinearCompactorJob {
         /// ULIDs of L0 SSTs and Sorted Runs that have been fully read/compacted when the job
@@ -248,7 +246,7 @@ pub(crate) struct CompactorJob {
     progress: CompactorJobProgress,
 }
 
-/// `CompactionStateRecord` is the durable, object-store representation of compaction
+/// `CompactorStateRecord` is the durable, object-store representation of compaction
 pub(crate) struct CompactorStateRecord {
     pub(crate) compactor_epoch: u64,
     // active_compaction plan queued, in-progress and completed mapped by compaction id in object store
@@ -259,8 +257,8 @@ pub(crate) struct CompactorStateRecord {
 ///
 /// This is the in-memory controller view that a single compactor task uses to:
 /// - keep a fresh `DirtyManifest` (view of `CoreDbState`),
-/// - track canonical `compaction_plans` by plan id (ULID), and
-/// - track `scheduled_compactions` by job id for executions owned by this process.
+/// - track canonical jobs by job id (ULID), and
+/// - track `scheduled_compaction_jobs` by jobAttempt id for executions owned by this process.
 ///
 /// It validates submissions, records lifecycle transitions (Submitted → Pending → InProgress →
 /// Completed/Failed) and mutates the in-memory manifest when jobs finish.
@@ -276,12 +274,12 @@ pub struct CompactorState {
     scheduled_jobs: HashMap<Ulid, CompactorJob>,
 }
 
-/// Execution unit (attempt) for a compaction plan.
+/// Execution unit (attempt) for a compaction job.
 ///
 /// - `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is
 ///   used as the runtime key in `scheduled_compactions`.
-/// - `compaction_id` is the canonical plan id (ULID) that ties this job attempt back to its
-///   `CompactionPlan` entry in the compactor's canonical map.
+/// - `compaction_id` is the canonical job id (ULID) that ties this attempt back to its
+///   parent `CompactorJob` entry in the compactor's canonical map.
 ///
 /// Jobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time
 /// metadata for progress reporting, retention, and resume logic.
@@ -307,13 +305,13 @@ pub(crate) struct CompactorJobAttempt {
 
 ### Persisting Internal Compactions
 
-1. Compactor fetches compactions from the compaction_state polled during this compactionEventLoop iteration with the compactionStatus as `submitted` and returns a list of compactions.
+1. Compactor fetches job requests from the compactor state polled during this compactionEventLoop iteration with the compactionStatus as `submitted` and returns a list of job requests.
 
-2. SizeTieredCompactionScheduler executes `maybe_schedule_compaction` and appends to this list of compactions.
+2. SizeTieredCompactionScheduler executes `maybe_schedule_compaction` and appends to this list of job requests.
 
-3. Compactor executes the `submit_compaction` method on the list of compactions from Step(1). The method delegates the validation of the compactions to the compactor_state.rs.
+3. Compactor executes the `submit_compaction` method on the list of job requests from Step(1). The method delegates the validation of the job requests to the compactor_state.rs.
 
-4. For each compaction in the input list of compactions, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
+4. For each request in the input list, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compactor state:
 
     - Check if the count of running compactions is less than the threshold. If yes, continue
 
@@ -325,7 +323,7 @@ pub(crate) struct CompactorJobAttempt {
 
     - The existing validations in `submit_compaction` method.
 
-5. When a compaction successfully validates, the status of the compaction is updated as `in_progress` in the compaction_state. When the validation is unsuccessful, the status of the compaction is updated as `failed` in the CompactionState.
+5. When a request successfully validates, the status is updated as `pending` in the compactor state. When validation is unsuccessful, the status is updated as `failed` in the `CompactorStateRecord`. The status is moved to `inProgress` when the executor picks the compaction for execution.
 
 6. Try writing the compactor_state to the next sequential .compactor file.
 
@@ -343,19 +341,19 @@ pub(crate) struct CompactorJobAttempt {
 
 7. Now, `start_compaction()` for each compaction in the `compactions` param if the count of running compactions is below threshold.
 
-8. A new `CompactionJob` is created using the last job_attempt or a fresh if it is the first CompactionJob. The `CompactionJob` is then handed to the CompactionExecutor for execution.
+8. A new `CompactionJobAttempt` is created using the last attempt or a fresh attempt if it is the first. The `CompactionJobAttempt` is then handed to the CompactionExecutor for execution.
 
 9. We need to update CompactionExecutor code to support the following:
 
     - Resuming Partially executed compactions (covered separately in the section below)
 
-    - Writing compaction_state updates to the .compactor file
+    - Writing `CompactorStateRecord` updates to the .compactor file
 
-    The CompactionExecutor would persist the compaction_state in .compactor file by updating the `compactions` param (refer state management protocol). Two possible options:
+    The CompactionExecutor would persist the `CompactorStateRecord` in the .compactor file by updating the `compactions` param (refer state management protocol). Two possible options:
 
       - Each compactionExecutor Job tries writing to the .compactor file.
 
-      - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the CompactionJob on the write.
+      - Writes the updated compacted_state to a blocking channel that would be listened and executed by the Compaction Event Handler. We can leverage `WorkerToOrchestratorMsg` enum with a oneshot ack to support blocking of the `CompactionJobAttempt` on the write.
       
 We have agreed on the second approach (channel-based updates via the compaction event handler).
 
@@ -370,7 +368,7 @@ We need a mechanism to plug in the external requests so that they can be picked 
 
 2. Use the `pick_next_compaction` to transform the request into a list of compactions.
 
-3. For each compaction in the input list of compactions, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compaction_state:
+3. For each request in the input list, the compactor_state.rs executes its own `submit_compaction` method that would do the following validations against the compactor state:
 
     - Check if the count of running compactions is less than the threshold. If yes, continue
 
@@ -384,7 +382,7 @@ We need a mechanism to plug in the external requests so that they can be picked 
 
   Note: Invalid compactions would be dropped from the list of compactions during validation.
 
-4. When a compaction successfully validates, the status of the compaction is updated as `submitted` in the compaction_state and added/updated in the `new_compactions` list.
+4. When a request successfully validates the above checks, the status is updated as `submitted` in the compactorJob state and added/updated in the `new_compactions` list.
 
 5. Try writing the compactor_state to the next sequential .compactor file.
 
@@ -416,7 +414,7 @@ Note: The validations added in this protocol are best effort. The authority to v
 
 4. Each `{key, seq_number, sst_iterator}` tuple is then added to a min_heap to decide the right order across a group of SRs (this is a way to get a sorted list from all the sorted SR SSTs).
 
-5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each and persists them to the .compactor file by updating the compaction in `compactions`. (This is the `CompactionJob` progress section in _State Management Protocol_.)
+5. Once the above is constructed, compaction logic continues to create output SST of 256MB with 4KB blocks each and persists them to the .compactor file by updating the job attempt in `compactions`. (This is the `CompactionJobAttempt` progress section in _State Management Protocol_.)
 
 Note:
  - Step (3) and (4) are already implemented in the `seek()` in merge_iterator. It should handle Tombstones, TTL/Expiration
@@ -431,7 +429,7 @@ Note:
 **Rationale**: Output SST completions provide the best recovery value per persistence operation. Each represents significant completed work that we don't want to lose.
 
 #### **2. Enhanced Job Model**  
-**Decision**: Change from 1:1 to 1:N relationship between Compaction and CompactionJob.
+**Decision**: Change from 1:1 to 1:N relationship between `CompactorJob` and `CompactionJobAttempt`.
 
 **Rationale**: Enables retry logic, progress tracking, and recovery without breaking existing compaction scheduling logic.
 
@@ -459,9 +457,9 @@ The compaction state is persisted to the object store following the same CAS pat
 
 _NOTE: The section below is discussed in detail [here](https://github.com/slatedb/slatedb/pull/695/files#r2239561471)._
 
-### Protocol for State Management of Manifest and CompactionState
+### Protocol for State Management of Manifest and CompactorStateRecord
 
-This a proposal for Statement Management of Manifest and CompactionState. The protocol is based on the following principals:
+This is a proposal for state management of Manifest and `CompactorStateRecord`. The protocol is based on the following principles:
 
 - manifest should be source of truth for reader and writer clients (and should thus contain SRs)
 
@@ -489,7 +487,7 @@ They can have separate files for any approach specific to their state persistenc
       - If latest .manifest compactor_epoch < current compactor epoch, increment the .manifest file ID by 1 and retry. This process would continue until successful compactor write.
       (The current active compactor has updated the .manifest file)
 
-3. Try writing above `compactor_epoch` to the dirty CompactionState to the next sequential .compactor position.(00006.compactor).
+3. Try writing the above `compactor_epoch` to the dirty `CompactorStateRecord` to the next sequential .compactor position (00006.compactor).
 
     File version check (in-memory and remote object store): if 00006.compactor exists, 
 
@@ -572,7 +570,7 @@ At this point, the compactor has been successfully initialised. Any updates to w
 
 5. Compactor A writes .manifest file (00002.manifest) with compactor_epoch (compactor_epoch = 1)
 
-(Compactions are scheduled based on the latest manifest poll and CompactionJob updates the .compactor file with the in progress SR state) 
+(Compactions are scheduled based on the latest manifest poll and `CompactionJobAttempt` updates the .compactor file with the in‑progress SR state)
 
 After compactionJob completion...,
 
