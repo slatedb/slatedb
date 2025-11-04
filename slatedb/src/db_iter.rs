@@ -90,19 +90,19 @@ impl DbIteratorRangeTracker {
     }
 }
 
-struct GetIterator<'a> {
+struct GetIterator {
     key: Bytes,
-    iters: Vec<Box<dyn KeyValueIterator + 'a>>,
+    iters: Vec<Box<dyn KeyValueIterator + 'static>>,
     idx: usize,
 }
 
-impl<'a> GetIterator<'a> {
+impl GetIterator {
     pub(crate) fn new(
         key: Bytes,
-        write_batch_iter: Box<dyn KeyValueIterator + 'a>,
-        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
+        write_batch_iter: Box<dyn KeyValueIterator + 'static>,
+        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
     ) -> Self {
         let iters = vec![write_batch_iter]
             .into_iter()
@@ -116,7 +116,7 @@ impl<'a> GetIterator<'a> {
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for GetIterator<'a> {
+impl KeyValueIterator for GetIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         // GetIterator departs from the normal convention for KeyValueIterator
         // in that it lazily initializes the iterators only when necessary -
@@ -163,16 +163,16 @@ impl<'a> KeyValueIterator for GetIterator<'a> {
     }
 }
 
-struct ScanIterator<'a> {
-    delegate: Box<dyn KeyValueIterator + 'a>,
+struct ScanIterator {
+    delegate: Box<dyn KeyValueIterator + 'static>,
 }
 
-impl<'a> ScanIterator<'a> {
+impl ScanIterator {
     pub(crate) fn new(
-        write_batch_iter: Box<dyn KeyValueIterator + 'a>,
-        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
+        write_batch_iter: Box<dyn KeyValueIterator + 'static>,
+        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
     ) -> Result<Self, SlateDBError> {
         // wrap each in a merge iterator
         let iters = vec![
@@ -189,7 +189,7 @@ impl<'a> ScanIterator<'a> {
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for ScanIterator<'a> {
+impl KeyValueIterator for ScanIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.delegate.init().await
     }
@@ -352,20 +352,20 @@ impl DbIterator {
     }
 }
 
-pub(crate) fn apply_filters<'a, T>(
+pub(crate) fn apply_filters<T>(
     iters: impl IntoIterator<Item = T>,
     max_seq: Option<u64>,
     now: i64,
-) -> Vec<Box<dyn KeyValueIterator + 'a>>
+) -> Vec<Box<dyn KeyValueIterator>>
 where
-    T: KeyValueIterator + 'a,
+    T: KeyValueIterator + 'static,
 {
     iters
         .into_iter()
         .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
         .map(|iter| MapIterator::new_with_ttl_now(iter, now))
-        .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'a>)
-        .collect::<Vec<Box<dyn KeyValueIterator + 'a>>>()
+        .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'static>)
+        .collect::<Vec<Box<dyn KeyValueIterator>>>()
 }
 
 #[cfg(test)]
