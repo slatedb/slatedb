@@ -30,9 +30,8 @@
     - [Object Store Layout](#object-store-layout)
 - [Protocol for State Management of Manifest and CompactorStateRecord](#protocol-for-state-management-of-manifest-and-compactorstaterecord)
     - [On startup...](#on-startup)
-    - [On compaction initiation...](#on-compaction-initiation)
-    - [On compaction job progress...](#on-compaction-job-progress)
-    - [On compaction job complete...](#on-compaction-job-complete)
+    - [On compactor job progress...](#on-compactor-job-progress)
+    - [On compactor job complete...](#on-compactor-job-complete)
   - [Summarised Protocol](#summarised-protocol)
   - [Race conditions handled in the protocol](#race-conditions-handled-in-the-protocol)
     - [Incorrect Read order of manifest and compactionState](#incorrect-read-order-of-manifest-and-compactionstate)
@@ -194,7 +193,7 @@ pub(crate) enum CompactorJobInput {
     },
 }
 
-/// Specification of how a compaction job should be executed.
+/// Specification of how a compactor job should be executed.
 ///
 /// Job specs are derived from the scheduler's decision and the `CompactorJobRequest`, and
 /// capture execution-time details (e.g., which inputs are already materialized) that the
@@ -207,7 +206,7 @@ pub(crate) enum CompactorJobProgress {
     },
 }
 
-/// Immutable request that describes a compaction job.
+/// Immutable request that describes a compactor job.
 ///
 /// Holds the logical inputs for a compaction the scheduler decided on:
 /// - `sources`: a set of `SourceId` identifying L0 SSTs and/or existing Sorted Runs
@@ -220,7 +219,7 @@ pub struct CompactorJobRequest {
     destination: u32,
 }
 
-/// Lightweight response snapshot for a compaction job.
+/// Lightweight response snapshot for a compactor job.
 ///
 /// Carries the job id, its status at the time of creation, and any sources that have been
 /// fully processed (useful for reporting/testing).
@@ -243,10 +242,10 @@ pub(crate) struct CompactorJob {
     progress: CompactorJobProgress,
 }
 
-/// `CompactorStateRecord` is the durable, object-store representation of compaction
+/// `CompactorStateRecord` is the durable, object-store representation of compactor job
 pub(crate) struct CompactorStateRecord {
     pub(crate) compactor_epoch: u64,
-    // active_compaction plan queued, in-progress and completed mapped by compaction id in object store
+    // active_compactor job queued, in-progress and completed mapped by compactor job id in object store
     pub(crate) jobs: HashMap<Ulid, CompactorJob>,
 }
 
@@ -265,15 +264,15 @@ pub(crate) struct CompactorStateRecord {
 pub struct CompactorState {
     manifest: DirtyManifest,
     compaction_state: DirtyRecord<CompactorStateRecord>,
-    // In-memory record of ongoing compaction job scheduled by compactor process mapped by compaction jobAttempt id
+    // In-memory record of ongoing compactor job scheduled by compactor process mapped by compactor jobAttempt id
     scheduled_jobs: HashMap<Ulid, CompactorJob>,
 }
 
-/// Execution unit (attempt) for a compaction job.
+/// Execution unit (attempt) for a compactor job.
 ///
 /// - `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is
 ///   used as the runtime key in `scheduled_compactions`.
-/// - `compaction_id` is the canonical job id (ULID) that ties this attempt back to its
+/// - `compactor_job_id` is the canonical job id (ULID) that ties this attempt back to its
 ///   parent `CompactorJob` entry in the compactor's canonical map.
 ///
 /// Jobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time
@@ -281,7 +280,7 @@ pub struct CompactorState {
 pub(crate) struct CompactorJobAttempt {
     /// Job attempt id. Unique per attempt and used for scheduling/routing.
     pub(crate) id: Ulid,
-    /// Canonical compaction job id this job belongs to.
+    /// Canonical compactor job id this job belongs to.
     pub(crate) compactor_job_id: Ulid,
     /// Destination sorted run id to be produced by this job.
     pub(crate) destination: u32,
@@ -497,7 +496,7 @@ They can have separate files for any approach specific to their state persistenc
 
 At this point, the compactor has been successfully initialised. Any updates to write a new .compactor (00006.compactor) or .manifest file (00006.manifest) by stale compactors would fence them.
 
-#### On compaction job creation...
+#### On compactor job creation...
 
 (Manifest is polled periodically to get the list of L0 SSTs created. The scheduler would create a list of new compactions for these L0 SSTs as well)
 
@@ -514,7 +513,7 @@ At this point, the compactor has been successfully initialised. Any updates to w
       - If latest .compactor compactor_epoch < current compactor epoch, panic
         (`compactor_epoch` went backwards)
 
-#### On compaction job progress...
+#### On compactor job progress...
 
 1. Compactor writes to the next .compactor file the compactionState (persist when an SST is added to SR) with the latest progress (00008.compactor in our example).
 
@@ -527,9 +526,9 @@ At this point, the compactor has been successfully initialised. Any updates to w
       - If latest .compactor compactor_epoch < current compactor epoch, panic
         (`compactor_epoch` went backwards)
 
-#### On compaction job complete...
+#### On compactor job complete...
 
-1. Write the current compactor state (including the completed compaction job) to the next sequential .compactor file (00009.compactor) (steps (1) and (2) in the "progress" section, above).
+1. Write the current compactor state (including the completed compactor job) to the next sequential .compactor file (00009.compactor) (steps (1) and (2) in the "progress" section, above).
 
 2. Update in-memory .manifest state (fetched in compaction initiation phase) with the compaction state to reflect the latest SRs/SSTs that were created (and remove old SRs/SSTs).
 
@@ -692,7 +691,7 @@ pub async fn get_compaction_info(
     id: String
 ) -> Result<CompactionInfo, Error>           // ← Returns public struct directly
 
-/// Status of a compaction job to be shown to the customer
+/// Status of a compactor job to be shown to the customer
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompactionStatusResponse {
     Submitted,      // Waiting to be scheduled
