@@ -3422,6 +3422,7 @@ dependencies = [
 name = "slatedb-py"
 version = "0.8.2"
 dependencies = [
+ "bytes",
  "once_cell",
  "pyo3",
  "pyo3-async-runtimes",

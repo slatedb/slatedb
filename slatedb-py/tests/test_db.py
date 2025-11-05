@@ -103,3 +103,20 @@ async def test_mixed_sync_async_operations(db):
     await db.delete_async(b"mixed_key1")
     result = db.get(b"mixed_key1")
     assert result is None
+
+
+def test_merge_operator_callable_concat(db_path):
+    """DB merge using a Python callable merge operator (concat)."""
+    def concat(existing, value):
+        return (existing or b"") + value
+
+    db = SlateDB(db_path, merge_operator=concat)
+    try:
+        db.merge(b"k", b"a")
+        assert db.get(b"k") == b"a"
+
+        db.merge(b"k", b"b")
+        db.merge(b"k", b"c")
+        assert db.get(b"k") == b"abc"
+    finally:
+        db.close()

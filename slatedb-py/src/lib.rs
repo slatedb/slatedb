@@ -4,6 +4,8 @@ use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
+use ::slatedb::MergeOperator;
+use ::slatedb::MergeOperatorError;
 use ::slatedb::{Error, KeyValue};
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::PyValueError;
@@ -37,28 +39,38 @@ fn load_object_store(env_file: Option<String>) -> PyResult<Arc<dyn ObjectStore>>
     }
 }
 
-async fn load_db_from_url(path: &str, url: &str, settings: Settings) -> PyResult<Db> {
+async fn load_db_from_url(
+    path: &str,
+    url: &str,
+    settings: Settings,
+    merge_operator: Option<MergeOperatorType>,
+) -> PyResult<Db> {
     let object_store = Db::resolve_object_store(url).map_err(create_value_error)?;
 
-    Db::builder(path, object_store)
-        .with_settings(settings)
-        .build()
-        .await
-        .map_err(create_value_error)
+    let builder = Db::builder(path, object_store).with_settings(settings);
+    let builder = if let Some(op) = merge_operator {
+        builder.with_merge_operator(op)
+    } else {
+        builder
+    };
+    builder.build().await.map_err(create_value_error)
 }
 
 async fn load_db_from_env(
     path: &str,
     env_file: Option<String>,
     settings: Settings,
+    merge_operator: Option<MergeOperatorType>,
 ) -> PyResult<Db> {
     let object_store = load_object_store(env_file)?;
 
-    Db::builder(path, object_store)
-        .with_settings(settings)
-        .build()
-        .await
-        .map_err(create_value_error)
+    let builder = Db::builder(path, object_store).with_settings(settings);
+    let builder = if let Some(op) = merge_operator {
+        builder.with_merge_operator(op)
+    } else {
+        builder
+    };
+    builder.build().await.map_err(create_value_error)
 }
 
 /// A Python module implemented in Rust.
@@ -71,36 +83,84 @@ fn slatedb(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-#[pyclass(name = "SlateDB")]
-struct PySlateDB {
-    inner: Arc<Db>,
+// Merge operator bridging to Python
+//
+// The merge operator may call back into Python during reads/compactions. To avoid
+// deadlocks, callers of DB methods must not hold the Python GIL while awaiting
+// Rust futures that may in turn invoke the merge operator. The DB methods below
+// use `py.allow_threads(|| rt.block_on(...))` to release the GIL before awaiting.
+// Here we only briefly acquire the GIL to run the Python callable and convert args/results.
+type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
+
+struct PyMergeOperator {
+    callable: Py<PyAny>,
 }
 
-impl PySlateDB {
-    fn inner_get_bytes(&self, key: Vec<u8>) -> PyResult<Option<Vec<u8>>> {
-        if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
-        }
-        let db = self.inner.clone();
-        let rt = get_runtime();
-        rt.block_on(async {
-            match db.get(&key).await {
-                Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
-                Ok(None) => Ok(None),
-                Err(e) => Err(create_value_error(e)),
+impl MergeOperator for PyMergeOperator {
+    fn merge(
+        &self,
+        existing_value: Option<bytes::Bytes>,
+        value: bytes::Bytes,
+    ) -> Result<bytes::Bytes, MergeOperatorError> {
+        // Fall back to returning the operand on any Python error.
+        let fallback = value.clone();
+        Python::with_gil(|py| {
+            let existing_arg: Option<Vec<u8>> = existing_value.as_ref().map(|b| b.to_vec());
+            let value_arg: Vec<u8> = value.to_vec();
+            match self.callable.call1(py, (existing_arg, value_arg)) {
+                Ok(obj) => {
+                    let obj = obj.bind(py);
+                    // Expect bytes return
+                    if let Ok(pybytes) = obj.downcast::<PyBytes>() {
+                        Ok(bytes::Bytes::copy_from_slice(pybytes.as_bytes()))
+                    } else if let Ok(v) = obj.extract::<Vec<u8>>() {
+                        Ok(bytes::Bytes::from(v))
+                    } else {
+                        eprintln!("merge operator returned non-bytes; using operand");
+                        Ok(fallback)
+                    }
+                }
+                Err(err) => {
+                    // Log and return operand as best-effort behavior (merge operator is infallible)
+                    eprintln!("merge operator raised exception: {}", err);
+                    Ok(fallback)
+                }
             }
         })
     }
 }
 
+fn parse_merge_operator(py_obj: Option<&Bound<PyAny>>) -> PyResult<Option<MergeOperatorType>> {
+    if let Some(obj) = py_obj {
+        // Expect a Python callable: merge(existing: Optional[bytes], value: bytes) -> bytes
+        if obj.is_callable() {
+            let callable: Py<PyAny> = obj.clone().unbind();
+            let op: MergeOperatorType = Arc::new(PyMergeOperator { callable });
+            Ok(Some(op))
+        } else {
+            Err(create_value_error("merge_operator must be a callable (merge(existing: Optional[bytes], value: bytes) -> bytes)"))
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+#[pyclass(name = "SlateDB")]
+struct PySlateDB {
+    inner: Arc<Db>,
+}
+
+impl PySlateDB {}
+
 #[pymethods]
 impl PySlateDB {
     #[new]
-    #[pyo3(signature = (path, url = None, env_file = None, *, **kwargs))]
+    #[pyo3(signature = (path, url = None, env_file = None, *, merge_operator = None, **kwargs))]
     fn new(
         path: String,
         url: Option<String>,
         env_file: Option<String>,
+        merge_operator: Option<&Bound<PyAny>>,
         kwargs: Option<&Bound<PyDict>>,
     ) -> PyResult<Self> {
         let rt = get_runtime();
@@ -114,11 +174,14 @@ impl PySlateDB {
             None => Settings::load().map_err(create_value_error)?,
         };
 
+        // Parse the optional merge operator
+        let merge_operator = parse_merge_operator(merge_operator)?;
+
         let db = rt.block_on(async move {
             if let Some(url) = url {
-                load_db_from_url(&path, &url, settings).await
+                load_db_from_url(&path, &url, settings, merge_operator).await
             } else {
-                load_db_from_env(&path, env_file, settings).await
+                load_db_from_env(&path, env_file, settings, merge_operator).await
             }
         })?;
         Ok(Self {
@@ -127,21 +190,34 @@ impl PySlateDB {
     }
 
     #[pyo3(signature = (key, value))]
-    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+    fn put(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
             return Err(create_value_error("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
-        rt.block_on(async { db.put(&key, &value).await.map_err(create_value_error) })
+        py.allow_threads(|| {
+            rt.block_on(async { db.put(&key, &value).await.map_err(create_value_error) })
+        })
     }
 
     #[pyo3(signature = (key))]
     fn get<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Option<Bound<'py, PyBytes>>> {
-        match self.inner_get_bytes(key)? {
-            Some(bytes) => Ok(Some(PyBytes::new(py, &bytes))),
-            None => Ok(None),
+        if key.is_empty() {
+            return Err(create_value_error("key cannot be empty"));
         }
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let res: Option<Vec<u8>> = py.allow_threads(|| {
+            rt.block_on(async {
+                match db.get(&key).await {
+                    Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.as_ref().to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(create_value_error(e)),
+                }
+            })
+        })?;
+        Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
     #[pyo3(signature = (start, end = None))]
@@ -163,17 +239,25 @@ impl PySlateDB {
 
         let db = self.inner.clone();
         let rt = get_runtime();
-        rt.block_on(async {
-            let mut iter = db.scan(start..end).await.map_err(create_value_error)?;
-            let mut tuples = Vec::new();
-            while let Some(entry) = iter.next().await.map_err(create_value_error)? {
-                let key = PyBytes::new(py, &entry.key);
-                let value = PyBytes::new(py, &entry.value);
-                let tuple = PyTuple::new(py, vec![key, value])?;
-                tuples.push(tuple);
-            }
-            Ok(tuples)
-        })
+        // Collect key-values with GIL released
+        let kvs = py.allow_threads(|| {
+            rt.block_on(async {
+                let mut iter = db.scan(start..end).await.map_err(create_value_error)?;
+                let mut out = Vec::new();
+                while let Some(entry) = iter.next().await.map_err(create_value_error)? {
+                    out.push((entry.key.to_vec(), entry.value.to_vec()));
+                }
+                Ok::<Vec<(Vec<u8>, Vec<u8>)>, PyErr>(out)
+            })
+        })?;
+        // Build Python tuples under GIL
+        kvs.into_iter()
+            .map(|(k, v)| {
+                let key = PyBytes::new(py, &k);
+                let value = PyBytes::new(py, &v);
+                PyTuple::new(py, vec![key, value])
+            })
+            .collect()
     }
 
     #[pyo3(signature = (start, end = None))]
@@ -191,19 +275,54 @@ impl PySlateDB {
     }
 
     #[pyo3(signature = (key))]
-    fn delete(&self, key: Vec<u8>) -> PyResult<()> {
+    fn delete(&self, py: Python<'_>, key: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
             return Err(create_value_error("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
-        rt.block_on(async { db.delete(&key).await.map_err(create_value_error) })
+        // Release the GIL while awaiting Rust I/O
+        py.allow_threads(|| {
+            rt.block_on(async { db.delete(&key).await.map_err(create_value_error) })
+        })
     }
 
-    fn close(&self) -> PyResult<()> {
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
         let db = self.inner.clone();
         let rt = get_runtime();
-        rt.block_on(async { db.close().await.map_err(create_value_error) })
+        // Release the GIL while awaiting shutdown
+        py.allow_threads(|| rt.block_on(async { db.close().await.map_err(create_value_error) }))
+    }
+
+    /// Merge a value into the database using the configured merge operator.
+    #[pyo3(signature = (key, value))]
+    fn merge(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(create_value_error("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        // Release the GIL while DB.merge may invoke Python merge operator
+        py.allow_threads(|| {
+            rt.block_on(async { db.merge(&key, &value).await.map_err(create_value_error) })
+        })
+    }
+
+    /// Async version of merge
+    #[pyo3(signature = (key, value))]
+    fn merge_async<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(create_value_error("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            db.merge(&key, &value).await.map_err(create_value_error)
+        })
     }
 
     #[pyo3(signature = (key, value))]
@@ -257,16 +376,18 @@ struct PySlateDBReader {
 #[pymethods]
 impl PySlateDBReader {
     #[new]
-    #[pyo3(signature = (path, env_file = None, checkpoint_id = None))]
+    #[pyo3(signature = (path, env_file = None, checkpoint_id = None, *, merge_operator = None))]
     fn new(
         path: String,
         env_file: Option<String>,
         checkpoint_id: Option<String>,
+        merge_operator: Option<&Bound<PyAny>>,
     ) -> PyResult<Self> {
         let rt = get_runtime();
         let object_store = load_object_store(env_file)?;
         let db_reader = rt.block_on(async {
-            let options = DbReaderOptions::default();
+            let mut options = DbReaderOptions::default();
+            options.merge_operator = parse_merge_operator(merge_operator)?;
             DbReader::open(
                 path,
                 object_store,
@@ -290,13 +411,17 @@ impl PySlateDBReader {
         }
         let db_reader = self.inner.clone();
         let rt = get_runtime();
-        rt.block_on(async {
-            match db_reader.get(&key).await {
-                Ok(Some(bytes)) => Ok(Some(PyBytes::new(py, &bytes))),
-                Ok(None) => Ok(None),
-                Err(e) => Err(create_value_error(e)),
-            }
-        })
+        // Release the GIL while awaiting Rust; merge operator may need to reacquire it.
+        let res: Option<Vec<u8>> = py.allow_threads(|| {
+            rt.block_on(async {
+                match db_reader.get(&key).await {
+                    Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(create_value_error(e)),
+                }
+            })
+        })?;
+        Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
     #[pyo3(signature = (key))]
@@ -333,20 +458,27 @@ impl PySlateDBReader {
 
         let db_reader = self.inner.clone();
         let rt = get_runtime();
-        rt.block_on(async {
-            let mut iter = db_reader
-                .scan(start..end)
-                .await
-                .map_err(create_value_error)?;
-            let mut tuples = Vec::new();
-            while let Some(entry) = iter.next().await.map_err(create_value_error)? {
-                let key = PyBytes::new(py, &entry.key);
-                let value = PyBytes::new(py, &entry.value);
-                let tuple = PyTuple::new(py, vec![key, value])?;
-                tuples.push(tuple);
-            }
-            Ok(tuples)
-        })
+        // Collect key-values with GIL released to avoid deadlocks when merge operator calls Python
+        let kvs = py.allow_threads(|| {
+            rt.block_on(async {
+                let mut iter = db_reader
+                    .scan(start..end)
+                    .await
+                    .map_err(create_value_error)?;
+                let mut out = Vec::new();
+                while let Some(entry) = iter.next().await.map_err(create_value_error)? {
+                    out.push((entry.key.to_vec(), entry.value.to_vec()));
+                }
+                Ok::<Vec<(Vec<u8>, Vec<u8>)>, PyErr>(out)
+            })
+        })?;
+        kvs.into_iter()
+            .map(|(k, v)| {
+                let key = PyBytes::new(py, &k);
+                let value = PyBytes::new(py, &v);
+                PyTuple::new(py, vec![key, value])
+            })
+            .collect()
     }
 
     #[pyo3(signature = (start, end = None))]
@@ -542,9 +674,12 @@ impl PyDbIterator {
         let receiver = self.receiver.as_ref().unwrap().clone();
         let rt = get_runtime();
 
-        let kv_result = rt.block_on(async {
-            let mut guard = receiver.lock().await;
-            guard.recv().await
+        // Release GIL while waiting on Rust channel to avoid blocking Python
+        let kv_result = py.allow_threads(|| {
+            rt.block_on(async {
+                let mut guard = receiver.lock().await;
+                guard.recv().await
+            })
         });
 
         match kv_result {

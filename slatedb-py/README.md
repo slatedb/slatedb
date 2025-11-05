@@ -106,6 +106,24 @@ async def main():
 asyncio.run(main())
 ```
 
+### Merge Operator
+
+SlateDB supports merge operations which allow partial updates using an associative operator. Configure a merge operator when opening the database, then use `merge`/`merge_async`:
+
+```python
+from slatedb import SlateDB
+
+# Python callable merge operator: concatenate bytes
+def concat(existing: bytes | None, value: bytes) -> bytes:
+    return (existing or b"") + value
+
+db = SlateDB("/path/to/your/database", merge_operator=concat)
+db.merge(b"key", b"a")
+db.merge(b"key", b"b")
+assert db.get(b"key") == b"ab"
+db.close()
+```
+
 ## Error Handling
 
 Most methods raise `ValueError` for errors like empty keys or database operation failures:
