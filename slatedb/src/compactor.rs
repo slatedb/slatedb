@@ -516,7 +516,11 @@ impl CompactorEventHandler {
         compactor_job: CompactorJob,
     ) -> Result<(), SlateDBError> {
         self.log_compaction_state();
-        let db_state = self.state.db_state();
+
+        // refresh manifest to get the latest manifest state
+        self.manifest.refresh().await?;
+        let dirty_manifest = self.manifest.prepare_dirty()?;
+
         let request = compactor_job.compactor_job_request();
         let (ssts, sorted_runs) = match &compactor_job.job_input() {
             CompactorJobInput::SortedRunJobInputs { ssts, sorted_runs } => {
@@ -524,8 +528,9 @@ impl CompactorEventHandler {
             }
         };
         // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
-        let is_dest_last_run = db_state.compacted.is_empty()
-            || db_state
+        let is_dest_last_run = dirty_manifest.core.compacted.is_empty()
+            || dirty_manifest
+                .core
                 .compacted
                 .last()
                 .is_some_and(|sr| request.destination() == sr.id);
@@ -536,8 +541,8 @@ impl CompactorEventHandler {
             destination: request.destination(),
             ssts,
             sorted_runs,
-            attempt_ts: db_state.last_l0_clock_tick,
-            retention_min_seq: Some(db_state.recent_snapshot_min_seq),
+            attempt_ts: dirty_manifest.core.last_l0_clock_tick,
+            retention_min_seq: Some(dirty_manifest.core.recent_snapshot_min_seq),
             is_dest_last_run,
         };
 
@@ -836,6 +841,7 @@ mod tests {
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
+
         let db_state = await_compaction(&db).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
@@ -890,8 +896,9 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        // should be no tombstone for key 'a' because it was filtered
-        // out of the last run
+        // After compaction, only key 'b' should remain. Key 'a' was deleted and its tombstone
+        // was filtered out during compaction because the compactor now correctly uses the
+        // latest recent_snapshot_min_seq from the manifest, allowing old versions to be GC'd.
         let next = iter.next().await.unwrap();
         assert_eq!(next.unwrap().key.as_ref(), &[b'b'; 16]);
         let next = iter.next().await.unwrap();
