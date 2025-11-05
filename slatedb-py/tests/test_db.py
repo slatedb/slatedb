@@ -1,6 +1,9 @@
-import pytest
 import asyncio
-from slatedb import SlateDB, ClosedError, UnavailableError, InvalidError, TransactionError
+
+import pytest
+
+from slatedb import ClosedError, InvalidError, SlateDB, TransactionError, UnavailableError
+
 
 @pytest.mark.asyncio
 async def test_async_put_and_get(db):

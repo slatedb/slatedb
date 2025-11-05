@@ -26,6 +26,9 @@ docs = [
     "sphinx-rtd-theme>=3.0",
     "sphinx-autoapi>=3.0",
 ]
+lint = [
+    "ruff>=0.14.3",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
@@ -36,3 +39,33 @@ python-source = "python"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short" 
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+    ".venv",
+    "target",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+]
+ignore = []
+fixable = ["ALL"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["slatedb"]
+
+[tool.ruff.lint.per-file-ignores]
+"python/slatedb/__init__.py" = ["F401", "F403"]
+"tests/**" = ["SIM105", "B017"]

@@ -1,5 +1,6 @@
 import pytest
-from slatedb import SlateDB, SlateDBReader, InvalidError
+
+from slatedb import InvalidError, SlateDB, SlateDBReader
 
 
 @pytest.fixture

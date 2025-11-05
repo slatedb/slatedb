@@ -1,5 +1,6 @@
 import pytest
-from slatedb import SlateDB, SlateDBReader, SlateDBAdmin, InvalidError
+
+from slatedb import InvalidError, SlateDB, SlateDBAdmin, SlateDBReader
 
 
 def test_admin_create_checkpoint(db_path, env_file):
