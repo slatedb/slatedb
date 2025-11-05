@@ -116,13 +116,13 @@ impl MergeOperator for PyMergeOperator {
                     } else if let Ok(v) = obj.extract::<Vec<u8>>() {
                         Ok(bytes::Bytes::from(v))
                     } else {
-                        eprintln!("merge operator returned non-bytes; using operand");
+                        log::warn!("merge operator returned non-bytes; using operand");
                         Ok(fallback)
                     }
                 }
                 Err(err) => {
                     // Log and return operand as best-effort behavior (merge operator is infallible)
-                    eprintln!("merge operator raised exception: {}", err);
+                    log::warn!("merge operator raised exception: {}", err);
                     Ok(fallback)
                 }
             }
