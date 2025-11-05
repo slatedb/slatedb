@@ -398,3 +398,125 @@ def test_txn_rollback(db_path, env_file):
         assert db.get(b"k9") is None
     finally:
         db.close()
+
+
+def test_db_flush_controls(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"f1", b"v1")
+        # basic flush
+        db.flush()
+        # explicit flush types
+        db.flush_with_options("wal")
+        db.flush_with_options("memtable")
+        assert db.get(b"f1") == b"v1"
+    finally:
+        db.close()
+
+
+def test_db_get_with_options(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"g1", b"v1")
+        # default
+        assert db.get_with_options(b"g1") == b"v1"
+        # with options
+        assert db.get_with_options(b"g1", durability_filter="memory", dirty=False) == b"v1"
+    finally:
+        db.close()
+
+
+def test_db_put_delete_merge_with_options(db_path, env_file):
+    # Use merge operator for merge tests
+    def last_write_wins(existing, value):
+        return value
+
+    db = SlateDB(db_path, env_file=env_file, merge_operator=last_write_wins)
+    try:
+        # put with await_durable=False
+        db.put_with_options(b"p1", b"v1", await_durable=False)
+        assert db.get(b"p1") == b"v1"
+
+        # delete with await_durable=False
+        db.delete_with_options(b"p1", await_durable=False)
+        assert db.get(b"p1") is None
+
+        # merge with options
+        db.merge_with_options(b"m1", b"a", await_durable=False)
+        db.merge_with_options(b"m1", b"b", await_durable=False)
+        assert db.get(b"m1") == b"b"
+    finally:
+        db.close()
+
+
+def test_db_write_batch_and_write_with_options(db_path, env_file):
+    from slatedb import WriteBatch
+
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        wb = WriteBatch()
+        wb.put(b"b1", b"v1")
+        wb.put(b"b2", b"v2")
+        wb.delete(b"b2")
+        db.write(wb)
+        assert db.get(b"b1") == b"v1"
+        assert db.get(b"b2") is None
+
+        wb2 = WriteBatch()
+        wb2.put(b"b3", b"v3")
+        db.write_with_options(wb2, await_durable=False)
+        assert db.get(b"b3") == b"v3"
+    finally:
+        db.close()
+
+
+def test_db_create_checkpoint(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"c1", b"v1")
+        res = db.create_checkpoint("all")
+        assert isinstance(res["id"], str)
+        assert isinstance(res["manifest_id"], int)
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_async_put_delete_merge_with_options(db_path, env_file):
+    def last_write_wins(existing, value):
+        return value
+
+    db = SlateDB(db_path, env_file=env_file, merge_operator=last_write_wins)
+    try:
+        await db.put_with_options_async(b"ap1", b"v1", await_durable=False)
+        assert await db.get_async(b"ap1") == b"v1"
+
+        await db.delete_with_options_async(b"ap1", await_durable=False)
+        assert await db.get_async(b"ap1") is None
+
+        await db.merge_with_options_async(b"am1", b"x", await_durable=False)
+        await db.merge_with_options_async(b"am1", b"y", await_durable=False)
+        assert await db.get_async(b"am1") == b"y"
+    finally:
+        await db.close_async()
+
+
+@pytest.mark.asyncio
+async def test_async_write_batch_and_write_with_options(db_path, env_file):
+    from slatedb import WriteBatch
+
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        wb = WriteBatch()
+        wb.put(b"ab1", b"v1")
+        wb.put(b"ab2", b"v2")
+        await db.write_async(wb)
+        assert await db.get_async(b"ab1") == b"v1"
+        assert await db.get_async(b"ab2") == b"v2"
+
+        wb2 = WriteBatch()
+        wb2.put(b"ab3", b"v3")
+        await db.write_with_options_async(wb2, await_durable=False)
+        assert await db.get_async(b"ab3") == b"v3"
+    finally:
+        await db.close_async()

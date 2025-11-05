@@ -224,6 +224,42 @@ class SlateDB:
         """Async variant of ``get``."""
         ...
 
+    def get_with_options(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """
+        Get a value with read options.
+
+        Args:
+            key: Non-empty key.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include uncommitted/dirty data if True.
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Raises:
+            InvalidError | TransactionError | ClosedError | UnavailableError | DataError | InternalError
+
+        Example:
+            >>> db.get_with_options(b"k", durability_filter="memory")
+        """
+        ...
+
+    async def get_with_options_async(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """Async variant of ``get_with_options``."""
+        ...
+
     def delete(self, key: bytes) -> None:
         """
         Delete a key.
@@ -326,6 +362,165 @@ class SlateDB:
 
     async def merge_async(self, key: bytes, value: bytes) -> None:
         """Async variant of ``merge``."""
+        ...
+
+    def put_with_options(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+        await_durable: bool | None = None,
+    ) -> None:
+        """
+        Store a key-value pair with per-op options.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes.
+            ttl: Optional logical TTL units for this write (depends on logical clock).
+            await_durable: If False, do not wait for durable write.
+
+        Raises:
+            InvalidError | TransactionError | ClosedError | UnavailableError | DataError | InternalError
+
+        Example:
+            >>> db.put_with_options(b"k", b"v", await_durable=False)
+        """
+        ...
+
+    def delete_with_options(self, key: bytes, *, await_durable: bool | None = None) -> None:
+        """
+        Delete a key with write options.
+
+        Args:
+            key: Non-empty key.
+            await_durable: If False, do not wait for durable write.
+        """
+        ...
+
+    def merge_with_options(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+        await_durable: bool | None = None,
+    ) -> None:
+        """
+        Merge a value using the configured merge operator with per-op options.
+        """
+        ...
+
+    async def put_with_options_async(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+        await_durable: bool | None = None,
+    ) -> None:
+        """Async variant of ``put_with_options``."""
+        ...
+
+    async def delete_with_options_async(self, key: bytes, *, await_durable: bool | None = None) -> None:
+        """Async variant of ``delete_with_options``."""
+        ...
+
+    async def merge_with_options_async(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+        await_durable: bool | None = None,
+    ) -> None:
+        """Async variant of ``merge_with_options``."""
+        ...
+
+    def write(self, batch: WriteBatch) -> None:
+        """
+        Atomically apply a batch of writes (puts/deletes/merges).
+
+        Args:
+            batch: A WriteBatch with queued operations.
+
+        Raises:
+            TransactionError | ClosedError | UnavailableError | DataError | InternalError
+
+        Example:
+            >>> wb = WriteBatch()
+            >>> wb.put(b"k1", b"v1")
+            >>> wb.delete(b"k2")
+            >>> db.write(wb)
+        """
+        ...
+
+    def write_with_options(self, batch: WriteBatch, *, await_durable: bool | None = None) -> None:
+        """
+        Atomically apply a batch with write options.
+        """
+        ...
+
+    async def write_async(self, batch: WriteBatch) -> None:
+        """Async variant of ``write``."""
+        ...
+
+    async def write_with_options_async(self, batch: WriteBatch, *, await_durable: bool | None = None) -> None:
+        """Async variant of ``write_with_options``."""
+        ...
+
+    def flush(self) -> None:
+        """
+        Flush in-memory writes to durable storage.
+        """
+        ...
+
+    async def flush_async(self) -> None:
+        """Async variant of ``flush``."""
+        ...
+
+    def flush_with_options(self, flush_type: Literal["wal", "memtable"]) -> None:
+        """
+        Flush with explicit type.
+
+        Args:
+            flush_type: "wal" to flush write-ahead log or "memtable" to flush in-memory table.
+        """
+        ...
+
+    async def flush_with_options_async(self, flush_type: Literal["wal", "memtable"]) -> None:
+        """Async variant of ``flush_with_options``."""
+        ...
+
+    def create_checkpoint(
+        self,
+        scope: Literal["all", "durable"] = "all",
+        *,
+        lifetime: int | None = None,
+        source: str | None = None,
+    ) -> CheckpointCreateResult:
+        """
+        Create a writer checkpoint that includes data per the requested scope.
+
+        Args:
+            scope: "all" to include recent writes, "durable" to include only durable data.
+            lifetime: Optional lifetime in milliseconds.
+            source: Optional existing checkpoint UUID to base from.
+
+        Returns:
+            Dict with ``id`` (UUID string) and ``manifest_id`` (int).
+        """
+        ...
+
+    async def create_checkpoint_async(
+        self,
+        scope: Literal["all", "durable"] = "all",
+        *,
+        lifetime: int | None = None,
+        source: str | None = None,
+    ) -> CheckpointCreateResult:
+        """Async variant of ``create_checkpoint``."""
         ...
 
     def close(self) -> None:
@@ -608,6 +803,31 @@ class CheckpointCreateResult(TypedDict):
     manifest_id: int
 
 
+class WriteBatch:
+    """Accumulates atomic write operations for ``SlateDB.write(...)``."""
+
+    def __init__(self) -> None: ...
+
+    def put(self, key: bytes, value: bytes) -> None:
+        """Queue a put operation."""
+        ...
+
+    def put_with_options(self, key: bytes, value: bytes, *, ttl: int | None = None) -> None:
+        """Queue a put with per-op options (e.g., TTL)."""
+        ...
+
+    def delete(self, key: bytes) -> None:
+        """Queue a delete operation."""
+        ...
+
+    def merge(self, key: bytes, value: bytes) -> None:
+        """Queue a merge operation."""
+        ...
+
+    def merge_with_options(self, key: bytes, value: bytes, *, ttl: int | None = None) -> None:
+        """Queue a merge with per-op options (e.g., TTL)."""
+        ...
+
 class SlateDBAdmin:
     """Administrative interface for managing checkpoints and metadata."""
 
@@ -658,4 +878,3 @@ class SlateDBAdmin:
     async def list_checkpoints_async(self) -> list[Checkpoint]:
         """Async variant of ``list_checkpoints``."""
         ...
-

@@ -1,6 +1,7 @@
 use ::slatedb::admin::{load_object_store_from_env, Admin};
 use ::slatedb::config::{
-    CheckpointOptions, DbReaderOptions, DurabilityLevel, ScanOptions, Settings,
+    CheckpointOptions, CheckpointScope, DbReaderOptions, DurabilityLevel, FlushOptions, FlushType,
+    MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
 use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
@@ -109,6 +110,7 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySlateDBSnapshot>()?;
     m.add_class::<PySlateDBTransaction>()?;
     m.add_class::<PySlateDBAdmin>()?;
+    m.add_class::<PyWriteBatch>()?;
     m.add_class::<PyDbIterator>()?;
     // Export exception types
     m.add("TransactionError", py.get_type::<TransactionError>())?;
@@ -214,6 +216,52 @@ fn build_scan_options(
         opts.max_fetch_tasks = mft;
     }
     Ok(opts)
+}
+
+fn build_read_options(
+    durability_filter: Option<String>,
+    dirty: Option<bool>,
+) -> PyResult<ReadOptions> {
+    let mut opts = ReadOptions::default();
+    if let Some(df) = durability_filter {
+        opts.durability_filter = match df.to_lowercase().as_str() {
+            "remote" => DurabilityLevel::Remote,
+            "memory" => DurabilityLevel::Memory,
+            other => {
+                return Err(InvalidError::new_err(format!(
+                    "invalid durability_filter: {other} (expected 'remote' or 'memory')"
+                )))
+            }
+        };
+    }
+    if let Some(d) = dirty {
+        opts.dirty = d;
+    }
+    Ok(opts)
+}
+
+fn build_put_options(ttl: Option<u64>) -> PutOptions {
+    PutOptions {
+        ttl: match ttl {
+            Some(v) => Ttl::ExpireAfter(v),
+            None => Ttl::Default,
+        },
+    }
+}
+
+fn build_merge_options(ttl: Option<u64>) -> MergeOptions {
+    MergeOptions {
+        ttl: match ttl {
+            Some(v) => Ttl::ExpireAfter(v),
+            None => Ttl::Default,
+        },
+    }
+}
+
+fn build_write_options(await_durable: Option<bool>) -> WriteOptions {
+    WriteOptions {
+        await_durable: await_durable.unwrap_or(true),
+    }
 }
 
 #[pyclass(name = "SlateDB")]
@@ -389,6 +437,32 @@ impl PySlateDB {
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    fn get_with_options<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let opts = build_read_options(durability_filter, dirty)?;
+        let rt = get_runtime();
+        let res: Option<Vec<u8>> = py.allow_threads(|| {
+            rt.block_on(async {
+                match db.get_with_options(&key, &opts).await {
+                    Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.as_ref().to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(map_error(e)),
+                }
+            })
+        })?;
+        Ok(res.map(|b| PyBytes::new(py, &b)))
+    }
+
     #[pyo3(signature = (start, end = None))]
     fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
@@ -535,6 +609,53 @@ impl PySlateDB {
         py.allow_threads(|| rt.block_on(async { db.merge(&key, &value).await.map_err(map_error) }))
     }
 
+    #[pyo3(signature = (key, value, *, ttl = None, await_durable = None))]
+    fn merge_with_options(
+        &self,
+        py: Python<'_>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<u64>,
+        await_durable: Option<bool>,
+    ) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let merge_opts = build_merge_options(ttl);
+        let write_opts = build_write_options(await_durable);
+        py.allow_threads(|| {
+            rt.block_on(async move {
+                db.merge_with_options(&key, &value, &merge_opts, &write_opts)
+                    .await
+                    .map_err(map_error)
+            })
+        })
+    }
+
+    #[pyo3(signature = (key, value, *, ttl = None, await_durable = None))]
+    fn merge_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<u64>,
+        await_durable: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let merge_opts = build_merge_options(ttl);
+        let write_opts = build_write_options(await_durable);
+        future_into_py(py, async move {
+            db.merge_with_options(&key, &value, &merge_opts, &write_opts)
+                .await
+                .map_err(map_error)
+        })
+    }
+
     #[pyo3(signature = (key, value))]
     fn merge_async<'py>(
         &self,
@@ -583,6 +704,28 @@ impl PySlateDB {
         })
     }
 
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    fn get_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let opts = build_read_options(durability_filter, dirty)?;
+        future_into_py(py, async move {
+            match db.get_with_options(&key, &opts).await {
+                Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
+                Ok(None) => Ok(None),
+                Err(e) => Err(map_error(e)),
+            }
+        })
+    }
+
     #[pyo3(signature = (key))]
     fn delete_async<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
@@ -590,6 +733,267 @@ impl PySlateDB {
         }
         let db = self.inner.clone();
         future_into_py(py, async move { db.delete(&key).await.map_err(map_error) })
+    }
+
+    #[pyo3(signature = (key, value, *, ttl = None, await_durable = None))]
+    fn put_with_options(
+        &self,
+        py: Python<'_>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<u64>,
+        await_durable: Option<bool>,
+    ) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let put_opts = build_put_options(ttl);
+        let write_opts = build_write_options(await_durable);
+        py.allow_threads(|| {
+            rt.block_on(async move {
+                db.put_with_options(&key, &value, &put_opts, &write_opts)
+                    .await
+                    .map_err(map_error)
+            })
+        })
+    }
+
+    #[pyo3(signature = (key, value, *, ttl = None, await_durable = None))]
+    fn put_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<u64>,
+        await_durable: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let put_opts = build_put_options(ttl);
+        let write_opts = build_write_options(await_durable);
+        future_into_py(py, async move {
+            db.put_with_options(&key, &value, &put_opts, &write_opts)
+                .await
+                .map_err(map_error)
+        })
+    }
+
+    #[pyo3(signature = (key, *, await_durable = None))]
+    fn delete_with_options(
+        &self,
+        py: Python<'_>,
+        key: Vec<u8>,
+        await_durable: Option<bool>,
+    ) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let write_opts = build_write_options(await_durable);
+        py.allow_threads(|| {
+            rt.block_on(async move {
+                db.delete_with_options(&key, &write_opts)
+                    .await
+                    .map_err(map_error)
+            })
+        })
+    }
+
+    fn write(&self, py: Python<'_>, batch: &PyWriteBatch) -> PyResult<()> {
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let b = batch.inner.clone();
+        py.allow_threads(|| rt.block_on(async move { db.write(b).await.map_err(map_error) }))
+    }
+
+    #[pyo3(signature = (batch, *, await_durable = None))]
+    fn write_with_options(
+        &self,
+        py: Python<'_>,
+        batch: &PyWriteBatch,
+        await_durable: Option<bool>,
+    ) -> PyResult<()> {
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let b = batch.inner.clone();
+        let opts = build_write_options(await_durable);
+        py.allow_threads(|| {
+            rt.block_on(async move { db.write_with_options(b, &opts).await.map_err(map_error) })
+        })
+    }
+
+    fn write_async<'py>(&self, py: Python<'py>, batch: &PyWriteBatch) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        let b = batch.inner.clone();
+        future_into_py(py, async move { db.write(b).await.map_err(map_error) })
+    }
+
+    #[pyo3(signature = (batch, *, await_durable = None))]
+    fn write_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        batch: &PyWriteBatch,
+        await_durable: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        let b = batch.inner.clone();
+        let opts = build_write_options(await_durable);
+        future_into_py(py, async move { db.write_with_options(b, &opts).await.map_err(map_error) })
+    }
+
+    #[pyo3(signature = (key, *, await_durable = None))]
+    fn delete_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        await_durable: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let write_opts = build_write_options(await_durable);
+        future_into_py(py, async move {
+            db.delete_with_options(&key, &write_opts)
+                .await
+                .map_err(map_error)
+        })
+    }
+
+    fn flush(&self, py: Python<'_>) -> PyResult<()> {
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        py.allow_threads(|| rt.block_on(async move { db.flush().await.map_err(map_error) }))
+    }
+
+    fn flush_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        future_into_py(py, async move { db.flush().await.map_err(map_error) })
+    }
+
+    #[pyo3(signature = (flush_type))]
+    fn flush_with_options(&self, py: Python<'_>, flush_type: String) -> PyResult<()> {
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let options = FlushOptions {
+            flush_type: match flush_type.to_lowercase().as_str() {
+                "wal" => FlushType::Wal,
+                "memtable" => FlushType::MemTable,
+                other => {
+                    return Err(InvalidError::new_err(format!(
+                        "invalid flush_type: {other} (expected 'wal' or 'memtable')"
+                    )))
+                }
+            },
+        };
+        py.allow_threads(|| {
+            rt.block_on(async move { db.flush_with_options(options).await.map_err(map_error) })
+        })
+    }
+
+    #[pyo3(signature = (flush_type))]
+    fn flush_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        flush_type: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        let options = FlushOptions {
+            flush_type: match flush_type.to_lowercase().as_str() {
+                "wal" => FlushType::Wal,
+                "memtable" => FlushType::MemTable,
+                other => {
+                    return Err(InvalidError::new_err(format!(
+                        "invalid flush_type: {other} (expected 'wal' or 'memtable')"
+                    )))
+                }
+            },
+        };
+        future_into_py(py, async move {
+            db.flush_with_options(options).await.map_err(map_error)
+        })
+    }
+
+    #[pyo3(signature = (scope = "all", *, lifetime = None, source = None))]
+    fn create_checkpoint<'py>(
+        &self,
+        py: Python<'py>,
+        scope: &str,
+        lifetime: Option<u64>,
+        source: Option<String>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let scope_enum = match scope.to_ascii_lowercase().as_str() {
+            "all" => CheckpointScope::All,
+            "durable" => CheckpointScope::Durable,
+            other => {
+                return Err(InvalidError::new_err(format!(
+                    "invalid scope: {other} (expected 'all' or 'durable')"
+                )))
+            }
+        };
+        let result = rt.block_on(async move {
+            let lifetime = lifetime.map(Duration::from_millis);
+            let source = source
+                .map(|s| {
+                    Uuid::parse_str(&s)
+                        .map_err(|e| InvalidError::new_err(format!("invalid source UUID: {e}")))
+                })
+                .transpose()?;
+
+            db.create_checkpoint(scope_enum, &CheckpointOptions { lifetime, source })
+                .await
+                .map_err(map_error)
+        })?;
+        let dict = PyDict::new(py);
+        dict.set_item("id", result.id.to_string())?;
+        dict.set_item("manifest_id", result.manifest_id)?;
+        Ok(dict)
+    }
+
+    #[pyo3(signature = (scope = "all", *, lifetime = None, source = None))]
+    fn create_checkpoint_async<'py>(
+        &self,
+        py: Python<'py>,
+        scope: &str,
+        lifetime: Option<u64>,
+        source: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        let scope_enum = match scope.to_ascii_lowercase().as_str() {
+            "all" => CheckpointScope::All,
+            "durable" => CheckpointScope::Durable,
+            other => {
+                return Err(InvalidError::new_err(format!(
+                    "invalid scope: {other} (expected 'all' or 'durable')"
+                )))
+            }
+        };
+        future_into_py(py, async move {
+            let lifetime = lifetime.map(Duration::from_millis);
+            let source = source
+                .map(|s| {
+                    Uuid::parse_str(&s)
+                        .map_err(|e| InvalidError::new_err(format!("invalid source UUID: {e}")))
+                })
+                .transpose()?;
+            let result = db
+                .create_checkpoint(scope_enum, &CheckpointOptions { lifetime, source })
+                .await
+                .map_err(map_error)?;
+            Python::with_gil(|py| {
+                let dict = PyDict::new(py);
+                dict.set_item("id", result.id.to_string())?;
+                dict.set_item("manifest_id", result.manifest_id)?;
+                Ok(dict.into_any().unbind())
+            })
+        })
     }
 }
 
@@ -777,6 +1181,73 @@ impl PySlateDBTransaction {
         self.inner
             .as_ref()
             .ok_or_else(|| ClosedError::new_err("transaction is closed"))
+    }
+}
+
+#[pyclass(name = "WriteBatch")]
+struct PyWriteBatch {
+    inner: ::slatedb::WriteBatch,
+}
+
+#[pymethods]
+impl PyWriteBatch {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: ::slatedb::WriteBatch::new(),
+        }
+    }
+
+    #[pyo3(signature = (key, value))]
+    fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        self.inner.put(&key, &value);
+        Ok(())
+    }
+
+    #[pyo3(signature = (key, value, *, ttl = None))]
+    fn put_with_options(&mut self, key: Vec<u8>, value: Vec<u8>, ttl: Option<u64>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let opts = build_put_options(ttl);
+        self.inner.put_with_options(&key, &value, &opts);
+        Ok(())
+    }
+
+    #[pyo3(signature = (key))]
+    fn delete(&mut self, key: Vec<u8>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        self.inner.delete(&key);
+        Ok(())
+    }
+
+    #[pyo3(signature = (key, value))]
+    fn merge(&mut self, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        self.inner.merge(&key, &value);
+        Ok(())
+    }
+
+    #[pyo3(signature = (key, value, *, ttl = None))]
+    fn merge_with_options(
+        &mut self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<u64>,
+    ) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let opts = build_merge_options(ttl);
+        self.inner.merge_with_options(&key, &value, &opts);
+        Ok(())
     }
 }
 
@@ -1285,17 +1756,16 @@ impl PyDbIterator {
     fn __next__(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let inner = self.inner_iter.clone();
         let rt = get_runtime();
-        let kv_opt = py
-            .allow_threads(|| {
-                rt.block_on(async {
-                    let mut guard = inner.lock().await;
-                    let iter = guard
-                        .as_mut()
-                        .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
-                    let next = iter.next().await.map_err(map_error)?;
-                    Ok::<_, PyErr>(next)
-                })
-            })?;
+        let kv_opt = py.allow_threads(|| {
+            rt.block_on(async {
+                let mut guard = inner.lock().await;
+                let iter = guard
+                    .as_mut()
+                    .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+                let next = iter.next().await.map_err(map_error)?;
+                Ok::<_, PyErr>(next)
+            })
+        })?;
         match kv_opt {
             Some(kv) => {
                 let key = PyBytes::new(py, &kv.key);
@@ -1321,14 +1791,12 @@ impl PyDbIterator {
                 .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
             let kv_opt = iter.next().await.map_err(map_error)?;
             match kv_opt {
-                Some(kv) => {
-                    Python::with_gil(|py| {
-                        let key = PyBytes::new(py, &kv.key);
-                        let value = PyBytes::new(py, &kv.value);
-                        let tuple = PyTuple::new(py, vec![key, value])?;
-                        Ok::<PyObject, PyErr>(tuple.into())
-                    })
-                }
+                Some(kv) => Python::with_gil(|py| {
+                    let key = PyBytes::new(py, &kv.key);
+                    let value = PyBytes::new(py, &kv.value);
+                    let tuple = PyTuple::new(py, vec![key, value])?;
+                    Ok::<PyObject, PyErr>(tuple.into())
+                }),
                 None => Err(pyo3::exceptions::PyStopAsyncIteration::new_err("")),
             }
         })
