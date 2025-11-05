@@ -6,6 +6,31 @@ This module provides a Python interface to SlateDB, a key-value database built i
 
 from typing import Optional, List, Tuple
 
+# Exceptions mirroring SlateDB error kinds
+class TransactionError(Exception):
+    """Raised when a transaction conflict occurs (retry or drop the operation)."""
+    ...
+
+class ClosedError(Exception):
+    """Raised when the database/reader is closed or fenced; create a new instance."""
+    ...
+
+class UnavailableError(Exception):
+    """Raised when storage or network is unavailable; retry or drop the operation."""
+    ...
+
+class InvalidError(Exception):
+    """Raised for invalid arguments, configuration, or method usage."""
+    ...
+
+class DataError(Exception):
+    """Raised for on-disk/object-store data corruption or incompatible versions."""
+    ...
+
+class InternalError(Exception):
+    """Raised for unexpected internal errors; consider reporting an issue."""
+    ...
+
 class SlateDB:
     """
     A Python interface to SlateDB, a key-value database.
@@ -22,7 +47,10 @@ class SlateDB:
             path: The path where the database will be stored
             
         Raises:
-            ValueError: If there's an error opening the database
+            InvalidError: If configuration or arguments are invalid
+            UnavailableError: If the object store is unavailable
+            DataError: If persisted data is invalid
+            InternalError: For unexpected internal errors
         """
         ...
     
@@ -35,7 +63,8 @@ class SlateDB:
             value: The value as bytes
             
         Raises:
-            ValueError: If the key is empty or there's a database error
+            InvalidError: If the key is empty or arguments are invalid
+            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
         """
         ...
 
@@ -51,7 +80,8 @@ class SlateDB:
             The value as bytes if found, None if not found
             
         Raises:
-            ValueError: If the key is empty or there's a database error
+            InvalidError: If the key is empty or arguments are invalid
+            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
         """
         ...
 
@@ -66,7 +96,8 @@ class SlateDB:
                  if None, scan until the end of start+0xFF
 
         Raises:
-            ValueError: If the start key is empty or there's a database error
+            InvalidError: If the start key is empty or arguments are invalid
+            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
 
         Returns:
             A list of tuples containing the key and value as bytes, sorted by key
@@ -81,7 +112,8 @@ class SlateDB:
             key: The key to delete as bytes (cannot be empty)
             
         Raises:
-            ValueError: If the key is empty or there's a database error
+            InvalidError: If the key is empty or arguments are invalid
+            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
         """
         ...
 
@@ -109,7 +141,7 @@ class SlateDB:
         Close the database connection.
         
         Raises:
-            ValueError: If there's an error closing the database
+            UnavailableError | InternalError: On errors during close
         """
         ...
 
@@ -136,7 +168,10 @@ class SlateDBReader:
             checkpoint_id: Optional checkpoint ID (UUID string) to read from
             
         Raises:
-            ValueError: If there's an error opening the database or invalid checkpoint_id
+            InvalidError: If checkpoint_id is invalid
+            UnavailableError: If the object store is unavailable
+            DataError: If persisted data is invalid
+            InternalError: For unexpected internal errors
         """
         ...
     
@@ -151,7 +186,8 @@ class SlateDBReader:
             The value as bytes if found, None if not found
             
         Raises:
-            ValueError: If the key is empty or there's a database error
+            InvalidError: If the key is empty or arguments are invalid
+            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
         """
         ...
     
@@ -165,7 +201,8 @@ class SlateDBReader:
                  if None, scan with auto-generated end (start + 0xFF)
 
         Raises:
-            ValueError: If the start key is empty or there's a database error
+            InvalidError: If the start key is empty or arguments are invalid
+            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
 
         Returns:
             A list of tuples containing the key and value as bytes, sorted by key
@@ -189,6 +226,6 @@ class SlateDBReader:
         Close the database reader.
         
         Raises:
-            ValueError: If there's an error closing the database reader
+            UnavailableError | InternalError: On errors during close
         """
         ... 

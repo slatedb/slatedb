@@ -578,7 +578,7 @@ impl PySlateDBAdmin {
             admin
                 .list_checkpoints()
                 .await
-                .map_err(|e| InvalidError::new_err(e.to_string()))
+                .map_err(|e| UnavailableError::new_err(e.to_string()))
         })?;
         result
             .into_iter()

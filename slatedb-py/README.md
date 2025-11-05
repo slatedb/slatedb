@@ -126,13 +126,44 @@ db.close()
 
 ## Error Handling
 
-Most methods raise `ValueError` for errors like empty keys or database operation failures:
+SlateDB’s Python API maps errors to specific Python exceptions that mirror error kinds in the Rust core:
+
+- `TransactionError` – transaction conflict; retry or drop the operation
+- `ClosedError` – the database/reader is closed or fenced; create a new instance
+- `UnavailableError` – storage/network unavailable; retry or drop the operation
+- `InvalidError` – invalid arguments, configuration, or misuse of the API
+- `DataError` – persisted data invalid or incompatible version
+- `InternalError` – unexpected internal error; please report
+
+Examples:
 
 ```python
+from slatedb import (
+    SlateDB,
+    TransactionError, ClosedError, UnavailableError,
+    InvalidError, DataError, InternalError,
+)
+
+db = SlateDB("/tmp/slatedb")
+
+# Invalid arguments raise InvalidError
 try:
-    db.put(b"", b"This will fail")
-except ValueError as e:
-    print(f"Error: {e}")
+    db.put(b"", b"value")
+except InvalidError:
+    pass
+
+# Catch specific operational errors
+try:
+    db.close()
+    db.put(b"k", b"v")
+except ClosedError:
+    print("database is closed")
+
+# Or catch broadly
+try:
+    value = db.get(b"k")
+except (TransactionError, ClosedError, UnavailableError, InvalidError, DataError, InternalError) as e:
+    print(f"SlateDB error: {e}")
 ```
 
 ## Documentation
