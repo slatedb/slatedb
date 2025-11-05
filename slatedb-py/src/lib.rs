@@ -4,6 +4,7 @@ use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
+use ::slatedb::DbSnapshot;
 use ::slatedb::MergeOperator;
 use ::slatedb::MergeOperatorError;
 use ::slatedb::{Error, KeyValue};
@@ -101,6 +102,7 @@ async fn load_db_from_env(
 fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySlateDB>()?;
     m.add_class::<PySlateDBReader>()?;
+    m.add_class::<PySlateDBSnapshot>()?;
     m.add_class::<PySlateDBAdmin>()?;
     m.add_class::<PyDbIterator>()?;
     // Export exception types
@@ -216,6 +218,20 @@ impl PySlateDB {
         })?;
         Ok(Self {
             inner: Arc::new(db),
+        })
+    }
+
+    /// Create a read-only snapshot of the database at the current committed state.
+    ///
+    /// The snapshot provides a consistent view that is not affected by subsequent
+    /// writes to the database. Use `SlateDBSnapshot` to perform read operations.
+    fn snapshot(&self, py: Python<'_>) -> PyResult<PySlateDBSnapshot> {
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let snapshot =
+            py.allow_threads(|| rt.block_on(async { db.snapshot().await.map_err(map_error) }))?;
+        Ok(PySlateDBSnapshot {
+            inner: Some(snapshot),
         })
     }
 
@@ -388,6 +404,118 @@ impl PySlateDB {
         }
         let db = self.inner.clone();
         future_into_py(py, async move { db.delete(&key).await.map_err(map_error) })
+    }
+}
+
+#[pyclass(name = "SlateDBSnapshot")]
+struct PySlateDBSnapshot {
+    inner: Option<Arc<DbSnapshot>>, // None after close()
+}
+
+impl PySlateDBSnapshot {
+    fn inner_ref(&self) -> PyResult<Arc<DbSnapshot>> {
+        self.inner
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ClosedError::new_err("snapshot is closed"))
+    }
+}
+
+#[pymethods]
+impl PySlateDBSnapshot {
+    #[pyo3(signature = (key))]
+    fn get<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let res: Option<Vec<u8>> = py.allow_threads(|| {
+            rt.block_on(async {
+                match snapshot.get(&key).await {
+                    Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.as_ref().to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(map_error(e)),
+                }
+            })
+        })?;
+        Ok(res.map(|b| PyBytes::new(py, &b)))
+    }
+
+    #[pyo3(signature = (key))]
+    fn get_async<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let snapshot = self.inner_ref()?;
+        future_into_py(py, async move {
+            match snapshot.get(&key).await {
+                Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
+                Ok(None) => Ok(None),
+                Err(e) => Err(map_error(e)),
+            }
+        })
+    }
+
+    #[pyo3(signature = (start, end = None))]
+    fn scan<'py>(
+        &self,
+        py: Python<'py>,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+    ) -> PyResult<Vec<Bound<'py, PyTuple>>> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let start_clone = start.clone();
+        let end = end.unwrap_or_else(|| {
+            let mut end = start_clone.clone();
+            end.push(0xff);
+            end
+        });
+
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let kvs = py.allow_threads(|| {
+            rt.block_on(async {
+                let mut iter = snapshot.scan(start..end).await.map_err(map_error)?;
+                let mut out = Vec::new();
+                while let Some(entry) = iter.next().await.map_err(map_error)? {
+                    out.push((entry.key.to_vec(), entry.value.to_vec()));
+                }
+                Ok::<Vec<(Vec<u8>, Vec<u8>)>, PyErr>(out)
+            })
+        })?;
+
+        kvs.into_iter()
+            .map(|(k, v)| {
+                let key = PyBytes::new(py, &k);
+                let value = PyBytes::new(py, &v);
+                PyTuple::new(py, vec![key, value])
+            })
+            .collect()
+    }
+
+    #[pyo3(signature = (start, end = None))]
+    fn scan_iter(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        Ok(PyDbIterator::new_from_snapshot(
+            self.inner_ref()?,
+            start,
+            end,
+        ))
+    }
+
+    fn close(&mut self) -> PyResult<()> {
+        self.inner = None; // drop snapshot; unregisters in Drop
+        Ok(())
     }
 }
 
@@ -606,6 +734,7 @@ pub struct PyDbIterator {
     receiver: Option<IteratorReceiver>,
     db: Option<Arc<Db>>,
     reader: Option<Arc<DbReader>>,
+    snapshot: Option<Arc<DbSnapshot>>,
     start: Vec<u8>,
     end: Vec<u8>,
     _task_handle: Option<tokio::task::JoinHandle<()>>,
@@ -617,6 +746,7 @@ impl PyDbIterator {
             receiver: None,
             db: Some(db),
             reader: None,
+            snapshot: None,
             start,
             end,
             _task_handle: None,
@@ -628,6 +758,19 @@ impl PyDbIterator {
             receiver: None,
             db: None,
             reader: Some(reader),
+            snapshot: None,
+            start,
+            end,
+            _task_handle: None,
+        }
+    }
+
+    fn new_from_snapshot(snapshot: Arc<DbSnapshot>, start: Vec<u8>, end: Vec<u8>) -> Self {
+        Self {
+            receiver: None,
+            db: None,
+            reader: None,
+            snapshot: Some(snapshot),
             start,
             end,
             _task_handle: None,
@@ -670,6 +813,27 @@ impl PyDbIterator {
             get_runtime().spawn(async move {
                 let result = async {
                     let mut iter = reader.scan(start..end).await?;
+                    while let Some(kv) = iter.next().await? {
+                        if sender.send(Ok(Some(kv))).is_err() {
+                            break; // Receiver dropped
+                        }
+                    }
+                    let _ = sender.send(Ok(None)); // End of iteration
+                    Ok::<(), Error>(())
+                }
+                .await;
+
+                if let Err(e) = result {
+                    let _ = sender.send(Err(e));
+                }
+            })
+        } else if let Some(snapshot) = &self.snapshot {
+            let snapshot = snapshot.clone();
+            let start = self.start.clone();
+            let end = self.end.clone();
+            get_runtime().spawn(async move {
+                let result = async {
+                    let mut iter = snapshot.scan(start..end).await?;
                     while let Some(kv) = iter.next().await? {
                         if sender.send(Ok(Some(kv))).is_err() {
                             break; // Receiver dropped

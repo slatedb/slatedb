@@ -70,6 +70,20 @@ class SlateDB:
         """
         ...
 
+    def snapshot(self) -> "SlateDBSnapshot":
+        """
+        Create a read-only snapshot of the database at the current committed state.
+
+        Returns:
+            A SlateDBSnapshot that provides a consistent, read-only view of data.
+
+        Notes:
+            The snapshot is independent from subsequent writes to the database. Call
+            `close()` on the snapshot to release resources promptly, or let it be
+            dropped by Python’s GC.
+        """
+        ...
+
     
     def get(self, key: bytes) -> Optional[bytes]:
         """
@@ -145,6 +159,45 @@ class SlateDB:
         Raises:
             UnavailableError | InternalError: On errors during close
         """
+        ...
+
+class SlateDBSnapshot:
+    """A consistent, read-only view of the database created via SlateDB.snapshot()."""
+
+    def get(self, key: bytes) -> Optional[bytes]:
+        """
+        Retrieve a value by key from the snapshot.
+
+        Args:
+            key: The key to look up as bytes (cannot be empty)
+
+        Returns:
+            The value as bytes if found, None if not found
+        """
+        ...
+
+    def scan(self, start: bytes, end: Optional[bytes] = None) -> List[Tuple[bytes, bytes]]:
+        """
+        Scan the snapshot for key-value pairs within a range.
+
+        Args:
+            start: The start key to scan from as bytes (cannot be empty)
+            end: The end key to stop at as bytes, exclusive (optional)
+                 if None, scan with auto-generated end (start + 0xFF)
+
+        Returns:
+            A list of tuples containing the key and value as bytes, sorted by key
+        """
+        ...
+
+    async def get_async(self, key: bytes) -> Optional[bytes]:
+        """
+        Retrieve a value by key from the snapshot asynchronously.
+        """
+        ...
+
+    def close(self) -> None:
+        """Close the snapshot, releasing any associated resources."""
         ...
 
 class SlateDBReader:

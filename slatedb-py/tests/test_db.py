@@ -145,3 +145,73 @@ def test_unknown_scheme_raises_unavailable_error(db_path):
     with pytest.raises(UnavailableError):
         SlateDB(db_path, url="unknown:///")
 
+
+def test_snapshot_basic_isolation(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"k1", b"v1")
+
+        # Create snapshot of current state
+        snap = db.snapshot()
+
+        # Mutate database after snapshot
+        db.put(b"k1", b"v2")
+        db.put(b"k2", b"v3")
+
+        # Snapshot sees original state
+        assert snap.get(b"k1") == b"v1"
+        assert snap.get(b"k2") is None
+
+        # Database sees latest state
+        assert db.get(b"k1") == b"v2"
+        assert db.get(b"k2") == b"v3"
+    finally:
+        db.close()
+
+
+def test_snapshot_scan_isolation(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"a1", b"v1")
+        db.put(b"a2", b"v2")
+
+        snap = db.snapshot()
+
+        # Insert after snapshot
+        db.put(b"a3", b"v3")
+
+        # Snapshot scan should not see a3
+        assert list(snap.scan(b"a")) == [(b"a1", b"v1"), (b"a2", b"v2")]
+        # DB scan sees all
+        assert list(db.scan(b"a")) == [(b"a1", b"v1"), (b"a2", b"v2"), (b"a3", b"v3")]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_get_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"k1", b"v1")
+        snap = db.snapshot()
+
+        # Mutate database after snapshot
+        db.put(b"k1", b"v2")
+
+        # Async read from snapshot returns original value
+        v = await snap.get_async(b"k1")
+        assert v == b"v1"
+    finally:
+        db.close()
+
+
+def test_snapshot_close(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"k", b"v")
+        snap = db.snapshot()
+        snap.close()
+        with pytest.raises(ClosedError):
+            _ = snap.get(b"k")
+    finally:
+        db.close()

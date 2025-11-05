@@ -125,6 +125,34 @@ assert db.get(b"key") == b"ab"
 db.close()
 ```
 
+### Snapshots
+
+Create a consistent, read-only view of the database using `snapshot()`. Reads from the snapshot are isolated from any subsequent writes to the database.
+
+```python
+from slatedb import SlateDB
+
+db = SlateDB("/path/to/your/database")
+
+# Write data and take a snapshot
+db.put(b"key1", b"original")
+snap = db.snapshot()
+
+# Modify the database after creating the snapshot
+db.put(b"key1", b"modified")
+
+# Snapshot sees original state; DB sees latest
+assert snap.get(b"key1") == b"original"
+assert db.get(b"key1") == b"modified"
+
+# Snapshots support range scans and async reads as well
+_ = list(snap.scan(b"key"))
+
+# Release resources when done (optional; also handled by GC)
+snap.close()
+db.close()
+```
+
 ### Admin API
 
 Use the Admin API to create and list checkpoints without holding a writer instance.
