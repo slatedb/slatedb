@@ -6,7 +6,6 @@ This module provides a Python interface to SlateDB, a key-value database built i
 
 from typing import Optional, List, Tuple, TypedDict, Iterator, Literal
 
-# Exceptions mirroring SlateDB error kinds
 class TransactionError(Exception):
     """Raised when a transaction conflict occurs (retry or drop the operation)."""
     ...
@@ -284,6 +283,21 @@ class DbIterator(Iterator[Tuple[bytes, bytes]]):
     """Iterator over (key, value) tuples returned by scan operations."""
     def __iter__(self) -> "DbIterator": ...
     def __next__(self) -> Tuple[bytes, bytes]: ...
+    def seek(self, key: bytes) -> None:
+        """
+        Seek forward to the next position within the original scan range.
+
+        Moves the iterator so that the next call to ``next(it)`` yields the
+        first key greater than or equal to ``key``. The seek is forward-only:
+        attempting to seek to a key less than or equal to the last returned key
+        raises ``InvalidError``. Seeking beyond the original scan end bound also
+        raises ``InvalidError``. If there are no further entries at or after
+        ``key``, the next iteration raises ``StopIteration``.
+
+        Args:
+            key: The target key to seek to (bytes, non-empty)
+        """
+        ...
     
     async def get_async(self, key: bytes) -> Optional[bytes]:
         """

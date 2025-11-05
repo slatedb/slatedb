@@ -7,9 +7,9 @@ use ::slatedb::object_store::ObjectStore;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
 use ::slatedb::DbSnapshot;
+use ::slatedb::Error;
 use ::slatedb::MergeOperator;
 use ::slatedb::MergeOperatorError;
-use ::slatedb::{Error, KeyValue};
 use once_cell::sync::OnceCell;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -20,7 +20,6 @@ use std::backtrace::Backtrace;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
@@ -311,12 +310,10 @@ impl PySlateDB {
             end
         });
 
-        Ok(PyDbIterator::new_from_db(
-            self.inner.clone(),
-            start,
-            end,
-            None,
-        ))
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async { db.scan(start..end).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
     }
 
     #[pyo3(signature = (key))]
@@ -356,12 +353,14 @@ impl PySlateDB {
             cache_blocks,
             max_fetch_tasks,
         )?;
-        Ok(PyDbIterator::new_from_db(
-            self.inner.clone(),
-            start,
-            end,
-            Some(opts),
-        ))
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            db.scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
@@ -502,12 +501,10 @@ impl PySlateDBSnapshot {
             end.push(0xff);
             end
         });
-        Ok(PyDbIterator::new_from_snapshot(
-            self.inner_ref()?,
-            start,
-            end,
-            None,
-        ))
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async { snapshot.scan(start..end).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
     }
 
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
@@ -536,12 +533,15 @@ impl PySlateDBSnapshot {
             cache_blocks,
             max_fetch_tasks,
         )?;
-        Ok(PyDbIterator::new_from_snapshot(
-            self.inner_ref()?,
-            start,
-            end,
-            Some(opts),
-        ))
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            snapshot
+                .scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
     }
 
     fn close(&mut self) -> PyResult<()> {
@@ -637,12 +637,10 @@ impl PySlateDBReader {
             end
         });
 
-        Ok(PyDbIterator::new_from_reader(
-            self.inner.clone(),
-            start,
-            end,
-            None,
-        ))
+        let reader = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async { reader.scan(start..end).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
     }
 
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
@@ -671,12 +669,15 @@ impl PySlateDBReader {
             cache_blocks,
             max_fetch_tasks,
         )?;
-        Ok(PyDbIterator::new_from_reader(
-            self.inner.clone(),
-            start,
-            end,
-            Some(opts),
-        ))
+        let reader = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            reader
+                .scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
     }
 
     fn close(&self) -> PyResult<()> {
@@ -754,168 +755,16 @@ impl PySlateDBAdmin {
     }
 }
 
-type IteratorReceiver = Arc<Mutex<mpsc::UnboundedReceiver<Result<Option<KeyValue>, Error>>>>;
-
 #[pyclass(name = "DbIterator")]
 pub struct PyDbIterator {
-    receiver: Option<IteratorReceiver>,
-    db: Option<Arc<Db>>,
-    reader: Option<Arc<DbReader>>,
-    snapshot: Option<Arc<DbSnapshot>>,
-    scan_options: Option<ScanOptions>,
-    start: Vec<u8>,
-    end: Vec<u8>,
-    _task_handle: Option<tokio::task::JoinHandle<()>>,
+    inner_iter: Option<::slatedb::DbIterator>,
 }
 
 impl PyDbIterator {
-    fn new_from_db(
-        db: Arc<Db>,
-        start: Vec<u8>,
-        end: Vec<u8>,
-        scan_options: Option<ScanOptions>,
-    ) -> Self {
+    fn from_iter(iter: ::slatedb::DbIterator) -> Self {
         Self {
-            receiver: None,
-            db: Some(db),
-            reader: None,
-            snapshot: None,
-            scan_options,
-            start,
-            end,
-            _task_handle: None,
+            inner_iter: Some(iter),
         }
-    }
-
-    fn new_from_reader(
-        reader: Arc<DbReader>,
-        start: Vec<u8>,
-        end: Vec<u8>,
-        scan_options: Option<ScanOptions>,
-    ) -> Self {
-        Self {
-            receiver: None,
-            db: None,
-            reader: Some(reader),
-            snapshot: None,
-            scan_options,
-            start,
-            end,
-            _task_handle: None,
-        }
-    }
-
-    fn new_from_snapshot(
-        snapshot: Arc<DbSnapshot>,
-        start: Vec<u8>,
-        end: Vec<u8>,
-        scan_options: Option<ScanOptions>,
-    ) -> Self {
-        Self {
-            receiver: None,
-            db: None,
-            reader: None,
-            snapshot: Some(snapshot),
-            scan_options,
-            start,
-            end,
-            _task_handle: None,
-        }
-    }
-
-    fn ensure_initialized(&mut self) -> PyResult<()> {
-        if self.receiver.is_some() {
-            return Ok(());
-        }
-
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let receiver = Arc::new(Mutex::new(receiver));
-
-        let task_handle = if let Some(db) = &self.db {
-            let db = db.clone();
-            let start = self.start.clone();
-            let end = self.end.clone();
-            let scan_options = self.scan_options.clone();
-            get_runtime().spawn(async move {
-                let result = async {
-                    let mut iter = if let Some(opts) = scan_options {
-                        db.scan_with_options(start..end, &opts).await?
-                    } else {
-                        db.scan(start..end).await?
-                    };
-                    while let Some(kv) = iter.next().await? {
-                        if sender.send(Ok(Some(kv))).is_err() {
-                            break; // Receiver dropped
-                        }
-                    }
-                    let _ = sender.send(Ok(None)); // End of iteration
-                    Ok::<(), Error>(())
-                }
-                .await;
-
-                if let Err(e) = result {
-                    let _ = sender.send(Err(e));
-                }
-            })
-        } else if let Some(reader) = &self.reader {
-            let reader = reader.clone();
-            let start = self.start.clone();
-            let end = self.end.clone();
-            let scan_options = self.scan_options.clone();
-            get_runtime().spawn(async move {
-                let result = async {
-                    let mut iter = if let Some(opts) = scan_options {
-                        reader.scan_with_options(start..end, &opts).await?
-                    } else {
-                        reader.scan(start..end).await?
-                    };
-                    while let Some(kv) = iter.next().await? {
-                        if sender.send(Ok(Some(kv))).is_err() {
-                            break; // Receiver dropped
-                        }
-                    }
-                    let _ = sender.send(Ok(None)); // End of iteration
-                    Ok::<(), Error>(())
-                }
-                .await;
-
-                if let Err(e) = result {
-                    let _ = sender.send(Err(e));
-                }
-            })
-        } else if let Some(snapshot) = &self.snapshot {
-            let snapshot = snapshot.clone();
-            let start = self.start.clone();
-            let end = self.end.clone();
-            let scan_options = self.scan_options.clone();
-            get_runtime().spawn(async move {
-                let result = async {
-                    let mut iter = if let Some(opts) = scan_options {
-                        snapshot.scan_with_options(start..end, &opts).await?
-                    } else {
-                        snapshot.scan(start..end).await?
-                    };
-                    while let Some(kv) = iter.next().await? {
-                        if sender.send(Ok(Some(kv))).is_err() {
-                            break; // Receiver dropped
-                        }
-                    }
-                    let _ = sender.send(Ok(None)); // End of iteration
-                    Ok::<(), Error>(())
-                }
-                .await;
-
-                if let Err(e) = result {
-                    let _ = sender.send(Err(e));
-                }
-            })
-        } else {
-            return Err(InvalidError::new_err("Iterator not properly initialized"));
-        };
-
-        self.receiver = Some(receiver);
-        self._task_handle = Some(task_handle);
-        Ok(())
     }
 }
 
@@ -926,31 +775,37 @@ impl PyDbIterator {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        self.ensure_initialized()?;
-
-        let receiver = self.receiver.as_ref().unwrap().clone();
+        let iter = self
+            .inner_iter
+            .as_mut()
+            .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
         let rt = get_runtime();
-
-        // Release GIL while waiting on Rust channel to avoid blocking Python
-        let kv_result = py.allow_threads(|| {
-            rt.block_on(async {
-                let mut guard = receiver.lock().await;
-                guard.recv().await
-            })
-        });
-
-        match kv_result {
-            Some(Ok(Some(kv))) => {
+        let kv_opt = py
+            .allow_threads(|| rt.block_on(async { iter.next().await }))
+            .map_err(map_error)?;
+        match kv_opt {
+            Some(kv) => {
                 let key = PyBytes::new(py, &kv.key);
                 let value = PyBytes::new(py, &kv.value);
                 let tuple = PyTuple::new(py, vec![key, value])?;
                 Ok(tuple.into())
             }
-            Some(Ok(None)) | None => {
-                // End of iteration or channel closed - raise StopIteration
-                Err(pyo3::exceptions::PyStopIteration::new_err(""))
-            }
-            Some(Err(e)) => Err(map_error(e)),
+            None => Err(pyo3::exceptions::PyStopIteration::new_err("")),
         }
+    }
+
+    #[pyo3(signature = (key))]
+    fn seek(&mut self, py: Python<'_>, key: Vec<u8>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let iter = self
+            .inner_iter
+            .as_mut()
+            .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+        let rt = get_runtime();
+        py.allow_threads(|| rt.block_on(async { iter.seek(&key).await }))
+            .map_err(map_error)?;
+        Ok(())
     }
 }

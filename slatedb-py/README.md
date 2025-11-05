@@ -153,6 +153,35 @@ snap.close()
 db.close()
 ```
 
+### Range Scans and Seek
+
+Range scans return an iterator. Materialize with `list(...)` or iterate lazily. You can optionally use `seek(key)` to move the iterator forward within the original range.
+
+```python
+from slatedb import SlateDB, InvalidError
+
+db = SlateDB("/path/to/your/database")
+db.put(b"a1", b"v1")
+db.put(b"a2", b"v2")
+db.put(b"a3", b"v3")
+
+# Iterate all keys with prefix 'a' lazily
+it = db.scan(b"a")
+print(next(it))         # (b"a1", b"v1")
+
+# Seek forward to the first key >= b"a3"
+it.seek(b"a3")
+print(next(it))         # (b"a3", b"v3")
+
+# Seeking backwards (<= last returned) raises InvalidError
+try:
+    it.seek(b"a2")
+except InvalidError:
+    pass
+
+db.close()
+```
+
 ### Admin API
 
 Use the Admin API to create and list checkpoints without holding a writer instance.

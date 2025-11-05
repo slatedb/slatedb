@@ -215,3 +215,54 @@ def test_snapshot_close(db_path, env_file):
             _ = snap.get(b"k")
     finally:
         db.close()
+
+
+def test_db_iterator_seek_forward_and_backward(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        # Populate keys
+        db.put(b"k1", b"v1")
+        db.put(b"k2", b"v2")
+        db.put(b"k3", b"v3")
+
+        it = db.scan(b"k")
+
+        # First element is k1
+        assert next(it) == (b"k1", b"v1")
+
+        # Seek forward to k3 and read it
+        it.seek(b"k3")
+        assert next(it) == (b"k3", b"v3")
+
+        # Seeking backwards to k2 should fail
+        with pytest.raises(InvalidError):
+            it.seek(b"k2")
+
+        # Exhaust iterator
+        with pytest.raises(StopIteration):
+            next(it)
+    finally:
+        db.close()
+
+
+def test_snapshot_iterator_seek(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"a1", b"v1")
+        db.put(b"a2", b"v2")
+        snap = db.snapshot()
+        # mutate after snapshot; snapshot should not see this
+        db.put(b"a3", b"v3")
+
+        it = snap.scan(b"a")
+        assert next(it) == (b"a1", b"v1")
+        # Seek forward to a2
+        it.seek(b"a2")
+        assert next(it) == (b"a2", b"v2")
+        # No more items in snapshot
+        with pytest.raises(StopIteration):
+            next(it)
+        snap.close()
+    finally:
+        db.close()
+
