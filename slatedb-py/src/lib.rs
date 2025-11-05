@@ -49,15 +49,6 @@ fn map_error(err: Error) -> PyErr {
     }
 }
 
-fn load_object_store(env_file: Option<String>) -> PyResult<Arc<dyn ObjectStore>> {
-    if let Some(env_file) = env_file {
-        Ok(load_object_store_from_env(Some(env_file))
-            .map_err(|e| InvalidError::new_err(e.to_string()))?)
-    } else {
-        Ok(Arc::new(InMemory::new()))
-    }
-}
-
 async fn load_db_from_url(
     path: &str,
     url: &str,
@@ -75,14 +66,27 @@ async fn load_db_from_url(
     builder.build().await.map_err(map_error)
 }
 
+fn resolve_object_store_py(
+    url: Option<&str>,
+    env_file: Option<String>,
+) -> PyResult<Arc<dyn ObjectStore>> {
+    if let Some(u) = url {
+        return Db::resolve_object_store(u).map_err(map_error);
+    }
+    if let Some(env) = env_file {
+        return load_object_store_from_env(Some(env))
+            .map_err(|e| InvalidError::new_err(e.to_string()));
+    }
+    Ok(Arc::new(InMemory::new()))
+}
+
 async fn load_db_from_env(
     path: &str,
     env_file: Option<String>,
     settings: Settings,
     merge_operator: Option<MergeOperatorType>,
 ) -> PyResult<Db> {
-    let object_store = load_object_store(env_file)?;
-
+    let object_store = resolve_object_store_py(None, env_file)?;
     let builder = Db::builder(path, object_store).with_settings(settings);
     let builder = if let Some(op) = merge_operator {
         builder.with_merge_operator(op)
@@ -395,15 +399,16 @@ struct PySlateDBReader {
 #[pymethods]
 impl PySlateDBReader {
     #[new]
-    #[pyo3(signature = (path, env_file = None, checkpoint_id = None, *, merge_operator = None))]
+    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None))]
     fn new(
         path: String,
+        url: Option<String>,
         env_file: Option<String>,
         checkpoint_id: Option<String>,
         merge_operator: Option<&Bound<PyAny>>,
     ) -> PyResult<Self> {
         let rt = get_runtime();
-        let object_store = load_object_store(env_file)?;
+        let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
         let db_reader = rt.block_on(async {
             let mut options = DbReaderOptions::default();
             options.merge_operator = parse_merge_operator(merge_operator)?;
@@ -534,9 +539,9 @@ struct PySlateDBAdmin {
 #[pymethods]
 impl PySlateDBAdmin {
     #[new]
-    #[pyo3(signature = (path, env_file = None))]
-    fn new(path: String, env_file: Option<String>) -> PyResult<Self> {
-        let object_store = load_object_store(env_file)?;
+    #[pyo3(signature = (path, url = None, env_file = None))]
+    fn new(path: String, url: Option<String>, env_file: Option<String>) -> PyResult<Self> {
+        let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
         let admin = Admin::builder(path, object_store).build();
         Ok(Self {
             inner: Arc::new(admin),

@@ -39,13 +39,15 @@ class SlateDB:
     and is built with Rust for safety and performance.
     """
     
-    def __init__(self, path: str, env_file: Optional[str] = None, **kwargs) -> None:
+    def __init__(self, path: str, url: Optional[str] = None, env_file: Optional[str] = None, **kwargs) -> None:
         """
         Create a new SlateDB instance.
-        
+
         Args:
             path: The path where the database will be stored
-            
+            url: Optional object store URL (e.g., "s3://bucket/prefix", "memory:///")
+            env_file: Optional environment file for object store configuration
+
         Raises:
             InvalidError: If configuration or arguments are invalid
             UnavailableError: If the object store is unavailable
@@ -154,21 +156,23 @@ class SlateDBReader:
     """
     
     def __init__(
-        self, 
-        path: str, 
-        env_file: Optional[str] = None, 
-        checkpoint_id: Optional[str] = None
+        self,
+        path: str,
+        url: Optional[str] = None,
+        env_file: Optional[str] = None,
+        checkpoint_id: Optional[str] = None,
     ) -> None:
         """
         Create a new SlateDBReader instance.
         
         Args:
             path: The path where the database is stored
+            url: Optional object store URL (e.g., "s3://bucket/prefix", "memory:///")
             env_file: Optional environment file for object store configuration
             checkpoint_id: Optional checkpoint ID (UUID string) to read from
             
         Raises:
-            InvalidError: If checkpoint_id is invalid
+            InvalidError: If checkpoint_id is invalid or arguments are invalid
             UnavailableError: If the object store is unavailable
             DataError: If persisted data is invalid
             InternalError: For unexpected internal errors
@@ -264,11 +268,12 @@ class SlateDBAdmin:
     operations that do not require an open writer instance.
     """
 
-    def __init__(self, path: str, env_file: Optional[str] = None) -> None:
+    def __init__(self, path: str, url: Optional[str] = None, env_file: Optional[str] = None) -> None:
         """Create an Admin handle for a database path.
 
         Args:
             path: Path to the database
+            url: Optional object store URL (e.g., "s3://bucket/prefix", "memory:///")
             env_file: Optional path to an environment file used to resolve the object store
 
         Raises:

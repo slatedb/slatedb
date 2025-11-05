@@ -69,8 +69,9 @@ db.close()
 ### Connecting to an object store based on its URL
 
 ```python
+from slatedb import SlateDB
 
-# Open the database
+# Open the database using an object store URL
 db = SlateDB("/tmp/slatedb", url="s3://my-bucket/my-prefix")
 
 # Put a key-value pair
@@ -138,7 +139,8 @@ db = SlateDB(path)
 db.put(b"keyA", b"valueA")
 db.close()
 
-admin = SlateDBAdmin(path)
+# Admin supports the same object store loading strategies (url or env_file)
+admin = SlateDBAdmin(path, url="s3://my-bucket/my-prefix")
 
 # Create a detached checkpoint (optionally set lifetime in ms)
 cp = admin.create_checkpoint(lifetime=60_000)
@@ -153,7 +155,8 @@ db2 = SlateDB(path)
 db2.put(b"keyB", b"valueB")
 db2.close()
 
-reader = SlateDBReader(path, checkpoint_id=cp["id"])  # pinned to cp
+# Reader supports the same strategies too (url or env_file)
+reader = SlateDBReader(path, url="s3://my-bucket/my-prefix", checkpoint_id=cp["id"])  # pinned to cp
 assert reader.get(b"keyA") == b"valueA"
 assert reader.get(b"keyB") is None
 reader.close()
