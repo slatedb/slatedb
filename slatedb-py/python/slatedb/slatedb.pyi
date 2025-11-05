@@ -876,8 +876,32 @@ class WriteBatch:
 class SlateDBAdmin:
     """Administrative interface for managing checkpoints and metadata."""
 
-    def __init__(self, path: str, url: str | None = None, env_file: str | None = None) -> None:
+    def __init__(
+        self,
+        path: str,
+        url: str | None = None,
+        env_file: str | None = None,
+        *,
+        wal_url: str | None = None,
+        seed: int | None = None,
+    ) -> None:
         """Create an admin handle for a database path/object store."""
+        ...
+
+    def read_manifest(self, id: int | None = None) -> str | None:
+        """Read the latest or specific manifest as JSON string."""
+        ...
+
+    async def read_manifest_async(self, id: int | None = None) -> str | None:
+        """Async variant of ``read_manifest``."""
+        ...
+
+    def list_manifests(self, start: int | None = None, end: int | None = None) -> str:
+        """List manifests within an optional [start, end) range as JSON."""
+        ...
+
+    async def list_manifests_async(self, start: int | None = None, end: int | None = None) -> str:
+        """Async variant of ``list_manifests``."""
         ...
 
     def create_checkpoint(
@@ -923,3 +947,87 @@ class SlateDBAdmin:
     async def list_checkpoints_async(self) -> list[Checkpoint]:
         """Async variant of ``list_checkpoints``."""
         ...
+
+    def refresh_checkpoint(self, id: str, lifetime: int | None = None) -> None:
+        """Refresh a checkpoint's lifetime (milliseconds)."""
+        ...
+
+    async def refresh_checkpoint_async(self, id: str, lifetime: int | None = None) -> None:
+        """Async variant of ``refresh_checkpoint``."""
+        ...
+
+    def delete_checkpoint(self, id: str) -> None:
+        """Delete a checkpoint by id."""
+        ...
+
+    async def delete_checkpoint_async(self, id: str) -> None:
+        """Async variant of ``delete_checkpoint``."""
+        ...
+
+    def get_timestamp_for_sequence(self, seq: int, *, round_up: bool = False) -> int | None:
+        """Return timestamp millis for a sequence, or ``None`` if unknown."""
+        ...
+
+    async def get_timestamp_for_sequence_async(self, seq: int, *, round_up: bool = False) -> int | None:
+        """Async variant of ``get_timestamp_for_sequence``."""
+        ...
+
+    def get_sequence_for_timestamp(self, ts_millis: int, *, round_up: bool = False) -> int | None:
+        """Return sequence for timestamp millis, or ``None`` if unknown."""
+        ...
+
+    async def get_sequence_for_timestamp_async(self, ts_millis: int, *, round_up: bool = False) -> int | None:
+        """Async variant of ``get_sequence_for_timestamp``."""
+        ...
+
+    def create_clone(self, parent_path: str, parent_checkpoint: str | None = None) -> None:
+        """Create a clone DB at this admin's path from a parent path/checkpoint."""
+        ...
+
+    async def create_clone_async(self, parent_path: str, parent_checkpoint: str | None = None) -> None:
+        """Async variant of ``create_clone``."""
+        ...
+
+    def run_gc_once(
+        self,
+        *,
+        manifest_interval: int | None = None,
+        manifest_min_age: int | None = None,
+        wal_interval: int | None = None,
+        wal_min_age: int | None = None,
+        compacted_interval: int | None = None,
+        compacted_min_age: int | None = None,
+    ) -> None: ...
+
+    async def run_gc_once_async(
+        self,
+        *,
+        manifest_interval: int | None = None,
+        manifest_min_age: int | None = None,
+        wal_interval: int | None = None,
+        wal_min_age: int | None = None,
+        compacted_interval: int | None = None,
+        compacted_min_age: int | None = None,
+    ) -> None: ...
+
+    def run_gc(
+        self,
+        *,
+        manifest_interval: int | None = None,
+        manifest_min_age: int | None = None,
+        wal_interval: int | None = None,
+        wal_min_age: int | None = None,
+        compacted_interval: int | None = None,
+        compacted_min_age: int | None = None,
+    ) -> None: ...
+
+    async def run_gc_async(
+        self,
+        *,
+        manifest_interval: int | None = None,
+        manifest_min_age: int | None = None,
+        wal_interval: int | None = None,
+        wal_min_age: int | None = None,
+        compacted_interval: int | None = None,
+        compacted_min_age: int | None = None,
+    ) -> None: ...

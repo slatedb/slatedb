@@ -27,3 +27,4 @@ tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-
 uuid = { workspace = true, features = ["v4", "serde"] }
 bytes = { workspace = true }
 log = { workspace = true }
+chrono = { workspace = true }

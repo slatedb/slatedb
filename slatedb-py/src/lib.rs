@@ -1,7 +1,8 @@
 use ::slatedb::admin::{load_object_store_from_env, Admin};
 use ::slatedb::config::{
     CheckpointOptions, CheckpointScope, DbReaderOptions, DurabilityLevel, FlushOptions, FlushType,
-    MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
+    GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
+    ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
 use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
@@ -13,6 +14,7 @@ use ::slatedb::Error;
 use ::slatedb::IsolationLevel;
 use ::slatedb::MergeOperator;
 use ::slatedb::MergeOperatorError;
+use chrono::{DateTime, Utc};
 use once_cell::sync::OnceCell;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -84,6 +86,63 @@ fn resolve_object_store_py(
             .map_err(|e| InvalidError::new_err(e.to_string()));
     }
     Ok(Arc::new(InMemory::new()))
+}
+
+fn build_gc_options_from_kwargs(
+    manifest_interval: Option<u64>,
+    manifest_min_age: Option<u64>,
+    wal_interval: Option<u64>,
+    wal_min_age: Option<u64>,
+    compacted_interval: Option<u64>,
+    compacted_min_age: Option<u64>,
+    require_interval: bool,
+    for_once: bool,
+) -> PyResult<GarbageCollectorOptions> {
+    fn build_dir(
+        interval_ms: Option<u64>,
+        min_age_ms: Option<u64>,
+        require_interval: bool,
+        for_once: bool,
+    ) -> PyResult<Option<GarbageCollectorDirectoryOptions>> {
+        match (interval_ms, min_age_ms) {
+            (None, None) => Ok(None),
+            (interval, Some(min_age)) => {
+                if require_interval && interval.is_none() {
+                    return Err(InvalidError::new_err(
+                        "gc opts: 'interval' is required when scheduling background GC",
+                    ));
+                }
+                let interval = if for_once {
+                    None
+                } else {
+                    interval.map(Duration::from_millis)
+                };
+                Ok(Some(GarbageCollectorDirectoryOptions {
+                    interval,
+                    min_age: Duration::from_millis(min_age),
+                }))
+            }
+            (Some(_), None) => Err(InvalidError::new_err(
+                "gc opts: 'min_age' is required when specifying interval",
+            )),
+        }
+    }
+
+    Ok(GarbageCollectorOptions {
+        manifest_options: build_dir(
+            manifest_interval,
+            manifest_min_age,
+            require_interval,
+            for_once,
+        )?,
+        wal_options: build_dir(wal_interval, wal_min_age, require_interval, for_once)?,
+        compacted_options: build_dir(
+            compacted_interval,
+            compacted_min_age,
+            require_interval,
+            for_once,
+        )?,
+    })
 }
 
 async fn load_db_from_env(
@@ -1697,12 +1756,93 @@ struct PySlateDBAdmin {
 #[pymethods]
 impl PySlateDBAdmin {
     #[new]
-    #[pyo3(signature = (path, url = None, env_file = None))]
-    fn new(path: String, url: Option<String>, env_file: Option<String>) -> PyResult<Self> {
+    #[pyo3(signature = (path, url = None, env_file = None, *, wal_url = None, seed = None))]
+    fn new(
+        path: String,
+        url: Option<String>,
+        env_file: Option<String>,
+        wal_url: Option<String>,
+        seed: Option<u64>,
+    ) -> PyResult<Self> {
         let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
-        let admin = Admin::builder(path, object_store).build();
+        let mut builder = Admin::builder(path, object_store);
+        if let Some(wal) = wal_url {
+            let wal_store = Db::resolve_object_store(&wal).map_err(map_error)?;
+            builder = builder.with_wal_object_store(wal_store);
+        }
+        if let Some(s) = seed {
+            builder = builder.with_seed(s);
+        }
+        let admin = builder.build();
         Ok(Self {
             inner: Arc::new(admin),
+        })
+    }
+
+    #[pyo3(signature = (id = None))]
+    fn read_manifest(&self, id: Option<u64>) -> PyResult<Option<String>> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            admin
+                .read_manifest(id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id = None))]
+    fn read_manifest_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            admin
+                .read_manifest(id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (start = None, end = None))]
+    fn list_manifests(&self, start: Option<u64>, end: Option<u64>) -> PyResult<String> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            let range = match (start, end) {
+                (Some(s), Some(e)) => s..e,
+                (Some(s), None) => s..u64::MAX,
+                (None, Some(e)) => u64::MIN..e,
+                (None, None) => u64::MIN..u64::MAX,
+            };
+            admin
+                .list_manifests(range)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (start = None, end = None))]
+    fn list_manifests_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Option<u64>,
+        end: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            let range = match (start, end) {
+                (Some(s), Some(e)) => s..e,
+                (Some(s), None) => s..u64::MAX,
+                (None, Some(e)) => u64::MIN..e,
+                (None, None) => u64::MIN..u64::MAX,
+            };
+            admin
+                .list_manifests(range)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
         })
     }
 
@@ -1809,6 +1949,276 @@ impl PySlateDBAdmin {
                 Ok(out?)
             })
         })
+    }
+
+    #[pyo3(signature = (id, lifetime = None))]
+    fn refresh_checkpoint(&self, id: String, lifetime: Option<u64>) -> PyResult<()> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        let uuid = Uuid::parse_str(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
+        rt.block_on(async move {
+            admin
+                .refresh_checkpoint(uuid, lifetime.map(Duration::from_millis))
+                .await
+                .map_err(map_error)
+        })
+    }
+
+    #[pyo3(signature = (id, lifetime = None))]
+    fn refresh_checkpoint_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        lifetime: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let uuid = Uuid::parse_str(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
+        future_into_py(py, async move {
+            admin
+                .refresh_checkpoint(uuid, lifetime.map(Duration::from_millis))
+                .await
+                .map_err(map_error)
+        })
+    }
+
+    #[pyo3(signature = (id))]
+    fn delete_checkpoint(&self, id: String) -> PyResult<()> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        let uuid = Uuid::parse_str(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
+        rt.block_on(async move { admin.delete_checkpoint(uuid).await.map_err(map_error) })
+    }
+
+    #[pyo3(signature = (id))]
+    fn delete_checkpoint_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let uuid = Uuid::parse_str(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
+        future_into_py(py, async move {
+            admin.delete_checkpoint(uuid).await.map_err(map_error)
+        })
+    }
+
+    #[pyo3(signature = (seq, *, round_up = false))]
+    fn get_timestamp_for_sequence(&self, seq: u64, round_up: bool) -> PyResult<Option<i64>> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            admin
+                .get_timestamp_for_sequence(seq, round_up)
+                .await
+                .map(|opt| opt.map(|ts| ts.timestamp_millis()))
+                .map_err(map_error)
+        })
+    }
+
+    #[pyo3(signature = (seq, *, round_up = false))]
+    fn get_timestamp_for_sequence_async<'py>(
+        &self,
+        py: Python<'py>,
+        seq: u64,
+        round_up: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            admin
+                .get_timestamp_for_sequence(seq, round_up)
+                .await
+                .map(|opt| opt.map(|ts| ts.timestamp_millis()))
+                .map_err(map_error)
+        })
+    }
+
+    #[pyo3(signature = (ts_millis, *, round_up = false))]
+    fn get_sequence_for_timestamp(&self, ts_millis: i64, round_up: bool) -> PyResult<Option<u64>> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        let ts: DateTime<Utc> = DateTime::<Utc>::from_timestamp_millis(ts_millis)
+            .ok_or_else(|| InvalidError::new_err("invalid timestamp millis (out of range)"))?;
+        rt.block_on(async move {
+            admin
+                .get_sequence_for_timestamp(ts, round_up)
+                .await
+                .map_err(map_error)
+        })
+    }
+
+    #[pyo3(signature = (ts_millis, *, round_up = false))]
+    fn get_sequence_for_timestamp_async<'py>(
+        &self,
+        py: Python<'py>,
+        ts_millis: i64,
+        round_up: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let ts = DateTime::<Utc>::from_timestamp_millis(ts_millis)
+            .ok_or_else(|| InvalidError::new_err("invalid timestamp millis (out of range)"))?;
+        future_into_py(py, async move {
+            admin
+                .get_sequence_for_timestamp(ts, round_up)
+                .await
+                .map_err(map_error)
+        })
+    }
+
+    #[pyo3(signature = (parent_path, parent_checkpoint = None))]
+    fn create_clone(&self, parent_path: String, parent_checkpoint: Option<String>) -> PyResult<()> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        let parent_ckpt = match parent_checkpoint {
+            Some(s) => Some(Uuid::parse_str(&s).map_err(|e| {
+                InvalidError::new_err(format!("invalid parent_checkpoint UUID: {e}"))
+            })?),
+            None => None,
+        };
+        rt.block_on(async move {
+            admin
+                .create_clone(parent_path, parent_ckpt)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (parent_path, parent_checkpoint = None))]
+    fn create_clone_async<'py>(
+        &self,
+        py: Python<'py>,
+        parent_path: String,
+        parent_checkpoint: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let parent_ckpt = match parent_checkpoint {
+            Some(s) => Some(Uuid::parse_str(&s).map_err(|e| {
+                InvalidError::new_err(format!("invalid parent_checkpoint UUID: {e}"))
+            })?),
+            None => None,
+        };
+        future_into_py(py, async move {
+            admin
+                .create_clone(parent_path, parent_ckpt)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    fn run_gc_once(
+        &self,
+        manifest_interval: Option<u64>,
+        manifest_min_age: Option<u64>,
+        wal_interval: Option<u64>,
+        wal_min_age: Option<u64>,
+        compacted_interval: Option<u64>,
+        compacted_min_age: Option<u64>,
+    ) -> PyResult<()> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        let opts = build_gc_options_from_kwargs(
+            manifest_interval,
+            manifest_min_age,
+            wal_interval,
+            wal_min_age,
+            compacted_interval,
+            compacted_min_age,
+            false,
+            true,
+        )?;
+        rt.block_on(async move {
+            admin
+                .run_gc_once(opts)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    fn run_gc_once_async<'py>(
+        &self,
+        py: Python<'py>,
+        manifest_interval: Option<u64>,
+        manifest_min_age: Option<u64>,
+        wal_interval: Option<u64>,
+        wal_min_age: Option<u64>,
+        compacted_interval: Option<u64>,
+        compacted_min_age: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let opts = build_gc_options_from_kwargs(
+            manifest_interval,
+            manifest_min_age,
+            wal_interval,
+            wal_min_age,
+            compacted_interval,
+            compacted_min_age,
+            false,
+            true,
+        )?;
+        future_into_py(py, async move {
+            admin
+                .run_gc_once(opts)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    fn run_gc(
+        &self,
+        manifest_interval: Option<u64>,
+        manifest_min_age: Option<u64>,
+        wal_interval: Option<u64>,
+        wal_min_age: Option<u64>,
+        compacted_interval: Option<u64>,
+        compacted_min_age: Option<u64>,
+    ) -> PyResult<()> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        let opts = build_gc_options_from_kwargs(
+            manifest_interval,
+            manifest_min_age,
+            wal_interval,
+            wal_min_age,
+            compacted_interval,
+            compacted_min_age,
+            true,
+            false,
+        )?;
+        rt.block_on(async move { admin.run_gc(opts).await.map_err(map_error) })
+    }
+
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    fn run_gc_async<'py>(
+        &self,
+        py: Python<'py>,
+        manifest_interval: Option<u64>,
+        manifest_min_age: Option<u64>,
+        wal_interval: Option<u64>,
+        wal_min_age: Option<u64>,
+        compacted_interval: Option<u64>,
+        compacted_min_age: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let opts = build_gc_options_from_kwargs(
+            manifest_interval,
+            manifest_min_age,
+            wal_interval,
+            wal_min_age,
+            compacted_interval,
+            compacted_min_age,
+            true,
+            false,
+        )?;
+        future_into_py(
+            py,
+            async move { admin.run_gc(opts).await.map_err(map_error) },
+        )
     }
 }
 
