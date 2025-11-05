@@ -8,7 +8,8 @@ use ::slatedb::MergeOperator;
 use ::slatedb::MergeOperatorError;
 use ::slatedb::{Error, KeyValue};
 use once_cell::sync::OnceCell;
-use pyo3::exceptions::PyValueError;
+use pyo3::create_exception;
+use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
@@ -31,6 +32,29 @@ fn create_value_error(msg: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error_msg)
 }
 
+// Python exception types mirroring slatedb::Error kinds
+create_exception!(slatedb, TransactionError, PyException);
+create_exception!(slatedb, ClosedError, PyException);
+create_exception!(slatedb, UnavailableError, PyException);
+create_exception!(slatedb, InvalidError, PyException);
+create_exception!(slatedb, DataError, PyException);
+create_exception!(slatedb, InternalError, PyException);
+
+// Map slatedb::Error into the appropriate Python exception type
+fn map_error(err: Error) -> PyErr {
+    let bt = Backtrace::capture();
+    let msg = format!("{}\nBacktrace:\n{}", err, bt);
+    match err.kind() {
+        ::slatedb::ErrorKind::Transaction => TransactionError::new_err(msg),
+        ::slatedb::ErrorKind::Closed(_) => ClosedError::new_err(msg),
+        ::slatedb::ErrorKind::Unavailable => UnavailableError::new_err(msg),
+        ::slatedb::ErrorKind::Invalid => InvalidError::new_err(msg),
+        ::slatedb::ErrorKind::Data => DataError::new_err(msg),
+        ::slatedb::ErrorKind::Internal => InternalError::new_err(msg),
+        _ => InternalError::new_err(msg),
+    }
+}
+
 fn load_object_store(env_file: Option<String>) -> PyResult<Arc<dyn ObjectStore>> {
     if let Some(env_file) = env_file {
         Ok(load_object_store_from_env(Some(env_file)).map_err(create_value_error)?)
@@ -45,7 +69,7 @@ async fn load_db_from_url(
     settings: Settings,
     merge_operator: Option<MergeOperatorType>,
 ) -> PyResult<Db> {
-    let object_store = Db::resolve_object_store(url).map_err(create_value_error)?;
+    let object_store = Db::resolve_object_store(url).map_err(map_error)?;
 
     let builder = Db::builder(path, object_store).with_settings(settings);
     let builder = if let Some(op) = merge_operator {
@@ -53,7 +77,7 @@ async fn load_db_from_url(
     } else {
         builder
     };
-    builder.build().await.map_err(create_value_error)
+    builder.build().await.map_err(map_error)
 }
 
 async fn load_db_from_env(
@@ -70,16 +94,23 @@ async fn load_db_from_env(
     } else {
         builder
     };
-    builder.build().await.map_err(create_value_error)
+    builder.build().await.map_err(map_error)
 }
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn slatedb(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySlateDB>()?;
     m.add_class::<PySlateDBReader>()?;
     m.add_class::<PySlateDBAdmin>()?;
     m.add_class::<PyDbIterator>()?;
+    // Export exception types
+    m.add("TransactionError", py.get_type::<TransactionError>())?;
+    m.add("ClosedError", py.get_type::<ClosedError>())?;
+    m.add("UnavailableError", py.get_type::<UnavailableError>())?;
+    m.add("InvalidError", py.get_type::<InvalidError>())?;
+    m.add("DataError", py.get_type::<DataError>())?;
+    m.add("InternalError", py.get_type::<InternalError>())?;
     Ok(())
 }
 
@@ -169,9 +200,9 @@ impl PySlateDB {
                 let settings_path = settings_item
                     .extract::<String>()
                     .map_err(create_value_error)?;
-                Settings::from_file(settings_path).map_err(create_value_error)?
+                Settings::from_file(settings_path).map_err(map_error)?
             }
-            None => Settings::load().map_err(create_value_error)?,
+            None => Settings::load().map_err(map_error)?,
         };
 
         // Parse the optional merge operator
@@ -196,9 +227,7 @@ impl PySlateDB {
         }
         let db = self.inner.clone();
         let rt = get_runtime();
-        py.allow_threads(|| {
-            rt.block_on(async { db.put(&key, &value).await.map_err(create_value_error) })
-        })
+        py.allow_threads(|| rt.block_on(async { db.put(&key, &value).await.map_err(map_error) }))
     }
 
     #[pyo3(signature = (key))]
@@ -213,7 +242,7 @@ impl PySlateDB {
                 match db.get(&key).await {
                     Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.as_ref().to_vec())),
                     Ok(None) => Ok(None),
-                    Err(e) => Err(create_value_error(e)),
+                    Err(e) => Err(map_error(e)),
                 }
             })
         })?;
@@ -242,9 +271,9 @@ impl PySlateDB {
         // Collect key-values with GIL released
         let kvs = py.allow_threads(|| {
             rt.block_on(async {
-                let mut iter = db.scan(start..end).await.map_err(create_value_error)?;
+                let mut iter = db.scan(start..end).await.map_err(map_error)?;
                 let mut out = Vec::new();
-                while let Some(entry) = iter.next().await.map_err(create_value_error)? {
+                while let Some(entry) = iter.next().await.map_err(map_error)? {
                     out.push((entry.key.to_vec(), entry.value.to_vec()));
                 }
                 Ok::<Vec<(Vec<u8>, Vec<u8>)>, PyErr>(out)
@@ -282,16 +311,14 @@ impl PySlateDB {
         let db = self.inner.clone();
         let rt = get_runtime();
         // Release the GIL while awaiting Rust I/O
-        py.allow_threads(|| {
-            rt.block_on(async { db.delete(&key).await.map_err(create_value_error) })
-        })
+        py.allow_threads(|| rt.block_on(async { db.delete(&key).await.map_err(map_error) }))
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         let db = self.inner.clone();
         let rt = get_runtime();
         // Release the GIL while awaiting shutdown
-        py.allow_threads(|| rt.block_on(async { db.close().await.map_err(create_value_error) }))
+        py.allow_threads(|| rt.block_on(async { db.close().await.map_err(map_error) }))
     }
 
     /// Merge a value into the database using the configured merge operator.
@@ -303,9 +330,7 @@ impl PySlateDB {
         let db = self.inner.clone();
         let rt = get_runtime();
         // Release the GIL while DB.merge may invoke Python merge operator
-        py.allow_threads(|| {
-            rt.block_on(async { db.merge(&key, &value).await.map_err(create_value_error) })
-        })
+        py.allow_threads(|| rt.block_on(async { db.merge(&key, &value).await.map_err(map_error) }))
     }
 
     /// Async version of merge
@@ -321,7 +346,7 @@ impl PySlateDB {
         }
         let db = self.inner.clone();
         future_into_py(py, async move {
-            db.merge(&key, &value).await.map_err(create_value_error)
+            db.merge(&key, &value).await.map_err(map_error)
         })
     }
 
@@ -336,9 +361,10 @@ impl PySlateDB {
             return Err(create_value_error("key cannot be empty"));
         }
         let db = self.inner.clone();
-        future_into_py(py, async move {
-            db.put(&key, &value).await.map_err(create_value_error)
-        })
+        future_into_py(
+            py,
+            async move { db.put(&key, &value).await.map_err(map_error) },
+        )
     }
 
     #[pyo3(signature = (key))]
@@ -351,7 +377,7 @@ impl PySlateDB {
             match db.get(&key).await {
                 Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
                 Ok(None) => Ok(None),
-                Err(e) => Err(create_value_error(e)),
+                Err(e) => Err(map_error(e)),
             }
         })
     }
@@ -362,9 +388,7 @@ impl PySlateDB {
             return Err(create_value_error("key cannot be empty"));
         }
         let db = self.inner.clone();
-        future_into_py(py, async move {
-            db.delete(&key).await.map_err(create_value_error)
-        })
+        future_into_py(py, async move { db.delete(&key).await.map_err(map_error) })
     }
 }
 
@@ -397,7 +421,7 @@ impl PySlateDBReader {
                 options,
             )
             .await
-            .map_err(create_value_error)
+            .map_err(map_error)
         })?;
         Ok(Self {
             inner: Arc::new(db_reader),
@@ -417,7 +441,7 @@ impl PySlateDBReader {
                 match db_reader.get(&key).await {
                     Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.to_vec())),
                     Ok(None) => Ok(None),
-                    Err(e) => Err(create_value_error(e)),
+                    Err(e) => Err(map_error(e)),
                 }
             })
         })?;
@@ -434,7 +458,7 @@ impl PySlateDBReader {
             match db_reader.get(&key).await {
                 Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
                 Ok(None) => Ok(None),
-                Err(e) => Err(create_value_error(e)),
+                Err(e) => Err(map_error(e)),
             }
         })
     }
@@ -461,12 +485,9 @@ impl PySlateDBReader {
         // Collect key-values with GIL released to avoid deadlocks when merge operator calls Python
         let kvs = py.allow_threads(|| {
             rt.block_on(async {
-                let mut iter = db_reader
-                    .scan(start..end)
-                    .await
-                    .map_err(create_value_error)?;
+                let mut iter = db_reader.scan(start..end).await.map_err(map_error)?;
                 let mut out = Vec::new();
-                while let Some(entry) = iter.next().await.map_err(create_value_error)? {
+                while let Some(entry) = iter.next().await.map_err(map_error)? {
                     out.push((entry.key.to_vec(), entry.value.to_vec()));
                 }
                 Ok::<Vec<(Vec<u8>, Vec<u8>)>, PyErr>(out)
@@ -502,7 +523,7 @@ impl PySlateDBReader {
     fn close(&self) -> PyResult<()> {
         let db_reader = self.inner.clone();
         let rt = get_runtime();
-        rt.block_on(async { db_reader.close().await.map_err(create_value_error) })
+        rt.block_on(async { db_reader.close().await.map_err(map_error) })
     }
 }
 
@@ -540,7 +561,7 @@ impl PySlateDBAdmin {
             admin
                 .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
                 .await
-                .map_err(create_value_error)
+                .map_err(map_error)
         })?;
         let dict = PyDict::new(py);
         dict.set_item("id", result.id.to_string())?;
@@ -693,7 +714,7 @@ impl PyDbIterator {
                 // End of iteration or channel closed - raise StopIteration
                 Err(pyo3::exceptions::PyStopIteration::new_err(""))
             }
-            Some(Err(e)) => Err(create_value_error(e)),
+            Some(Err(e)) => Err(map_error(e)),
         }
     }
 }

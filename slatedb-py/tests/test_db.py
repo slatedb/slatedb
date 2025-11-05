@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from slatedb import SlateDB
+from slatedb import SlateDB, ClosedError, UnavailableError, InvalidError
 
 @pytest.mark.asyncio
 async def test_async_put_and_get(db):
@@ -120,3 +120,28 @@ def test_merge_operator_callable_concat(db_path):
         assert db.get(b"k") == b"abc"
     finally:
         db.close()
+
+
+def test_closed_error_on_operations(db_path):
+    db = SlateDB(db_path)
+    db.put(b"k", b"v")
+    db.close()
+
+    with pytest.raises(ClosedError):
+        db.put(b"k2", b"v2")
+
+    with pytest.raises(ClosedError):
+        db.get(b"k")
+
+
+def test_invalid_url_raises_invalid_error(db_path):
+    # Bad URL that fails parsing triggers InvalidError mapping
+    with pytest.raises(InvalidError):
+        SlateDB(db_path, url=":invalid:")
+
+
+def test_unknown_scheme_raises_unavailable_error(db_path):
+    # Unknown scheme parses but is not resolvable by registry -> UnavailableError
+    with pytest.raises(UnavailableError):
+        SlateDB(db_path, url="unknown:///")
+
