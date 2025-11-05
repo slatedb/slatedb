@@ -81,7 +81,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
         let current_system_ts = system_clock.now().timestamp_millis();
-        for (idx, (_, entry)) in versions.into_iter().enumerate() {
+        for (_, entry) in versions.into_iter() {
             // always keep the latest version (idx == 0), for older versions, check if they are within retention window.
             // retention window is defined by either timeout or seq, or both. if both are not set, only the latest version
             // is kept.
@@ -105,14 +105,6 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 .map(|min_seq| entry.seq >= min_seq)
                 .unwrap_or(false);
 
-            let should_keep = idx == 0 || in_retention_window_by_time || in_retention_window_by_seq;
-            if !should_keep {
-                // if an entry is filtered out in retention, we should not
-                // continue have the earlier versions of the same key still
-                // included in the iterator.
-                break;
-            }
-
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
@@ -133,7 +125,16 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 _ => entry,
             };
 
+            // always keep the entry with latest version. also, we should keep
+            // the latest version which has a seq belowing `retention_min_seq`.
             filtered_versions.insert(Reverse(entry.seq), entry);
+
+            let should_continue = in_retention_window_by_time || in_retention_window_by_seq;
+            if !should_continue {
+                // if we find the first entry that neither in retention window by time nor by seq,
+                // we should break the loop to filter out the earlier versions of the same key.
+                break;
+            }
         }
 
         if filter_tombstone {
