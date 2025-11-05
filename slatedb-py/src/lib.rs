@@ -1756,22 +1756,18 @@ struct PySlateDBAdmin {
 #[pymethods]
 impl PySlateDBAdmin {
     #[new]
-    #[pyo3(signature = (path, url = None, env_file = None, *, wal_url = None, seed = None))]
+    #[pyo3(signature = (path, url = None, env_file = None, *, wal_url = None))]
     fn new(
         path: String,
         url: Option<String>,
         env_file: Option<String>,
         wal_url: Option<String>,
-        seed: Option<u64>,
     ) -> PyResult<Self> {
         let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
         let mut builder = Admin::builder(path, object_store);
         if let Some(wal) = wal_url {
             let wal_store = Db::resolve_object_store(&wal).map_err(map_error)?;
             builder = builder.with_wal_object_store(wal_store);
-        }
-        if let Some(s) = seed {
-            builder = builder.with_seed(s);
         }
         let admin = builder.build();
         Ok(Self {

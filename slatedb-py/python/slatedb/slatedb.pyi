@@ -883,7 +883,6 @@ class SlateDBAdmin:
         env_file: str | None = None,
         *,
         wal_url: str | None = None,
-        seed: int | None = None,
     ) -> None:
         """Create an admin handle for a database path/object store."""
         ...
