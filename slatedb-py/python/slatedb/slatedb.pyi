@@ -1,461 +1,443 @@
 """
-Python stub file for slatedb module.
+Typing stubs for the ``slatedb`` module.
 
-This module provides a Python interface to SlateDB, a key-value database built in Rust.
+These stubs describe the Python API exposed by the Rust extension and are
+used by type checkers and IDEs for autocompletion and linting.
 """
 
-from typing import Optional, List, Tuple, TypedDict, Iterator, Literal
+from typing import Optional, List, Tuple, TypedDict, Iterator, AsyncIterator, Literal, Callable
 
-class TransactionError(Exception):
-    """Raised when a transaction conflict occurs (retry or drop the operation)."""
-    ...
 
-class ClosedError(Exception):
-    """Raised when the database/reader is closed or fenced; create a new instance."""
-    ...
+class TransactionError(Exception): ...
+class ClosedError(Exception): ...
+class UnavailableError(Exception): ...
+class InvalidError(Exception): ...
+class DataError(Exception): ...
+class InternalError(Exception): ...
 
-class UnavailableError(Exception):
-    """Raised when storage or network is unavailable; retry or drop the operation."""
-    ...
-
-class InvalidError(Exception):
-    """Raised for invalid arguments, configuration, or method usage."""
-    ...
-
-class DataError(Exception):
-    """Raised for on-disk/object-store data corruption or incompatible versions."""
-    ...
-
-class InternalError(Exception):
-    """Raised for unexpected internal errors; consider reporting an issue."""
-    ...
 
 class SlateDB:
     """
-    A Python interface to SlateDB, a key-value database.
-    
-    SlateDB is a high-performance key-value store that provides ACID transactions
-    and is built with Rust for safety and performance.
+    Read/write interface to a SlateDB database.
+
+    Use this class to open a database, read and write keys, and run
+    transactions. For read-only access (optionally at a checkpoint), see
+    ``SlateDBReader``.
     """
-    
-    def __init__(self, path: str, url: Optional[str] = None, env_file: Optional[str] = None, **kwargs) -> None:
+
+    def __init__(
+        self,
+        path: str,
+        url: Optional[str] = None,
+        env_file: Optional[str] = None,
+        *,
+        merge_operator: Optional[Callable[[Optional[bytes], bytes], bytes]] = None,
+        settings: Optional[str] = None,
+    ) -> None:
         """
-        Create a new SlateDB instance.
+        Create or open a SlateDB database.
 
         Args:
-            path: The path where the database will be stored
-            url: Optional object store URL (e.g., "s3://bucket/prefix", "memory:///")
-            env_file: Optional environment file for object store configuration
+            path: Local path (or logical DB name) for the database.
+            url: Optional object store URL (e.g. ``"s3://bucket/prefix"``,
+                ``"memory:///"``). If omitted, object store is resolved from
+                ``env_file`` when provided, otherwise in-memory.
+            env_file: Optional path to a file containing environment variables
+                to configure the object store.
+            merge_operator: Optional Python callable implementing a merge
+                function with signature ``merge(existing: Optional[bytes], value: bytes) -> bytes``.
+            settings: Optional path to a SlateDB settings TOML file.
 
         Raises:
-            InvalidError: If configuration or arguments are invalid
-            UnavailableError: If the object store is unavailable
-            DataError: If persisted data is invalid
-            InternalError: For unexpected internal errors
+            InvalidError: Invalid arguments or configuration.
+            UnavailableError: Object store unavailable.
+            DataError: Persisted data is invalid or incompatible.
+            InternalError: Unexpected internal error.
+
+        Examples:
+            Open a DB using an env file:
+
+            >>> db = SlateDB("/tmp/mydb", env_file=".env")
+
+            Configure a merge operator:
+
+            >>> def last_write_wins(existing: Optional[bytes], value: bytes) -> bytes:
+            ...     return value
+            >>> db = SlateDB("/tmp/mydb", merge_operator=last_write_wins)
         """
         ...
-    
-    def put(self, key: bytes, value: bytes) -> None:
+
+    @classmethod
+    async def open_async(
+        cls,
+        path: str,
+        url: Optional[str] = None,
+        env_file: Optional[str] = None,
+        *,
+        merge_operator: Optional[Callable[[Optional[bytes], bytes], bytes]] = None,
+        settings: Optional[str] = None,
+    ) -> "SlateDB":
         """
-        Store a key-value pair in the database.
-        
+        Async constructor that opens the database and returns a ``SlateDB``.
+
         Args:
-            key: The key as bytes (cannot be empty)
-            value: The value as bytes
-            
+            path: Database path.
+            url: Optional object store URL.
+            env_file: Optional env file for object store config.
+            merge_operator: Optional merge function.
+            settings: Optional path to settings TOML file.
+
+        Returns:
+            An initialized ``SlateDB`` instance.
+
         Raises:
-            InvalidError: If the key is empty or arguments are invalid
-            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
+            InvalidError | UnavailableError | DataError | InternalError
+
+        Examples:
+            >>> db = await SlateDB.open_async("/tmp/mydb", env_file=".env")
         """
         ...
 
     def snapshot(self) -> "SlateDBSnapshot":
         """
-        Create a read-only snapshot of the database at the current committed state.
+        Create a read-only snapshot at the current committed state.
 
         Returns:
-            A SlateDBSnapshot that provides a consistent, read-only view of data.
+            ``SlateDBSnapshot`` providing a consistent, read-only view.
 
-        Notes:
-            The snapshot is independent from subsequent writes to the database. Call
-            `close()` on the snapshot to release resources promptly, or let it be
-            dropped by Python’s GC.
+        Raises:
+            UnavailableError | InternalError
+
+        Example:
+            >>> snap = db.snapshot()
+            >>> snap.get(b"k")
+        """
+        ...
+    async def snapshot_async(self) -> "SlateDBSnapshot":
+        """
+        Async variant of ``snapshot``.
+
+        Example:
+            >>> snap = await db.snapshot_async()
         """
         ...
 
-    def begin(self, isolation: Literal["si", "ssi"] = "si") -> "SlateDBTransaction":
+    def begin(self, isolation: Literal["si", "ssi", "snapshot", "serializable", "serializable_snapshot"] | None = None) -> "SlateDBTransaction":
         """
         Begin a transaction.
 
         Args:
-            isolation: Isolation level. "si" for Snapshot Isolation, "ssi" for Serializable Snapshot Isolation.
+            isolation: Isolation level. Aliases:
+                - ``"si"`` or ``"snapshot"`` for Snapshot Isolation
+                - ``"ssi"``, ``"serializable"``, or ``"serializable_snapshot"`` for Serializable Snapshot Isolation
 
         Returns:
-            A SlateDBTransaction handle for performing read/write operations and commit/rollback.
-        """
-        ...
-
-    async def begin_async(self, isolation: Literal["si", "ssi"] = "si") -> "SlateDBTransaction":
-        """Async variant of begin()."""
-        ...
-
-    
-    def get(self, key: bytes) -> Optional[bytes]:
-        """
-        Retrieve a value by key from the database.
-        
-        Args:
-            key: The key to look up as bytes (cannot be empty)
-            
-        Returns:
-            The value as bytes if found, None if not found
-            
-        Raises:
-            InvalidError: If the key is empty or arguments are invalid
-            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
-        """
-        ...
-
-    
-    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
-        """
-        Create an iterator over key-value pairs within a range.
-
-        Args:
-            start: The start key to scan from as bytes (cannot be empty)
-            end: The end key to stop at as bytes, exclusive (optional)
-                 if None, scan with auto-generated end (start + 0xFF)
-
-        Returns:
-            A DbIterator yielding (key, value) tuples sorted by key.
-        """
-        ...
-
-    def scan_with_options(
-        self,
-        start: bytes,
-        end: Optional[bytes] = None,
-        *,
-        durability_filter: Optional[Literal["remote", "memory"]] = None,
-        dirty: Optional[bool] = None,
-        read_ahead_bytes: Optional[int] = None,
-        cache_blocks: Optional[bool] = None,
-        max_fetch_tasks: Optional[int] = None,
-    ) -> "DbIterator":
-        """Create an iterator with advanced scan options."""
-        ...
-    
-    def delete(self, key: bytes) -> None:
-        """
-        Delete a key-value pair from the database.
-        
-        Args:
-            key: The key to delete as bytes (cannot be empty)
-            
-        Raises:
-            InvalidError: If the key is empty or arguments are invalid
-            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
-        """
-        ...
-
-    async def put_async(self, key: bytes, value: bytes) -> None:
-        """
-        Store a key-value pair in the database asynchronously.
-        """
-        ...
-
-    async def get_async(self, key: bytes) -> Optional[bytes]:
-        """
-        Retrieve a value by key from the database asynchronously.
-        """
-        ...
-
-    async def delete_async(self, key: bytes) -> None:
-        """
-        Delete a key-value pair from the database asynchronously.
-        """
-        ...
-
-
-    def close(self) -> None:
-        """
-        Close the database connection.
-        
-        Raises:
-            UnavailableError | InternalError: On errors during close
-        """
-        ...
-
-class SlateDBSnapshot:
-    """A consistent, read-only view of the database created via SlateDB.snapshot()."""
-
-    def get(self, key: bytes) -> Optional[bytes]:
-        """
-        Retrieve a value by key from the snapshot.
-
-        Args:
-            key: The key to look up as bytes (cannot be empty)
-
-        Returns:
-            The value as bytes if found, None if not found
-        """
-        ...
-
-class SlateDBTransaction:
-    """
-    A read-write transaction handle created by ``SlateDB.begin()``.
-
-    A transaction provides read-your-writes semantics: reads issued after a
-    buffered ``put``/``delete``/``merge`` within the same transaction will
-    observe those uncommitted changes. Use ``commit()`` to atomically persist
-    the buffered writes or ``rollback()`` to discard them.
-    """
-
-    def get(self, key: bytes) -> Optional[bytes]:
-        """
-        Get a value within the transaction.
-
-        Reads will observe your own uncommitted writes within this transaction.
-
-        Args:
-            key: The key to look up as bytes (must be non-empty).
-
-        Returns:
-            The value as bytes if found, otherwise ``None`` if the key does not exist.
+            ``SlateDBTransaction`` handle.
 
         Raises:
-            InvalidError: If ``key`` is empty or otherwise invalid.
-            ClosedError: If the transaction has been closed or the database is fenced.
-            UnavailableError: If the underlying storage is unavailable.
-            DataError: If persisted data is corrupted or incompatible.
-            InternalError: For unexpected internal errors.
+            InvalidError: Invalid isolation string.
+            ClosedError | UnavailableError | InternalError
+
+        Example:
+            >>> txn = db.begin("ssi")
+            >>> txn.put(b"k", b"v")
+            >>> txn.commit()
         """
         ...
+    async def begin_async(self, isolation: Literal["si", "ssi", "snapshot", "serializable", "serializable_snapshot"] | None = None) -> "SlateDBTransaction":
+        """Async variant of ``begin``.
 
-    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
-        """
-        Iterate key/value pairs within a range in this transaction.
-
-        Args:
-            start: Start of the range (bytes, non-empty). Inclusive.
-            end: Optional end of the range (bytes). Exclusive. If ``None``, an
-                end bound is derived to iterate keys sharing the ``start`` prefix.
-
-        Returns:
-            A ``DbIterator`` yielding ``(key, value)`` pairs in key order.
-
-        Raises:
-            InvalidError: If ``start`` is empty or bounds are invalid.
-            ClosedError: If the transaction has been closed or the database is fenced.
-            UnavailableError: If the underlying storage is unavailable.
-            DataError: If persisted data is corrupted or incompatible.
-            InternalError: For unexpected internal errors.
-        """
-        ...
-
-    def scan_with_options(
-        self,
-        start: bytes,
-        end: Optional[bytes] = None,
-        *,
-        durability_filter: Optional[Literal["remote", "memory"]] = None,
-        dirty: Optional[bool] = None,
-        read_ahead_bytes: Optional[int] = None,
-        cache_blocks: Optional[bool] = None,
-        max_fetch_tasks: Optional[int] = None,
-    ) -> "DbIterator":
-        """
-        Iterate a key range with advanced scan options within this transaction.
-
-        Args:
-            start: Start of the range (bytes, non-empty). Inclusive.
-            end: Optional end of the range (bytes). Exclusive.
-            durability_filter: Optionally restrict sources consulted during the scan
-                (e.g., ``"remote"`` or ``"memory"``). If ``None``, uses the default.
-            dirty: If specified, controls inclusion of dirty (in-memory/unflushed)
-                data. If ``None``, uses the default for the transaction.
-            read_ahead_bytes: Optional read-ahead size hint in bytes.
-            cache_blocks: Optional toggle to cache blocks read during iteration.
-            max_fetch_tasks: Optional limit on concurrent/background fetch tasks.
-
-        Returns:
-            A ``DbIterator`` yielding ``(key, value)`` pairs in key order.
-
-        Raises:
-            InvalidError: If bounds or options are invalid.
-            ClosedError: If the transaction has been closed or the database is fenced.
-            UnavailableError: If the underlying storage is unavailable.
-            DataError: If persisted data is corrupted or incompatible.
-            InternalError: For unexpected internal errors.
+        Example:
+            >>> txn = await db.begin_async("si")
         """
         ...
 
     def put(self, key: bytes, value: bytes) -> None:
         """
-        Buffer a put in the transaction's write set.
-
-        The change becomes visible to reads in this transaction and is durably
-        applied when ``commit()`` succeeds.
+        Store a key-value pair.
 
         Args:
-            key: Key to set (bytes, must be non-empty).
-            value: Value to associate with ``key`` (bytes).
+            key: Non-empty key.
+            value: Value bytes.
 
         Raises:
-            InvalidError: If ``key`` is empty or arguments are invalid.
-            ClosedError: If the transaction has been closed or the database is fenced.
-            UnavailableError: If the underlying storage is unavailable.
-            DataError: If persisted data is corrupted or incompatible.
-            InternalError: For unexpected internal errors.
+            InvalidError: Empty key.
+            TransactionError | ClosedError | UnavailableError | DataError | InternalError
+
+        Example:
+            >>> db.put(b"k", b"v")
         """
         ...
-
-    def delete(self, key: bytes) -> None:
+    async def put_async(self, key: bytes, value: bytes) -> None:
+        """Async variant of ``put``."""
+        ...
+    def get(self, key: bytes) -> Optional[bytes]:
         """
-        Buffer a delete in the transaction's write set.
-
-        The removal becomes visible to reads in this transaction and is applied
-        when ``commit()`` succeeds.
+        Get a value by key.
 
         Args:
-            key: Key to remove (bytes, must be non-empty).
+            key: Non-empty key.
+
+        Returns:
+            Value bytes or ``None`` if not found.
 
         Raises:
-            InvalidError: If ``key`` is empty or arguments are invalid.
-            ClosedError: If the transaction has been closed or the database is fenced.
-            UnavailableError: If the underlying storage is unavailable.
-            DataError: If persisted data is corrupted or incompatible.
-            InternalError: For unexpected internal errors.
+            InvalidError | TransactionError | ClosedError | UnavailableError | DataError | InternalError
         """
+        ...
+    async def get_async(self, key: bytes) -> Optional[bytes]:
+        """Async variant of ``get``."""
+        ...
+    def delete(self, key: bytes) -> None:
+        """
+        Delete a key.
+
+        Args:
+            key: Non-empty key to remove.
+
+        Raises:
+            InvalidError | TransactionError | ClosedError | UnavailableError | DataError | InternalError
+        """
+        ...
+    async def delete_async(self, key: bytes) -> None:
+        """Async variant of ``delete``."""
+        ...
+
+    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
+        """
+        Iterate over a key range.
+
+        Args:
+            start: Start key (inclusive, non-empty).
+            end: Optional end key (exclusive). If ``None``, a bound is derived
+                to iterate keys sharing the ``start`` prefix.
+
+        Returns:
+            ``DbIterator`` yielding ``(key, value)`` sorted by key.
+
+        Example:
+            >>> for k, v in db.scan(b"a", b"z"):
+            ...     pass
+        """
+        ...
+    async def scan_async(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
+        """
+        Async variant of ``scan``. Returns an async-capable iterator.
+
+        Example:
+            >>> it = await db.scan_async(b"a")
+            >>> async for k, v in it:
+            ...     pass
+        """
+        ...
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: Optional[bytes] = None,
+        *,
+        durability_filter: Optional[Literal["remote", "memory"]] = None,
+        dirty: Optional[bool] = None,
+        read_ahead_bytes: Optional[int] = None,
+        cache_blocks: Optional[bool] = None,
+        max_fetch_tasks: Optional[int] = None,
+    ) -> "DbIterator":
+        """
+        Iterate with advanced scan options.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+            durability_filter: Restrict sources (``"remote"`` or ``"memory"``).
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            ``DbIterator`` over the requested range.
+        """
+        ...
+    async def scan_with_options_async(
+        self,
+        start: bytes,
+        end: Optional[bytes] = None,
+        *,
+        durability_filter: Optional[Literal["remote", "memory"]] = None,
+        dirty: Optional[bool] = None,
+        read_ahead_bytes: Optional[int] = None,
+        cache_blocks: Optional[bool] = None,
+        max_fetch_tasks: Optional[int] = None,
+    ) -> "DbIterator":
+        """Async variant of ``scan_with_options``."""
         ...
 
     def merge(self, key: bytes, value: bytes) -> None:
         """
-        Buffer a merge operation in the transaction.
+        Merge a value using the configured merge operator.
 
-        Requires a merge operator to be configured for the database.
-
-        Args:
-            key: Key to merge into (bytes, must be non-empty).
-            value: Operand value supplied to the merge operator (bytes).
-
-        Raises:
-            InvalidError: If ``key`` is empty, a merge operator is not configured, or arguments are invalid.
-            ClosedError: If the transaction has been closed or the database is fenced.
-            UnavailableError: If the underlying storage is unavailable.
-            DataError: If persisted data is corrupted or incompatible.
-            InternalError: For unexpected internal errors.
+        Requires that the DB was opened with a ``merge_operator``.
         """
         ...
-
-    def commit(self) -> None:
-        """
-        Commit the transaction, atomically applying buffered writes.
-
-        Raises:
-            TransactionError: If the commit detects a conflict and is aborted.
-            ClosedError: If the transaction has been closed or the database is fenced.
-            UnavailableError: If the underlying storage is unavailable.
-            DataError: If persisted data is corrupted or incompatible.
-            InternalError: For unexpected internal errors.
-        """
+    async def merge_async(self, key: bytes, value: bytes) -> None:
+        """Async variant of ``merge``."""
+        ...
+    def close(self) -> None:
+        """Close the database and release resources."""
+        ...
+    async def close_async(self) -> None:
+        """Async variant of ``close``."""
         ...
 
-    def rollback(self) -> None:
-        """
-        Discard all buffered operations without committing any changes.
 
-        This is also performed automatically when the transaction is garbage-collected
-        if neither ``commit()`` nor ``rollback()`` has been called.
+class SlateDBSnapshot:
+    """Read-only view of a consistent point in time."""
 
-        Raises:
-            ClosedError: If the transaction has already been closed.
-            UnavailableError: If the underlying storage is unavailable.
-            InternalError: For unexpected internal errors.
-        """
+    def get(self, key: bytes) -> Optional[bytes]:
+        """Get a value from the snapshot by key."""
         ...
 
     async def get_async(self, key: bytes) -> Optional[bytes]:
-        """
-        Asynchronously get a value within the transaction.
-
-        Args:
-            key: The key to look up as bytes (must be non-empty).
-
-        Returns:
-            The value as bytes if found, otherwise ``None`` if the key does not exist.
-
-        Raises:
-            InvalidError: If ``key`` is empty or otherwise invalid.
-            ClosedError: If the transaction has been closed or the database is fenced.
-            UnavailableError: If the underlying storage is unavailable.
-            DataError: If persisted data is corrupted or incompatible.
-            InternalError: For unexpected internal errors.
-        """
+        """Async variant of ``get``."""
         ...
 
+    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
+        """Iterate a range within the snapshot."""
+        ...
+
+    async def scan_async(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
+        """Async variant of ``scan``."""
+        ...
+
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: Optional[bytes] = None,
+        *,
+        durability_filter: Optional[Literal["remote", "memory"]] = None,
+        dirty: Optional[bool] = None,
+        read_ahead_bytes: Optional[int] = None,
+        cache_blocks: Optional[bool] = None,
+        max_fetch_tasks: Optional[int] = None,
+    ) -> "DbIterator":
+        """Iterate a range with advanced options within the snapshot."""
+        ...
+    async def scan_with_options_async(
+        self,
+        start: bytes,
+        end: Optional[bytes] = None,
+        *,
+        durability_filter: Optional[Literal["remote", "memory"]] = None,
+        dirty: Optional[bool] = None,
+        read_ahead_bytes: Optional[int] = None,
+        cache_blocks: Optional[bool] = None,
+        max_fetch_tasks: Optional[int] = None,
+    ) -> "DbIterator":
+        """Async variant of ``scan_with_options``."""
+        ...
     def close(self) -> None:
-        """
-        Close the transaction and release any associated resources.
-
-        Raises:
-            UnavailableError: If the underlying storage is unavailable.
-            InternalError: For unexpected internal errors.
-        """
+        """Close the snapshot handle."""
         ...
+    async def close_async(self) -> None:
+        """Async variant of ``close``."""
+        ...
+
+
+class SlateDBTransaction:
+    """Read/write transaction handle."""
+
+    def get(self, key: bytes) -> Optional[bytes]:
+        """Get a value within the transaction (reads see prior writes)."""
+        ...
+
+    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
+        """Iterate a range within the transaction."""
+        ...
+
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: Optional[bytes] = None,
+        *,
+        durability_filter: Optional[Literal["remote", "memory"]] = None,
+        dirty: Optional[bool] = None,
+        read_ahead_bytes: Optional[int] = None,
+        cache_blocks: Optional[bool] = None,
+        max_fetch_tasks: Optional[int] = None,
+    ) -> "DbIterator":
+        """Iterate a range with advanced options within the transaction."""
+        ...
+    def put(self, key: bytes, value: bytes) -> None:
+        """Buffer a put in the transaction."""
+        ...
+    def delete(self, key: bytes) -> None:
+        """Buffer a delete in the transaction."""
+        ...
+    def merge(self, key: bytes, value: bytes) -> None:
+        """Buffer a merge in the transaction (requires merge operator)."""
+        ...
+    def commit(self) -> None:
+        """Commit buffered writes atomically."""
+        ...
+    async def commit_async(self) -> None:
+        """Async variant of ``commit``."""
+        ...
+    def rollback(self) -> None:
+        """Discard buffered writes without committing."""
+        ...
+
 
 class SlateDBReader:
-    """
-    A read-only Python interface to SlateDB.
-    
-    SlateDBReader provides read-only access to a SlateDB database,
-    optionally at a specific checkpoint.
-    """
-    
     def __init__(
         self,
         path: str,
         url: Optional[str] = None,
         env_file: Optional[str] = None,
         checkpoint_id: Optional[str] = None,
+        *,
+        merge_operator: Optional[Callable[[Optional[bytes], bytes], bytes]] = None,
     ) -> None:
         """
-        Create a new SlateDBReader instance.
-        
+        Create a read-only reader.
+
         Args:
-            path: The path where the database is stored
-            url: Optional object store URL (e.g., "s3://bucket/prefix", "memory:///")
-            env_file: Optional environment file for object store configuration
-            checkpoint_id: Optional checkpoint ID (UUID string) to read from
-            
-        Raises:
-            InvalidError: If checkpoint_id is invalid or arguments are invalid
-            UnavailableError: If the object store is unavailable
-            DataError: If persisted data is invalid
-            InternalError: For unexpected internal errors
+            path: Database path.
+            url: Optional object store URL.
+            env_file: Optional env file for object store config.
+            checkpoint_id: Optional checkpoint UUID string to read at.
+            merge_operator: Optional merge operator for reads.
         """
-        ...
-    
-    def get(self, key: bytes) -> Optional[bytes]:
-        """
-        Retrieve a value by key from the database.
-        
-        Args:
-            key: The key to look up as bytes (cannot be empty)
-            
-        Returns:
-            The value as bytes if found, None if not found
-            
-        Raises:
-            InvalidError: If the key is empty or arguments are invalid
-            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
-        """
-        ...
-    
-    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
-        """Create an iterator over key-value pairs within a range."""
         ...
 
+    @classmethod
+    async def open_async(
+        cls,
+        path: str,
+        url: Optional[str] = None,
+        env_file: Optional[str] = None,
+        checkpoint_id: Optional[str] = None,
+        *,
+        merge_operator: Optional[Callable[[Optional[bytes], bytes], bytes]] = None,
+    ) -> "SlateDBReader":
+        """
+        Async constructor for a read-only reader.
+
+        Example:
+            >>> reader = await SlateDBReader.open_async("/tmp/mydb", env_file=".env")
+        """
+        ...
+
+    def get(self, key: bytes) -> Optional[bytes]:
+        """Get a value by key from the reader."""
+        ...
+    async def get_async(self, key: bytes) -> Optional[bytes]:
+        """Async variant of ``get``."""
+        ...
+    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
+        """Iterate a range using the reader."""
+        ...
+    async def scan_async(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
+        """Async variant of ``scan``."""
+        ...
     def scan_with_options(
         self,
         start: bytes,
@@ -467,60 +449,75 @@ class SlateDBReader:
         cache_blocks: Optional[bool] = None,
         max_fetch_tasks: Optional[int] = None,
     ) -> "DbIterator":
-        """Create an iterator with advanced scan options."""
+        """Iterate a range with advanced options using the reader."""
+        ...
+    async def scan_with_options_async(
+        self,
+        start: bytes,
+        end: Optional[bytes] = None,
+        *,
+        durability_filter: Optional[Literal["remote", "memory"]] = None,
+        dirty: Optional[bool] = None,
+        read_ahead_bytes: Optional[int] = None,
+        cache_blocks: Optional[bool] = None,
+        max_fetch_tasks: Optional[int] = None,
+    ) -> "DbIterator":
+        """Async variant of ``scan_with_options``."""
+        ...
+    def close(self) -> None:
+        """Close the reader and release resources."""
+        ...
+    async def close_async(self) -> None:
+        """Async variant of ``close``."""
         ...
 
-class DbIterator(Iterator[Tuple[bytes, bytes]]):
-    """Iterator over (key, value) tuples returned by scan operations."""
-    def __iter__(self) -> "DbIterator": ...
-    def __next__(self) -> Tuple[bytes, bytes]: ...
+
+class DbIterator(Iterator[Tuple[bytes, bytes]], AsyncIterator[Tuple[bytes, bytes]]):
+    """Iterator over ``(key, value)`` tuples returned by scans."""
+
+    def __iter__(self) -> "DbIterator":
+        """Return ``self`` to support iteration in ``for`` loops."""
+        ...
+
+    def __next__(self) -> Tuple[bytes, bytes]:
+        """
+        Return the next ``(key, value)`` pair.
+
+        Raises:
+            StopIteration: When the iterator is exhausted.
+        """
+        ...
+
+    def __aiter__(self) -> "DbIterator":
+        """Return ``self`` to support ``async for`` loops."""
+        ...
+
+    async def __anext__(self) -> Tuple[bytes, bytes]:
+        """
+        Await and return the next ``(key, value)`` pair.
+
+        Raises:
+            StopAsyncIteration: When the iterator is exhausted.
+        """
+        ...
+
     def seek(self, key: bytes) -> None:
         """
-        Seek forward to the next position within the original scan range.
-
-        Moves the iterator so that the next call to ``next(it)`` yields the
-        first key greater than or equal to ``key``. The seek is forward-only:
-        attempting to seek to a key less than or equal to the last returned key
-        raises ``InvalidError``. Seeking beyond the original scan end bound also
-        raises ``InvalidError``. If there are no further entries at or after
-        ``key``, the next iteration raises ``StopIteration``.
+        Seek forward to the first key ``>= key`` within the original range.
 
         Args:
-            key: The target key to seek to (bytes, non-empty)
+            key: Non-empty key to seek to.
         """
         ...
-    
-    async def get_async(self, key: bytes) -> Optional[bytes]:
-        """
-        Retrieve a value by key from the database asynchronously.
-        
-        Args:
-            key: The key to look up as bytes (cannot be empty)
-            
-        Returns:
-            The value as bytes if found, None if not found
-        """
+
+    async def seek_async(self, key: bytes) -> None:
+        """Async variant of ``seek``."""
         ...
-    
-    def close(self) -> None:
-        """
-        Close the database reader.
-        
-        Raises:
-            UnavailableError | InternalError: On errors during close
-        """
-        ... 
 
 
 class Checkpoint(TypedDict):
-    """Details about a checkpoint returned by the Admin API.
+    """Checkpoint metadata returned by the admin API."""
 
-    Keys
-    - id: The checkpoint UUID string
-    - manifest_id: The manifest version number at which the checkpoint was created
-    - expire_time: Optional expiration timestamp in milliseconds since epoch
-    - create_time: Creation timestamp in milliseconds since epoch
-    """
     id: str
     manifest_id: int
     expire_time: Optional[int]
@@ -528,63 +525,47 @@ class Checkpoint(TypedDict):
 
 
 class CheckpointCreateResult(TypedDict):
-    """Result returned by create_checkpoint.
+    """Result from ``create_checkpoint`` containing the checkpoint id and manifest id."""
 
-    Keys
-    - id: The created checkpoint UUID string
-    - manifest_id: The manifest version number used for the checkpoint
-    """
     id: str
     manifest_id: int
 
 
 class SlateDBAdmin:
-    """Administrative interface for SlateDB.
-
-    Provides functions to create and list checkpoints and to run administrative
-    operations that do not require an open writer instance.
-    """
+    """Administrative interface for managing checkpoints and metadata."""
 
     def __init__(self, path: str, url: Optional[str] = None, env_file: Optional[str] = None) -> None:
-        """Create an Admin handle for a database path.
+        """Create an admin handle for a database path/object store."""
+        ...
+
+    def create_checkpoint(self, *, lifetime: Optional[int] = None, source: Optional[str] = None) -> CheckpointCreateResult:
+        """
+        Create a detached checkpoint.
 
         Args:
-            path: Path to the database
-            url: Optional object store URL (e.g., "s3://bucket/prefix", "memory:///")
-            env_file: Optional path to an environment file used to resolve the object store
+            lifetime: Optional checkpoint lifetime in milliseconds.
+            source: Optional source checkpoint UUID string to extend/refresh.
+
+        Returns:
+            Dict with ``id`` (UUID string) and ``manifest_id`` (int).
 
         Raises:
-            InvalidError: If configuration is invalid
-            UnavailableError: If the object store is unavailable
-            InternalError: For unexpected internal errors
+            InvalidError | UnavailableError | DataError | InternalError
+
+        Example:
+            >>> admin = SlateDBAdmin("/tmp/mydb", env_file=".env")
+            >>> admin.create_checkpoint()
         """
         ...
 
-    def create_checkpoint(
-        self, *, lifetime: Optional[int] = None, source: Optional[str] = None
-    ) -> CheckpointCreateResult:
-        """Create a detached checkpoint.
-
-        Args:
-            lifetime: Optional lifetime in milliseconds for the checkpoint
-            source: Optional source checkpoint id (UUID string) to extend/refresh
-
-        Returns:
-            A dict with the created checkpoint id and manifest id
-
-        Raises:
-            InvalidError: If `source` is not a valid UUID or arguments are invalid
-            UnavailableError | DataError | InternalError: On underlying admin/database errors
-        """
+    async def create_checkpoint_async(self, *, lifetime: Optional[int] = None, source: Optional[str] = None) -> CheckpointCreateResult:
+        """Async variant of ``create_checkpoint``."""
         ...
 
     def list_checkpoints(self) -> List[Checkpoint]:
-        """List known checkpoints.
+        """List known checkpoints for the database path/object store."""
+        ...
 
-        Returns:
-            A list of checkpoint dicts with id, manifest_id, expire_time, create_time
-
-        Raises:
-            UnavailableError | InternalError: On errors fetching checkpoint metadata
-        """
+    async def list_checkpoints_async(self) -> List[Checkpoint]:
+        """Async variant of ``list_checkpoints``."""
         ...
