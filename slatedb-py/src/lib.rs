@@ -1,5 +1,7 @@
 use ::slatedb::admin::{load_object_store_from_env, Admin};
-use ::slatedb::config::{CheckpointOptions, DbReaderOptions, Settings};
+use ::slatedb::config::{
+    CheckpointOptions, DbReaderOptions, DurabilityLevel, ScanOptions, Settings,
+};
 use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::Db;
@@ -177,6 +179,40 @@ fn parse_merge_operator(py_obj: Option<&Bound<PyAny>>) -> PyResult<Option<MergeO
     }
 }
 
+fn build_scan_options(
+    durability_filter: Option<String>,
+    dirty: Option<bool>,
+    read_ahead_bytes: Option<usize>,
+    cache_blocks: Option<bool>,
+    max_fetch_tasks: Option<usize>,
+) -> PyResult<ScanOptions> {
+    let mut opts = ScanOptions::default();
+    if let Some(df) = durability_filter {
+        opts.durability_filter = match df.to_lowercase().as_str() {
+            "remote" => DurabilityLevel::Remote,
+            "memory" => DurabilityLevel::Memory,
+            other => {
+                return Err(InvalidError::new_err(format!(
+                    "invalid durability_filter: {other} (expected 'remote' or 'memory')"
+                )))
+            }
+        };
+    }
+    if let Some(d) = dirty {
+        opts.dirty = d;
+    }
+    if let Some(rab) = read_ahead_bytes {
+        opts.read_ahead_bytes = rab;
+    }
+    if let Some(cb) = cache_blocks {
+        opts.cache_blocks = cb;
+    }
+    if let Some(mft) = max_fetch_tasks {
+        opts.max_fetch_tasks = mft;
+    }
+    Ok(opts)
+}
+
 #[pyclass(name = "SlateDB")]
 struct PySlateDB {
     inner: Arc<Db>,
@@ -265,47 +301,7 @@ impl PySlateDB {
     }
 
     #[pyo3(signature = (start, end = None))]
-    fn scan<'py>(
-        &self,
-        py: Python<'py>,
-        start: Vec<u8>,
-        end: Option<Vec<u8>>,
-    ) -> PyResult<Vec<Bound<'py, PyTuple>>> {
-        if start.is_empty() {
-            return Err(InvalidError::new_err("start cannot be empty"));
-        }
-        let start = start.clone();
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
-
-        let db = self.inner.clone();
-        let rt = get_runtime();
-        // Collect key-values with GIL released
-        let kvs = py.allow_threads(|| {
-            rt.block_on(async {
-                let mut iter = db.scan(start..end).await.map_err(map_error)?;
-                let mut out = Vec::new();
-                while let Some(entry) = iter.next().await.map_err(map_error)? {
-                    out.push((entry.key.to_vec(), entry.value.to_vec()));
-                }
-                Ok::<Vec<(Vec<u8>, Vec<u8>)>, PyErr>(out)
-            })
-        })?;
-        // Build Python tuples under GIL
-        kvs.into_iter()
-            .map(|(k, v)| {
-                let key = PyBytes::new(py, &k);
-                let value = PyBytes::new(py, &v);
-                PyTuple::new(py, vec![key, value])
-            })
-            .collect()
-    }
-
-    #[pyo3(signature = (start, end = None))]
-    fn scan_iter(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
+    fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
@@ -315,7 +311,12 @@ impl PySlateDB {
             end
         });
 
-        Ok(PyDbIterator::new_from_db(self.inner.clone(), start, end))
+        Ok(PyDbIterator::new_from_db(
+            self.inner.clone(),
+            start,
+            end,
+            None,
+        ))
     }
 
     #[pyo3(signature = (key))]
@@ -327,6 +328,40 @@ impl PySlateDB {
         let rt = get_runtime();
         // Release the GIL while awaiting Rust I/O
         py.allow_threads(|| rt.block_on(async { db.delete(&key).await.map_err(map_error) }))
+    }
+
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_with_options(
+        &self,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        Ok(PyDbIterator::new_from_db(
+            self.inner.clone(),
+            start,
+            end,
+            Some(opts),
+        ))
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
@@ -458,46 +493,7 @@ impl PySlateDBSnapshot {
     }
 
     #[pyo3(signature = (start, end = None))]
-    fn scan<'py>(
-        &self,
-        py: Python<'py>,
-        start: Vec<u8>,
-        end: Option<Vec<u8>>,
-    ) -> PyResult<Vec<Bound<'py, PyTuple>>> {
-        if start.is_empty() {
-            return Err(InvalidError::new_err("start cannot be empty"));
-        }
-        let start_clone = start.clone();
-        let end = end.unwrap_or_else(|| {
-            let mut end = start_clone.clone();
-            end.push(0xff);
-            end
-        });
-
-        let snapshot = self.inner_ref()?;
-        let rt = get_runtime();
-        let kvs = py.allow_threads(|| {
-            rt.block_on(async {
-                let mut iter = snapshot.scan(start..end).await.map_err(map_error)?;
-                let mut out = Vec::new();
-                while let Some(entry) = iter.next().await.map_err(map_error)? {
-                    out.push((entry.key.to_vec(), entry.value.to_vec()));
-                }
-                Ok::<Vec<(Vec<u8>, Vec<u8>)>, PyErr>(out)
-            })
-        })?;
-
-        kvs.into_iter()
-            .map(|(k, v)| {
-                let key = PyBytes::new(py, &k);
-                let value = PyBytes::new(py, &v);
-                PyTuple::new(py, vec![key, value])
-            })
-            .collect()
-    }
-
-    #[pyo3(signature = (start, end = None))]
-    fn scan_iter(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
+    fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
@@ -510,6 +506,41 @@ impl PySlateDBSnapshot {
             self.inner_ref()?,
             start,
             end,
+            None,
+        ))
+    }
+
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_with_options(
+        &self,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        Ok(PyDbIterator::new_from_snapshot(
+            self.inner_ref()?,
+            start,
+            end,
+            Some(opts),
         ))
     }
 
@@ -596,46 +627,7 @@ impl PySlateDBReader {
     }
 
     #[pyo3(signature = (start, end = None))]
-    fn scan<'py>(
-        &self,
-        py: Python<'py>,
-        start: Vec<u8>,
-        end: Option<Vec<u8>>,
-    ) -> PyResult<Vec<Bound<'py, PyTuple>>> {
-        if start.is_empty() {
-            return Err(InvalidError::new_err("start cannot be empty"));
-        }
-        let start = start.clone();
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
-
-        let db_reader = self.inner.clone();
-        let rt = get_runtime();
-        // Collect key-values with GIL released to avoid deadlocks when merge operator calls Python
-        let kvs = py.allow_threads(|| {
-            rt.block_on(async {
-                let mut iter = db_reader.scan(start..end).await.map_err(map_error)?;
-                let mut out = Vec::new();
-                while let Some(entry) = iter.next().await.map_err(map_error)? {
-                    out.push((entry.key.to_vec(), entry.value.to_vec()));
-                }
-                Ok::<Vec<(Vec<u8>, Vec<u8>)>, PyErr>(out)
-            })
-        })?;
-        kvs.into_iter()
-            .map(|(k, v)| {
-                let key = PyBytes::new(py, &k);
-                let value = PyBytes::new(py, &v);
-                PyTuple::new(py, vec![key, value])
-            })
-            .collect()
-    }
-
-    #[pyo3(signature = (start, end = None))]
-    fn scan_iter(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
+    fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
@@ -649,6 +641,41 @@ impl PySlateDBReader {
             self.inner.clone(),
             start,
             end,
+            None,
+        ))
+    }
+
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_with_options(
+        &self,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        Ok(PyDbIterator::new_from_reader(
+            self.inner.clone(),
+            start,
+            end,
+            Some(opts),
         ))
     }
 
@@ -735,42 +762,61 @@ pub struct PyDbIterator {
     db: Option<Arc<Db>>,
     reader: Option<Arc<DbReader>>,
     snapshot: Option<Arc<DbSnapshot>>,
+    scan_options: Option<ScanOptions>,
     start: Vec<u8>,
     end: Vec<u8>,
     _task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl PyDbIterator {
-    fn new_from_db(db: Arc<Db>, start: Vec<u8>, end: Vec<u8>) -> Self {
+    fn new_from_db(
+        db: Arc<Db>,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        scan_options: Option<ScanOptions>,
+    ) -> Self {
         Self {
             receiver: None,
             db: Some(db),
             reader: None,
             snapshot: None,
+            scan_options,
             start,
             end,
             _task_handle: None,
         }
     }
 
-    fn new_from_reader(reader: Arc<DbReader>, start: Vec<u8>, end: Vec<u8>) -> Self {
+    fn new_from_reader(
+        reader: Arc<DbReader>,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        scan_options: Option<ScanOptions>,
+    ) -> Self {
         Self {
             receiver: None,
             db: None,
             reader: Some(reader),
             snapshot: None,
+            scan_options,
             start,
             end,
             _task_handle: None,
         }
     }
 
-    fn new_from_snapshot(snapshot: Arc<DbSnapshot>, start: Vec<u8>, end: Vec<u8>) -> Self {
+    fn new_from_snapshot(
+        snapshot: Arc<DbSnapshot>,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        scan_options: Option<ScanOptions>,
+    ) -> Self {
         Self {
             receiver: None,
             db: None,
             reader: None,
             snapshot: Some(snapshot),
+            scan_options,
             start,
             end,
             _task_handle: None,
@@ -789,9 +835,14 @@ impl PyDbIterator {
             let db = db.clone();
             let start = self.start.clone();
             let end = self.end.clone();
+            let scan_options = self.scan_options.clone();
             get_runtime().spawn(async move {
                 let result = async {
-                    let mut iter = db.scan(start..end).await?;
+                    let mut iter = if let Some(opts) = scan_options {
+                        db.scan_with_options(start..end, &opts).await?
+                    } else {
+                        db.scan(start..end).await?
+                    };
                     while let Some(kv) = iter.next().await? {
                         if sender.send(Ok(Some(kv))).is_err() {
                             break; // Receiver dropped
@@ -810,9 +861,14 @@ impl PyDbIterator {
             let reader = reader.clone();
             let start = self.start.clone();
             let end = self.end.clone();
+            let scan_options = self.scan_options.clone();
             get_runtime().spawn(async move {
                 let result = async {
-                    let mut iter = reader.scan(start..end).await?;
+                    let mut iter = if let Some(opts) = scan_options {
+                        reader.scan_with_options(start..end, &opts).await?
+                    } else {
+                        reader.scan(start..end).await?
+                    };
                     while let Some(kv) = iter.next().await? {
                         if sender.send(Ok(Some(kv))).is_err() {
                             break; // Receiver dropped
@@ -831,9 +887,14 @@ impl PyDbIterator {
             let snapshot = snapshot.clone();
             let start = self.start.clone();
             let end = self.end.clone();
+            let scan_options = self.scan_options.clone();
             get_runtime().spawn(async move {
                 let result = async {
-                    let mut iter = snapshot.scan(start..end).await?;
+                    let mut iter = if let Some(opts) = scan_options {
+                        snapshot.scan_with_options(start..end, &opts).await?
+                    } else {
+                        snapshot.scan(start..end).await?
+                    };
                     while let Some(kv) = iter.next().await? {
                         if sender.send(Ok(Some(kv))).is_err() {
                             break; // Receiver dropped

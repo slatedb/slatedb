@@ -4,7 +4,7 @@ Python stub file for slatedb module.
 This module provides a Python interface to SlateDB, a key-value database built in Rust.
 """
 
-from typing import Optional, List, Tuple, TypedDict
+from typing import Optional, List, Tuple, TypedDict, Iterator, Literal
 
 # Exceptions mirroring SlateDB error kinds
 class TransactionError(Exception):
@@ -102,22 +102,32 @@ class SlateDB:
         ...
 
     
-    def scan(self, start: bytes, end: Optional[bytes] = None) -> List[Tuple[bytes, bytes]]:
+    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
         """
-        Scan the database for key-value pairs with a given prefix.
+        Create an iterator over key-value pairs within a range.
 
         Args:
             start: The start key to scan from as bytes (cannot be empty)
-            end: The end key to stop at as bytes, exclusive (optional, defaults to None)
-                 if None, scan until the end of start+0xFF
-
-        Raises:
-            InvalidError: If the start key is empty or arguments are invalid
-            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
+            end: The end key to stop at as bytes, exclusive (optional)
+                 if None, scan with auto-generated end (start + 0xFF)
 
         Returns:
-            A list of tuples containing the key and value as bytes, sorted by key
+            A DbIterator yielding (key, value) tuples sorted by key.
         """
+        ...
+
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: Optional[bytes] = None,
+        *,
+        durability_filter: Optional[Literal["remote", "memory"]] = None,
+        dirty: Optional[bool] = None,
+        read_ahead_bytes: Optional[int] = None,
+        cache_blocks: Optional[bool] = None,
+        max_fetch_tasks: Optional[int] = None,
+    ) -> "DbIterator":
+        """Create an iterator with advanced scan options."""
         ...
     
     def delete(self, key: bytes) -> None:
@@ -176,18 +186,22 @@ class SlateDBSnapshot:
         """
         ...
 
-    def scan(self, start: bytes, end: Optional[bytes] = None) -> List[Tuple[bytes, bytes]]:
-        """
-        Scan the snapshot for key-value pairs within a range.
+    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
+        """Create an iterator over key-value pairs within a range."""
+        ...
 
-        Args:
-            start: The start key to scan from as bytes (cannot be empty)
-            end: The end key to stop at as bytes, exclusive (optional)
-                 if None, scan with auto-generated end (start + 0xFF)
-
-        Returns:
-            A list of tuples containing the key and value as bytes, sorted by key
-        """
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: Optional[bytes] = None,
+        *,
+        durability_filter: Optional[Literal["remote", "memory"]] = None,
+        dirty: Optional[bool] = None,
+        read_ahead_bytes: Optional[int] = None,
+        cache_blocks: Optional[bool] = None,
+        max_fetch_tasks: Optional[int] = None,
+    ) -> "DbIterator":
+        """Create an iterator with advanced scan options."""
         ...
 
     async def get_async(self, key: bytes) -> Optional[bytes]:
@@ -248,23 +262,28 @@ class SlateDBReader:
         """
         ...
     
-    def scan(self, start: bytes, end: Optional[bytes] = None) -> List[Tuple[bytes, bytes]]:
-        """
-        Scan the database for key-value pairs within a range.
-
-        Args:
-            start: The start key to scan from as bytes (cannot be empty)
-            end: The end key to stop at as bytes, exclusive (optional)
-                 if None, scan with auto-generated end (start + 0xFF)
-
-        Raises:
-            InvalidError: If the start key is empty or arguments are invalid
-            TransactionError | ClosedError | UnavailableError | DataError | InternalError: On DB errors
-
-        Returns:
-            A list of tuples containing the key and value as bytes, sorted by key
-        """
+    def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
+        """Create an iterator over key-value pairs within a range."""
         ...
+
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: Optional[bytes] = None,
+        *,
+        durability_filter: Optional[Literal["remote", "memory"]] = None,
+        dirty: Optional[bool] = None,
+        read_ahead_bytes: Optional[int] = None,
+        cache_blocks: Optional[bool] = None,
+        max_fetch_tasks: Optional[int] = None,
+    ) -> "DbIterator":
+        """Create an iterator with advanced scan options."""
+        ...
+
+class DbIterator(Iterator[Tuple[bytes, bytes]]):
+    """Iterator over (key, value) tuples returned by scan operations."""
+    def __iter__(self) -> "DbIterator": ...
+    def __next__(self) -> Tuple[bytes, bytes]: ...
     
     async def get_async(self, key: bytes) -> Optional[bytes]:
         """
