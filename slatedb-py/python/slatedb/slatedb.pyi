@@ -647,6 +647,9 @@ class SlateDBReader:
         checkpoint_id: str | None = None,
         *,
         merge_operator: Callable[[bytes | None, bytes], bytes] | None = None,
+        manifest_poll_interval: int | None = None,
+        checkpoint_lifetime: int | None = None,
+        max_memtable_bytes: int | None = None,
     ) -> None:
         """
         Create a read-only reader.
@@ -657,6 +660,9 @@ class SlateDBReader:
             env_file: Optional env file for object store config.
             checkpoint_id: Optional checkpoint UUID string to read at.
             merge_operator: Optional merge operator for reads.
+            manifest_poll_interval: Optional poll interval in milliseconds to refresh manifests and replay new WALs when no explicit checkpoint is supplied. Must be <= checkpoint_lifetime/2.
+            checkpoint_lifetime: Optional checkpoint lifetime in milliseconds for implicit reader checkpoints. Must be >= 1000 and > 2x manifest_poll_interval.
+            max_memtable_bytes: Optional maximum size in bytes of the internal immutable memtable used when replaying WALs.
         """
         ...
 
@@ -669,6 +675,9 @@ class SlateDBReader:
         checkpoint_id: str | None = None,
         *,
         merge_operator: Callable[[bytes | None, bytes], bytes] | None = None,
+        manifest_poll_interval: int | None = None,
+        checkpoint_lifetime: int | None = None,
+        max_memtable_bytes: int | None = None,
     ) -> SlateDBReader:
         """
         Async constructor for a read-only reader.
@@ -687,6 +696,42 @@ class SlateDBReader:
 
     async def get_async(self, key: bytes) -> bytes | None:
         """Async variant of ``get``."""
+        ...
+
+    def get_with_options(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """
+        Get a value by key with read options.
+
+        Args:
+            key: Non-empty key.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include uncommitted/dirty data if True (ignored by readers; reads are committed-only).
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Raises:
+            InvalidError | UnavailableError | DataError | InternalError
+
+        Example:
+            >>> reader.get_with_options(b"k", durability_filter="memory")
+        """
+        ...
+
+    async def get_with_options_async(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """Async variant of ``get_with_options``."""
         ...
 
     def scan(self, start: bytes, end: bytes | None = None) -> DbIterator:

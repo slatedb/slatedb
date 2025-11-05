@@ -137,3 +137,68 @@ def test_invalid_checkpoint_id(db_path, env_file):
     # Invalid UUID format should raise an error
     with pytest.raises(InvalidError):
         SlateDBReader(db_path, env_file=env_file, checkpoint_id="invalid-uuid-format") 
+
+
+def test_get_with_options(db_path, env_file, populated_db):
+    """Ensure get_with_options is exposed and returns expected values."""
+    reader = SlateDBReader(db_path, env_file=env_file)
+    # Basic retrieval
+    assert reader.get_with_options(b"key1") == b"value1"
+    # With durability filter and dirty flag (ignored by reader, but should not error)
+    assert reader.get_with_options(b"key2", durability_filter="memory", dirty=False) == b"value2"
+    # Missing key
+    assert reader.get_with_options(b"missing") is None
+    reader.close()
+
+
+@pytest.mark.asyncio
+async def test_get_with_options_async(db_path, env_file, populated_db):
+    reader = SlateDBReader(db_path, env_file=env_file)
+    assert await reader.get_with_options_async(b"key1") == b"value1"
+    assert await reader.get_with_options_async(b"missing") is None
+    reader.close()
+
+
+def test_reader_options_validation_min_lifetime(db_path, env_file):
+    """checkpoint_lifetime must be >= 1000ms."""
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"t", b"v")
+    db.close()
+    with pytest.raises(InvalidError):
+        SlateDBReader(
+            db_path,
+            env_file=env_file,
+            checkpoint_id=None,
+            checkpoint_lifetime=500,  # too small
+        )
+
+
+def test_reader_options_validation_interval_vs_lifetime(db_path, env_file):
+    """checkpoint_lifetime must exceed 2x manifest_poll_interval."""
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"t", b"v")
+    db.close()
+    with pytest.raises(InvalidError):
+        SlateDBReader(
+            db_path,
+            env_file=env_file,
+            checkpoint_id=None,
+            manifest_poll_interval=700,
+            checkpoint_lifetime=1000,  # 1000 < 2 * 700
+        )
+
+
+def test_reader_options_success(db_path, env_file):
+    """Providing valid reader options opens and closes successfully."""
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"t", b"v")
+    db.close()
+    reader = SlateDBReader(
+        db_path,
+        env_file=env_file,
+        manifest_poll_interval=200,
+        checkpoint_lifetime=2000,
+        max_memtable_bytes=1024 * 1024,
+    )
+    assert reader.get(b"t") == b"v"
+    reader.close()

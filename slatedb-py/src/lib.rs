@@ -827,7 +827,11 @@ impl PySlateDB {
         })
     }
 
-    fn write_async<'py>(&self, py: Python<'py>, batch: &PyWriteBatch) -> PyResult<Bound<'py, PyAny>> {
+    fn write_async<'py>(
+        &self,
+        py: Python<'py>,
+        batch: &PyWriteBatch,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();
         let b = batch.inner.clone();
         future_into_py(py, async move { db.write(b).await.map_err(map_error) })
@@ -843,7 +847,9 @@ impl PySlateDB {
         let db = self.inner.clone();
         let b = batch.inner.clone();
         let opts = build_write_options(await_durable);
-        future_into_py(py, async move { db.write_with_options(b, &opts).await.map_err(map_error) })
+        future_into_py(py, async move {
+            db.write_with_options(b, &opts).await.map_err(map_error)
+        })
     }
 
     #[pyo3(signature = (key, *, await_durable = None))]
@@ -1385,7 +1391,7 @@ struct PySlateDBReader {
 #[pymethods]
 impl PySlateDBReader {
     #[classmethod]
-    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None))]
+    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
     fn open_async<'py>(
         _cls: &'py Bound<'py, PyType>,
         py: Python<'py>,
@@ -1394,12 +1400,24 @@ impl PySlateDBReader {
         env_file: Option<String>,
         checkpoint_id: Option<String>,
         merge_operator: Option<&'py Bound<'py, PyAny>>,
+        manifest_poll_interval: Option<u64>,
+        checkpoint_lifetime: Option<u64>,
+        max_memtable_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let object_store = resolve_object_store_py(url.as_deref(), env_file.clone())?;
         let merge_operator = parse_merge_operator(merge_operator)?;
         future_into_py(py, async move {
             let mut options = DbReaderOptions::default();
             options.merge_operator = merge_operator;
+            if let Some(ms) = manifest_poll_interval {
+                options.manifest_poll_interval = Duration::from_millis(ms);
+            }
+            if let Some(ms) = checkpoint_lifetime {
+                options.checkpoint_lifetime = Duration::from_millis(ms);
+            }
+            if let Some(bytes) = max_memtable_bytes {
+                options.max_memtable_bytes = bytes;
+            }
             let checkpoint = checkpoint_id
                 .map(|id| {
                     Uuid::parse_str(&id)
@@ -1415,19 +1433,31 @@ impl PySlateDBReader {
         })
     }
     #[new]
-    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None))]
+    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
     fn new(
         path: String,
         url: Option<String>,
         env_file: Option<String>,
         checkpoint_id: Option<String>,
         merge_operator: Option<&Bound<PyAny>>,
+        manifest_poll_interval: Option<u64>,
+        checkpoint_lifetime: Option<u64>,
+        max_memtable_bytes: Option<u64>,
     ) -> PyResult<Self> {
         let rt = get_runtime();
         let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
         let db_reader = rt.block_on(async {
             let mut options = DbReaderOptions::default();
             options.merge_operator = parse_merge_operator(merge_operator)?;
+            if let Some(ms) = manifest_poll_interval {
+                options.manifest_poll_interval = Duration::from_millis(ms);
+            }
+            if let Some(ms) = checkpoint_lifetime {
+                options.checkpoint_lifetime = Duration::from_millis(ms);
+            }
+            if let Some(bytes) = max_memtable_bytes {
+                options.max_memtable_bytes = bytes;
+            }
             DbReader::open(
                 path,
                 object_store,
@@ -1476,6 +1506,54 @@ impl PySlateDBReader {
         let db_reader = self.inner.clone();
         future_into_py(py, async move {
             match db_reader.get(&key).await {
+                Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
+                Ok(None) => Ok(None),
+                Err(e) => Err(map_error(e)),
+            }
+        })
+    }
+
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    fn get_with_options<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let reader = self.inner.clone();
+        let opts = build_read_options(durability_filter, dirty)?;
+        let rt = get_runtime();
+        let res: Option<Vec<u8>> = py.allow_threads(|| {
+            rt.block_on(async {
+                match reader.get_with_options(&key, &opts).await {
+                    Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.as_ref().to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(map_error(e)),
+                }
+            })
+        })?;
+        Ok(res.map(|b| PyBytes::new(py, &b)))
+    }
+
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    fn get_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let reader = self.inner.clone();
+        let opts = build_read_options(durability_filter, dirty)?;
+        future_into_py(py, async move {
+            match reader.get_with_options(&key, &opts).await {
                 Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
                 Ok(None) => Ok(None),
                 Err(e) => Err(map_error(e)),
