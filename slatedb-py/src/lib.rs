@@ -4,10 +4,12 @@ use ::slatedb::config::{
 };
 use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
+use ::slatedb::DBTransaction;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
 use ::slatedb::DbSnapshot;
 use ::slatedb::Error;
+use ::slatedb::IsolationLevel;
 use ::slatedb::MergeOperator;
 use ::slatedb::MergeOperatorError;
 use once_cell::sync::OnceCell;
@@ -104,6 +106,7 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySlateDB>()?;
     m.add_class::<PySlateDBReader>()?;
     m.add_class::<PySlateDBSnapshot>()?;
+    m.add_class::<PySlateDBTransaction>()?;
     m.add_class::<PySlateDBAdmin>()?;
     m.add_class::<PyDbIterator>()?;
     // Export exception types
@@ -217,7 +220,24 @@ struct PySlateDB {
     inner: Arc<Db>,
 }
 
-impl PySlateDB {}
+impl PySlateDB {
+    fn parse_isolation_level(level: Option<String>) -> PyResult<IsolationLevel> {
+        match level
+            .as_deref()
+            .unwrap_or("si")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "si" | "snapshot" => Ok(IsolationLevel::Snapshot),
+            "ssi" | "serializable" | "serializable_snapshot" => {
+                Ok(IsolationLevel::SerializableSnapshot)
+            }
+            other => Err(InvalidError::new_err(format!(
+                "invalid isolation level: {other} (expected 'si' or 'ssi')"
+            ))),
+        }
+    }
+}
 
 #[pymethods]
 impl PySlateDB {
@@ -267,6 +287,32 @@ impl PySlateDB {
             py.allow_threads(|| rt.block_on(async { db.snapshot().await.map_err(map_error) }))?;
         Ok(PySlateDBSnapshot {
             inner: Some(snapshot),
+        })
+    }
+
+    #[pyo3(signature = (isolation = None))]
+    fn begin(&self, py: Python<'_>, isolation: Option<String>) -> PyResult<PySlateDBTransaction> {
+        let db = self.inner.clone();
+        let level = Self::parse_isolation_level(isolation)?;
+        let rt = get_runtime();
+        let txn =
+            py.allow_threads(|| rt.block_on(async { db.begin(level).await.map_err(map_error) }))?;
+        Ok(PySlateDBTransaction { inner: Some(txn) })
+    }
+
+    #[pyo3(signature = (isolation = None))]
+    fn begin_async<'py>(
+        &self,
+        py: Python<'py>,
+        isolation: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        let level = Self::parse_isolation_level(isolation)?;
+        future_into_py(py, async move {
+            db.begin(level)
+                .await
+                .map(|txn| PySlateDBTransaction { inner: Some(txn) })
+                .map_err(map_error)
         })
     }
 
@@ -546,6 +592,139 @@ impl PySlateDBSnapshot {
 
     fn close(&mut self) -> PyResult<()> {
         self.inner = None; // drop snapshot; unregisters in Drop
+        Ok(())
+    }
+}
+
+#[pyclass(name = "SlateDBTransaction")]
+struct PySlateDBTransaction {
+    inner: Option<DBTransaction>, // None after commit/rollback
+}
+
+impl PySlateDBTransaction {
+    fn inner_ref(&self) -> PyResult<&DBTransaction> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| ClosedError::new_err("transaction is closed"))
+    }
+}
+
+#[pymethods]
+impl PySlateDBTransaction {
+    #[pyo3(signature = (key))]
+    fn get<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let res: Option<Vec<u8>> = py.allow_threads(|| {
+            rt.block_on(async {
+                match txn.get(&key).await {
+                    Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.as_ref().to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(map_error(e)),
+                }
+            })
+        })?;
+        Ok(res.map(|b| PyBytes::new(py, &b)))
+    }
+
+    // No async get for transactions: DBTransaction is not clonable/shared safely across async boundaries.
+
+    #[pyo3(signature = (start, end = None))]
+    fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async { txn.scan(start..end).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_with_options(
+        &self,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            txn.scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (key, value))]
+    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        txn.put(&key, &value).map_err(map_error)
+    }
+
+    #[pyo3(signature = (key))]
+    fn delete(&self, key: Vec<u8>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        txn.delete(&key).map_err(map_error)
+    }
+
+    /// Merge within a transaction (requires merge operator configured on DB)
+    #[pyo3(signature = (key, value))]
+    fn merge(&self, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        txn.merge(&key, &value).map_err(map_error)
+    }
+
+    fn commit(&mut self, py: Python<'_>) -> PyResult<()> {
+        let txn = self
+            .inner
+            .take()
+            .ok_or_else(|| ClosedError::new_err("transaction is closed"))?;
+        let rt = get_runtime();
+        py.allow_threads(|| rt.block_on(async { txn.commit().await.map_err(map_error) }))
+    }
+
+    fn rollback(&mut self) -> PyResult<()> {
+        if let Some(txn) = self.inner.take() {
+            txn.rollback();
+        }
         Ok(())
     }
 }

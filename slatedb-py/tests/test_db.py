@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from slatedb import SlateDB, ClosedError, UnavailableError, InvalidError
+from slatedb import SlateDB, ClosedError, UnavailableError, InvalidError, TransactionError
 
 @pytest.mark.asyncio
 async def test_async_put_and_get(db):
@@ -263,6 +263,136 @@ def test_snapshot_iterator_seek(db_path, env_file):
         with pytest.raises(StopIteration):
             next(it)
         snap.close()
+    finally:
+        db.close()
+
+
+def test_txn_si_read_your_writes_and_commit(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        # Initial write
+        db.put(b"k0", b"v0")
+
+        # Begin SI transaction
+        txn = db.begin("si")
+        # Reads see committed data
+        assert txn.get(b"k0") == b"v0"
+        # Writes are visible inside the txn (read-your-writes)
+        txn.put(b"k1", b"v1")
+        assert txn.get(b"k1") == b"v1"
+
+        # A scan created before further writes should not see later writes
+        it = txn.scan(b"k")
+        # Write after creating the iterator
+        txn.put(b"k2", b"v2")
+        # Exhaust iterator – should not see k2 inserted after iterator creation
+        keys = [k for k, _ in it]
+        assert b"k2" not in keys
+
+        # A new scan should see the updated write-set
+        keys2 = [k for k, _ in txn.scan(b"k")]
+        assert b"k1" in keys2 and b"k2" in keys2
+
+        # Commit and verify
+        txn.commit()
+        assert db.get(b"k1") == b"v1"
+        assert db.get(b"k2") == b"v2"
+    finally:
+        db.close()
+
+
+def test_txn_si_conflict_between_txns(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"k1", b"v1")
+
+        txn1 = db.begin("si")
+        txn1.put(b"k1", b"v2")
+
+        txn2 = db.begin("si")
+        txn2.put(b"k1", b"v3")
+
+        # First commit succeeds
+        txn1.commit()
+
+        # Second commit conflicts
+        with pytest.raises(TransactionError):
+            txn2.commit()
+    finally:
+        db.close()
+
+
+def test_txn_si_conflict_with_db_writes(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"k1", b"v1")
+
+        txn = db.begin("si")
+        txn.put(b"k1", b"v2")
+
+        # Outside write on same key
+        db.put(b"k1", b"v3")
+
+        with pytest.raises(TransactionError):
+            txn.commit()
+    finally:
+        db.close()
+
+
+def test_txn_ssi_read_conflict(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"k1", b"v1")
+        db.put(b"k2", b"v2.1")
+
+        txn1 = db.begin("ssi")
+        txn1.put(b"k1", b"v2")
+        txn1.put(b"k2", b"v2.2")
+
+        txn2 = db.begin("ssi")
+        assert txn2.get(b"k2") == b"v2.1"
+        txn2.put(b"k3", b"v3")
+
+        txn1.commit()
+
+        with pytest.raises(TransactionError):
+            txn2.commit()
+    finally:
+        db.close()
+
+
+def test_txn_ssi_range_conflict(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"k1", b"v1")
+        db.put(b"k2", b"v2.1")
+        db.put(b"k3", b"v3")
+
+        txn1 = db.begin("ssi")
+        txn2 = db.begin("ssi")
+
+        # Transaction 2 scans k2..k3
+        _ = [kv for kv in txn2.scan(b"k2", b"k3\xff")]
+
+        # Transaction 1 writes within the range that transaction 2 scanned
+        txn1.put(b"k2", b"v2.2")
+        txn1.commit()
+
+        # Transaction 2 writes something and tries to commit -> conflict
+        txn2.put(b"k4", b"v4")
+        with pytest.raises(TransactionError):
+            txn2.commit()
+    finally:
+        db.close()
+
+
+def test_txn_rollback(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        txn = db.begin("si")
+        txn.put(b"k9", b"v9")
+        txn.rollback()
+        assert db.get(b"k9") is None
     finally:
         db.close()
 

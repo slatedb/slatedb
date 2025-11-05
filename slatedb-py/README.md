@@ -153,6 +153,42 @@ snap.close()
 db.close()
 ```
 
+### Transactions
+
+SlateDB supports multi-operation, atomic transactions with two isolation levels:
+
+- SI (Snapshot Isolation): prevents write-write conflicts.
+- SSI (Serializable Snapshot Isolation): additionally detects read-write and phantom range conflicts.
+
+```python
+from slatedb import SlateDB, TransactionError
+
+db = SlateDB("/path/to/your/database")
+
+# Snapshot Isolation (default)
+txn = db.begin()  # or db.begin("si")
+txn.put(b"k1", b"v1")
+assert txn.get(b"k1") == b"v1"   # read your own writes
+txn.commit()
+
+# Serializable Snapshot Isolation
+txn1 = db.begin("ssi")
+txn1.put(b"k2", b"v2")
+
+txn2 = db.begin("ssi")
+_ = txn2.get(b"k2")            # reads old value
+txn2.put(b"k3", b"v3")
+
+txn1.commit()                   # makes k2 visible
+
+try:
+    txn2.commit()               # conflicts with txn1's write
+except TransactionError:
+    pass
+
+db.close()
+```
+
 ### Range Scans and Seek
 
 Range scans return an iterator. Materialize with `list(...)` or iterate lazily. You can optionally use `seek(key)` to move the iterator forward within the original range.

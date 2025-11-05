@@ -83,6 +83,22 @@ class SlateDB:
         """
         ...
 
+    def begin(self, isolation: Literal["si", "ssi"] = "si") -> "SlateDBTransaction":
+        """
+        Begin a transaction.
+
+        Args:
+            isolation: Isolation level. "si" for Snapshot Isolation, "ssi" for Serializable Snapshot Isolation.
+
+        Returns:
+            A SlateDBTransaction handle for performing read/write operations and commit/rollback.
+        """
+        ...
+
+    async def begin_async(self, isolation: Literal["si", "ssi"] = "si") -> "SlateDBTransaction":
+        """Async variant of begin()."""
+        ...
+
     
     def get(self, key: bytes) -> Optional[bytes]:
         """
@@ -185,8 +201,56 @@ class SlateDBSnapshot:
         """
         ...
 
+class SlateDBTransaction:
+    """
+    A read-write transaction handle created by ``SlateDB.begin()``.
+
+    A transaction provides read-your-writes semantics: reads issued after a
+    buffered ``put``/``delete``/``merge`` within the same transaction will
+    observe those uncommitted changes. Use ``commit()`` to atomically persist
+    the buffered writes or ``rollback()`` to discard them.
+    """
+
+    def get(self, key: bytes) -> Optional[bytes]:
+        """
+        Get a value within the transaction.
+
+        Reads will observe your own uncommitted writes within this transaction.
+
+        Args:
+            key: The key to look up as bytes (must be non-empty).
+
+        Returns:
+            The value as bytes if found, otherwise ``None`` if the key does not exist.
+
+        Raises:
+            InvalidError: If ``key`` is empty or otherwise invalid.
+            ClosedError: If the transaction has been closed or the database is fenced.
+            UnavailableError: If the underlying storage is unavailable.
+            DataError: If persisted data is corrupted or incompatible.
+            InternalError: For unexpected internal errors.
+        """
+        ...
+
     def scan(self, start: bytes, end: Optional[bytes] = None) -> "DbIterator":
-        """Create an iterator over key-value pairs within a range."""
+        """
+        Iterate key/value pairs within a range in this transaction.
+
+        Args:
+            start: Start of the range (bytes, non-empty). Inclusive.
+            end: Optional end of the range (bytes). Exclusive. If ``None``, an
+                end bound is derived to iterate keys sharing the ``start`` prefix.
+
+        Returns:
+            A ``DbIterator`` yielding ``(key, value)`` pairs in key order.
+
+        Raises:
+            InvalidError: If ``start`` is empty or bounds are invalid.
+            ClosedError: If the transaction has been closed or the database is fenced.
+            UnavailableError: If the underlying storage is unavailable.
+            DataError: If persisted data is corrupted or incompatible.
+            InternalError: For unexpected internal errors.
+        """
         ...
 
     def scan_with_options(
@@ -200,17 +264,144 @@ class SlateDBSnapshot:
         cache_blocks: Optional[bool] = None,
         max_fetch_tasks: Optional[int] = None,
     ) -> "DbIterator":
-        """Create an iterator with advanced scan options."""
+        """
+        Iterate a key range with advanced scan options within this transaction.
+
+        Args:
+            start: Start of the range (bytes, non-empty). Inclusive.
+            end: Optional end of the range (bytes). Exclusive.
+            durability_filter: Optionally restrict sources consulted during the scan
+                (e.g., ``"remote"`` or ``"memory"``). If ``None``, uses the default.
+            dirty: If specified, controls inclusion of dirty (in-memory/unflushed)
+                data. If ``None``, uses the default for the transaction.
+            read_ahead_bytes: Optional read-ahead size hint in bytes.
+            cache_blocks: Optional toggle to cache blocks read during iteration.
+            max_fetch_tasks: Optional limit on concurrent/background fetch tasks.
+
+        Returns:
+            A ``DbIterator`` yielding ``(key, value)`` pairs in key order.
+
+        Raises:
+            InvalidError: If bounds or options are invalid.
+            ClosedError: If the transaction has been closed or the database is fenced.
+            UnavailableError: If the underlying storage is unavailable.
+            DataError: If persisted data is corrupted or incompatible.
+            InternalError: For unexpected internal errors.
+        """
+        ...
+
+    def put(self, key: bytes, value: bytes) -> None:
+        """
+        Buffer a put in the transaction's write set.
+
+        The change becomes visible to reads in this transaction and is durably
+        applied when ``commit()`` succeeds.
+
+        Args:
+            key: Key to set (bytes, must be non-empty).
+            value: Value to associate with ``key`` (bytes).
+
+        Raises:
+            InvalidError: If ``key`` is empty or arguments are invalid.
+            ClosedError: If the transaction has been closed or the database is fenced.
+            UnavailableError: If the underlying storage is unavailable.
+            DataError: If persisted data is corrupted or incompatible.
+            InternalError: For unexpected internal errors.
+        """
+        ...
+
+    def delete(self, key: bytes) -> None:
+        """
+        Buffer a delete in the transaction's write set.
+
+        The removal becomes visible to reads in this transaction and is applied
+        when ``commit()`` succeeds.
+
+        Args:
+            key: Key to remove (bytes, must be non-empty).
+
+        Raises:
+            InvalidError: If ``key`` is empty or arguments are invalid.
+            ClosedError: If the transaction has been closed or the database is fenced.
+            UnavailableError: If the underlying storage is unavailable.
+            DataError: If persisted data is corrupted or incompatible.
+            InternalError: For unexpected internal errors.
+        """
+        ...
+
+    def merge(self, key: bytes, value: bytes) -> None:
+        """
+        Buffer a merge operation in the transaction.
+
+        Requires a merge operator to be configured for the database.
+
+        Args:
+            key: Key to merge into (bytes, must be non-empty).
+            value: Operand value supplied to the merge operator (bytes).
+
+        Raises:
+            InvalidError: If ``key`` is empty, a merge operator is not configured, or arguments are invalid.
+            ClosedError: If the transaction has been closed or the database is fenced.
+            UnavailableError: If the underlying storage is unavailable.
+            DataError: If persisted data is corrupted or incompatible.
+            InternalError: For unexpected internal errors.
+        """
+        ...
+
+    def commit(self) -> None:
+        """
+        Commit the transaction, atomically applying buffered writes.
+
+        Raises:
+            TransactionError: If the commit detects a conflict and is aborted.
+            ClosedError: If the transaction has been closed or the database is fenced.
+            UnavailableError: If the underlying storage is unavailable.
+            DataError: If persisted data is corrupted or incompatible.
+            InternalError: For unexpected internal errors.
+        """
+        ...
+
+    def rollback(self) -> None:
+        """
+        Discard all buffered operations without committing any changes.
+
+        This is also performed automatically when the transaction is garbage-collected
+        if neither ``commit()`` nor ``rollback()`` has been called.
+
+        Raises:
+            ClosedError: If the transaction has already been closed.
+            UnavailableError: If the underlying storage is unavailable.
+            InternalError: For unexpected internal errors.
+        """
         ...
 
     async def get_async(self, key: bytes) -> Optional[bytes]:
         """
-        Retrieve a value by key from the snapshot asynchronously.
+        Asynchronously get a value within the transaction.
+
+        Args:
+            key: The key to look up as bytes (must be non-empty).
+
+        Returns:
+            The value as bytes if found, otherwise ``None`` if the key does not exist.
+
+        Raises:
+            InvalidError: If ``key`` is empty or otherwise invalid.
+            ClosedError: If the transaction has been closed or the database is fenced.
+            UnavailableError: If the underlying storage is unavailable.
+            DataError: If persisted data is corrupted or incompatible.
+            InternalError: For unexpected internal errors.
         """
         ...
 
     def close(self) -> None:
-        """Close the snapshot, releasing any associated resources."""
+        """
+        Close the transaction and release any associated resources.
+
+        Raises:
+            UnavailableError: If the underlying storage is unavailable.
+            InternalError: For unexpected internal errors.
+        """
         ...
 
 class SlateDBReader:
