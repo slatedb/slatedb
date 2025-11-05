@@ -124,6 +124,41 @@ assert db.get(b"key") == b"ab"
 db.close()
 ```
 
+### Admin API
+
+Use the Admin API to create and list checkpoints without holding a writer instance.
+
+```python
+from slatedb import SlateDB, SlateDBAdmin, SlateDBReader
+
+path = "/tmp/slatedb"
+
+# Prepare some data
+db = SlateDB(path)
+db.put(b"keyA", b"valueA")
+db.close()
+
+admin = SlateDBAdmin(path)
+
+# Create a detached checkpoint (optionally set lifetime in ms)
+cp = admin.create_checkpoint(lifetime=60_000)
+print(cp["id"], cp["manifest_id"])  # checkpoint id + manifest id
+
+# List all known checkpoints
+checkpoints = admin.list_checkpoints()
+print([c["id"] for c in checkpoints])
+
+# Reads pinned to a checkpoint don't see later writes
+db2 = SlateDB(path)
+db2.put(b"keyB", b"valueB")
+db2.close()
+
+reader = SlateDBReader(path, checkpoint_id=cp["id"])  # pinned to cp
+assert reader.get(b"keyA") == b"valueA"
+assert reader.get(b"keyB") is None
+reader.close()
+```
+
 ## Error Handling
 
 SlateDB’s Python API maps errors to specific Python exceptions that mirror error kinds in the Rust core:

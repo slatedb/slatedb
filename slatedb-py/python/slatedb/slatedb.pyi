@@ -4,7 +4,7 @@ Python stub file for slatedb module.
 This module provides a Python interface to SlateDB, a key-value database built in Rust.
 """
 
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, TypedDict
 
 # Exceptions mirroring SlateDB error kinds
 class TransactionError(Exception):
@@ -229,3 +229,80 @@ class SlateDBReader:
             UnavailableError | InternalError: On errors during close
         """
         ... 
+
+
+class Checkpoint(TypedDict):
+    """Details about a checkpoint returned by the Admin API.
+
+    Keys
+    - id: The checkpoint UUID string
+    - manifest_id: The manifest version number at which the checkpoint was created
+    - expire_time: Optional expiration timestamp in milliseconds since epoch
+    - create_time: Creation timestamp in milliseconds since epoch
+    """
+    id: str
+    manifest_id: int
+    expire_time: Optional[int]
+    create_time: int
+
+
+class CheckpointCreateResult(TypedDict):
+    """Result returned by create_checkpoint.
+
+    Keys
+    - id: The created checkpoint UUID string
+    - manifest_id: The manifest version number used for the checkpoint
+    """
+    id: str
+    manifest_id: int
+
+
+class SlateDBAdmin:
+    """Administrative interface for SlateDB.
+
+    Provides functions to create and list checkpoints and to run administrative
+    operations that do not require an open writer instance.
+    """
+
+    def __init__(self, path: str, env_file: Optional[str] = None) -> None:
+        """Create an Admin handle for a database path.
+
+        Args:
+            path: Path to the database
+            env_file: Optional path to an environment file used to resolve the object store
+
+        Raises:
+            InvalidError: If configuration is invalid
+            UnavailableError: If the object store is unavailable
+            InternalError: For unexpected internal errors
+        """
+        ...
+
+    def create_checkpoint(
+        self, *, lifetime: Optional[int] = None, source: Optional[str] = None
+    ) -> CheckpointCreateResult:
+        """Create a detached checkpoint.
+
+        Args:
+            lifetime: Optional lifetime in milliseconds for the checkpoint
+            source: Optional source checkpoint id (UUID string) to extend/refresh
+
+        Returns:
+            A dict with the created checkpoint id and manifest id
+
+        Raises:
+            InvalidError: If `source` is not a valid UUID or arguments are invalid
+            UnavailableError | DataError | InternalError: On underlying admin/database errors
+        """
+        ...
+
+    def list_checkpoints(self) -> List[Checkpoint]:
+        """List known checkpoints.
+
+        Returns:
+            A list of checkpoint dicts with id, manifest_id, expire_time, create_time
+
+        Raises:
+            UnavailableError | InternalError: On errors fetching checkpoint metadata
+        """
+        ...
