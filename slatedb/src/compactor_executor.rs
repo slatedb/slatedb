@@ -211,7 +211,7 @@ impl TokioCompactionExecutorInner {
         let mut retention_iter = RetentionIterator::new(
             merge_iter,
             None,
-            None,
+            compaction.retention_min_seq,
             compaction.is_dest_last_run,
             compaction.attempt_ts,
             self.clock.clone(),
