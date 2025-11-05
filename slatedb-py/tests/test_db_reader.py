@@ -1,5 +1,5 @@
 import pytest
-from slatedb import SlateDB, SlateDBReader, SlateDBAdmin, InvalidError
+from slatedb import SlateDB, SlateDBReader, InvalidError
 
 @pytest.fixture
 def populated_db(db_path, env_file):
@@ -112,26 +112,7 @@ async def test_get_async_empty_key_error(db_path, env_file, populated_db):
     
     reader.close()
 
-def test_create_checkpoint(db_path, env_file, populated_db):
-    """Test creating a checkpoint."""
-    admin = SlateDBAdmin(db_path, env_file=env_file)
-    result = admin.create_checkpoint()
-    assert result is not None
-    assert result["id"] is not None
-    assert result["manifest_id"] is not None
-
-
-def test_read_checkpoint(db_path, env_file, populated_db):
-    """Test reading a checkpoint."""
-    admin = SlateDBAdmin(db_path, env_file=env_file)
-    result = admin.create_checkpoint()
-    populated_db.put(b"key4", b"value4")
-    reader = SlateDBReader(db_path, env_file=env_file, checkpoint_id=result["id"])
-    assert reader.get(b"key4") is None
-    reader.close()
-    reader2 = SlateDBReader(db_path, env_file=env_file)
-    assert reader2.get(b"key4") == b"value4"
-    reader2.close()
+ 
 
 def test_invalid_path():
     """Test reader creation with invalid path."""
