@@ -22,6 +22,7 @@ use std::backtrace::Backtrace;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
@@ -1264,13 +1265,13 @@ impl PySlateDBAdmin {
 
 #[pyclass(name = "DbIterator")]
 pub struct PyDbIterator {
-    inner_iter: Option<::slatedb::DbIterator>,
+    inner_iter: Arc<Mutex<Option<::slatedb::DbIterator>>>,
 }
 
 impl PyDbIterator {
     fn from_iter(iter: ::slatedb::DbIterator) -> Self {
         Self {
-            inner_iter: Some(iter),
+            inner_iter: Arc::new(Mutex::new(Some(iter))),
         }
     }
 }
@@ -1282,14 +1283,19 @@ impl PyDbIterator {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        let iter = self
-            .inner_iter
-            .as_mut()
-            .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+        let inner = self.inner_iter.clone();
         let rt = get_runtime();
         let kv_opt = py
-            .allow_threads(|| rt.block_on(async { iter.next().await }))
-            .map_err(map_error)?;
+            .allow_threads(|| {
+                rt.block_on(async {
+                    let mut guard = inner.lock().await;
+                    let iter = guard
+                        .as_mut()
+                        .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+                    let next = iter.next().await.map_err(map_error)?;
+                    Ok::<_, PyErr>(next)
+                })
+            })?;
         match kv_opt {
             Some(kv) => {
                 let key = PyBytes::new(py, &kv.key);
@@ -1307,32 +1313,25 @@ impl PyDbIterator {
     }
 
     fn __anext__<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let iter = self
-            .inner_iter
-            .as_mut()
-            .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
-        let rt = get_runtime();
-        // Pull next item synchronously (releasing GIL), then return a ready future.
-        let kv_opt = py
-            .allow_threads(|| rt.block_on(async { iter.next().await }))
-            .map_err(map_error)?;
-        match kv_opt {
-            Some(kv) => {
-                let key_vec = kv.key;
-                let val_vec = kv.value;
-                future_into_py::<_, PyObject>(py, async move {
+        let inner = self.inner_iter.clone();
+        future_into_py::<_, PyObject>(py, async move {
+            let mut guard = inner.lock().await;
+            let iter = guard
+                .as_mut()
+                .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+            let kv_opt = iter.next().await.map_err(map_error)?;
+            match kv_opt {
+                Some(kv) => {
                     Python::with_gil(|py| {
-                        let key = PyBytes::new(py, &key_vec);
-                        let value = PyBytes::new(py, &val_vec);
+                        let key = PyBytes::new(py, &kv.key);
+                        let value = PyBytes::new(py, &kv.value);
                         let tuple = PyTuple::new(py, vec![key, value])?;
                         Ok::<PyObject, PyErr>(tuple.into())
                     })
-                })
+                }
+                None => Err(pyo3::exceptions::PyStopAsyncIteration::new_err("")),
             }
-            None => future_into_py::<_, PyObject>(py, async move {
-                Err(pyo3::exceptions::PyStopAsyncIteration::new_err(""))
-            }),
-        }
+        })
     }
 
     #[pyo3(signature = (key))]
@@ -1340,13 +1339,17 @@ impl PyDbIterator {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
-        let iter = self
-            .inner_iter
-            .as_mut()
-            .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+        let inner = self.inner_iter.clone();
         let rt = get_runtime();
-        py.allow_threads(|| rt.block_on(async { iter.seek(&key).await }))
-            .map_err(map_error)?;
+        py.allow_threads(|| {
+            rt.block_on(async {
+                let mut guard = inner.lock().await;
+                let iter = guard
+                    .as_mut()
+                    .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+                iter.seek(&key).await.map_err(map_error)
+            })
+        })?;
         Ok(())
     }
 
@@ -1355,14 +1358,13 @@ impl PyDbIterator {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
-        let iter = self
-            .inner_iter
-            .as_mut()
-            .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
-        let rt = get_runtime();
-        // Do the seek now (releasing GIL), return an already-resolved future.
-        py.allow_threads(|| rt.block_on(async { iter.seek(&key).await }))
-            .map_err(map_error)?;
-        future_into_py(py, async move { Ok(()) })
+        let inner = self.inner_iter.clone();
+        future_into_py(py, async move {
+            let mut guard = inner.lock().await;
+            let iter = guard
+                .as_mut()
+                .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+            iter.seek(&key).await.map_err(map_error)
+        })
     }
 }
