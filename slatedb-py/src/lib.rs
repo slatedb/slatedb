@@ -1337,6 +1337,77 @@ impl PySlateDBTransaction {
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
+    #[pyo3(signature = (key))]
+    fn get_async<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let res: Option<Vec<u8>> = py.allow_threads(|| {
+            rt.block_on(async {
+                match txn.get(&key).await {
+                    Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.as_ref().to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(map_error(e)),
+                }
+            })
+        })?;
+        future_into_py(py, async move { Ok(res) })
+    }
+
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    fn get_with_options<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        let opts = build_read_options(durability_filter, dirty)?;
+        let rt = get_runtime();
+        let res: Option<Vec<u8>> = py.allow_threads(|| {
+            rt.block_on(async {
+                match txn.get_with_options(&key, &opts).await {
+                    Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.as_ref().to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(map_error(e)),
+                }
+            })
+        })?;
+        Ok(res.map(|b| PyBytes::new(py, &b)))
+    }
+
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    fn get_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        key: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        let opts = build_read_options(durability_filter, dirty)?;
+        let rt = get_runtime();
+        let res: Option<Vec<u8>> = py.allow_threads(|| {
+            rt.block_on(async {
+                match txn.get_with_options(&key, &opts).await {
+                    Ok(Some(bytes)) => Ok::<Option<Vec<u8>>, PyErr>(Some(bytes.as_ref().to_vec())),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(map_error(e)),
+                }
+            })
+        })?;
+        future_into_py(py, async move { Ok(res) })
+    }
+
     #[pyo3(signature = (start, end = None))]
     fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
@@ -1351,6 +1422,29 @@ impl PySlateDBTransaction {
         let rt = get_runtime();
         let iter = rt.block_on(async { txn.scan(start..end).await.map_err(map_error) })?;
         Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (start, end = None))]
+    fn scan_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = py.allow_threads(|| {
+            rt.block_on(async { txn.scan(start..end).await.map_err(map_error) })
+        })?;
+        future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
     }
 
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
@@ -1389,6 +1483,45 @@ impl PySlateDBTransaction {
         Ok(PyDbIterator::from_iter(iter))
     }
 
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = py.allow_threads(|| {
+            rt.block_on(async {
+                txn.scan_with_options(start..end, &opts)
+                    .await
+                    .map_err(map_error)
+            })
+        })?;
+        future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
+    }
+
     #[pyo3(signature = (key, value))]
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
@@ -1396,6 +1529,16 @@ impl PySlateDBTransaction {
         }
         let txn = self.inner_ref()?;
         txn.put(&key, &value).map_err(map_error)
+    }
+
+    #[pyo3(signature = (key, value, *, ttl = None))]
+    fn put_with_options(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<u64>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        let opts = build_put_options(ttl);
+        txn.put_with_options(&key, &value, &opts).map_err(map_error)
     }
 
     #[pyo3(signature = (key))]
@@ -1415,6 +1558,17 @@ impl PySlateDBTransaction {
         }
         let txn = self.inner_ref()?;
         txn.merge(&key, &value).map_err(map_error)
+    }
+
+    #[pyo3(signature = (key, value, *, ttl = None))]
+    fn merge_with_options(&self, key: Vec<u8>, value: Vec<u8>, ttl: Option<u64>) -> PyResult<()> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        let opts = build_merge_options(ttl);
+        txn.merge_with_options(&key, &value, &opts)
+            .map_err(map_error)
     }
 
     fn commit(&mut self, py: Python<'_>) -> PyResult<()> {

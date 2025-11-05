@@ -595,8 +595,36 @@ class SlateDBTransaction:
         """Get a value within the transaction (reads see prior writes)."""
         ...
 
+    async def get_async(self, key: bytes) -> bytes | None:
+        """Async variant of ``get`` within the transaction."""
+        ...
+
+    def get_with_options(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """Get a value with read options within the transaction."""
+        ...
+
+    async def get_with_options_async(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """Async variant of ``get_with_options`` within the transaction."""
+        ...
+
     def scan(self, start: bytes, end: bytes | None = None) -> DbIterator:
         """Iterate a range within the transaction."""
+        ...
+
+    async def scan_async(self, start: bytes, end: bytes | None = None) -> DbIterator:
+        """Async variant of ``scan`` returning a DbIterator."""
         ...
 
     def scan_with_options(
@@ -611,6 +639,20 @@ class SlateDBTransaction:
         max_fetch_tasks: int | None = None,
     ) -> DbIterator:
         """Iterate a range with advanced options within the transaction."""
+        ...
+
+    async def scan_with_options_async(
+        self,
+        start: bytes,
+        end: bytes | None = None,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """Async variant of ``scan_with_options`` returning a DbIterator."""
         ...
 
     def put(self, key: bytes, value: bytes) -> None:

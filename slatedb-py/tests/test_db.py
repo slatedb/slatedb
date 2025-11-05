@@ -426,6 +426,107 @@ def test_db_get_with_options(db_path, env_file):
         db.close()
 
 
+def test_txn_get_with_options(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        # Seed data
+        db.put(b"tg1", b"v1")
+
+        # Begin transaction and read existing key with default options
+        txn = db.begin("si")
+        assert txn.get_with_options(b"tg1") == b"v1"
+        # Missing key returns None
+        assert txn.get_with_options(b"missing") is None
+
+        # Read with explicit read options
+        assert (
+            txn.get_with_options(b"tg1", durability_filter="memory", dirty=False) == b"v1"
+        )
+
+        # Read-your-writes behavior also works with get_with_options
+        txn.put(b"tg2", b"v2")
+        assert txn.get_with_options(b"tg2") == b"v2"
+
+        txn.rollback()
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_txn_get_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"ag1", b"v1")
+        txn = db.begin("si")
+        # Existing key
+        assert await txn.get_async(b"ag1") == b"v1"
+        # Missing key
+        assert await txn.get_async(b"missing") is None
+        # Read-your-writes via async path
+        txn.put(b"ag2", b"v2")
+        assert await txn.get_async(b"ag2") == b"v2"
+        txn.rollback()
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_txn_get_with_options_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"agw1", b"v1")
+        txn = db.begin("si")
+        assert (
+            await txn.get_with_options_async(b"agw1", durability_filter="memory", dirty=False)
+            == b"v1"
+        )
+        txn.rollback()
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_txn_scan_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"s1", b"v1")
+        db.put(b"s2", b"v2")
+        txn = db.begin("si")
+        it = await txn.scan_async(b"s")
+        # Insert after iterator creation; should not be visible in this iterator
+        txn.put(b"s3", b"v3")
+        items = list(it)
+        assert (b"s1", b"v1") in items and (b"s2", b"v2") in items
+        assert (b"s3", b"v3") not in items
+        # A new iterator should see the new write
+        items2 = list(await txn.scan_async(b"s"))
+        assert (b"s3", b"v3") in items2
+        txn.rollback()
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_txn_scan_with_options_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"o1", b"v1")
+        db.put(b"o2", b"v2")
+        txn = db.begin("si")
+        it = await txn.scan_with_options_async(
+            b"o",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=1024,
+            cache_blocks=True,
+            max_fetch_tasks=2,
+        )
+        assert list(it) == [(b"o1", b"v1"), (b"o2", b"v2")]
+        txn.rollback()
+    finally:
+        db.close()
+
+
 def test_db_put_delete_merge_with_options(db_path, env_file):
     # Use merge operator for merge tests
     def last_write_wins(existing, value):
@@ -520,3 +621,39 @@ async def test_async_write_batch_and_write_with_options(db_path, env_file):
         assert await db.get_async(b"ab3") == b"v3"
     finally:
         await db.close_async()
+
+
+def test_txn_merge_and_merge_with_options(db_path, env_file):
+    # Define merge operators
+    def last_write_wins(existing, value):
+        return value
+
+    def concat(existing, value):
+        return (existing or b"") + value
+
+    # Test with last_write_wins
+    db = SlateDB(db_path, env_file=env_file, merge_operator=last_write_wins)
+    try:
+        txn = db.begin("si")
+        txn.merge(b"mk1", b"a")
+        txn.merge_with_options(b"mk1", b"b")
+        # Within txn should see last write
+        assert txn.get(b"mk1") == b"b"
+        txn.commit()
+        assert db.get(b"mk1") == b"b"
+    finally:
+        db.close()
+
+    # Test with concat operator
+    db2 = SlateDB(db_path, env_file=env_file, merge_operator=concat)
+    try:
+        txn = db2.begin("si")
+        txn.merge(b"mk2", b"x")
+        txn.merge_with_options(b"mk2", b"y")
+        txn.merge(b"mk2", b"z")
+        # Within txn sees accumulated merge result
+        assert txn.get(b"mk2") == b"xyz"
+        txn.commit()
+        assert db2.get(b"mk2") == b"xyz"
+    finally:
+        db2.close()
