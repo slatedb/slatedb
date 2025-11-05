@@ -9,7 +9,7 @@ use ::slatedb::MergeOperatorError;
 use ::slatedb::{Error, KeyValue};
 use once_cell::sync::OnceCell;
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyValueError};
+use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 use pyo3_async_runtimes::tokio::future_into_py;
@@ -24,12 +24,6 @@ static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 
 fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime::new().unwrap())
-}
-
-fn create_value_error(msg: impl std::fmt::Display) -> PyErr {
-    let bt = Backtrace::capture();
-    let error_msg = format!("{}.\nBacktrace:\n{}", msg, bt);
-    PyValueError::new_err(error_msg)
 }
 
 // Python exception types mirroring slatedb::Error kinds
@@ -57,7 +51,8 @@ fn map_error(err: Error) -> PyErr {
 
 fn load_object_store(env_file: Option<String>) -> PyResult<Arc<dyn ObjectStore>> {
     if let Some(env_file) = env_file {
-        Ok(load_object_store_from_env(Some(env_file)).map_err(create_value_error)?)
+        Ok(load_object_store_from_env(Some(env_file))
+            .map_err(|e| InvalidError::new_err(e.to_string()))?)
     } else {
         Ok(Arc::new(InMemory::new()))
     }
@@ -169,7 +164,7 @@ fn parse_merge_operator(py_obj: Option<&Bound<PyAny>>) -> PyResult<Option<MergeO
             let op: MergeOperatorType = Arc::new(PyMergeOperator { callable });
             Ok(Some(op))
         } else {
-            Err(create_value_error("merge_operator must be a callable (merge(existing: Optional[bytes], value: bytes) -> bytes)"))
+            Err(InvalidError::new_err("merge_operator must be a callable (merge(existing: Optional[bytes], value: bytes) -> bytes)"))
         }
     } else {
         Ok(None)
@@ -199,7 +194,7 @@ impl PySlateDB {
             Some(settings_item) => {
                 let settings_path = settings_item
                     .extract::<String>()
-                    .map_err(create_value_error)?;
+                    .map_err(|e| InvalidError::new_err(e.to_string()))?;
                 Settings::from_file(settings_path).map_err(map_error)?
             }
             None => Settings::load().map_err(map_error)?,
@@ -223,7 +218,7 @@ impl PySlateDB {
     #[pyo3(signature = (key, value))]
     fn put(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
@@ -233,7 +228,7 @@ impl PySlateDB {
     #[pyo3(signature = (key))]
     fn get<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Option<Bound<'py, PyBytes>>> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
@@ -257,7 +252,7 @@ impl PySlateDB {
         end: Option<Vec<u8>>,
     ) -> PyResult<Vec<Bound<'py, PyTuple>>> {
         if start.is_empty() {
-            return Err(create_value_error("start cannot be empty"));
+            return Err(InvalidError::new_err("start cannot be empty"));
         }
         let start = start.clone();
         let end = end.unwrap_or_else(|| {
@@ -292,7 +287,7 @@ impl PySlateDB {
     #[pyo3(signature = (start, end = None))]
     fn scan_iter(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
-            return Err(create_value_error("start cannot be empty"));
+            return Err(InvalidError::new_err("start cannot be empty"));
         }
         let end = end.unwrap_or_else(|| {
             let mut end = start.clone();
@@ -306,7 +301,7 @@ impl PySlateDB {
     #[pyo3(signature = (key))]
     fn delete(&self, py: Python<'_>, key: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
@@ -325,7 +320,7 @@ impl PySlateDB {
     #[pyo3(signature = (key, value))]
     fn merge(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         let rt = get_runtime();
@@ -342,7 +337,7 @@ impl PySlateDB {
         value: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         future_into_py(py, async move {
@@ -358,7 +353,7 @@ impl PySlateDB {
         value: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         future_into_py(
@@ -370,7 +365,7 @@ impl PySlateDB {
     #[pyo3(signature = (key))]
     fn get_async<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         future_into_py(py, async move {
@@ -385,7 +380,7 @@ impl PySlateDB {
     #[pyo3(signature = (key))]
     fn delete_async<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
         future_into_py(py, async move { db.delete(&key).await.map_err(map_error) })
@@ -416,7 +411,11 @@ impl PySlateDBReader {
                 path,
                 object_store,
                 checkpoint_id
-                    .map(|id| Uuid::parse_str(&id).map_err(create_value_error))
+                    .map(|id| {
+                        Uuid::parse_str(&id).map_err(|e| {
+                            InvalidError::new_err(format!("invalid checkpoint_id: {e}"))
+                        })
+                    })
                     .transpose()?,
                 options,
             )
@@ -431,7 +430,7 @@ impl PySlateDBReader {
     #[pyo3(signature = (key))]
     fn get<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Option<Bound<'py, PyBytes>>> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db_reader = self.inner.clone();
         let rt = get_runtime();
@@ -451,7 +450,7 @@ impl PySlateDBReader {
     #[pyo3(signature = (key))]
     fn get_async<'py>(&self, py: Python<'py>, key: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
-            return Err(create_value_error("key cannot be empty"));
+            return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db_reader = self.inner.clone();
         future_into_py(py, async move {
@@ -471,7 +470,7 @@ impl PySlateDBReader {
         end: Option<Vec<u8>>,
     ) -> PyResult<Vec<Bound<'py, PyTuple>>> {
         if start.is_empty() {
-            return Err(create_value_error("start cannot be empty"));
+            return Err(InvalidError::new_err("start cannot be empty"));
         }
         let start = start.clone();
         let end = end.unwrap_or_else(|| {
@@ -505,7 +504,7 @@ impl PySlateDBReader {
     #[pyo3(signature = (start, end = None))]
     fn scan_iter(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
-            return Err(create_value_error("start cannot be empty"));
+            return Err(InvalidError::new_err("start cannot be empty"));
         }
         let end = end.unwrap_or_else(|| {
             let mut end = start.clone();
@@ -556,7 +555,10 @@ impl PySlateDBAdmin {
         let result = rt.block_on(async {
             let lifetime = lifetime.map(Duration::from_millis);
             let source = source
-                .map(|s| Uuid::parse_str(&s).map_err(create_value_error))
+                .map(|s| {
+                    Uuid::parse_str(&s)
+                        .map_err(|e| InvalidError::new_err(format!("invalid source UUID: {e}")))
+                })
                 .transpose()?;
             admin
                 .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
@@ -572,8 +574,12 @@ impl PySlateDBAdmin {
     fn list_checkpoints<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let admin = self.inner.clone();
         let rt = get_runtime();
-        let result =
-            rt.block_on(async { admin.list_checkpoints().await.map_err(create_value_error) })?;
+        let result = rt.block_on(async {
+            admin
+                .list_checkpoints()
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })?;
         result
             .into_iter()
             .map(|c| {
@@ -674,7 +680,7 @@ impl PyDbIterator {
                 }
             })
         } else {
-            return Err(create_value_error("Iterator not properly initialized"));
+            return Err(InvalidError::new_err("Iterator not properly initialized"));
         };
 
         self.receiver = Some(receiver);

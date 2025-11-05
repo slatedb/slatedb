@@ -1,5 +1,5 @@
 import pytest
-from slatedb import SlateDB, SlateDBReader, SlateDBAdmin
+from slatedb import SlateDB, SlateDBReader, SlateDBAdmin, InvalidError
 
 @pytest.fixture
 def populated_db(db_path, env_file):
@@ -79,10 +79,10 @@ def test_empty_key_validation(db_path, env_file, populated_db):
     """Test that empty keys raise ValueError."""
     reader = SlateDBReader(db_path, env_file=env_file)
     
-    with pytest.raises(ValueError, match="key cannot be empty"):
+    with pytest.raises(InvalidError, match="key cannot be empty"):
         reader.get(b"")
     
-    with pytest.raises(ValueError, match="start cannot be empty"):
+    with pytest.raises(InvalidError, match="start cannot be empty"):
         list(reader.scan(b"", b"key3"))
     
     reader.close()
@@ -107,7 +107,7 @@ async def test_get_async_empty_key_error(db_path, env_file, populated_db):
     """Test that async get with empty key raises ValueError."""
     reader = SlateDBReader(db_path, env_file=env_file)
     
-    with pytest.raises(ValueError, match="key cannot be empty"):
+    with pytest.raises(InvalidError, match="key cannot be empty"):
         await reader.get_async(b"")
     
     reader.close()
@@ -146,5 +146,5 @@ def test_invalid_checkpoint_id(db_path, env_file):
     db.close()
     
     # Invalid UUID format should raise an error
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidError):
         SlateDBReader(db_path, env_file=env_file, checkpoint_id="invalid-uuid-format") 
