@@ -16,7 +16,7 @@ use once_cell::sync::OnceCell;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyTuple, PyType};
 use pyo3_async_runtimes::tokio::future_into_py;
 use std::backtrace::Backtrace;
 use std::sync::Arc;
@@ -241,6 +241,39 @@ impl PySlateDB {
 
 #[pymethods]
 impl PySlateDB {
+    #[classmethod]
+    #[pyo3(signature = (path, url = None, env_file = None, *, merge_operator = None, **kwargs))]
+    fn open_async<'py>(
+        _cls: &'py Bound<'py, PyType>,
+        py: Python<'py>,
+        path: String,
+        url: Option<String>,
+        env_file: Option<String>,
+        merge_operator: Option<&'py Bound<'py, PyAny>>,
+        kwargs: Option<&'py Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let settings = match kwargs.and_then(|k| k.get_item("settings").ok().flatten()) {
+            Some(settings_item) => {
+                let settings_path = settings_item
+                    .extract::<String>()
+                    .map_err(|e| InvalidError::new_err(e.to_string()))?;
+                Settings::from_file(settings_path).map_err(map_error)?
+            }
+            None => Settings::load().map_err(map_error)?,
+        };
+        let merge_operator = parse_merge_operator(merge_operator)?;
+        future_into_py(py, async move {
+            let db = if let Some(url) = url {
+                load_db_from_url(&path, &url, settings, merge_operator).await?
+            } else {
+                load_db_from_env(&path, env_file, settings, merge_operator).await?
+            };
+            Ok(PySlateDB {
+                inner: Arc::new(db),
+            })
+        })
+    }
+
     #[new]
     #[pyo3(signature = (path, url = None, env_file = None, *, merge_operator = None, **kwargs))]
     fn new(
@@ -287,6 +320,16 @@ impl PySlateDB {
             py.allow_threads(|| rt.block_on(async { db.snapshot().await.map_err(map_error) }))?;
         Ok(PySlateDBSnapshot {
             inner: Some(snapshot),
+        })
+    }
+
+    fn snapshot_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            let snapshot = db.snapshot().await.map_err(map_error)?;
+            Ok(PySlateDBSnapshot {
+                inner: Some(snapshot),
+            })
         })
     }
 
@@ -362,6 +405,28 @@ impl PySlateDB {
         Ok(PyDbIterator::from_iter(iter))
     }
 
+    #[pyo3(signature = (start, end = None))]
+    fn scan_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = db.scan(start..end).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (key))]
     fn delete(&self, py: Python<'_>, key: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
@@ -409,11 +474,52 @@ impl PySlateDB {
         Ok(PyDbIterator::from_iter(iter))
     }
 
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = db
+                .scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         let db = self.inner.clone();
         let rt = get_runtime();
-        // Release the GIL while awaiting shutdown
         py.allow_threads(|| rt.block_on(async { db.close().await.map_err(map_error) }))
+    }
+
+    fn close_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        future_into_py(py, async move { db.close().await.map_err(map_error) })
     }
 
     /// Merge a value into the database using the configured merge operator.
@@ -428,7 +534,6 @@ impl PySlateDB {
         py.allow_threads(|| rt.block_on(async { db.merge(&key, &value).await.map_err(map_error) }))
     }
 
-    /// Async version of merge
     #[pyo3(signature = (key, value))]
     fn merge_async<'py>(
         &self,
@@ -553,6 +658,28 @@ impl PySlateDBSnapshot {
         Ok(PyDbIterator::from_iter(iter))
     }
 
+    #[pyo3(signature = (start, end = None))]
+    fn scan_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let snapshot = self.inner_ref()?;
+        future_into_py(py, async move {
+            let iter = snapshot.scan(start..end).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
     fn scan_with_options(
         &self,
@@ -590,9 +717,52 @@ impl PySlateDBSnapshot {
         Ok(PyDbIterator::from_iter(iter))
     }
 
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let snapshot = self.inner_ref()?;
+        future_into_py(py, async move {
+            let iter = snapshot
+                .scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     fn close(&mut self) -> PyResult<()> {
         self.inner = None; // drop snapshot; unregisters in Drop
         Ok(())
+    }
+
+    fn close_async<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // Drop immediately and return a ready future
+        self.inner = None;
+        future_into_py(py, async move { Ok(()) })
     }
 }
 
@@ -629,8 +799,6 @@ impl PySlateDBTransaction {
         })?;
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
-
-    // No async get for transactions: DBTransaction is not clonable/shared safely across async boundaries.
 
     #[pyo3(signature = (start, end = None))]
     fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
@@ -721,6 +889,14 @@ impl PySlateDBTransaction {
         py.allow_threads(|| rt.block_on(async { txn.commit().await.map_err(map_error) }))
     }
 
+    fn commit_async<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let txn = self
+            .inner
+            .take()
+            .ok_or_else(|| ClosedError::new_err("transaction is closed"))?;
+        future_into_py(py, async move { txn.commit().await.map_err(map_error) })
+    }
+
     fn rollback(&mut self) -> PyResult<()> {
         if let Some(txn) = self.inner.take() {
             txn.rollback();
@@ -736,6 +912,36 @@ struct PySlateDBReader {
 
 #[pymethods]
 impl PySlateDBReader {
+    #[classmethod]
+    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None))]
+    fn open_async<'py>(
+        _cls: &'py Bound<'py, PyType>,
+        py: Python<'py>,
+        path: String,
+        url: Option<String>,
+        env_file: Option<String>,
+        checkpoint_id: Option<String>,
+        merge_operator: Option<&'py Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let object_store = resolve_object_store_py(url.as_deref(), env_file.clone())?;
+        let merge_operator = parse_merge_operator(merge_operator)?;
+        future_into_py(py, async move {
+            let mut options = DbReaderOptions::default();
+            options.merge_operator = merge_operator;
+            let checkpoint = checkpoint_id
+                .map(|id| {
+                    Uuid::parse_str(&id)
+                        .map_err(|e| InvalidError::new_err(format!("invalid checkpoint_id: {e}")))
+                })
+                .transpose()?;
+            let db_reader = DbReader::open(path, object_store, checkpoint, options)
+                .await
+                .map_err(map_error)?;
+            Ok(PySlateDBReader {
+                inner: Arc::new(db_reader),
+            })
+        })
+    }
     #[new]
     #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None))]
     fn new(
@@ -822,6 +1028,28 @@ impl PySlateDBReader {
         Ok(PyDbIterator::from_iter(iter))
     }
 
+    #[pyo3(signature = (start, end = None))]
+    fn scan_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let reader = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = reader.scan(start..end).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
     fn scan_with_options(
         &self,
@@ -859,10 +1087,55 @@ impl PySlateDBReader {
         Ok(PyDbIterator::from_iter(iter))
     }
 
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Vec<u8>,
+        end: Option<Vec<u8>>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if start.is_empty() {
+            return Err(InvalidError::new_err("start cannot be empty"));
+        }
+        let end = end.unwrap_or_else(|| {
+            let mut end = start.clone();
+            end.push(0xff);
+            end
+        });
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let reader = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = reader
+                .scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     fn close(&self) -> PyResult<()> {
         let db_reader = self.inner.clone();
         let rt = get_runtime();
         rt.block_on(async { db_reader.close().await.map_err(map_error) })
+    }
+
+    fn close_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let db_reader = self.inner.clone();
+        future_into_py(
+            py,
+            async move { db_reader.close().await.map_err(map_error) },
+        )
     }
 }
 
@@ -911,6 +1184,36 @@ impl PySlateDBAdmin {
         Ok(dict)
     }
 
+    #[pyo3(signature = (lifetime = None, source = None))]
+    fn create_checkpoint_async<'py>(
+        &self,
+        py: Python<'py>,
+        lifetime: Option<u64>,
+        source: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            let lifetime = lifetime.map(Duration::from_millis);
+            let source = source
+                .map(|s| {
+                    Uuid::parse_str(&s)
+                        .map_err(|e| InvalidError::new_err(format!("invalid source UUID: {e}")))
+                })
+                .transpose()?;
+            let result = admin
+                .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
+                .await
+                .map_err(map_error)?;
+            Python::with_gil(|py| {
+                let dict = PyDict::new(py);
+                dict.set_item("id", result.id.to_string())?;
+                dict.set_item("manifest_id", result.manifest_id)?;
+                // Convert to a GIL-independent PyObject for return
+                Ok(dict.into_any().unbind())
+            })
+        })
+    }
+
     fn list_checkpoints<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let admin = self.inner.clone();
         let rt = get_runtime();
@@ -931,6 +1234,31 @@ impl PySlateDBAdmin {
                 Ok(dict)
             })
             .collect::<PyResult<Vec<Bound<PyDict>>>>()
+    }
+
+    fn list_checkpoints_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            let result = admin
+                .list_checkpoints()
+                .await
+                .map_err(|e| UnavailableError::new_err(e.to_string()))?;
+            Python::with_gil(|py| {
+                let out: PyResult<Vec<PyObject>> = result
+                    .into_iter()
+                    .map(|c| {
+                        let dict = PyDict::new(py);
+                        dict.set_item("id", c.id.to_string())?;
+                        dict.set_item("manifest_id", c.manifest_id)?;
+                        dict.set_item("expire_time", c.expire_time.map(|t| t.timestamp_millis()))?;
+                        dict.set_item("create_time", c.create_time.timestamp_millis())?;
+                        // Convert to a GIL-independent PyObject for return
+                        Ok(dict.into_any().unbind())
+                    })
+                    .collect();
+                Ok(out?)
+            })
+        })
     }
 }
 
@@ -973,6 +1301,40 @@ impl PyDbIterator {
         }
     }
 
+    /// Enable `async for` by providing an async iterator protocol.
+    fn __aiter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let iter = self
+            .inner_iter
+            .as_mut()
+            .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+        let rt = get_runtime();
+        // Pull next item synchronously (releasing GIL), then return a ready future.
+        let kv_opt = py
+            .allow_threads(|| rt.block_on(async { iter.next().await }))
+            .map_err(map_error)?;
+        match kv_opt {
+            Some(kv) => {
+                let key_vec = kv.key;
+                let val_vec = kv.value;
+                future_into_py::<_, PyObject>(py, async move {
+                    Python::with_gil(|py| {
+                        let key = PyBytes::new(py, &key_vec);
+                        let value = PyBytes::new(py, &val_vec);
+                        let tuple = PyTuple::new(py, vec![key, value])?;
+                        Ok::<PyObject, PyErr>(tuple.into())
+                    })
+                })
+            }
+            None => future_into_py::<_, PyObject>(py, async move {
+                Err(pyo3::exceptions::PyStopAsyncIteration::new_err(""))
+            }),
+        }
+    }
+
     #[pyo3(signature = (key))]
     fn seek(&mut self, py: Python<'_>, key: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
@@ -986,5 +1348,21 @@ impl PyDbIterator {
         py.allow_threads(|| rt.block_on(async { iter.seek(&key).await }))
             .map_err(map_error)?;
         Ok(())
+    }
+
+    #[pyo3(signature = (key))]
+    fn seek_async<'py>(&mut self, py: Python<'py>, key: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
+        if key.is_empty() {
+            return Err(InvalidError::new_err("key cannot be empty"));
+        }
+        let iter = self
+            .inner_iter
+            .as_mut()
+            .ok_or_else(|| InternalError::new_err("iterator not initialized"))?;
+        let rt = get_runtime();
+        // Do the seek now (releasing GIL), return an already-resolved future.
+        py.allow_threads(|| rt.block_on(async { iter.seek(&key).await }))
+            .map_err(map_error)?;
+        future_into_py(py, async move { Ok(()) })
     }
 }
