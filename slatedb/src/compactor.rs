@@ -22,6 +22,7 @@ use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::merge_operator::MergeOperatorType;
 use crate::rand::DbRand;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
@@ -175,6 +176,7 @@ pub(crate) struct Compactor {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    merge_operator: Option<MergeOperatorType>,
 }
 
 impl Compactor {
@@ -188,6 +190,7 @@ impl Compactor {
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
         error_state: WatchableOnceCell<SlateDBError>,
+        merge_operator: Option<MergeOperatorType>,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
@@ -204,6 +207,7 @@ impl Compactor {
             rand,
             stats,
             system_clock,
+            merge_operator,
         }
     }
 
@@ -228,6 +232,7 @@ impl Compactor {
             self.stats.clone(),
             self.system_clock.clone(),
             self.manifest_store.clone(),
+            self.merge_operator.clone(),
         ));
         let handler = CompactorEventHandler::new(
             self.manifest_store.clone(),
@@ -674,6 +679,7 @@ pub mod stats {
 mod tests {
     use std::collections::HashMap;
     use std::future::Future;
+    use std::sync::atomic;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
@@ -698,6 +704,7 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -707,8 +714,23 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
+    use bytes::Bytes;
 
     const PATH: &str = "/test/db";
+
+    struct StringConcatMergeOperator;
+
+    impl MergeOperator for StringConcatMergeOperator {
+        fn merge(
+            &self,
+            existing_value: Option<Bytes>,
+            value: Bytes,
+        ) -> Result<Bytes, MergeOperatorError> {
+            let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
+            result.extend_from_slice(&value);
+            Ok(Bytes::from(result))
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_compactor_compacts_l0() {
@@ -877,6 +899,530 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_apply_merge_during_l0_compaction() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.db_state().l0.len() >= 2,
+        )));
+        let options = db_options(Some(compactor_options()));
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let (_manifest_store, table_store) = build_test_stores(os.clone());
+
+        // write merge operations across multiple L0 SSTs
+        db.merge(b"key1", b"a").await.unwrap();
+        db.merge(b"key1", b"b").await.unwrap();
+        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.flush().await.unwrap();
+
+        db.merge(b"key1", b"c").await.unwrap();
+        db.merge(b"key2", b"x").await.unwrap();
+        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.flush().await.unwrap();
+
+        // when:
+        let db_state = await_compaction(&db).await;
+
+        // then:
+        let db_state = db_state.expect("db was not compacted");
+        assert_eq!(db_state.compacted.len(), 1);
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_merge(b"key1", b"abc", 4).with_create_ts(0),
+                RowEntry::new_merge(b"key2", b"x", 5).with_create_ts(0),
+                RowEntry::new_value(&[b'x'; 16], &[b'p'; 128], 3).with_create_ts(0),
+                RowEntry::new_value(&[b'y'; 16], &[b'p'; 128], 6).with_create_ts(0),
+            ],
+        )
+        .await;
+
+        // verify the merged values are readable from the db
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("abc")));
+        let result = db.get(b"key2").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("x")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_apply_merge_across_l0_and_sorted_runs() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| !state.db_state().l0.is_empty(),
+        )));
+        let options = db_options(Some(compactor_options()));
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let (_manifest_store, table_store) = build_test_stores(os.clone());
+
+        // write initial merge operations and compact to L1
+        db.merge(b"key1", b"a").await.unwrap();
+        db.merge(b"key1", b"b").await.unwrap();
+        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.flush().await.unwrap();
+
+        let db_state = await_compaction(&db).await;
+        let db_state = db_state.expect("db was not compacted");
+        assert_eq!(db_state.compacted.len(), 1);
+
+        // write more merge operations to L0
+        db.merge(b"key1", b"c").await.unwrap();
+        db.merge(b"key1", b"d").await.unwrap();
+        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.flush().await.unwrap();
+
+        // when: compact L0 with the existing sorted run
+        let db_state = await_compaction(&db).await;
+
+        // then:
+        let db_state = db_state.expect("db was not compacted");
+        assert_eq!(db_state.compacted.len(), 1);
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_merge(b"key1", b"abcd", 5).with_create_ts(0),
+                RowEntry::new_value(&[b'x'; 16], &[b'p'; 128], 3).with_create_ts(0),
+                RowEntry::new_value(&[b'y'; 16], &[b'p'; 128], 6).with_create_ts(0),
+            ],
+        )
+        .await;
+
+        // verify the merged value is readable from the db
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("abcd")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_merge_without_base_value() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.db_state().l0.len() >= 2,
+        )));
+        let options = db_options(Some(compactor_options()));
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let (_manifest_store, table_store) = build_test_stores(os.clone());
+
+        // write only merge operations without any base value
+        db.merge(b"key1", b"x").await.unwrap();
+        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.flush().await.unwrap();
+
+        db.merge(b"key1", b"y").await.unwrap();
+        db.merge(b"key1", b"z").await.unwrap();
+        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.flush().await.unwrap();
+
+        // when:
+        let db_state = await_compaction(&db).await;
+
+        // then:
+        let db_state = db_state.expect("db was not compacted");
+        assert_eq!(db_state.compacted.len(), 1);
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_merge(b"key1", b"xyz", 4).with_create_ts(0),
+                RowEntry::new_value(&[b'x'; 16], &[b'p'; 128], 2).with_create_ts(0),
+                RowEntry::new_value(&[b'y'; 16], &[b'p'; 128], 5).with_create_ts(0),
+            ],
+        )
+        .await;
+
+        // verify the merged value is readable from the db
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("xyz")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_preserve_merge_order_across_multiple_ssts() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.db_state().l0.len() >= 3,
+        )));
+        let options = db_options(Some(compactor_options()));
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let (_manifest_store, table_store) = build_test_stores(os.clone());
+
+        // write merge operations across three L0 SSTs in specific order
+        db.merge(b"key1", b"1").await.unwrap();
+        db.put(&vec![b'a'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.flush().await.unwrap();
+
+        db.merge(b"key1", b"2").await.unwrap();
+        db.put(&vec![b'b'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.flush().await.unwrap();
+
+        db.merge(b"key1", b"3").await.unwrap();
+        db.put(&vec![b'c'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.flush().await.unwrap();
+
+        // when:
+        let db_state = await_compaction(&db).await;
+
+        // then:
+        let db_state = db_state.expect("db was not compacted");
+        assert_eq!(db_state.compacted.len(), 1);
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // merges should be applied in chronological order: 1, 2, 3
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(&[b'a'; 16], &[b'p'; 128], 2).with_create_ts(0),
+                RowEntry::new_value(&[b'b'; 16], &[b'p'; 128], 4).with_create_ts(0),
+                RowEntry::new_value(&[b'c'; 16], &[b'p'; 128], 6).with_create_ts(0),
+                RowEntry::new_merge(b"key1", b"123", 5).with_create_ts(0),
+            ],
+        )
+        .await;
+
+        // verify the merged value is readable from the db
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("123")));
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_not_compact_expired_merge_operations_in_last_run() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let insert_clock = Arc::new(TestClock::new());
+
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.db_state().l0.len() >= 2,
+        )));
+
+        let mut options = db_options(Some(compactor_options()));
+        options.wal_enabled = false;
+        options.l0_sst_size_bytes = 128;
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(insert_clock.clone())
+            .with_compaction_scheduler_supplier(scheduler)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let (_manifest_store, table_store) = build_test_stores(os.clone());
+
+        // ticker time = 0, expire time = 10
+        insert_clock.ticker.store(0, atomic::Ordering::SeqCst);
+        db.merge_with_options(
+            b"key1",
+            &[b'a'; 32],
+            &crate::config::MergeOptions {
+                ttl: Ttl::ExpireAfter(10),
+            },
+            &WriteOptions {
+                await_durable: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // ticker time = 20, no expire time
+        insert_clock.ticker.store(20, atomic::Ordering::SeqCst);
+        db.merge_with_options(
+            b"key1",
+            &[b'b'; 32],
+            &crate::config::MergeOptions { ttl: Ttl::NoExpiry },
+            &WriteOptions {
+                await_durable: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let db_state = await_compaction(&db).await.unwrap();
+        assert_eq!(db_state.compacted.len(), 1);
+        assert_eq!(db_state.last_l0_clock_tick, 20);
+
+        // then: the compacted SST should only contain the non-expired merge
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // only the non-expired merge "b" should be present
+        assert_iterator(
+            &mut iter,
+            vec![RowEntry::new_merge(b"key1", &[b'b'; 32], 2).with_create_ts(20)],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_merge_and_then_overwrite_with_put() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.db_state().l0.len() >= 2,
+        )));
+        let options = db_options(Some(compactor_options()));
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, _table_store) = build_test_stores(os.clone());
+
+        // write merge operations
+        db.merge(b"key1", b"a").await.unwrap();
+        db.merge(b"key1", b"b").await.unwrap();
+        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding
+        db.flush().await.unwrap();
+
+        // then overwrite with a put
+        db.put(b"key1", b"new_value").await.unwrap();
+        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding
+        db.flush().await.unwrap();
+
+        // when:
+        // Wait a bit for compaction to occur
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // then: verify the put value overwrote the merge
+        let result = db.get(b"key1").await.unwrap();
+        assert_eq!(result, Some(Bytes::from("new_value")));
+
+        // verify the compacted state in manifest
+        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let db_state = stored_manifest.db_state();
+        assert!(
+            !db_state.compacted.is_empty(),
+            "compaction should have occurred"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn should_not_merge_operations_with_different_expire_times() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        // given:
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.db_state().l0.len() >= 2,
+        )));
+        let options = db_options(Some(compactor_options()));
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, table_store) = build_test_stores(os.clone());
+
+        // write merge operations with different TTLs
+        db.merge_with_options(
+            b"key1",
+            b"a",
+            &crate::config::MergeOptions {
+                ttl: Ttl::ExpireAfter(100),
+            },
+            &WriteOptions::default(),
+        )
+        .await
+        .unwrap();
+        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding
+        db.flush().await.unwrap();
+
+        db.merge_with_options(
+            b"key1",
+            b"b",
+            &crate::config::MergeOptions {
+                ttl: Ttl::ExpireAfter(200),
+            },
+            &WriteOptions::default(),
+        )
+        .await
+        .unwrap();
+        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding
+        db.flush().await.unwrap();
+
+        // when:
+        // Wait a bit for compaction to occur
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // then: verify that merges with different expire times are NOT merged together
+        // Reading should get only the latest merge since they weren't combined
+        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let db_state = stored_manifest.db_state();
+        assert!(
+            !db_state.compacted.is_empty(),
+            "compaction should have occurred"
+        );
+
+        // The compacted sorted run should contain both merge operations separately
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // merge operations should be kept separate due to different expire times
+        let mut key1_entries = vec![];
+        while let Some(entry) = iter.next_entry().await.unwrap() {
+            if entry.key.as_ref() == b"key1" {
+                key1_entries.push(entry);
+            }
+        }
+        // We should have at least 1 merge operation for key1
+        assert!(
+            !key1_entries.is_empty(),
+            "should have merge operations for key1"
+        );
+        // All entries for key1 should be merge operations
+        assert!(key1_entries
+            .iter()
+            .all(|e| matches!(e.value, crate::types::ValueDeletable::Merge(_))));
+        // If there are 2 entries, they should have different expire times
+        if key1_entries.len() == 2 {
+            assert_ne!(
+                key1_entries[0].expire_ts, key1_entries[1].expire_ts,
+                "separate merge operations should have different expire times"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_should_compact_expired_entries() {
         // given:
         let os = Arc::new(InMemory::new());
@@ -1033,6 +1579,7 @@ mod tests {
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
                 manifest_store.clone(),
+                options.merge_operator.clone(),
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),

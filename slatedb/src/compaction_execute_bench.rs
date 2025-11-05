@@ -335,6 +335,7 @@ impl CompactionExecuteBench {
             stats.clone(),
             self.system_clock.clone(),
             manifest_store.clone(),
+            None,
         );
 
         let manifest = StoredManifest::load(manifest_store).await?;
