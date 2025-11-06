@@ -102,7 +102,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 })
                 .unwrap_or(false);
             let in_retention_window_by_seq = retention_min_seq
-                .map(|min_seq| entry.seq >= min_seq)
+                .map(|min_seq| entry.seq > min_seq)
                 .unwrap_or(false);
 
             // filter out any expired entries -- eventually we can consider
