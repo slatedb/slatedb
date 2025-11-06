@@ -819,8 +819,9 @@ mod tests {
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest)
-            // value2 and value1 filtered out because seq <= retention_min_seq and not latest
+            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest in retention window)
+            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // Kept (boundary value for snapshots)
+            // value1 filtered out because it's older than the boundary
         ],
         filter_tombstone: false,
     })]
