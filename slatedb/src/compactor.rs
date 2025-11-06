@@ -14,8 +14,7 @@ use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{CompactionExecutor, CompactorJobAttempt, TokioCompactionExecutor};
 use crate::compactor_state::{
-    CompactorJob, CompactorJobInput, CompactorJobRequest, CompactorJobRequestType, CompactorState,
-    SourceId,
+    CompactorJob, CompactorJobInput, CompactorJobRequest, CompactorState, SourceId,
 };
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::SortedRun;
@@ -498,12 +497,8 @@ impl CompactorEventHandler {
                     compactor_job_request.sources(),
                 ),
             };
-            let compactor_job: CompactorJob = CompactorJob::new(
-                compactor_job_id,
-                CompactorJobRequestType::Internal,
-                compactor_job_request.clone(),
-                job_input,
-            );
+            let compactor_job: CompactorJob =
+                CompactorJob::new(compactor_job_id, compactor_job_request.clone(), job_input);
             self.submit_compaction(compactor_job).await?;
         }
         Ok(())

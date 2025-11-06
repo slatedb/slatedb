@@ -427,8 +427,7 @@ mod tests {
 
     use crate::clock::DefaultSystemClock;
     use crate::compactor_state::{
-        CompactorJob, CompactorJobInput, CompactorJobRequest, CompactorJobRequestType,
-        CompactorState, SourceId,
+        CompactorJob, CompactorJobInput, CompactorJobRequest, CompactorState, SourceId,
     };
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
@@ -571,7 +570,6 @@ mod tests {
         };
         let compactor_job = CompactorJob::new(
             compaction_id,
-            CompactorJobRequestType::Internal,
             request,
             job_input,
         );
@@ -671,7 +669,6 @@ mod tests {
         };
         let compactor_job = CompactorJob::new(
             compaction_id,
-            CompactorJobRequestType::Internal,
             request,
             job_input,
         );
@@ -718,7 +715,6 @@ mod tests {
         };
         let compactor_job = CompactorJob::new(
             compaction_id,
-            CompactorJobRequestType::Internal,
             create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
             job_input,
         );
