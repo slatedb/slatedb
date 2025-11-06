@@ -653,6 +653,25 @@ def test_txn_merge_and_merge_with_options(db_path, env_file):
     finally:
         db2.close()
 
+def test_txn_put_with_options(db_path, env_file):
+    """Transaction put_with_options should override prior puts and commit properly."""
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        txn = db.begin("si")
+        # Regular put then put_with_options should see last write inside txn
+        txn.put(b"tk1", b"v1")
+        txn.put_with_options(b"tk1", b"v2")
+        assert txn.get(b"tk1") == b"v2"
+
+        # put_with_options with TTL argument should be accepted
+        txn.put_with_options(b"tk2", b"vx", ttl=1000)
+
+        txn.commit()
+        assert db.get(b"tk1") == b"v2"
+        assert db.get(b"tk2") == b"vx"
+    finally:
+        db.close()
+
 
 def test_db_metrics_returns_dict_and_increments(db_path):
     db = SlateDB(db_path)

@@ -667,12 +667,41 @@ class SlateDBTransaction:
         """Buffer a put in the transaction."""
         ...
 
+    def put_with_options(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+    ) -> None:
+        """
+        Buffer a put with per-op options.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes.
+            ttl: Optional logical TTL units for this write.
+        """
+        ...
+
     def delete(self, key: bytes) -> None:
         """Buffer a delete in the transaction."""
         ...
 
     def merge(self, key: bytes, value: bytes) -> None:
         """Buffer a merge in the transaction (requires merge operator)."""
+        ...
+
+    def merge_with_options(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+    ) -> None:
+        """
+        Buffer a merge with per-op options (e.g., TTL).
+        """
         ...
 
     def commit(self) -> None:
