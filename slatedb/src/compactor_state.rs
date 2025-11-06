@@ -406,7 +406,7 @@ mod tests {
         let request = build_l0_compaction(&state.db_state().l0, 0);
         // when:
         let compactor_job = CompactorJob::new(job_id, request.clone());
-        state.add_job(compactor_job.clone());
+        state.add_job(compactor_job.clone()).expect("failed to add job");
 
         // then:
         let mut jobs = state.jobs();
@@ -425,7 +425,7 @@ mod tests {
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = build_l0_compaction(&before_compaction.l0, 0);
         let compactor_job = CompactorJob::new(job_id, request);
-        state.add_job(compactor_job.clone());
+        state.add_job(compactor_job.clone()).expect("failed to add job");
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -472,7 +472,7 @@ mod tests {
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = build_l0_compaction(&before_compaction.l0, 0);
         let compactor_job = CompactorJob::new(job_id, request);
-        state.add_job(compactor_job.clone());
+        state.add_job(compactor_job.clone()).expect("failed to add job");
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -531,7 +531,7 @@ mod tests {
             0,
         );
         let compactor_job = CompactorJob::new(job_id, request);
-        state.add_job(compactor_job.clone());
+        state.add_job(compactor_job.clone()).expect("failed to add job");
         state.finish_job(
             job_id,
             SortedRun {
@@ -599,7 +599,7 @@ mod tests {
             0,
         );
         let compactor_job = CompactorJob::new(job_id, request);
-        state.add_job(compactor_job.clone());
+        state.add_job(compactor_job.clone()).expect("failed to add job");
         state.finish_job(
             job_id,
             SortedRun {
