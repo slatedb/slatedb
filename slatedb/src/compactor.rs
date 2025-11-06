@@ -494,8 +494,8 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         let db_state = self.state.db_state();
         let request = job.request();
-        let ssts = CompactorJob::get_ssts(db_state, &request.sources());
-        let sorted_runs = CompactorJob::get_sorted_runs(db_state, &request.sources());
+        let ssts = CompactorJob::get_ssts(db_state, request.sources());
+        let sorted_runs = CompactorJob::get_sorted_runs(db_state, request.sources());
         // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
         let is_dest_last_run = db_state.compacted.is_empty()
             || db_state
@@ -565,7 +565,7 @@ impl CompactorEventHandler {
     #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
     async fn submit_compaction(&mut self, job: CompactorJob) -> Result<(), SlateDBError> {
         // Validate the candidate compaction; skip invalid ones
-        if let Err(e) = self.validate_compaction(&job.request()) {
+        if let Err(e) = self.validate_compaction(job.request()) {
             warn!("invalid compaction [error={:?}]", e);
             return Ok(());
         }
