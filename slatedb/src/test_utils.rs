@@ -1,6 +1,6 @@
 use crate::clock::LogicalClock;
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
-use crate::compactor_state::{Compaction, CompactorState, SourceId};
+use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
@@ -309,7 +309,7 @@ impl OnDemandCompactionScheduler {
 }
 
 impl CompactionScheduler for OnDemandCompactionScheduler {
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction> {
+    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactionSpec> {
         if !(self.should_compact)(state) {
             return vec![];
         }
@@ -331,7 +331,7 @@ impl CompactionScheduler for OnDemandCompactionScheduler {
             sources.push(SourceId::SortedRun(sr.id));
         }
 
-        vec![Compaction::new(sources, next_sr_id)]
+        vec![CompactionSpec::new(sources, next_sr_id)]
     }
 }
 

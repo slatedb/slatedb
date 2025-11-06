@@ -5,7 +5,7 @@ use log::info;
 use ulid::Ulid;
 use uuid::Uuid;
 
-use crate::compactor_state::CompactionStatus::Submitted;
+use crate::compactor_state::CompactionStatus::InProgress;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
@@ -53,36 +53,51 @@ impl SourceId {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CompactionSpec {
+    pub(crate) sources: Vec<SourceId>,
+    pub(crate) destination: u32
+}
+
+impl CompactionSpec {
+    pub(crate) fn new(sources: Vec<SourceId>, destination: u32) -> Self {
+        Self {
+            sources,
+            destination,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CompactionStatus {
-    Submitted,
-    #[allow(dead_code)]
     InProgress,
+    #[allow(dead_code)]
+    Completed,
+    #[allow(dead_code)]
+    Failed
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Compaction {
     pub(crate) status: CompactionStatus,
-    pub(crate) sources: Vec<SourceId>,
-    pub(crate) destination: u32,
+    pub(crate) spec: CompactionSpec,
 }
 
 impl Display for Compaction {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let displayed_sources: Vec<_> = self.sources.iter().map(|s| format!("{}", s)).collect();
+        let displayed_sources: Vec<_> = self.spec.sources.iter().map(|s| format!("{}", s)).collect();
         write!(
             f,
             "{:?} -> {}: {:?}",
-            displayed_sources, self.destination, self.status
+            displayed_sources, self.spec.destination, self.status
         )
     }
 }
 
 impl Compaction {
-    pub(crate) fn new(sources: Vec<SourceId>, destination: u32) -> Self {
+    pub(crate) fn new(spec: CompactionSpec) -> Self {
         Self {
-            status: Submitted,
-            sources,
-            destination,
+            status: InProgress,
+            spec,
         }
     }
 }
@@ -124,7 +139,7 @@ impl CompactorState {
         if self
             .compactions
             .values()
-            .any(|c| c.destination == compaction.destination)
+            .any(|c| c.spec.destination == compaction.spec.destination)
         {
             // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
@@ -133,11 +148,11 @@ impl CompactorState {
             .db_state()
             .compacted
             .iter()
-            .any(|sr| sr.id == compaction.destination)
+            .any(|sr| sr.id == compaction.spec.destination)
         {
             // the compaction overwrites an existing sr but doesn't include the sr
-            if !compaction.sources.iter().any(|src| match src {
-                SourceId::SortedRun(sr) => *sr == compaction.destination,
+            if !compaction.spec.sources.iter().any(|src| match src {
+                SourceId::SortedRun(sr) => *sr == compaction.spec.destination,
                 SourceId::Sst(_) => false,
             }) {
                 return Err(SlateDBError::InvalidCompaction);
@@ -197,15 +212,15 @@ impl CompactorState {
             info!("finished compaction [compaction={}]", compaction);
             // reconstruct l0
             let compaction_l0s: HashSet<Ulid> = compaction
-                .sources
+                .spec.sources
                 .iter()
                 .filter_map(|id| id.maybe_unwrap_sst())
                 .collect();
             let compaction_srs: HashSet<u32> = compaction
-                .sources
+                .spec.sources
                 .iter()
                 .chain(std::iter::once(&SourceId::SortedRun(
-                    compaction.destination,
+                    compaction.spec.destination,
                 )))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
@@ -237,7 +252,7 @@ impl CompactorState {
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
             let first_source = compaction
-                .sources
+                .spec.sources
                 .first()
                 .expect("illegal: empty compaction");
             if let Some(compacted_l0) = first_source.maybe_unwrap_sst() {
@@ -270,7 +285,7 @@ mod tests {
     use super::*;
     use crate::checkpoint::Checkpoint;
     use crate::clock::{DefaultSystemClock, SystemClock};
-    use crate::compactor_state::CompactionStatus::Submitted;
+    use crate::compactor_state::CompactionStatus::InProgress;
     use crate::compactor_state::SourceId::Sst;
     use crate::config::Settings;
     use crate::db::Db;
@@ -300,7 +315,7 @@ mod tests {
 
         // then:
         assert_eq!(state.compactions().len(), 1);
-        assert_eq!(state.compactions().first().unwrap().status, Submitted);
+        assert_eq!(state.compactions().first().unwrap().status, InProgress);
     }
 
     #[test]
@@ -415,10 +430,10 @@ mod tests {
         let id = state
             .submit_compaction(
                 uuid::Uuid::new_v4(),
-                Compaction::new(
+                Compaction::new(CompactionSpec::new(
                     vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
                     0,
-                ),
+                )),
             )
             .unwrap();
         state.finish_compaction(
@@ -481,13 +496,13 @@ mod tests {
         let id = state
             .submit_compaction(
                 uuid::Uuid::new_v4(),
-                Compaction::new(
+                Compaction::new(CompactionSpec::new(
                     original_l0s
                         .iter()
                         .map(|h| Sst(h.id.unwrap_compacted_id()))
                         .collect(),
                     0,
-                ),
+                )),
             )
             .unwrap();
         state.finish_compaction(
@@ -557,7 +572,7 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let result = state.submit_compaction(
             uuid::Uuid::new_v4(),
-            Compaction::new(
+            Compaction::new(CompactionSpec::new(
                 original_l0s
                     .iter()
                     .enumerate()
@@ -565,7 +580,7 @@ mod tests {
                     .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
                     .collect::<Vec<SourceId>>(),
                 0,
-            ),
+            )),
         );
 
         // then:
@@ -593,7 +608,7 @@ mod tests {
 
         // If you need both:
         let sources: Vec<SourceId> = l0_sources.chain(sr_sources).collect();
-        let result = state.submit_compaction(uuid::Uuid::new_v4(), Compaction::new(sources, 0));
+        let result = state.submit_compaction(uuid::Uuid::new_v4(), Compaction::new(CompactionSpec::new(sources, 0)));
 
         // or simply:
         assert!(result.is_ok());
@@ -667,7 +682,7 @@ mod tests {
             .iter()
             .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
             .collect();
-        Compaction::new(sources, dst)
+        Compaction::new(CompactionSpec::new(sources, dst))
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {

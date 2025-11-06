@@ -16,7 +16,7 @@ use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
 use crate::compactor_state::SourceId;
-use crate::compactor_state::{Compaction, CompactorState};
+use crate::compactor_state::{Compaction, CompactionSpec, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -39,11 +39,11 @@ pub trait CompactionSchedulerSupplier: Send + Sync {
 }
 
 pub trait CompactionScheduler: Send + Sync {
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction>;
+    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactionSpec>;
     fn validate_compaction(
         &self,
         _state: &CompactorState,
-        _compaction: &Compaction,
+        _compaction: &CompactionSpec,
     ) -> Result<(), Error> {
         Ok(())
     }
@@ -439,13 +439,13 @@ impl CompactorEventHandler {
 
     fn validate_compaction(&self, compaction: &Compaction) -> Result<(), SlateDBError> {
         // Validate compaction sources exist
-        if compaction.sources.is_empty() {
-            warn!("submitted compaction is empty: {:?}", compaction.sources);
+        if compaction.spec.sources.is_empty() {
+            warn!("submitted compaction is empty: {:?}", compaction.spec.sources);
             return Err(SlateDBError::InvalidCompaction);
         }
 
         let has_only_l0 = compaction
-            .sources
+            .spec.sources
             .iter()
             .all(|s| matches!(s, SourceId::Sst(_)));
 
@@ -457,31 +457,32 @@ impl CompactorEventHandler {
                 .compacted
                 .first()
                 .map_or(0, |sr| sr.id + 1);
-            if compaction.destination < highest_id {
+            if compaction.spec.destination < highest_id {
                 warn!("compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
-                compaction.destination, highest_id);
+                compaction.spec.destination, highest_id);
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
 
         self.scheduler
-            .validate_compaction(&self.state, compaction)
+            .validate_compaction(&self.state, &compaction.spec)
             .map_err(|_e| SlateDBError::InvalidCompaction)
     }
 
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
-        let compactions = self.scheduler.maybe_schedule_compaction(&self.state);
-        for compaction in compactions.iter() {
+        let compaction_specs = self.scheduler.maybe_schedule_compaction(&self.state);
+        for spec in compaction_specs.iter() {
             if self.state.num_compactions() >= self.options.max_concurrent_compactions {
                 info!(
                     "already running {} compactions, which is at the max {}. Won't run compaction {:?}",
                     self.state.num_compactions(),
                     self.options.max_concurrent_compactions,
-                    compaction
+                    spec
                 );
                 break;
             }
-            self.submit_compaction(compaction.clone()).await?;
+            let compaction = Compaction::new(spec.clone());
+            self.submit_compaction(compaction).await?;
         }
         Ok(())
     }
@@ -503,13 +504,13 @@ impl CompactorEventHandler {
         let srs_by_id: HashMap<u32, &SortedRun> =
             db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
         let ssts: Vec<SsTableHandle> = compaction
-            .sources
+            .spec.sources
             .iter()
             .filter_map(|s| s.maybe_unwrap_sst())
             .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
             .collect();
         let sorted_runs: Vec<SortedRun> = compaction
-            .sources
+            .spec.sources
             .iter()
             .filter_map(|s| s.maybe_unwrap_sorted_run())
             .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
@@ -519,10 +520,10 @@ impl CompactorEventHandler {
             || db_state
                 .compacted
                 .last()
-                .is_some_and(|sr| compaction.destination == sr.id);
+                .is_some_and(|sr| compaction.spec.destination == sr.id);
         let job = CompactionJob {
             id,
-            destination: compaction.destination,
+            destination: compaction.spec.destination,
             ssts,
             sorted_runs,
             compaction_ts: db_state.last_l0_clock_tick,
@@ -1608,7 +1609,7 @@ mod tests {
                 .iter()
                 .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
                 .collect();
-            Compaction::new(l0_ids_to_compact, 0)
+            Compaction::new(CompactionSpec::new(l0_ids_to_compact, 0))
         }
 
         fn assert_started_compaction(&self, num: usize) -> Vec<CompactionJob> {
@@ -1701,7 +1702,7 @@ mod tests {
         assert_eq!(
             db_state.l0_last_compacted.unwrap(),
             compaction
-                .sources
+                .spec.sources
                 .first()
                 .and_then(|id| id.maybe_unwrap_sst())
                 .unwrap()
@@ -1789,7 +1790,7 @@ mod tests {
             .iter()
             .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
             .collect();
-        assert_eq!(l0_ids, compaction.sources);
+        assert_eq!(l0_ids, compaction.spec.sources);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1846,7 +1847,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_compaction_empty_sources_rejected() {
         let fixture = CompactorEventHandlerTestFixture::new().await;
-        let c = Compaction::new(Vec::new(), 0);
+        let c = Compaction::new(CompactionSpec::new(Vec::new(), 0));
         let err = fixture.handler.validate_compaction(&c).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
@@ -1908,10 +1909,10 @@ mod tests {
         let state = fixture.latest_db_state().await;
         let sr_id = state.compacted.first().unwrap().id;
         let l0_ulid = state.l0.front().unwrap().id.unwrap_compacted_id();
-        let mixed = Compaction::new(
+        let mixed = Compaction::new(CompactionSpec::new(
             vec![SourceId::SortedRun(sr_id), SourceId::Sst(l0_ulid)],
             sr_id,
-        );
+        ));
         // Compactor-level validation should not reject (scheduler default validate returns Ok(()))
         fixture.handler.validate_compaction(&mixed).unwrap();
     }
@@ -2041,9 +2042,9 @@ mod tests {
     }
 
     impl CompactionScheduler for MockScheduler {
-        fn maybe_schedule_compaction(&self, _state: &CompactorState) -> Vec<Compaction> {
+        fn maybe_schedule_compaction(&self, _state: &CompactorState) -> Vec<CompactionSpec> {
             let mut inner = self.inner.lock();
-            std::mem::take(&mut inner.compaction)
+            std::mem::take(&mut inner.compaction).into_iter().map(|c| c.spec).collect()
         }
     }
 

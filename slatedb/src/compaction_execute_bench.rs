@@ -19,7 +19,7 @@ use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{CompactionExecutor, CompactionJob, TokioCompactionExecutor};
-use crate::compactor_state::{Compaction, SourceId};
+use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -269,7 +269,7 @@ impl CompactionExecuteBench {
             .map(|sr| (sr.id, sr.clone()))
             .collect();
         let srs: Vec<_> = compaction
-            .sources
+            .spec.sources
             .iter()
             .map(|sr| {
                 srs_by_id
@@ -308,10 +308,10 @@ impl CompactionExecuteBench {
             None,
         ));
         let compaction = source_sr_ids.map(|source_sr_ids| {
-            Compaction::new(
+            Compaction::new(CompactionSpec::new(
                 source_sr_ids.into_iter().map(SourceId::SortedRun).collect(),
                 destination_sr_id,
-            )
+            ))
         });
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();
