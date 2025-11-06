@@ -1,3 +1,18 @@
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![warn(clippy::panic)]
+#![cfg_attr(test, allow(clippy::panic))]
+#![allow(clippy::result_large_err, clippy::too_many_arguments)]
+// Disallow non-approved non-deterministic types and functions in production code
+#![deny(clippy::disallowed_types, clippy::disallowed_methods)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        clippy::disallowed_types,
+        clippy::disallowed_methods
+    )
+)]
+
 use ::slatedb::admin::{load_object_store_from_env, Admin};
 use ::slatedb::config::{
     CheckpointOptions, CheckpointScope, DbReaderOptions, DurabilityLevel, FlushOptions, FlushType,
@@ -1636,8 +1651,10 @@ impl PySlateDBReader {
         let object_store = resolve_object_store_py(url.as_deref(), env_file.clone())?;
         let merge_operator = parse_merge_operator(merge_operator)?;
         future_into_py(py, async move {
-            let mut options = DbReaderOptions::default();
-            options.merge_operator = merge_operator;
+            let mut options = DbReaderOptions {
+                merge_operator,
+                ..Default::default()
+            };
             if let Some(ms) = manifest_poll_interval {
                 options.manifest_poll_interval = Duration::from_millis(ms);
             }
@@ -1676,8 +1693,10 @@ impl PySlateDBReader {
         let rt = get_runtime();
         let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
         let db_reader = rt.block_on(async {
-            let mut options = DbReaderOptions::default();
-            options.merge_operator = parse_merge_operator(merge_operator)?;
+            let mut options = DbReaderOptions {
+                merge_operator: parse_merge_operator(merge_operator)?,
+                ..Default::default()
+            };
             if let Some(ms) = manifest_poll_interval {
                 options.manifest_poll_interval = Duration::from_millis(ms);
             }
@@ -2112,7 +2131,7 @@ impl PySlateDBAdmin {
                         Ok(dict.into_any().unbind())
                     })
                     .collect();
-                Ok(out?)
+                out
             })
         })
     }
