@@ -961,3 +961,34 @@ def test_db_metrics_write_ops_and_batch_count_and_memtable_flush(db_path):
         assert int(after.get("db/immutable_memtable_flushes", 0)) >= memflush_before + 1
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_db_get_with_options_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"gaw1", b"v1")
+        # default async get_with_options
+        assert await db.get_with_options_async(b"gaw1") == b"v1"
+        # with explicit options
+        assert (
+            await db.get_with_options_async(b"gaw1", durability_filter="memory", dirty=False)
+            == b"v1"
+        )
+        # missing key
+        assert await db.get_with_options_async(b"missing") is None
+    finally:
+        db.close()
+
+
+def test_txn_delete(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        # Seed a key then delete it within a transaction
+        db.put(b"td1", b"v1")
+        txn = db.begin("si")
+        txn.delete(b"td1")
+        txn.commit()
+        assert db.get(b"td1") is None
+    finally:
+        db.close()
