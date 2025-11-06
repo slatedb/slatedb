@@ -25,7 +25,7 @@ table CompactorJobAttempt {
     // CompactorJobAttempt ID(Ulid)
     id: Ulid (required);
 
-    // Reference to the compaction to which this job belongs
+    // Reference to the CompactorJob to which this attempt belongs
     compactor_job_id: Ulid (required);
 
     progress: CompactorJobProgress (required);
@@ -42,7 +42,7 @@ table SortedRunJobInputs {
 }
 
 table CompactorJob {
-    // Compaction Status visible to public API
+    // CompactorJob status visible to the public API
     status: CompactorJobStatus = Submitted;
 
     // Destination Sorted Run ID
@@ -51,13 +51,13 @@ table CompactorJob {
     // Destination Sorted Run
     output_sorted_run: SortedRun;
 
-    // Identifier to reference a Compaction(Ulid)
+    // Identifier to reference a CompactorJob (Ulid)
     // Ulid can be used get the human readable timestamp:
     // https://docs.rs/ulid/latest/ulid/struct.Ulid.html#method.timestamp_ms
     // Can also be a replacement from created_ts
     id: Ulid (required);
 
-    // Compaction Type to distinguish between internal or external
+    // CompactorJob type to distinguish between internal or external
     request_type: CompactorJobRequestType = Internal;
 
     // List of CompactorJob Retries
@@ -67,10 +67,10 @@ table CompactorJob {
 }
 
 
-table CompactionState {
+table CompactorState {
     // Fencing token to ensure single active compactor
     compactor_epoch: uint64;
 
-    // Compactions in scheduled, in_progress and recently completed compactions
+    // CompactorJobs in Submitted, InProgress, and recently Completed
     recent_jobs: [CompactorJob] (required);
 }
