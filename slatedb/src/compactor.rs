@@ -124,7 +124,6 @@ pub(crate) enum CompactorMessage {
         result: Result<SortedRun, SlateDBError>,
     },
     /// Sent when an [`CompactionExecutor`] wishes to alert the compactor about starting a compaction.
-    #[allow(dead_code)]
     CompactionJobAttemptStarted {
         id: Ulid,
     },

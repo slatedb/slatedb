@@ -54,13 +54,9 @@ impl SourceId {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CompactorJobStatus {
     Submitted,
-    #[allow(dead_code)]
     Pending,
-    #[allow(dead_code)]
     InProgress,
-    #[allow(dead_code)]
     Completed,
-    #[allow(dead_code)]
     Failed,
 }
 
@@ -69,7 +65,6 @@ pub(crate) enum CompactorJobRequestType {
     /// Signals that the compaction was requested by the DB's compactor.
     Internal,
     /// Signals that the compaction was requested by an external process such as the admin CLI.
-    #[allow(dead_code)]
     External,
 }
 
@@ -131,7 +126,6 @@ impl CompactorJobRequest {
         }
     }
 
-    #[allow(dead_code)]
     pub fn sources(&self) -> &Vec<SourceId> {
         &self.sources
     }
@@ -154,7 +148,6 @@ impl Display for CompactorJobRequest {
 /// Carries the job id, its status at the time of creation, and any sources that have been
 /// fully processed (useful for reporting/testing).
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)]
 pub struct CompactorJobResponse {
     compactor_job_id: Ulid,
     status: CompactorJobStatus,
@@ -162,7 +155,6 @@ pub struct CompactorJobResponse {
 }
 
 impl CompactorJobResponse {
-    #[allow(dead_code)]
     pub fn new(
         compactor_job_id: Ulid,
         status: CompactorJobStatus,
@@ -175,17 +167,13 @@ impl CompactorJobResponse {
         }
     }
 
-    #[allow(dead_code)]
     pub fn id(&self) -> Ulid {
         self.compactor_job_id
     }
-
-    #[allow(dead_code)]
     pub fn status(&self) -> &CompactorJobStatus {
         &self.status
     }
 
-    #[allow(dead_code)]
     pub fn completed_sources(&self) -> &Vec<SourceId> {
         &self.completed_sources
     }
@@ -212,11 +200,9 @@ pub(crate) struct CompactorJob {
 
     status: CompactorJobStatus,
 
-    #[allow(dead_code)]
     attempts: Vec<CompactorJobAttempt>,
 
     /// Execution-time job spec (e.g., progress/resume details).
-    #[allow(dead_code)]
     progress: CompactorJobProgress,
 }
 
@@ -269,7 +255,6 @@ impl CompactorJob {
         self.id
     }
 
-    #[allow(dead_code)]
     pub(crate) fn compactor_job_request_type(&self) -> &CompactorJobRequestType {
         &self.job_request_type
     }
@@ -278,32 +263,23 @@ impl CompactorJob {
         &self.request
     }
 
-    #[allow(dead_code)]
     pub(crate) fn job_input(&self) -> &CompactorJobInput {
         &self.job_input
     }
-
-    #[allow(dead_code)]
     pub(crate) fn status(&self) -> &CompactorJobStatus {
         &self.status
     }
 
-    #[allow(dead_code)]
     pub(crate) fn progress(&self) -> &CompactorJobProgress {
         &self.progress
     }
-
-    #[allow(dead_code)]
     pub(crate) fn job_attempts(&self) -> &Vec<CompactorJobAttempt> {
         &self.attempts
     }
 
-    #[allow(dead_code)]
     pub(crate) fn add_job_attempt(&mut self, job_attempt: CompactorJobAttempt) {
         self.attempts.push(job_attempt);
     }
-
-    #[allow(dead_code)]
     pub(crate) fn remove_job_attempt(&mut self, job_attempt_id: Ulid) {
         self.attempts
             .retain(|job_attempt| job_attempt.id != job_attempt_id);
@@ -339,15 +315,12 @@ impl Display for CompactorJob {
 /// in tests and as a placeholder for wiring to the on-disk format.
 #[derive(Clone)]
 pub(crate) struct CompactorStateRecord {
-    #[allow(dead_code)]
     pub(crate) compactor_epoch: u64,
     // active_compaction plan queued, in-progress and completed mapped by compaction id in object store
-    #[allow(dead_code)]
     pub(crate) jobs: HashMap<Ulid, CompactorJob>,
 }
 
 impl CompactorStateRecord {
-    #[allow(dead_code)]
     pub(crate) fn initial() -> Self {
         Self {
             compactor_epoch: 0,
