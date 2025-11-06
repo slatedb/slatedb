@@ -181,10 +181,14 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactorJobRequest> {
         let mut compactions = Vec::new();
         let db_state = state.db_state();
-
         let (l0, srs) = self.compaction_sources(db_state);
-
-        let conflict_checker = ConflictChecker::new(&state.requests());
+        let conflict_checker = ConflictChecker::new(
+            state
+                .jobs()
+                .map(|j| j.request().clone())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
         let backpressure_checker = BackpressureChecker::new(
             self.options.include_size_threshold,
             self.options.max_compaction_sources,
@@ -192,7 +196,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         );
         let mut checker = CompactionChecker::new(conflict_checker, backpressure_checker);
 
-        while state.requests().len() + compactions.len() < self.max_concurrent_compactions {
+        while state.jobs().count() + compactions.len() < self.max_concurrent_compactions {
             let Some(compaction) = self.pick_next_compaction(&l0, &srs, &checker) else {
                 break;
             };
@@ -559,18 +563,11 @@ mod tests {
         let rand = Arc::new(DbRand::default());
         let system_clock = Arc::new(DefaultSystemClock::new());
 
-        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![3, 2, 1, 0]);
-        let compactor_job = CompactorJob::new(compaction_id, request);
+        let compactor_job = CompactorJob::new(job_id, request);
 
-        state.submit_job(compactor_job.clone());
-
-        let id = state
-            .submit_compaction(compaction_job_id, compactor_job)
-            .unwrap();
-
-        assert_eq!(id, compaction_job_id);
+        state.add_job(compactor_job.clone());
 
         // when:
         let requests = scheduler.maybe_schedule_compaction(&state);
@@ -654,12 +651,7 @@ mod tests {
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
         let compactor_job = CompactorJob::new(compaction_id, request);
-        state.submit_job(compactor_job.clone());
-        let id = state
-            .submit_compaction(compaction_job_id, compactor_job)
-            .unwrap();
-
-        assert_eq!(id, compaction_job_id);
+        state.add_job(compactor_job.clone());
 
         // when:
         let requests = scheduler.maybe_schedule_compaction(&state);
@@ -689,18 +681,12 @@ mod tests {
         let rand = Arc::new(DbRand::default());
         let system_clock = Arc::new(DefaultSystemClock::new());
 
-        let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compactor_job = CompactorJob::new(
             compaction_id,
             create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
         );
-        state.submit_job(compactor_job.clone());
-        let id = state
-            .submit_compaction(compaction_job_id, compactor_job)
-            .unwrap();
-
-        assert_eq!(id, compaction_job_id);
+        state.add_job(compactor_job.clone());
 
         // when:
         let compactions = scheduler.maybe_schedule_compaction(&state);

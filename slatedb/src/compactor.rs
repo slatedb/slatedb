@@ -13,7 +13,9 @@ use ulid::Ulid;
 use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{CompactionExecutor, CompactorJobAttempt, TokioCompactionExecutor};
-use crate::compactor_state::{CompactorJob, CompactorJobRequest, CompactorState, SourceId};
+use crate::compactor_state::{
+    CompactorJob, CompactorJobRequest, CompactorJobStatus, CompactorState, SourceId,
+};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -289,7 +291,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
         match message {
             CompactorMessage::LogStats => self.handle_log_ticker(),
             CompactorMessage::PollManifest => self.handle_ticker().await,
-            CompactorMessage::CompactionJobAttemptStarted { id } => self.compaction_started(id),
+            CompactorMessage::CompactionJobAttemptStarted { .. } => {},
             CompactorMessage::CompactionJobAttemptFinished { id, result } => match result {
                 Ok(sr) => self
                     .finish_compaction(id, sr)
@@ -472,20 +474,33 @@ impl CompactorEventHandler {
     }
 
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
-        let requests = self.scheduler.maybe_schedule_compaction(&self.state);
-        for request in requests.iter() {
-            if self.state.num_compactions() >= self.options.max_concurrent_compactions {
+        let mut active_compactions = self
+            .state
+            .jobs()
+            .filter(|s| {
+                matches!(
+                    s.status(),
+                    CompactorJobStatus::Submitted
+                        | CompactorJobStatus::Pending
+                        | CompactorJobStatus::InProgress
+                )
+            })
+            .count();
+        let mut requests = self.scheduler.maybe_schedule_compaction(&self.state);
+        for request in requests.drain(..) {
+            if active_compactions >= self.options.max_concurrent_compactions {
                 info!(
                     "already running {} compactions, which is at the max {}. Won't run compaction {:?}",
-                    self.state.num_compactions(),
+                    active_compactions,
                     self.options.max_concurrent_compactions,
                     request
                 );
                 break;
             }
             let job_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let job = CompactorJob::new(job_id, request.clone());
+            let job = CompactorJob::new(job_id, request);
             self.submit_compaction(job).await?;
+            active_compactions += 1;
         }
         Ok(())
     }
@@ -545,13 +560,8 @@ impl CompactorEventHandler {
 
     // state writers
     fn finish_failed_compaction(&mut self, id: Ulid) {
-        self.state.finish_failed_job(id);
+        self.state.remove_job(&id);
         self.progress_tracker.remove_job(id);
-    }
-
-    fn compaction_started(&mut self, id: Ulid) {
-        self.state.start_job(id);
-        self.log_compaction_state();
     }
 
     #[instrument(level = "debug", skip_all, fields(id = %id))]
@@ -573,29 +583,17 @@ impl CompactorEventHandler {
 
     #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
     async fn submit_compaction(&mut self, job: CompactorJob) -> Result<(), SlateDBError> {
-        let request = job.request();
         // Validate the candidate compaction; skip invalid ones
-        if let Err(e) = self.validate_compaction(request) {
+        if let Err(e) = self.validate_compaction(&job.request()) {
             warn!("invalid compaction [error={:?}]", e);
             return Ok(());
         }
 
-        self.state.submit_job(job.clone());
-        // Generate a compactionJob id
-        let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-        tracing::Span::current().record("id", tracing::field::display(&id));
-        let result = self.state.submit_compaction(id, job.clone());
-        match result {
-            Ok(_) => {
-                // TODO(sujeetsawala): Add compaction plan to object store with Pending status
-                self.start_compaction(id, job).await?;
-            }
-            Err(err) => {
-                // TODO(sujeetsawala): Add compaction plan to object store with Failed status
-                self.state.remove_job(&job.id());
-                warn!("invalid compaction [error={:?}]", err);
-            }
-        }
+        self.state.add_job(job.clone())?;
+        // Jobs and attempts are 1:1 right now.
+        let attempt_id = job.id();
+        tracing::Span::current().record("id", tracing::field::display(&attempt_id));
+        self.start_compaction(attempt_id, job).await?;
         Ok(())
     }
 
@@ -610,9 +608,9 @@ impl CompactorEventHandler {
 
     fn log_compaction_state(&self) {
         self.state.db_state().log_db_runs();
-        let compactions = self.state.requests();
-        for compaction in compactions.iter() {
-            info!("in-flight compaction [compaction={}]", compaction);
+        let jobs = self.state.jobs();
+        for job in jobs {
+            info!("in-flight compaction [compaction={}]", job);
         }
     }
 }
