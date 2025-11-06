@@ -90,19 +90,19 @@ impl DbIteratorRangeTracker {
     }
 }
 
-struct GetIterator<'a> {
+struct GetIterator {
     key: Bytes,
-    iters: Vec<Box<dyn KeyValueIterator + 'a>>,
+    iters: Vec<Box<dyn KeyValueIterator + 'static>>,
     idx: usize,
 }
 
-impl<'a> GetIterator<'a> {
+impl GetIterator {
     pub(crate) fn new(
         key: Bytes,
-        write_batch_iter: Box<dyn KeyValueIterator + 'a>,
-        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
+        write_batch_iter: Box<dyn KeyValueIterator + 'static>,
+        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
     ) -> Self {
         let iters = vec![write_batch_iter]
             .into_iter()
@@ -116,7 +116,7 @@ impl<'a> GetIterator<'a> {
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for GetIterator<'a> {
+impl KeyValueIterator for GetIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         // GetIterator departs from the normal convention for KeyValueIterator
         // in that it lazily initializes the iterators only when necessary -
@@ -163,16 +163,16 @@ impl<'a> KeyValueIterator for GetIterator<'a> {
     }
 }
 
-struct ScanIterator<'a> {
-    delegate: Box<dyn KeyValueIterator + 'a>,
+struct ScanIterator {
+    delegate: Box<dyn KeyValueIterator + 'static>,
 }
 
-impl<'a> ScanIterator<'a> {
+impl ScanIterator {
     pub(crate) fn new(
-        write_batch_iter: Box<dyn KeyValueIterator + 'a>,
-        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
+        write_batch_iter: Box<dyn KeyValueIterator + 'static>,
+        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
     ) -> Result<Self, SlateDBError> {
         // wrap each in a merge iterator
         let iters = vec![
@@ -189,7 +189,7 @@ impl<'a> ScanIterator<'a> {
 }
 
 #[async_trait]
-impl<'a> KeyValueIterator for ScanIterator<'a> {
+impl KeyValueIterator for ScanIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.delegate.init().await
     }
@@ -203,21 +203,21 @@ impl<'a> KeyValueIterator for ScanIterator<'a> {
     }
 }
 
-pub struct DbIterator<'a> {
+pub struct DbIterator {
     range: BytesRange,
-    iter: Box<dyn KeyValueIterator + 'a>,
+    iter: Box<dyn KeyValueIterator + 'static>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
     range_tracker: Option<Arc<DbIteratorRangeTracker>>,
 }
 
-impl<'a> DbIterator<'a> {
+impl DbIterator {
     pub(crate) async fn new(
         range: BytesRange,
         write_batch_iter: Option<WriteBatchIterator>,
-        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
-        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'a>>,
+        mem_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        l0_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
+        sr_iters: impl IntoIterator<Item = Box<dyn KeyValueIterator + 'static>>,
         max_seq: Option<u64>,
         range_tracker: Option<Arc<DbIteratorRangeTracker>>,
         now: i64,
@@ -227,7 +227,7 @@ impl<'a> DbIterator<'a> {
         // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
         // not have an real committed sequence number yet.
         let write_batch_iter = write_batch_iter
-            .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'a>)
+            .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'static>)
             .unwrap_or_else(|| Box::new(EmptyIterator::new()));
 
         // Apply the max_seq filter to all the iterators. Please note that we should apply this filter BEFORE
@@ -250,13 +250,13 @@ impl<'a> DbIterator<'a> {
                 mem_iters,
                 l0_iters,
                 sr_iters,
-            )) as Box<dyn KeyValueIterator + 'a>,
+            )) as Box<dyn KeyValueIterator + 'static>,
             None => Box::new(ScanIterator::new(
                 write_batch_iter,
                 mem_iters,
                 l0_iters,
                 sr_iters,
-            )?) as Box<dyn KeyValueIterator + 'a>,
+            )?) as Box<dyn KeyValueIterator + 'static>,
         };
 
         if let Some(merge_operator) = merge_operator {
@@ -352,20 +352,20 @@ impl<'a> DbIterator<'a> {
     }
 }
 
-pub(crate) fn apply_filters<'a, T>(
+pub(crate) fn apply_filters<T>(
     iters: impl IntoIterator<Item = T>,
     max_seq: Option<u64>,
     now: i64,
-) -> Vec<Box<dyn KeyValueIterator + 'a>>
+) -> Vec<Box<dyn KeyValueIterator>>
 where
-    T: KeyValueIterator + 'a,
+    T: KeyValueIterator + 'static,
 {
     iters
         .into_iter()
         .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
         .map(|iter| MapIterator::new_with_ttl_now(iter, now))
-        .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'a>)
-        .collect::<Vec<Box<dyn KeyValueIterator + 'a>>>()
+        .map(|iter| Box::new(iter) as Box<dyn KeyValueIterator + 'static>)
+        .collect::<Vec<Box<dyn KeyValueIterator>>>()
 }
 
 #[cfg(test)]

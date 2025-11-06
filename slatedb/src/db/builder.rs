@@ -486,7 +486,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 write_tx,
                 stat_registry,
                 self.fp_registry.clone(),
-                merge_operator,
+                merge_operator.clone(),
             )
             .await?,
         );
@@ -557,6 +557,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 stats.clone(),
                 system_clock.clone(),
                 manifest_store.clone(),
+                merge_operator.clone(),
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),
@@ -759,6 +760,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
     error_state: WatchableOnceCell<SlateDBError>,
+    merge_operator: Option<MergeOperatorType>,
 }
 
 #[allow(unused)]
@@ -774,6 +776,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
             error_state: WatchableOnceCell::new(),
+            merge_operator: None,
         }
     }
 
@@ -822,6 +825,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
+        self.merge_operator = Some(merge_operator);
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
@@ -852,6 +860,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.stat_registry,
             self.system_clock,
             self.error_state,
+            self.merge_operator,
         )
     }
 }

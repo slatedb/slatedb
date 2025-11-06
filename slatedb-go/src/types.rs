@@ -104,29 +104,14 @@ pub struct CSdbScanOptions {
 /// Internal struct for managing database iterators in FFI
 /// Contains the iterator and a reference to the database to ensure proper lifetime management
 pub struct CSdbIterator {
-    pub db_ptr: *mut SlateDbFFI,   // Keep DB alive via pointer reference
-    pub iter: DbIterator<'static>, // Iterator with transmuted lifetime
+    pub db_ptr: *mut SlateDbFFI, // Keep DB alive via pointer reference
+    pub iter: DbIterator,
 }
 
 impl CSdbIterator {
     /// Create a new iterator FFI wrapper
-    ///
-    /// # Safety
-    ///
-    /// This function uses unsafe transmute to extend the iterator's lifetime to 'static.
-    /// This is ONLY safe because:
-    /// 1. Most iterator data (SST files) is owned by the iterator, not borrowed
-    /// 2. The small amount of borrowed data (memtables) will remain valid as long as the DB exists
-    /// 3. The caller MUST ensure the iterator is closed before the DB is closed
-    /// 4. Violating this contract results in undefined behavior (likely a crash)
-    pub fn new(db_ptr: *mut SlateDbFFI, iter: DbIterator<'_>) -> Box<Self> {
-        // SAFETY: See safety comment above - this transmute is only safe with user contract
-        let static_iter: DbIterator<'static> = unsafe { std::mem::transmute(iter) };
-
-        Box::new(CSdbIterator {
-            db_ptr,
-            iter: static_iter,
-        })
+    pub fn new(db_ptr: *mut SlateDbFFI, iter: DbIterator) -> Box<Self> {
+        Box::new(CSdbIterator { db_ptr, iter })
     }
 }
 
