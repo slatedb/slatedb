@@ -1,7 +1,15 @@
 import asyncio
+
 import pytest
 
-from slatedb import ClosedError, InvalidError, SlateDB, TransactionError, UnavailableError, WriteBatch
+from slatedb import (
+    ClosedError,
+    InvalidError,
+    SlateDB,
+    TransactionError,
+    UnavailableError,
+    WriteBatch,
+)
 
 
 @pytest.mark.asyncio
@@ -147,6 +155,15 @@ def test_unknown_scheme_raises_unavailable_error(db_path):
     with pytest.raises(UnavailableError):
         SlateDB(db_path, url="unknown:///")
 
+@pytest.mark.asyncio
+async def test_db_open_async_and_close_async(db_path, env_file):
+    db = await SlateDB.open_async(db_path, env_file=env_file)
+    try:
+        await db.put_async(b"ka", b"va")
+        assert await db.get_async(b"ka") == b"va"
+    finally:
+        await db.close_async()
+
 
 def test_snapshot_basic_isolation(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
@@ -167,6 +184,17 @@ def test_snapshot_basic_isolation(db_path, env_file):
         # Database sees latest state
         assert db.get(b"k1") == b"v2"
         assert db.get(b"k2") == b"v3"
+    finally:
+        db.close()
+
+@pytest.mark.asyncio
+async def test_snapshot_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"k1", b"v1")
+        snap = await db.snapshot_async()
+        db.put(b"k1", b"v2")
+        assert await snap.get_async(b"k1") == b"v1"
     finally:
         db.close()
 
@@ -218,6 +246,18 @@ def test_snapshot_close(db_path, env_file):
     finally:
         db.close()
 
+@pytest.mark.asyncio
+async def test_snapshot_close_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"k", b"v")
+        snap = db.snapshot()
+        await snap.close_async()
+        with pytest.raises(ClosedError):
+            _ = snap.get(b"k")
+    finally:
+        db.close()
+
 
 def test_db_iterator_seek_forward_and_backward(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
@@ -243,6 +283,28 @@ def test_db_iterator_seek_forward_and_backward(db_path, env_file):
         # Exhaust iterator
         with pytest.raises(StopIteration):
             next(it)
+    finally:
+        db.close()
+
+@pytest.mark.asyncio
+async def test_db_iterator_async_for_and_seek_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        for i in range(3):
+            db.put(f"ai{i}".encode(), f"v{i}".encode())
+        it = db.scan(b"ai")
+        # Async iterate over sync-created iterator
+        seen = []
+        async for k, v in it:  # __aiter__/__anext__
+            seen.append((k, v))
+        assert (b"ai0", b"v0") in seen and (b"ai2", b"v2") in seen
+
+        # Now use seek_async on a fresh iterator
+        it2 = await db.scan_async(b"ai")
+        await it2.seek_async(b"ai2")
+        pairs = list(it2)
+        # After seeking to ai2, first item should be ai2
+        assert pairs[0] == (b"ai2", b"v2")
     finally:
         db.close()
 
@@ -299,6 +361,17 @@ def test_txn_si_read_your_writes_and_commit(db_path, env_file):
         txn.commit()
         assert db.get(b"k1") == b"v1"
         assert db.get(b"k2") == b"v2"
+    finally:
+        db.close()
+
+@pytest.mark.asyncio
+async def test_db_begin_async_and_commit_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        txn = await db.begin_async("si")
+        txn.put(b"bk1", b"bv1")
+        await txn.commit_async()
+        assert db.get(b"bk1") == b"bv1"
     finally:
         db.close()
 
@@ -398,6 +471,15 @@ def test_txn_rollback(db_path, env_file):
     finally:
         db.close()
 
+def test_db_delete_sync(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"d1", b"v1")
+        db.delete(b"d1")
+        assert db.get(b"d1") is None
+    finally:
+        db.close()
+
 
 def test_db_flush_controls(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
@@ -421,6 +503,25 @@ def test_db_get_with_options(db_path, env_file):
         assert db.get_with_options(b"g1") == b"v1"
         # with options
         assert db.get_with_options(b"g1", durability_filter="memory", dirty=False) == b"v1"
+    finally:
+        db.close()
+
+def test_txn_scan_with_options_sync(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"to1", b"v1")
+        db.put(b"to2", b"v2")
+        txn = db.begin("si")
+        it = txn.scan_with_options(
+            b"to",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=1024,
+            cache_blocks=True,
+            max_fetch_tasks=2,
+        )
+        assert list(it) == [(b"to1", b"v1"), (b"to2", b"v2")]
+        txn.rollback()
     finally:
         db.close()
 
@@ -567,12 +668,49 @@ def test_db_write_batch_and_write_with_options(db_path, env_file):
     finally:
         db.close()
 
+def test_db_write_batch_put_with_options_and_merges(db_path, env_file):
+    def concat(existing, value):
+        return (existing or b"") + value
+
+    db = SlateDB(db_path, env_file=env_file, merge_operator=concat)
+    try:
+        # Put with options in a batch
+        wb = WriteBatch()
+        wb.put_with_options(b"wpo1", b"v1", ttl=1000)
+        db.write(wb)
+        assert db.get(b"wpo1") == b"v1"
+
+        # Apply merge and merge_with_options in separate batches to ensure accumulation
+        wb1 = WriteBatch()
+        wb1.merge(b"wm1", b"a")
+        db.write(wb1)
+        assert db.get(b"wm1") == b"a"
+
+        wb2 = WriteBatch()
+        wb2.merge_with_options(b"wm1", b"b", ttl=2000)
+        db.write(wb2)
+        # With concat merge operator, we expect accumulated result
+        assert db.get(b"wm1") == b"ab"
+    finally:
+        db.close()
+
 
 def test_db_create_checkpoint(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
     try:
         db.put(b"c1", b"v1")
         res = db.create_checkpoint("all")
+        assert isinstance(res["id"], str)
+        assert isinstance(res["manifest_id"], int)
+    finally:
+        db.close()
+
+@pytest.mark.asyncio
+async def test_db_create_checkpoint_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"c2", b"v2")
+        res = await db.create_checkpoint_async("durable")
         assert isinstance(res["id"], str)
         assert isinstance(res["manifest_id"], int)
     finally:
@@ -597,6 +735,92 @@ async def test_async_put_delete_merge_with_options(db_path, env_file):
         assert await db.get_async(b"am1") == b"y"
     finally:
         await db.close_async()
+
+@pytest.mark.asyncio
+async def test_db_scan_async_and_scan_with_options_variants(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        for k, v in [(b"sa1", b"v1"), (b"sa2", b"v2")]:
+            db.put(k, v)
+        it = await db.scan_async(b"sa")
+        assert list(it) == [(b"sa1", b"v1"), (b"sa2", b"v2")]
+        it2 = db.scan_with_options(
+            b"sa",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=64,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it2) == [(b"sa1", b"v1"), (b"sa2", b"v2")]
+        it3 = await db.scan_with_options_async(
+            b"sa",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=64,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it3) == [(b"sa1", b"v1"), (b"sa2", b"v2")]
+    finally:
+        db.close()
+
+@pytest.mark.asyncio
+async def test_db_flush_async_and_flush_with_options_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"ff1", b"v1")
+        await db.flush_async()
+        await db.flush_with_options_async("wal")
+        await db.flush_with_options_async("memtable")
+        assert db.get(b"ff1") == b"v1"
+    finally:
+        db.close()
+
+@pytest.mark.asyncio
+async def test_db_merge_async(db_path, env_file):
+    def last_write_wins(existing, value):
+        return value
+
+    db = SlateDB(db_path, env_file=env_file, merge_operator=last_write_wins)
+    try:
+        await db.merge_async(b"ma1", b"x")
+        await db.merge_async(b"ma1", b"y")
+        assert await db.get_async(b"ma1") == b"y"
+    finally:
+        await db.close_async()
+
+@pytest.mark.asyncio
+async def test_snapshot_scan_async_and_with_options(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"ps1", b"v1")
+        db.put(b"ps2", b"v2")
+        snap = db.snapshot()
+        # mutate after snapshot to ensure isolation
+        db.put(b"ps3", b"v3")
+        it = await snap.scan_async(b"ps")
+        assert list(it) == [(b"ps1", b"v1"), (b"ps2", b"v2")]
+        it2 = snap.scan_with_options(
+            b"ps",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=128,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it2) == [(b"ps1", b"v1"), (b"ps2", b"v2")]
+        it3 = await snap.scan_with_options_async(
+            b"ps",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=128,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it3) == [(b"ps1", b"v1"), (b"ps2", b"v2")]
+    finally:
+        db.close()
 
 
 @pytest.mark.asyncio
