@@ -257,10 +257,12 @@ impl CompactorState {
             .db_state()
             .compacted
             .iter()
-            .any(|sr| sr.id == request.destination()) && !request.sources().iter().any(|src| match src {
+            .any(|sr| sr.id == request.destination())
+            && !request.sources().iter().any(|src| match src {
                 SourceId::SortedRun(sr) => *sr == request.destination(),
                 SourceId::Sst(_) => false,
-            }) {
+            })
+        {
             // the job overwrites an existing sr but doesn't include the sr
             return Err(SlateDBError::InvalidCompaction);
         }

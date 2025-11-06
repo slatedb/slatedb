@@ -532,7 +532,7 @@ impl CompactorEventHandler {
         .map_err(|_| SlateDBError::CompactionExecutorFailed);
         #[cfg(dst)]
         let result = tokio::spawn(async move {
-            this_executor.start_compaction(job);
+            this_executor.start_compaction(attempt);
         })
         .await
         .map_err(|_| SlateDBError::CompactionExecutorFailed);
