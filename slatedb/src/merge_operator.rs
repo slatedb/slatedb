@@ -13,7 +13,10 @@ use crate::{
 
 #[non_exhaustive]
 #[derive(Clone, Debug, Error)]
-pub enum MergeOperatorError {}
+pub enum MergeOperatorError {
+    #[error("merge_batch called with empty operands and no existing value")]
+    EmptyBatch,
+}
 
 /// A trait for implementing custom merge operations in SlateDB.
 ///
@@ -65,9 +68,36 @@ pub trait MergeOperator {
         existing_value: Option<Bytes>,
         value: Bytes,
     ) -> Result<Bytes, MergeOperatorError>;
+
+    /// Merges a batch of operands with an optional existing value.
+    ///
+    /// This method allows for more efficient batch processing of merge operands.
+    /// The default implementation applies pairwise merging, but implementations
+    /// can override this for better performance (e.g., a counter can sum all values at once).
+    ///
+    /// # Arguments
+    /// * `existing_value` - The current accumulated value (if any)
+    /// * `operands` - A slice of operands to merge, ordered from oldest to newest
+    ///
+    /// # Returns
+    /// * `Ok(Bytes)` - The merged result as bytes
+    /// * `Err(MergeOperatorError)` - If the merge operation fails
+    fn merge_batch(
+        &self,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<Bytes, MergeOperatorError> {
+        let mut result = existing_value;
+        for operand in operands {
+            result = Some(self.merge(result, operand.clone())?);
+        }
+        result.ok_or(MergeOperatorError::EmptyBatch)
+    }
 }
 
 pub(crate) type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
+
+const MERGE_BATCH_SIZE: usize = 100;
 
 /// An iterator that ensures merge operands are not returned when no merge operator is configured.
 pub(crate) struct MergeOperatorRequiredIterator<T: KeyValueIterator> {
@@ -205,12 +235,19 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
             entries.remove(0);
         }
 
-        for entry in entries.iter().filter(|e| is_not_expired(e, self.now)) {
-            // Accumulate timestamps
-            max_create_ts = merge_options(max_create_ts, entry.create_ts, i64::max);
-            min_expire_ts = merge_options(min_expire_ts, entry.expire_ts, i64::min);
-            seq = std::cmp::max(seq, entry.seq);
+        // Process merge operands in batches to limit memory during merge operations
+        // Note: We've already collected all entries, but we process the merge in batches
+        // to allow merge_batch to work with smaller chunks
+        let merge_operands: Vec<Bytes> = entries
+            .iter()
+            .filter(|e| is_not_expired(e, self.now))
+            .filter_map(|entry| {
+                // Accumulate timestamps and seq
+                max_create_ts = merge_options(max_create_ts, entry.create_ts, i64::max);
+                min_expire_ts = merge_options(min_expire_ts, entry.expire_ts, i64::min);
+                seq = std::cmp::max(seq, entry.seq);
 
+<<<<<<< HEAD
             match &entry.value {
                 ValueDeletable::Merge(value) => {
                     merged_value = Some(self.merge_operator.merge(
@@ -218,12 +255,18 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                         merged_value,
                         value.clone(),
                     )?);
+=======
+                match &entry.value {
+                    ValueDeletable::Merge(value) => Some(value.clone()),
+                    _ => None,
+>>>>>>> c62792b (merge_batch function is added to optimize mem alocation)
                 }
-                // we collect at most one Tombstone/Value entry in the loop above, and
-                // if we do collect one it will be the first entry (which is removed in
-                // the conditional above) so this should never happen
-                _ => unreachable!("Should not merge any non-merge entries"),
-            }
+            })
+            .collect();
+
+        // Merge operands in batches
+        for chunk in merge_operands.chunks(MERGE_BATCH_SIZE) {
+            merged_value = Some(self.merge_operator.merge_batch(merged_value, chunk)?);
         }
 
         if let Some(result_value) = merged_value {
@@ -469,6 +512,7 @@ mod tests {
         }
     }
 
+<<<<<<< HEAD
     /// A merge operator that routes to different merge strategies based on key prefix
     struct KeyPrefixMergeOperator;
 
@@ -536,6 +580,17 @@ mod tests {
         ];
 
         // when
+=======
+    #[tokio::test]
+    async fn test_batched_merge_with_many_operands() {
+        let merge_operator = Arc::new(MockMergeOperator {});
+
+        let mut data = vec![];
+        for i in 1..=250 {
+            data.push(RowEntry::new_merge(b"key1", &[i as u8], i));
+        }
+
+>>>>>>> c62792b (merge_batch function is added to optimize mem alocation)
         let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
             merge_operator,
             data.into(),
@@ -543,6 +598,7 @@ mod tests {
             0,
         );
 
+<<<<<<< HEAD
         // then
         assert_iterator(
             &mut iterator,
@@ -552,5 +608,35 @@ mod tests {
             ],
         )
         .await;
+=======
+        let expected_bytes: Vec<u8> = (1..=250).map(|i| i as u8).collect();
+        let expected = vec![RowEntry::new_merge(b"key1", &expected_bytes, 250)];
+
+        assert_iterator(&mut iterator, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_batched_merge_with_base_value() {
+        let merge_operator = Arc::new(MockMergeOperator {});
+
+        let mut data = vec![];
+        data.push(RowEntry::new_value(b"key1", b"BASE", 0));
+        for i in 1..=150 {
+            data.push(RowEntry::new_merge(b"key1", &[i as u8], i));
+        }
+
+        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            0,
+        );
+
+        let mut expected_bytes = b"BASE".to_vec();
+        expected_bytes.extend((1..=150).map(|i| i as u8));
+        let expected = vec![RowEntry::new_value(b"key1", &expected_bytes, 150)];
+
+        assert_iterator(&mut iterator, expected).await;
+>>>>>>> c62792b (merge_batch function is added to optimize mem alocation)
     }
 }
