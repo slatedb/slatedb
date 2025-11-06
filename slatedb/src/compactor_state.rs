@@ -64,8 +64,6 @@ pub enum CompactorJobStatus {
 pub(crate) enum CompactorJobRequestType {
     /// Signals that the compaction was requested by the DB's compactor.
     Internal,
-    /// Signals that the compaction was requested by an external process such as the admin CLI.
-    External,
 }
 
 /// In-memory description of the inputs to a compaction.
@@ -140,42 +138,6 @@ impl Display for CompactorJobRequest {
         let displayed_sources: Vec<String> =
             self.sources().iter().map(|s| format!("{}", s)).collect();
         write!(f, "{:?} -> {}", displayed_sources, self.destination())
-    }
-}
-
-/// Lightweight response snapshot for a compaction job.
-///
-/// Carries the job id, its status at the time of creation, and any sources that have been
-/// fully processed (useful for reporting/testing).
-#[derive(Clone, Debug, PartialEq)]
-pub struct CompactorJobResponse {
-    compactor_job_id: Ulid,
-    status: CompactorJobStatus,
-    completed_sources: Vec<SourceId>,
-}
-
-impl CompactorJobResponse {
-    pub fn new(
-        compactor_job_id: Ulid,
-        status: CompactorJobStatus,
-        completed_sources: Vec<SourceId>,
-    ) -> Self {
-        Self {
-            compactor_job_id,
-            status,
-            completed_sources,
-        }
-    }
-
-    pub fn id(&self) -> Ulid {
-        self.compactor_job_id
-    }
-    pub fn status(&self) -> &CompactorJobStatus {
-        &self.status
-    }
-
-    pub fn completed_sources(&self) -> &Vec<SourceId> {
-        &self.completed_sources
     }
 }
 
