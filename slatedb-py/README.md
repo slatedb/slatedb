@@ -31,12 +31,93 @@ pip install slatedb
 
 - Python 3.10 or higher
 
+## Features
+
+- Support for in-memory object store and object stores (S3, GCS, ABS, MinIO, memory)
+- Sync and async APIs
+- Range scans with iteration and `seek`
+- Snapshots for consistent, read-only views
+- Transactions with snapshot isolation (SI) and serializable snapshot isolation (SSI)
+- Atomic batched writes
+- Merge operator (user-defined Python callable)
+- Per-operation time-to-live (TTL)
+- Reader for read-only access with optional checkpoint pinning
+- Admin APIs for manifests, checkpoints, clones, garbage collection, and sequence↔timestamp mapping
+
 ## Usage
 
-## Documentation
+The example below demonstrates common features in a single script.
 
-- [SlateDB core documentation](https://slatedb.io/docs/introduction) - Comprehensive guide to understand how SlateDB works.
-- [API Reference](https://github.com/slatedb/slatedb/tree/main/slatedb-py) - Detailed Python API documentation embedded in the source code.
+```python
+from __future__ import annotations
+
+from slatedb import (
+    SlateDB,
+    SlateDBReader,
+    SlateDBAdmin,
+    WriteBatch,
+)
+
+
+# Optional: define a merge operator. This simple example is last-write-wins.
+def concat(existing: bytes | None, value: bytes) -> bytes:
+    return (existing or b"") + value
+
+# Open a database using the in-memory object store
+db = SlateDB("/tmp/slatedb-demo", url="memory:///", merge_operator=concat)
+
+# Basic CRUD
+db.put(b"user:1", b"Alice")
+assert db.get(b"user:1") == b"Alice"
+
+# Per-op TTL and durability control
+db.put_with_options(b"temp", b"ok", ttl=5_000, await_durable=False)
+
+# Batched writes
+wb = WriteBatch()
+wb.put(b"batch:1", b"one")
+wb.delete(b"temp")
+db.write(wb)
+
+# Transactions (SSI or SI). Operations buffer until commit.
+txn = db.begin("ssi")
+txn.put(b"user:2", b"Bob")
+txn.merge(b"counter:visits", b"1")  # uses the configured merge operator
+txn.commit()
+
+# Snapshots provide consistent, read-only views
+snap = db.snapshot()
+assert snap.get(b"user:2") == b"Bob"
+
+# Range scans (prefix scan when end omitted). Iterator supports seek.
+it = db.scan(b"user:")
+first = next(it)
+it.seek(b"user:2")
+rest = list(it)
+
+# Advanced scan options (read-ahead, caching, durability filter)
+_ = list(db.scan_with_options(b"user:", cache_blocks=True, read_ahead_bytes=1 << 20))
+
+# Flush
+db.flush_with_options("wal")
+
+# Get metrics
+metrics = db.metrics()
+
+# Create a durable checkpoint and read it with a read-only reader
+ckpt = db.create_checkpoint(scope="durable")
+reader = SlateDBReader("/tmp/slatedb-demo", url="memory:///", checkpoint_id=ckpt["id"])
+_ = list(reader.scan(b"user:"))
+reader.close()
+
+# Admin: list checkpoints, read manifests, GC, and sequence/timestamp mapping
+admin = SlateDBAdmin("/tmp/slatedb-demo", url="memory///")
+_ = admin.list_checkpoints()
+_ = admin.read_manifest()
+admin.run_gc_once(manifest_min_age=0, wal_min_age=0, compacted_min_age=0)
+
+db.close()
+```
 
 ## Contributing
 
