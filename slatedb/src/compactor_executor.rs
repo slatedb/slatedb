@@ -299,12 +299,6 @@ impl TokioCompactionExecutorInner {
 
         // TODO(sujeetsawala): Add compaction plan to object store with InProgress status
 
-        // Notify the compactor that this attempt has started.
-        #[allow(clippy::disallowed_methods)]
-        self.worker_tx
-            .send(CompactorMessage::CompactionJobAttemptStarted { id })
-            .expect("failed to send compaction started msg");
-
         let this = self.clone();
         let this_cleanup = self.clone();
         let task = spawn_bg_task(

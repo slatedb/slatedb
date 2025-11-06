@@ -50,15 +50,6 @@ impl SourceId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum CompactorJobStatus {
-    Submitted,
-    Pending,
-    InProgress,
-    Completed,
-    Failed,
-}
-
 /// Immutable request that describes a compaction job.
 ///
 /// Holds the logical inputs for a compaction the scheduler decided on:
@@ -113,16 +104,11 @@ pub(crate) struct CompactorJob {
     id: Ulid,
     /// What to compact (sources) and where to write (destination).
     request: CompactorJobRequest,
-    status: CompactorJobStatus,
 }
 
 impl CompactorJob {
     pub(crate) fn new(id: Ulid, request: CompactorJobRequest) -> Self {
-        Self {
-            id,
-            request,
-            status: CompactorJobStatus::Submitted,
-        }
+        Self { id, request }
     }
 
     pub(crate) fn get_sorted_runs(db_state: &CoreDbState, sources: &[SourceId]) -> Vec<SortedRun> {
@@ -157,14 +143,6 @@ impl CompactorJob {
     pub(crate) fn request(&self) -> &CompactorJobRequest {
         &self.request
     }
-
-    pub(crate) fn status(&self) -> &CompactorJobStatus {
-        &self.status
-    }
-
-    pub(crate) fn set_status(&mut self, status: CompactorJobStatus) {
-        self.status = status;
-    }
 }
 
 impl Display for CompactorJob {
@@ -177,10 +155,9 @@ impl Display for CompactorJob {
             .collect();
         write!(
             f,
-            "{:?} -> {}: {:?}",
+            "{:?} -> {}",
             displayed_sources,
             self.request.destination(),
-            self.status
         )
     }
 }
@@ -397,7 +374,7 @@ mod tests {
     const PATH: &str = "/test/db";
 
     #[test]
-    fn test_should_register_job_as_submitted() {
+    fn test_should_register_job() {
         // given:
         let rt = build_runtime();
         let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
@@ -406,12 +383,13 @@ mod tests {
         let request = build_l0_compaction(&state.db_state().l0, 0);
         // when:
         let compactor_job = CompactorJob::new(job_id, request.clone());
-        state.add_job(compactor_job.clone()).expect("failed to add job");
+        state
+            .add_job(compactor_job.clone())
+            .expect("failed to add job");
 
         // then:
         let mut jobs = state.jobs();
-        let mut expected = CompactorJob::new(job_id, request.clone());
-        expected.set_status(CompactorJobStatus::Submitted);
+        let expected = CompactorJob::new(job_id, request.clone());
         assert_eq!(jobs.next().expect("job not found"), &expected);
         assert!(jobs.next().is_none());
     }
@@ -425,7 +403,9 @@ mod tests {
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = build_l0_compaction(&before_compaction.l0, 0);
         let compactor_job = CompactorJob::new(job_id, request);
-        state.add_job(compactor_job.clone()).expect("failed to add job");
+        state
+            .add_job(compactor_job.clone())
+            .expect("failed to add job");
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -472,7 +452,9 @@ mod tests {
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = build_l0_compaction(&before_compaction.l0, 0);
         let compactor_job = CompactorJob::new(job_id, request);
-        state.add_job(compactor_job.clone()).expect("failed to add job");
+        state
+            .add_job(compactor_job.clone())
+            .expect("failed to add job");
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -531,7 +513,9 @@ mod tests {
             0,
         );
         let compactor_job = CompactorJob::new(job_id, request);
-        state.add_job(compactor_job.clone()).expect("failed to add job");
+        state
+            .add_job(compactor_job.clone())
+            .expect("failed to add job");
         state.finish_job(
             job_id,
             SortedRun {
@@ -599,7 +583,9 @@ mod tests {
             0,
         );
         let compactor_job = CompactorJob::new(job_id, request);
-        state.add_job(compactor_job.clone()).expect("failed to add job");
+        state
+            .add_job(compactor_job.clone())
+            .expect("failed to add job");
         state.finish_job(
             job_id,
             SortedRun {

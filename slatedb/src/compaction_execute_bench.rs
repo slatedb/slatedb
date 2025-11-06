@@ -260,19 +260,19 @@ impl CompactionExecuteBench {
 
     fn load_compaction_as_job(
         manifest: &StoredManifest,
-        compactor_job: &CompactorJob,
+        job: &CompactorJob,
         is_dest_last_run: bool,
         rand: Arc<DbRand>,
         system_clock: Arc<dyn SystemClock>,
     ) -> CompactorJobAttempt {
         let state = manifest.db_state();
-        let compactor_job_request = compactor_job.request();
+        let request = job.request();
         let srs_by_id: HashMap<_, _> = state
             .compacted
             .iter()
             .map(|sr| (sr.id, sr.clone()))
             .collect();
-        let srs: Vec<_> = compactor_job_request
+        let srs: Vec<_> = request
             .sources()
             .iter()
             .map(|sr| {
@@ -285,7 +285,7 @@ impl CompactionExecuteBench {
         info!("loaded compaction job");
         CompactorJobAttempt {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
-            job_id: compactor_job.id(),
+            job_id: job.id(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,

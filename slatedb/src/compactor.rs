@@ -13,9 +13,7 @@ use ulid::Ulid;
 use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{CompactionExecutor, CompactorJobAttempt, TokioCompactionExecutor};
-use crate::compactor_state::{
-    CompactorJob, CompactorJobRequest, CompactorJobStatus, CompactorState, SourceId,
-};
+use crate::compactor_state::{CompactorJob, CompactorJobRequest, CompactorState, SourceId};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -121,10 +119,6 @@ pub(crate) enum CompactorMessage {
     CompactionJobAttemptFinished {
         id: Ulid,
         result: Result<SortedRun, SlateDBError>,
-    },
-    /// Sent when an [`CompactionExecutor`] wishes to alert the compactor about starting a compaction.
-    CompactionJobAttemptStarted {
-        id: Ulid,
     },
     /// Sent when an [`CompactionExecutor`] wishes to alert the compactor of progress. This
     /// information is only used for reporting purposes, and can be an estimate.
@@ -291,7 +285,6 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
         match message {
             CompactorMessage::LogStats => self.handle_log_ticker(),
             CompactorMessage::PollManifest => self.handle_ticker().await,
-            CompactorMessage::CompactionJobAttemptStarted { .. } => {}
             CompactorMessage::CompactionJobAttemptFinished { id, result } => match result {
                 Ok(sr) => self
                     .finish_compaction(id, sr)
@@ -474,20 +467,9 @@ impl CompactorEventHandler {
     }
 
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
-        let mut active_compactions = self
-            .state
-            .jobs()
-            .filter(|s| {
-                matches!(
-                    s.status(),
-                    CompactorJobStatus::Submitted
-                        | CompactorJobStatus::Pending
-                        | CompactorJobStatus::InProgress
-                )
-            })
-            .count();
         let mut requests = self.scheduler.maybe_schedule_compaction(&self.state);
         for request in requests.drain(..) {
+            let active_compactions = self.state.jobs().count();
             if active_compactions >= self.options.max_concurrent_compactions {
                 info!(
                     "already running {} compactions, which is at the max {}. Won't run compaction {:?}",
@@ -500,7 +482,6 @@ impl CompactorEventHandler {
             let job_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
             let job = CompactorJob::new(job_id, request);
             self.submit_compaction(job).await?;
-            active_compactions += 1;
         }
         Ok(())
     }
