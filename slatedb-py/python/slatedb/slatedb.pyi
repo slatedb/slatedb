@@ -7,12 +7,12 @@ object storage. The stubs are used by type checkers and IDEs for
 autocompletion, static analysis, and inline documentation.
 
 Overview:
-- ``SlateDB`` provides read/write access, transactions, and snapshots.
-- ``SlateDBReader`` provides read-only access, optionally pinned to a
+- :class:`SlateDB` provides read/write access, transactions, and snapshots.
+- :class:`SlateDBReader` provides read-only access, optionally pinned to a
   checkpoint.
-- ``SlateDBAdmin`` exposes administrative functionality for manifests,
+- :class:`SlateDBAdmin` exposes administrative functionality for manifests,
   checkpoints, cloning, and garbage collection.
-- Iteration is available via ``scan(...)`` returning ``DbIterator`` that
+- Iteration is available via ``scan(...)`` returning :class:`DbIterator` that
   supports both sync and async iteration.
 
 See also:
@@ -57,7 +57,7 @@ class SlateDB:
 
     Use this class to open a database, read and write keys, and run
     transactions. For read-only access (optionally at a checkpoint), see
-    ``SlateDBReader``.
+    :class:`SlateDBReader`.
     """
 
     def __init__(
@@ -106,7 +106,7 @@ class SlateDB:
         settings: str | None = None,
     ) -> SlateDB:
         """
-        Async constructor that opens the database and returns a SlateDB.
+        Async constructor that opens the database and returns a :class:`SlateDB`.
 
         Args:
             path: Database path.
@@ -116,10 +116,12 @@ class SlateDB:
             settings: Optional path to settings TOML file.
 
         Returns:
-            An initialized SlateDB instance.
+            An initialized :class:`SlateDB` instance.
 
         Examples:
             >>> db = await SlateDB.open_async("/tmp/mydb", env_file=".env")
+            >>> print(isinstance(db, SlateDB))
+            True
         """
         ...
 
@@ -128,11 +130,12 @@ class SlateDB:
         Create a read-only snapshot at the current committed state.
 
         Returns:
-            SlateDBSnapshot providing a consistent, read-only view.
+            :class:`SlateDBSnapshot` providing a consistent, read-only view.
 
         Example:
             >>> snap = db.snapshot()
-            >>> _ = snap.get(b"k")
+            >>> print(isinstance(snap, SlateDBSnapshot))
+            True
         """
         ...
 
@@ -141,10 +144,12 @@ class SlateDB:
         Async variant of ``snapshot``.
 
         Returns:
-            A SlateDBSnapshot instance.
+            A :class:`SlateDBSnapshot` instance.
 
         Examples:
             >>> snap = await db.snapshot_async()
+            >>> print(isinstance(snap, SlateDBSnapshot))
+            True
         """
         ...
 
@@ -158,10 +163,12 @@ class SlateDB:
                 - "ssi", "serializable", or "serializable_snapshot" for Serializable Snapshot Isolation
 
         Returns:
-            SlateDBTransaction handle.
+            :class:`SlateDBTransaction` handle.
 
         Example:
             >>> txn = db.begin("ssi")
+            >>> print(isinstance(txn, SlateDBTransaction))
+            True
             >>> txn.put(b"k", b"v")
             >>> txn.commit()
         """
@@ -175,10 +182,12 @@ class SlateDB:
             isolation: Optional isolation level string.
 
         Returns:
-            A SlateDBTransaction instance.
+            A :class:`SlateDBTransaction` instance.
 
         Examples:
             >>> txn = await db.begin_async("si")
+            >>> print(isinstance(txn, SlateDBTransaction))
+            True
         """
         ...
 
@@ -219,8 +228,8 @@ class SlateDB:
             Value bytes or ``None`` if not found.
 
         Example:
-            >>> db.get(b"missing") is None
-            True
+            >>> print(db.get(b"missing"))
+            None
         """
         ...
 
@@ -236,7 +245,7 @@ class SlateDB:
 
         Examples:
             >>> await db.put_async(b"k", b"v")
-            >>> await db.get_async(b"k")
+            >>> print(await db.get_async(b"k"))
             b'v'
         """
         ...
@@ -260,7 +269,8 @@ class SlateDB:
             Value bytes or ``None`` if not found.
 
         Example:
-            >>> db.get_with_options(b"k", durability_filter="memory")
+            >>> print(db.get_with_options(b"k", durability_filter="memory"))
+            None
         """
         ...
 
@@ -283,7 +293,8 @@ class SlateDB:
             Value bytes or ``None`` if not found.
 
         Examples:
-            >>> await db.get_with_options_async(b"k", durability_filter="remote")
+            >>> print(await db.get_with_options_async(b"k", durability_filter="remote"))
+            None
         """
         ...
 
@@ -323,13 +334,14 @@ class SlateDB:
                 to iterate keys sharing the ``start`` prefix.
 
         Returns:
-            DbIterator yielding ``(key, value)`` sorted by key.
+            :class:`DbIterator` yielding ``(key, value)`` sorted by key.
 
         Examples:
             Iterate synchronously:
 
-            >>> for k, v in db.scan(b"a", b"z"):
-            ...     _ = (k, v)
+            >>> it = db.scan(b"a", b"z")
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -342,12 +354,12 @@ class SlateDB:
             end: Optional end key (exclusive) or ``None`` for prefix range.
 
         Returns:
-            A DbIterator that supports ``async for``.
+            A :class:`DbIterator` that supports ``async for``.
 
         Example:
             >>> it = await db.scan_async(b"prefix")
-            >>> async for k, v in it:
-            ...     _ = (k, v)
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -375,11 +387,12 @@ class SlateDB:
             max_fetch_tasks: Limit background fetch task count.
 
         Returns:
-            DbIterator over the requested range.
+            :class:`DbIterator` over the requested range.
 
         Examples:
             >>> it = db.scan_with_options(b"a", b"c", read_ahead_bytes=1_000_000)
-            >>> next(it)  # doctest: +SKIP
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -407,12 +420,12 @@ class SlateDB:
             max_fetch_tasks: Limit background fetch task count.
 
         Returns:
-            DbIterator over the requested range that supports ``async for``.
+            :class:`DbIterator` over the requested range that supports ``async for``.
 
         Examples:
             >>> it = await db.scan_with_options_async(b"a")
-            >>> async for k, v in it:
-            ...     _ = (k, v)
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -563,7 +576,7 @@ class SlateDB:
         Atomically apply a batch of writes (puts/deletes/merges).
 
         Args:
-            batch: A WriteBatch with queued operations.
+            batch: A :class:`WriteBatch` with queued operations.
 
         Example:
             >>> wb = WriteBatch()
@@ -578,7 +591,7 @@ class SlateDB:
         Atomically apply a batch with write options.
 
         Args:
-            batch: A WriteBatch with queued operations.
+            batch: A :class:`WriteBatch` with queued operations.
             await_durable: If False, do not wait for durable write.
 
         Examples:
@@ -593,7 +606,7 @@ class SlateDB:
         Async variant of ``write``.
 
         Args:
-            batch: A WriteBatch with queued operations.
+            batch: A :class:`WriteBatch` with queued operations.
 
         Examples:
             >>> wb = WriteBatch(); wb.put(b"k", b"v")
@@ -606,7 +619,7 @@ class SlateDB:
         Async variant of ``write_with_options``.
 
         Args:
-            batch: A WriteBatch with queued operations.
+            batch: A :class:`WriteBatch` with queued operations.
             await_durable: If False, do not wait for durable write.
 
         Examples:
@@ -659,15 +672,14 @@ class SlateDB:
 
     def metrics(self) -> dict[str, int]:
         """
-        Return current SlateDB metrics as a dictionary.
+        Return current :class:`SlateDB` metrics as a dictionary.
 
         Returns:
             A mapping of metric name to value. Keys are metric names (for example,
             ``"db/get_requests"``) and values are integers.
 
         Examples:
-            >>> m = db.metrics()
-            >>> isinstance(m, dict)
+            >>> print(isinstance(db.metrics(), dict))
             True
         """
         ...
@@ -692,7 +704,7 @@ class SlateDB:
 
         Examples:
             >>> res = db.create_checkpoint()
-            >>> list(res.keys()) == ["id", "manifest_id"]
+            >>> print(list(res.keys()) == ["id", "manifest_id"])
             True
         """
         ...
@@ -717,7 +729,7 @@ class SlateDB:
 
         Examples:
             >>> res = await db.create_checkpoint_async()
-            >>> "id" in res and "manifest_id" in res
+            >>> print("id" in res and "manifest_id" in res)
             True
         """
         ...
@@ -756,7 +768,8 @@ class SlateDBSnapshot:
 
         Examples:
             >>> snap = db.snapshot()
-            >>> _ = snap.get(b"k")
+            >>> print(snap.get(b"k"))
+            None
         """
         ...
 
@@ -772,7 +785,8 @@ class SlateDBSnapshot:
 
         Examples:
             >>> snap = await db.snapshot_async()
-            >>> await snap.get_async(b"k")
+            >>> print(await snap.get_async(b"k"))
+            None
         """
         ...
 
@@ -785,11 +799,12 @@ class SlateDBSnapshot:
             end: Optional end key (exclusive). ``None`` derives a prefix bound.
 
         Returns:
-            DbIterator over ``(key, value)`` pairs at the snapshot.
+            :class:`DbIterator` over ``(key, value)`` pairs at the snapshot.
 
         Examples:
             >>> it = snap.scan(b"a")
-            >>> next(it)  # doctest: +SKIP
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -802,12 +817,12 @@ class SlateDBSnapshot:
             end: Optional end key (exclusive).
 
         Returns:
-            DbIterator for async iteration at the snapshot.
+            :class:`DbIterator` for async iteration at the snapshot.
 
         Examples:
             >>> it = await snap.scan_async(b"a")
-            >>> async for k, v in it:
-            ...     _ = (k, v)
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -835,11 +850,12 @@ class SlateDBSnapshot:
             max_fetch_tasks: Limit background fetch task count.
 
         Returns:
-            DbIterator over the requested range.
+            :class:`DbIterator` over the requested range.
 
         Examples:
             >>> it = snap.scan_with_options(b"a", cache_blocks=True)
-            >>> next(it)  # doctest: +SKIP
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -867,12 +883,12 @@ class SlateDBSnapshot:
             max_fetch_tasks: Limit background fetch task count.
 
         Returns:
-            DbIterator over the requested range for async iteration.
+            :class:`DbIterator` over the requested range for async iteration.
 
         Examples:
             >>> it = await snap.scan_with_options_async(b"a")
-            >>> async for k, v in it:
-            ...     _ = (k, v)
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -910,7 +926,7 @@ class SlateDBTransaction:
 
         Examples:
             >>> txn = db.begin()
-            >>> txn.get(b"k") is None or True
+            >>> print(txn.get(b"k") is None)
             True
         """
         ...
@@ -927,7 +943,8 @@ class SlateDBTransaction:
 
         Examples:
             >>> txn = await db.begin_async()
-            >>> await txn.get_async(b"k")
+            >>> print(await txn.get_async(b"k"))
+            None
         """
         ...
 
@@ -951,7 +968,8 @@ class SlateDBTransaction:
 
         Examples:
             >>> txn = db.begin()
-            >>> txn.get_with_options(b"k", dirty=True)
+            >>> print(txn.get_with_options(b"k", dirty=True))
+            None
         """
         ...
 
@@ -975,7 +993,8 @@ class SlateDBTransaction:
 
         Examples:
             >>> txn = await db.begin_async()
-            >>> await txn.get_with_options_async(b"k", dirty=True)
+            >>> print(await txn.get_with_options_async(b"k", dirty=True))
+            None
         """
         ...
 
@@ -988,31 +1007,32 @@ class SlateDBTransaction:
             end: Optional end key (exclusive).
 
         Returns:
-            DbIterator over ``(key, value)`` pairs, reflecting in-transaction writes.
+            :class:`DbIterator` over ``(key, value)`` pairs, reflecting in-transaction writes.
 
         Examples:
             >>> txn = db.begin()
-            >>> for k, v in txn.scan(b"a"):
-            ...     _ = (k, v)
+            >>> it = txn.scan(b"a")
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
     async def scan_async(self, start: bytes, end: bytes | None = None) -> DbIterator:
         """
-        Async variant of ``scan`` returning a DbIterator.
+        Async variant of ``scan`` returning a :class:`DbIterator`.
 
         Args:
             start: Start key (inclusive).
             end: Optional end key (exclusive).
 
         Returns:
-            DbIterator for async iteration reflecting in-transaction writes.
+            :class:`DbIterator` for async iteration reflecting in-transaction writes.
 
         Examples:
             >>> txn = await db.begin_async()
             >>> it = await txn.scan_async(b"a")
-            >>> async for k, v in it:
-            ...     _ = (k, v)
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -1040,12 +1060,13 @@ class SlateDBTransaction:
             max_fetch_tasks: Limit background fetch task count.
 
         Returns:
-            DbIterator over the requested range.
+            :class:`DbIterator` over the requested range.
 
         Examples:
             >>> txn = db.begin()
             >>> it = txn.scan_with_options(b"a", read_ahead_bytes=1_000)
-            >>> next(it)  # doctest: +SKIP
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -1061,7 +1082,7 @@ class SlateDBTransaction:
         max_fetch_tasks: int | None = None,
     ) -> DbIterator:
         """
-        Async variant of ``scan_with_options`` returning a DbIterator.
+        Async variant of ``scan_with_options`` returning a :class:`DbIterator`.
 
         Args:
             start: Start key (inclusive).
@@ -1073,13 +1094,13 @@ class SlateDBTransaction:
             max_fetch_tasks: Limit background fetch task count.
 
         Returns:
-            DbIterator over the requested range for async iteration.
+            :class:`DbIterator` over the requested range for async iteration.
 
         Examples:
             >>> txn = await db.begin_async()
             >>> it = await txn.scan_with_options_async(b"a", cache_blocks=True)
-            >>> async for k, v in it:
-            ...     _ = (k, v)
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -1176,8 +1197,8 @@ class SlateDBTransaction:
 
         Examples:
             >>> txn = await db.begin_async()
-            >>> await txn.put_with_options(b"k", b"v")  # doctest: +SKIP
-            >>> await txn.commit_async()  # doctest: +SKIP
+            >>> await txn.put_with_options(b"k", b"v")
+            >>> await txn.commit_async()
         """
         ...
 
@@ -1249,10 +1270,12 @@ class SlateDBReader:
             max_memtable_bytes: Optional max size of internal immutable memtable when replaying WALs.
 
         Returns:
-            A SlateDBReader instance.
+            A :class:`SlateDBReader` instance.
 
         Examples:
             >>> reader = await SlateDBReader.open_async("/tmp/mydb", env_file=".env")
+            >>> print(isinstance(reader, SlateDBReader))
+            True
         """
         ...
 
@@ -1267,7 +1290,7 @@ class SlateDBReader:
             Value bytes or ``None`` if not found.
 
         Examples:
-            >>> reader.get(b"k") is None or True
+            >>> print(reader.get(b"k") is None)
             True
         """
         ...
@@ -1283,7 +1306,8 @@ class SlateDBReader:
             Value bytes or ``None`` if not found.
 
         Examples:
-            >>> await reader.get_async(b"k")
+            >>> print(await reader.get_async(b"k"))
+            None
         """
         ...
 
@@ -1306,7 +1330,8 @@ class SlateDBReader:
             Value bytes or ``None`` if not found.
 
         Example:
-            >>> reader.get_with_options(b"k", durability_filter="memory")
+            >>> print(reader.get_with_options(b"k", durability_filter="memory"))
+            None
         """
         ...
 
@@ -1329,7 +1354,8 @@ class SlateDBReader:
             Value bytes or ``None`` if not found.
 
         Examples:
-            >>> await reader.get_with_options_async(b"k", durability_filter="remote")
+            >>> print(await reader.get_with_options_async(b"k", durability_filter="remote"))
+            None
         """
         ...
 
@@ -1342,11 +1368,12 @@ class SlateDBReader:
             end: Optional end key (exclusive). If ``None``, a bound is derived to iterate keys sharing the ``start`` prefix.
 
         Returns:
-            DbIterator over ``(key, value)`` pairs.
+            :class:`DbIterator` over ``(key, value)`` pairs.
 
         Examples:
             >>> it = reader.scan(b"a")
-            >>> next(it)  # doctest: +SKIP
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -1359,12 +1386,12 @@ class SlateDBReader:
             end: Optional end key (exclusive).
 
         Returns:
-            DbIterator for async iteration.
+            :class:`DbIterator` for async iteration.
 
         Examples:
             >>> it = await reader.scan_async(b"a")
-            >>> async for k, v in it:
-            ...     _ = (k, v)
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -1392,11 +1419,12 @@ class SlateDBReader:
             max_fetch_tasks: Limit background fetch task count.
 
         Returns:
-            DbIterator over the requested range.
+            :class:`DbIterator` over the requested range.
 
         Examples:
             >>> it = reader.scan_with_options(b"a", read_ahead_bytes=1_000)
-            >>> next(it)  # doctest: +SKIP
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -1424,12 +1452,12 @@ class SlateDBReader:
             max_fetch_tasks: Limit background fetch task count.
 
         Returns:
-            DbIterator over the requested range for async iteration.
+            :class:`DbIterator` over the requested range for async iteration.
 
         Examples:
             >>> it = await reader.scan_with_options_async(b"a")
-            >>> async for k, v in it:
-            ...     _ = (k, v)
+            >>> print(isinstance(it, DbIterator))
+            True
         """
         ...
 
@@ -1464,7 +1492,7 @@ class DbIterator(Iterator[tuple[bytes, bytes]], AsyncIterator[tuple[bytes, bytes
 
         Examples:
             >>> it = db.scan(b"a")
-            >>> iter(it) is it
+            >>> print(iter(it) is it)
             True
         """
         ...
@@ -1478,7 +1506,7 @@ class DbIterator(Iterator[tuple[bytes, bytes]], AsyncIterator[tuple[bytes, bytes
 
         Examples:
             >>> it = db.scan(b"a")
-            >>> isinstance(next(it), tuple)
+            >>> print(isinstance(next(it), tuple))
             True
         """
         ...
@@ -1493,7 +1521,7 @@ class DbIterator(Iterator[tuple[bytes, bytes]], AsyncIterator[tuple[bytes, bytes
         Examples:
             >>> it = await db.scan_async(b"a")
             >>> aiter = it.__aiter__()
-            >>> aiter is it
+            >>> print(aiter is it)
             True
         """
         ...
@@ -1507,8 +1535,9 @@ class DbIterator(Iterator[tuple[bytes, bytes]], AsyncIterator[tuple[bytes, bytes
 
         Examples:
             >>> it = await db.scan_async(b"a")
-            >>> async for k, v in it:
-            ...     _ = (k, v)
+            >>> item = await it.__anext__()
+            >>> print(isinstance(item, tuple))
+            True
         """
         ...
 
@@ -1556,7 +1585,7 @@ class CheckpointCreateResult(TypedDict):
 
 
 class WriteBatch:
-    """Accumulates atomic write operations for ``SlateDB.write(...)``."""
+    """Accumulates atomic write operations for :class:`SlateDB`.write(...)."""
 
     def __init__(self) -> None:
         """
@@ -1672,7 +1701,7 @@ class SlateDBAdmin:
 
         Examples:
             >>> s = admin.read_manifest()
-            >>> s is None or s.startswith("{")
+            >>> print(s is None or s.startswith("{"))
             True
         """
         ...
@@ -1688,7 +1717,9 @@ class SlateDBAdmin:
             JSON string of the manifest, or ``None``.
 
         Examples:
-            >>> await admin.read_manifest_async()
+            >>> s = await admin.read_manifest_async()
+            >>> print(s is None or s.startswith("{"))
+            True
         """
         ...
 
@@ -1705,7 +1736,7 @@ class SlateDBAdmin:
 
         Examples:
             >>> s = admin.list_manifests()
-            >>> s.startswith("[")
+            >>> print(s.startswith("["))
             True
         """
         ...
@@ -1723,7 +1754,7 @@ class SlateDBAdmin:
 
         Examples:
             >>> s = await admin.list_manifests_async()
-            >>> s.startswith("[")
+            >>> print(s.startswith("["))
             True
         """
         ...
@@ -1747,7 +1778,7 @@ class SlateDBAdmin:
         Example:
             >>> admin = SlateDBAdmin("/tmp/mydb", env_file=".env")
             >>> res = admin.create_checkpoint()
-            >>> list(res.keys()) == ["id", "manifest_id"]
+            >>> print(list(res.keys()) == ["id", "manifest_id"])
             True
         """
         ...
@@ -1769,7 +1800,9 @@ class SlateDBAdmin:
             Dict with ``id`` (UUID string) and ``manifest_id`` (int).
 
         Examples:
-            >>> await admin.create_checkpoint_async()  # doctest: +SKIP
+            >>> res = await admin.create_checkpoint_async()
+            >>> print("id" in res and "manifest_id" in res)
+            True
         """
         ...
 
@@ -1778,11 +1811,11 @@ class SlateDBAdmin:
         List known checkpoints for the database path/object store.
 
         Returns:
-            A list of checkpoint metadata dicts.
+            A list of :class:`Checkpoint` metadata dicts.
 
         Examples:
             >>> cps = admin.list_checkpoints()
-            >>> isinstance(cps, list)
+            >>> print(isinstance(cps, list))
             True
         """
         ...
@@ -1792,10 +1825,12 @@ class SlateDBAdmin:
         Async variant of ``list_checkpoints``.
 
         Returns:
-            A list of checkpoint metadata dicts.
+            A list of :class:`Checkpoint` metadata dicts.
 
         Examples:
-            >>> await admin.list_checkpoints_async()
+            >>> cps = await admin.list_checkpoints_async()
+            >>> print(isinstance(cps, list))
+            True
         """
         ...
 
@@ -1808,7 +1843,7 @@ class SlateDBAdmin:
             lifetime: New lifetime in milliseconds.
 
         Examples:
-            >>> admin.refresh_checkpoint("00000000-0000-0000-0000-000000000000", lifetime=60000)  # doctest: +SKIP
+            >>> admin.refresh_checkpoint("00000000-0000-0000-0000-000000000000", lifetime=60000)
         """
         ...
 
@@ -1821,7 +1856,7 @@ class SlateDBAdmin:
             lifetime: New lifetime in milliseconds.
 
         Examples:
-            >>> await admin.refresh_checkpoint_async("00000000-0000-0000-0000-000000000000", lifetime=60000)  # doctest: +SKIP
+            >>> await admin.refresh_checkpoint_async("00000000-0000-0000-0000-000000000000", lifetime=60000)
         """
         ...
 
@@ -1833,7 +1868,7 @@ class SlateDBAdmin:
             id: Checkpoint UUID string.
 
         Examples:
-            >>> admin.delete_checkpoint("00000000-0000-0000-0000-000000000000")  # doctest: +SKIP
+            >>> admin.delete_checkpoint("00000000-0000-0000-0000-000000000000")
         """
         ...
 
@@ -1845,7 +1880,7 @@ class SlateDBAdmin:
             id: Checkpoint UUID string.
 
         Examples:
-            >>> await admin.delete_checkpoint_async("00000000-0000-0000-0000-000000000000")  # doctest: +SKIP
+            >>> await admin.delete_checkpoint_async("00000000-0000-0000-0000-000000000000")
         """
         ...
 
@@ -1862,7 +1897,7 @@ class SlateDBAdmin:
 
         Examples:
             >>> ts = admin.get_timestamp_for_sequence(42)
-            >>> ts is None or isinstance(ts, int)
+            >>> print(ts is None or isinstance(ts, int))
             True
         """
         ...
@@ -1879,7 +1914,9 @@ class SlateDBAdmin:
             Milliseconds since epoch, or ``None``.
 
         Examples:
-            >>> await admin.get_timestamp_for_sequence_async(42)
+            >>> ts = await admin.get_timestamp_for_sequence_async(42)
+            >>> print(ts is None or isinstance(ts, int))
+            True
         """
         ...
 
@@ -1896,7 +1933,7 @@ class SlateDBAdmin:
 
         Examples:
             >>> seq = admin.get_sequence_for_timestamp(1_700_000_000_000)
-            >>> seq is None or isinstance(seq, int)
+            >>> print(seq is None or isinstance(seq, int))
             True
         """
         ...
@@ -1913,7 +1950,9 @@ class SlateDBAdmin:
             Sequence number, or ``None``.
 
         Examples:
-            >>> await admin.get_sequence_for_timestamp_async(1_700_000_000_000)
+            >>> seq = await admin.get_sequence_for_timestamp_async(1_700_000_000_000)
+            >>> print(seq is None or isinstance(seq, int))
+            True
         """
         ...
 
@@ -1926,7 +1965,7 @@ class SlateDBAdmin:
             parent_checkpoint: Optional checkpoint id to clone from; latest if ``None``.
 
         Examples:
-            >>> admin.create_clone("/tmp/parent", parent_checkpoint=None)  # doctest: +SKIP
+            >>> admin.create_clone("/tmp/parent", parent_checkpoint=None)
         """
         ...
 
@@ -1939,7 +1978,7 @@ class SlateDBAdmin:
             parent_checkpoint: Optional checkpoint id to clone from.
 
         Examples:
-            >>> await admin.create_clone_async("/tmp/parent")  # doctest: +SKIP
+            >>> await admin.create_clone_async("/tmp/parent")
         """
         ...
 
@@ -1965,7 +2004,7 @@ class SlateDBAdmin:
             compacted_min_age: Minimum age before compacted files are GC'd (ms).
 
         Examples:
-            >>> admin.run_gc_once(manifest_min_age=3_600_000)  # doctest: +SKIP
+            >>> admin.run_gc_once(manifest_min_age=3_600_000)
         """
         ...
 
@@ -1991,7 +2030,7 @@ class SlateDBAdmin:
             compacted_min_age: Minimum age before compacted files are GC'd (ms).
 
         Examples:
-            >>> await admin.run_gc_once_async(manifest_min_age=3_600_000)  # doctest: +SKIP
+            >>> await admin.run_gc_once_async(manifest_min_age=3_600_000)
         """
         ...
 
@@ -2018,7 +2057,7 @@ class SlateDBAdmin:
 
         Examples:
             >>> # Blocks until cancelled; run in a background task
-            >>> # admin.run_gc(manifest_min_age=3_600_000)  # doctest: +SKIP
+            >>> # admin.run_gc(manifest_min_age=3_600_000)
         """
         ...
 
@@ -2045,6 +2084,6 @@ class SlateDBAdmin:
 
         Examples:
             >>> # Typically run in an asyncio Task
-            >>> # await admin.run_gc_async(manifest_min_age=3_600_000)  # doctest: +SKIP
+            >>> # await admin.run_gc_async(manifest_min_age=3_600_000)
         """
         ...
