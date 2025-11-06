@@ -184,7 +184,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
 
         let (l0, srs) = self.compaction_sources(db_state);
 
-        let conflict_checker = ConflictChecker::new(&state.compactions());
+        let conflict_checker = ConflictChecker::new(&state.requests());
         let backpressure_checker = BackpressureChecker::new(
             self.options.include_size_threshold,
             self.options.max_compaction_sources,
@@ -192,7 +192,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         );
         let mut checker = CompactionChecker::new(conflict_checker, backpressure_checker);
 
-        while state.compactions().len() + compactions.len() < self.max_concurrent_compactions {
+        while state.requests().len() + compactions.len() < self.max_concurrent_compactions {
             let Some(compaction) = self.pick_next_compaction(&l0, &srs, &checker) else {
                 break;
             };
@@ -564,7 +564,7 @@ mod tests {
         let request = create_sr_compaction(vec![3, 2, 1, 0]);
         let compactor_job = CompactorJob::new(compaction_id, request);
 
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
 
         let id = state
             .submit_compaction(compaction_job_id, compactor_job)
@@ -654,7 +654,7 @@ mod tests {
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
         let compactor_job = CompactorJob::new(compaction_id, request);
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
         let id = state
             .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
@@ -695,7 +695,7 @@ mod tests {
             compaction_id,
             create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
         );
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
         let id = state
             .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();

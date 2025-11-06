@@ -154,7 +154,7 @@ impl CompactorJob {
         self.id
     }
 
-    pub(crate) fn compactor_job_request(&self) -> &CompactorJobRequest {
+    pub(crate) fn request(&self) -> &CompactorJobRequest {
         &self.request
     }
 
@@ -219,10 +219,10 @@ impl CompactorState {
         self.scheduled_jobs.len()
     }
 
-    pub(crate) fn compactions(&self) -> Vec<CompactorJobRequest> {
+    pub(crate) fn requests(&self) -> Vec<CompactorJobRequest> {
         self.scheduled_jobs
             .values()
-            .map(|job| job.compactor_job_request())
+            .map(|job| job.request())
             .cloned()
             .collect()
     }
@@ -237,15 +237,15 @@ impl CompactorState {
 
     pub(crate) fn submit_compaction(
         &mut self,
-        id: Ulid,
-        compactor_job: CompactorJob,
+        which_id_is_this: Ulid,
+        job: CompactorJob,
     ) -> Result<Ulid, SlateDBError> {
-        let compactor_request = compactor_job.compactor_job_request();
+        let request = job.request();
         if self
             .scheduled_jobs
             .values()
-            .map(|c| c.compactor_job_request())
-            .any(|c| c.destination() == compactor_request.destination())
+            .map(|c| c.request())
+            .any(|c| c.destination() == request.destination())
         {
             // we already have an ongoing compaction for this destination
             return Err(SlateDBError::InvalidCompaction);
@@ -254,30 +254,27 @@ impl CompactorState {
             .db_state()
             .compacted
             .iter()
-            .any(|sr| sr.id == compactor_request.destination())
+            .any(|sr| sr.id == request.destination())
         {
             // the compaction overwrites an existing sr but doesn't include the sr
-            if !compactor_request.sources().iter().any(|src| match src {
-                SourceId::SortedRun(sr) => *sr == compactor_request.destination(),
+            if !request.sources().iter().any(|src| match src {
+                SourceId::SortedRun(sr) => *sr == request.destination(),
                 SourceId::Sst(_) => false,
             }) {
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
-        info!(
-            "accepted submitted compaction [compactor_request={}]",
-            compactor_request
-        );
+        info!("accepted submitted compaction [request={}]", request);
         // TODO(sujeetsawala): Add compactionJob attempt to the object store
-        let compactor_job_id = compactor_job.id();
-        if let Some(job) = self.compactor_jobs.get_mut(&compactor_job_id) {
+        let job_id = job.id();
+        if let Some(job) = self.compactor_jobs.get_mut(&job_id) {
             job.update_status(CompactorJobStatus::Pending);
-            self.scheduled_jobs.insert(id, job.clone());
+            self.scheduled_jobs.insert(which_id_is_this, job.clone());
         } else {
-            error!("compaction not found [compaction_id={}]", compactor_job_id);
+            error!("compaction not found [job_id={}]", job_id);
             return Err(SlateDBError::InvalidCompaction);
         }
-        Ok(id)
+        Ok(which_id_is_this)
     }
 
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
@@ -320,21 +317,20 @@ impl CompactorState {
         self.manifest = remote_manifest;
     }
 
-    pub(crate) fn submit_compactor_job(&mut self, compactor_job: CompactorJob) {
-        self.compactor_jobs
-            .insert(compactor_job.id(), compactor_job);
+    pub(crate) fn submit_job(&mut self, job: CompactorJob) {
+        self.compactor_jobs.insert(job.id(), job);
     }
 
-    pub(crate) fn remove_compactor_job(&mut self, id: &Ulid) {
-        self.compactor_jobs.remove(id);
+    pub(crate) fn remove_job(&mut self, job_id: &Ulid) {
+        self.compactor_jobs.remove(job_id);
     }
 
-    fn update_compactor_state(
+    fn update_attempt_status(
         &mut self,
-        job_attempt_id: Ulid,
+        attempt_id: Ulid,
         status: CompactorJobStatus,
     ) -> Result<(), SlateDBError> {
-        if let Some(sched) = self.scheduled_jobs.get_mut(&job_attempt_id) {
+        if let Some(sched) = self.scheduled_jobs.get_mut(&attempt_id) {
             // mirror status on the scheduled entry
             sched.update_status(status);
 
@@ -349,60 +345,54 @@ impl CompactorState {
             }
         } else {
             error!(
-                "scheduled compactor job not found [job_attempt_id={}]",
-                job_attempt_id
+                "scheduled compactor job not found [attempt_id={}]",
+                attempt_id
             );
             Err(SlateDBError::InvalidCompaction)
         }
     }
 
-    pub(crate) fn start_compactor_job(&mut self, job_attempt_id: Ulid) {
-        if let Err(e) = self.update_compactor_state(job_attempt_id, CompactorJobStatus::InProgress)
-        {
+    pub(crate) fn start_job(&mut self, attempt_id: Ulid) {
+        if let Err(e) = self.update_attempt_status(attempt_id, CompactorJobStatus::InProgress) {
             error!(
-                "failed to start compactor job [job_attempt_id={}, error={:?}]",
-                job_attempt_id, e
+                "failed to start compactor job [attempt_id={}, error={:?}]",
+                attempt_id, e
             );
         }
     }
 
-    pub(crate) fn finish_failed_compactor_job(&mut self, job_attempt_id: Ulid) {
+    pub(crate) fn finish_failed_job(&mut self, attempt_id: Ulid) {
         // Update status first; only remove entries if update succeeded.
-        if let Err(e) = self.update_compactor_state(job_attempt_id, CompactorJobStatus::Failed) {
+        if let Err(e) = self.update_attempt_status(attempt_id, CompactorJobStatus::Failed) {
             error!(
-                "failed to update compactor job state [job_attempt_id={}, error={:?}]",
-                job_attempt_id, e
+                "failed to update compactor job state [attempt_id={}, error={:?}]",
+                attempt_id, e
             );
             return;
         }
 
         // Remove from scheduled and canonical maps.
-        if let Some(sched) = self.scheduled_jobs.remove(&job_attempt_id) {
+        if let Some(sched) = self.scheduled_jobs.remove(&attempt_id) {
             let job_id = sched.id();
             // This should be removed once persistence is implemented since removal will be handled by GC
             self.compactor_jobs.remove(&job_id);
         }
     }
 
-    pub(crate) fn finish_compactor_job(&mut self, id: Ulid, output_sr: SortedRun) {
-        if let Some(job) = self.scheduled_jobs.get(&id) {
-            let compaction_request = job.compactor_job_request();
-            info!(
-                "finished compaction [compaction_request={}]",
-                compaction_request
-            );
+    pub(crate) fn finish_job(&mut self, attempt_id: Ulid, output_sr: SortedRun) {
+        if let Some(job) = self.scheduled_jobs.get(&attempt_id) {
+            let request = job.request();
+            info!("finished compaction [request={}]", request);
             // reconstruct l0
-            let compaction_l0s: HashSet<Ulid> = compaction_request
+            let compaction_l0s: HashSet<Ulid> = request
                 .sources()
                 .iter()
                 .filter_map(|id| id.maybe_unwrap_sst())
                 .collect();
-            let compaction_srs: HashSet<u32> = compaction_request
+            let compaction_srs: HashSet<u32> = request
                 .sources()
                 .iter()
-                .chain(std::iter::once(&SourceId::SortedRun(
-                    compaction_request.destination(),
-                )))
+                .chain(std::iter::once(&SourceId::SortedRun(request.destination())))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
             let mut db_state = self.db_state().clone();
@@ -432,7 +422,7 @@ impl CompactorState {
                 new_compacted.push(output_sr.clone());
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
-            let first_source = compaction_request
+            let first_source = request
                 .sources()
                 .first()
                 .expect("illegal: empty compaction request");
@@ -445,15 +435,15 @@ impl CompactorState {
             db_state.compacted = new_compacted;
             self.manifest.core = db_state;
             // TODO(sujeetsawala): Add compaction plan to object store with Completed status
-            if let Err(e) = self.update_compactor_state(id, CompactorJobStatus::Completed) {
+            if let Err(e) = self.update_attempt_status(attempt_id, CompactorJobStatus::Completed) {
                 error!("failed to update compactor job state [error={:?}]", e);
                 return;
             }
-            if let Some(sched) = self.scheduled_jobs.remove(&id) {
+            if let Some(sched) = self.scheduled_jobs.remove(&attempt_id) {
                 let job_id = sched.id();
                 self.compactor_jobs.remove(&job_id);
             } else {
-                error!("scheduled compactor job not found [job_id={}]", id);
+                error!("scheduled compactor job not found [job_id={}]", attempt_id);
             }
         }
     }
@@ -502,14 +492,14 @@ mod tests {
         let request = build_l0_compaction(&state.db_state().l0, 0);
         // when:
         let compactor_job = CompactorJob::new(compaction_id, request);
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
         let id = state
             .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
 
         // then:
         assert_eq!(id, compaction_job_id);
-        assert_eq!(state.compactions().len(), 1);
+        assert_eq!(state.requests().len(), 1);
     }
 
     #[test]
@@ -522,7 +512,7 @@ mod tests {
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = build_l0_compaction(&before_compaction.l0, 0);
         let compactor_job = CompactorJob::new(compaction_id, request);
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
         let id = state
             .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
@@ -535,7 +525,7 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compactor_job(id, sr.clone());
+        state.finish_job(id, sr.clone());
 
         // then:
         assert_eq!(
@@ -575,7 +565,7 @@ mod tests {
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = build_l0_compaction(&before_compaction.l0, 0);
         let compactor_job = CompactorJob::new(compaction_id, request);
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
         let id = state
             .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
@@ -588,10 +578,10 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compactor_job(id, sr.clone());
+        state.finish_job(id, sr.clone());
 
         // then:
-        assert_eq!(state.compactions().len(), 0)
+        assert_eq!(state.requests().len(), 0)
     }
 
     #[test]
@@ -640,14 +630,14 @@ mod tests {
             0,
         );
         let compactor_job = CompactorJob::new(compaction_id, request);
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
         let id = state
             .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
 
         assert_eq!(compaction_job_id, id);
 
-        state.finish_compactor_job(
+        state.finish_job(
             id,
             SortedRun {
                 id: 0,
@@ -715,14 +705,14 @@ mod tests {
             0,
         );
         let compactor_job = CompactorJob::new(compaction_id, request);
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
         let id = state
             .submit_compaction(compaction_job_id, compactor_job)
             .unwrap();
 
         assert_eq!(compaction_job_id, id);
 
-        state.finish_compactor_job(
+        state.finish_job(
             id,
             SortedRun {
                 id: 0,
@@ -799,7 +789,7 @@ mod tests {
             0,
         );
         let compactor_job = CompactorJob::new(compaction_id, request);
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
         let result = state.submit_compaction(id, compactor_job);
         // then:
         assert!(result.is_ok());
@@ -833,7 +823,7 @@ mod tests {
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = CompactorJobRequest::new(sources, 0);
         let compactor_job = CompactorJob::new(compaction_id, request);
-        state.submit_compactor_job(compactor_job.clone());
+        state.submit_job(compactor_job.clone());
         let result = state.submit_compaction(id, compactor_job);
 
         // or simply:

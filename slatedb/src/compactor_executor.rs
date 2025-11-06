@@ -36,8 +36,8 @@ use ulid::Ulid;
 ///
 /// - `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is
 ///   used as the runtime key in `scheduled_compactions`.
-/// - `compaction_id` is the canonical plan id (ULID) that ties this job attempt back to its
-///   `CompactionPlan` entry in the compactor's canonical map.
+/// - `job_id` is the canonical plan id (ULID) that ties this job attempt back to its
+///   `CompactionJob` entry in the compactor's canonical map.
 ///
 /// Jobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time
 /// metadata for progress reporting, retention, and resume logic.
@@ -46,7 +46,7 @@ pub(crate) struct CompactorJobAttempt {
     /// Job attempt id. Unique per attempt and used for scheduling/routing.
     pub(crate) id: Ulid,
     /// Canonical compaction job id this job belongs to.
-    pub(crate) compactor_job_id: Ulid,
+    pub(crate) job_id: Ulid,
     /// Destination sorted run id to be produced by this job.
     pub(crate) destination: u32,
     /// Input L0 SSTs for this attempt.
@@ -65,7 +65,7 @@ impl std::fmt::Debug for CompactorJobAttempt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompactorJobAttempt")
             .field("id", &self.id)
-            .field("compactor_job_id", &self.compactor_job_id)
+            .field("job_id", &self.job_id)
             .field("destination", &self.destination)
             .field("ssts", &self.ssts)
             .field("sorted_runs", &self.sorted_runs)
@@ -222,16 +222,13 @@ impl TokioCompactionExecutorInner {
         Ok(retention_iter)
     }
 
-    #[instrument(level = "debug", skip_all, fields(id = %compactor_job_attempt.id))]
+    #[instrument(level = "debug", skip_all, fields(id = %attempt.id))]
     async fn execute_compaction(
         &self,
-        compactor_job_attempt: CompactorJobAttempt,
+        attempt: CompactorJobAttempt,
     ) -> Result<SortedRun, SlateDBError> {
-        debug!(
-            "executing compaction [compaction={:?}]",
-            compactor_job_attempt
-        );
-        let mut all_iter = self.load_iterators(&compactor_job_attempt).await?;
+        debug!("executing compaction [attempt={:?}]", attempt);
+        let mut all_iter = self.load_iterators(&attempt).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
@@ -250,7 +247,7 @@ impl TokioCompactionExecutorInner {
                 #[allow(clippy::disallowed_methods)]
                 self.worker_tx
                     .send(CompactorMessage::CompactionJobAttemptProgress {
-                        id: compactor_job_attempt.id,
+                        id: attempt.id,
                         bytes_processed: all_iter.total_bytes_processed(),
                     })
                     .expect("failed to send compaction progress");
@@ -284,21 +281,21 @@ impl TokioCompactionExecutorInner {
         }
 
         Ok(SortedRun {
-            id: compactor_job_attempt.destination,
+            id: attempt.destination,
             ssts: output_ssts,
         })
     }
 
-    fn start_compaction(self: &Arc<Self>, compactor_job_attempt: CompactorJobAttempt) {
+    fn start_compaction(self: &Arc<Self>, attempt: CompactorJobAttempt) {
         let mut tasks = self.tasks.lock();
         if self.is_stopped.load(atomic::Ordering::SeqCst) {
             return;
         }
-        let dst = compactor_job_attempt.destination;
+        let dst = attempt.destination;
         self.stats.running_compactions.inc();
         assert!(!tasks.contains_key(&dst));
 
-        let id = compactor_job_attempt.id;
+        let id = attempt.id;
 
         // TODO(sujeetsawala): Add compaction plan to object store with InProgress status
 
@@ -330,7 +327,7 @@ impl TokioCompactionExecutorInner {
                     .expect("failed to send compaction finished msg");
                 this_cleanup.stats.running_compactions.dec();
             },
-            async move { this.execute_compaction(compactor_job_attempt).await },
+            async move { this.execute_compaction(attempt).await },
         );
         tasks.insert(dst, TokioCompactionTask { task });
     }
