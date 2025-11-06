@@ -1174,6 +1174,7 @@ mod tests {
     impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
         fn merge(
             &self,
+            _key: &Bytes,
             existing_value: Option<Bytes>,
             operand: Bytes,
         ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {

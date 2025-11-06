@@ -1046,7 +1046,7 @@ impl Db {
     /// struct StringConcatMergeOperator;
     ///
     /// impl MergeOperator for StringConcatMergeOperator {
-    ///     fn merge(&self, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+    ///     fn merge(&self, _key: &Bytes, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
     ///         let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
     ///         result.extend_from_slice(&value);
     ///         Ok(Bytes::from(result))
@@ -1100,7 +1100,7 @@ impl Db {
     /// struct StringConcatMergeOperator;
     ///
     /// impl MergeOperator for StringConcatMergeOperator {
-    ///     fn merge(&self, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+    ///     fn merge(&self, _key: &Bytes, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
     ///         let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
     ///         result.extend_from_slice(&value);
     ///         Ok(Bytes::from(result))
@@ -4944,6 +4944,7 @@ mod tests {
     impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
         fn merge(
             &self,
+            _key: &Bytes,
             existing_value: Option<Bytes>,
             value: Bytes,
         ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {
