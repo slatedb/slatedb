@@ -82,29 +82,6 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         let mut filtered_versions = BTreeMap::new();
         let current_system_ts = system_clock.now().timestamp_millis();
         for (_, entry) in versions.into_iter() {
-            // always keep the latest version (idx == 0), for older versions, check if they are within retention window.
-            // retention window is defined by either timeout or seq, or both. if both are not set, only the latest version
-            // is kept.
-            let in_retention_window_by_time = retention_timeout
-                .map(|timeout| {
-                    let create_sys_ts = sequence_tracker
-                        // Use RoundUp to conservatively estimate creation time. For example:
-                        // - If retention window is 10min and current time is 12:00:00
-                        // - And sequence tracker has timestamps at 11:49:30 and 11:50:30
-                        // - RoundUp will use 11:50:30 (later timestamp) to avoid over-aggressive filtering
-                        .find_ts(entry.seq, FindOption::RoundUp)
-                        .map(|ts| ts.timestamp_millis())
-                        // if the sequence number is greater than the last recorded sequence
-                        // number we just assume that it was produced now (so it effectively
-                        // should be kept in the filtered results)
-                        .unwrap_or(current_system_ts);
-                    create_sys_ts + (timeout.as_millis() as i64) > current_system_ts
-                })
-                .unwrap_or(false);
-            let in_retention_window_by_seq = retention_min_seq
-                .map(|min_seq| entry.seq > min_seq)
-                .unwrap_or(false);
-
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
@@ -124,13 +101,37 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 }
                 _ => entry,
             };
+            let entry_seq = entry.seq;
 
             // always keep the entry with latest version. also, we should keep
             // the latest version which has a seq belowing `retention_min_seq`.
             filtered_versions.insert(Reverse(entry.seq), entry);
 
-            let should_continue = in_retention_window_by_time || in_retention_window_by_seq;
-            if !should_continue {
+            // always keep the latest version (idx == 0), for older versions, check if they are within retention window.
+            // retention window is defined by either timeout or seq, or both. if both are not set, only the latest version
+            // is kept.
+            let end_retain_by_time = retention_timeout
+                .map(|timeout| {
+                    let create_sys_ts = sequence_tracker
+                        // Use RoundUp to conservatively estimate creation time. For example:
+                        // - If retention window is 10min and current time is 12:00:00
+                        // - And sequence tracker has timestamps at 11:49:30 and 11:50:30
+                        // - RoundUp will use 11:50:30 (later timestamp) to avoid over-aggressive filtering
+                        .find_ts(entry_seq, FindOption::RoundUp)
+                        .map(|ts| ts.timestamp_millis())
+                        // if the sequence number is greater than the last recorded sequence
+                        // number we just assume that it was produced now (so it effectively
+                        // should be kept in the filtered results)
+                        .unwrap_or(current_system_ts);
+                    create_sys_ts + (timeout.as_millis() as i64) <= current_system_ts
+                })
+                .unwrap_or(true);
+            let end_retain_by_seq = retention_min_seq
+                .map(|min_seq| entry_seq <= min_seq)
+                .unwrap_or(true);
+
+            let end_retain = end_retain_by_time && end_retain_by_seq;
+            if end_retain {
                 // if we find the first entry that neither in retention window by time nor by seq,
                 // we should break the loop to filter out the earlier versions of the same key.
                 break;
