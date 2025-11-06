@@ -431,6 +431,22 @@ impl PySlateDB {
         })
     }
 
+    /// Return a dictionary of current database metrics.
+    ///
+    /// The dictionary maps metric names (strings) to integer values.
+    fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let registry = self.inner.metrics();
+        let names = registry.names();
+        let out = PyDict::new(py);
+        for name in names {
+            if let Some(stat) = registry.lookup(name) {
+                // Values are exposed as i64. Python will see these as int.
+                out.set_item(name, stat.get())?;
+            }
+        }
+        Ok(out)
+    }
+
     fn snapshot_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();
         future_into_py(py, async move {

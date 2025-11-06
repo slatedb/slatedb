@@ -1,8 +1,7 @@
 import asyncio
-
 import pytest
 
-from slatedb import ClosedError, InvalidError, SlateDB, TransactionError, UnavailableError
+from slatedb import ClosedError, InvalidError, SlateDB, TransactionError, UnavailableError, WriteBatch
 
 
 @pytest.mark.asyncio
@@ -551,8 +550,6 @@ def test_db_put_delete_merge_with_options(db_path, env_file):
 
 
 def test_db_write_batch_and_write_with_options(db_path, env_file):
-    from slatedb import WriteBatch
-
     db = SlateDB(db_path, env_file=env_file)
     try:
         wb = WriteBatch()
@@ -604,8 +601,6 @@ async def test_async_put_delete_merge_with_options(db_path, env_file):
 
 @pytest.mark.asyncio
 async def test_async_write_batch_and_write_with_options(db_path, env_file):
-    from slatedb import WriteBatch
-
     db = SlateDB(db_path, env_file=env_file)
     try:
         wb = WriteBatch()
@@ -657,3 +652,69 @@ def test_txn_merge_and_merge_with_options(db_path, env_file):
         assert db2.get(b"mk2") == b"xyz"
     finally:
         db2.close()
+
+
+def test_db_metrics_returns_dict_and_increments(db_path):
+    db = SlateDB(db_path)
+    try:
+        metrics = db.metrics()
+        assert isinstance(metrics, dict)
+        # Expect at least core db stats to be present
+        assert "db/get_requests" in metrics
+        start_gets = int(metrics.get("db/get_requests", 0))
+
+        # Trigger a get to increment the counter
+        assert db.get(b"missing") is None
+        metrics2 = db.metrics()
+        assert int(metrics2.get("db/get_requests", 0)) >= start_gets + 1
+    finally:
+        db.close()
+
+
+def test_db_metrics_scan_requests_increments(db_path):
+    db = SlateDB(db_path)
+    try:
+        # Seed a couple of keys
+        db.put(b"a1", b"v1")
+        db.put(b"a2", b"v2")
+
+        before = db.metrics()
+        scans_before = int(before.get("db/scan_requests", 0))
+
+        # Perform a scan and fully consume the iterator
+        items = list(db.scan(b"a"))
+        assert (b"a1", b"v1") in items and (b"a2", b"v2") in items
+
+        after = db.metrics()
+        assert int(after.get("db/scan_requests", 0)) >= scans_before + 1
+    finally:
+        db.close()
+
+
+def test_db_metrics_write_ops_and_batch_count_and_memtable_flush(db_path):
+    db = SlateDB(db_path)
+    try:
+        base = db.metrics()
+        batches_before = int(base.get("db/write_batch_count", 0))
+        ops_before = int(base.get("db/write_ops", 0))
+        memflush_before = int(base.get("db/immutable_memtable_flushes", 0))
+
+        # Prepare a batch with 3 operations
+        wb = WriteBatch()
+        wb.put(b"b1", b"v1")
+        wb.put(b"b2", b"v2")
+        wb.delete(b"b2")
+        db.write(wb)
+
+        mid = db.metrics()
+        assert int(mid.get("db/write_batch_count", 0)) == batches_before + 1
+        # WriteBatch de-duplicates ops per key; put+delete on same key counts once.
+        # In this batch we have: put(b1), put(b2), delete(b2) => 2 effective ops.
+        assert int(mid.get("db/write_ops", 0)) >= ops_before + 2
+
+        # Force a memtable flush and check the counter increments
+        db.flush_with_options("memtable")
+        after = db.metrics()
+        assert int(after.get("db/immutable_memtable_flushes", 0)) >= memflush_before + 1
+    finally:
+        db.close()

@@ -493,6 +493,14 @@ class SlateDB:
         """Async variant of ``flush_with_options``."""
         ...
 
+    def metrics(self) -> dict[str, int]:
+        """
+        Return current SlateDB metrics as a dictionary.
+
+        Keys are metric names (e.g., "db/get_requests") and values are integers.
+        """
+        ...
+
     def create_checkpoint(
         self,
         scope: Literal["all", "durable"] = "all",
