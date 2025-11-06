@@ -13,9 +13,7 @@ use ulid::Ulid;
 use crate::clock::SystemClock;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{CompactionExecutor, CompactorJobAttempt, TokioCompactionExecutor};
-use crate::compactor_state::{
-    CompactorJob, CompactorJobInput, CompactorJobRequest, CompactorState, SourceId,
-};
+use crate::compactor_state::{CompactorJob, CompactorJobRequest, CompactorState, SourceId};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -485,20 +483,9 @@ impl CompactorEventHandler {
                 );
                 break;
             }
-            // Pass compactor job in here
             let compactor_job_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let job_input = CompactorJobInput::SortedRunJobInputs {
-                ssts: CompactorJob::get_ssts(
-                    self.state.db_state(),
-                    compactor_job_request.sources(),
-                ),
-                sorted_runs: CompactorJob::get_sorted_runs(
-                    self.state.db_state(),
-                    compactor_job_request.sources(),
-                ),
-            };
             let compactor_job: CompactorJob =
-                CompactorJob::new(compactor_job_id, compactor_job_request.clone(), job_input);
+                CompactorJob::new(compactor_job_id, compactor_job_request.clone());
             self.submit_compaction(compactor_job).await?;
         }
         Ok(())
@@ -512,11 +499,8 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         let db_state = self.state.db_state();
         let request = compactor_job.compactor_job_request();
-        let (ssts, sorted_runs) = match &compactor_job.job_input() {
-            CompactorJobInput::SortedRunJobInputs { ssts, sorted_runs } => {
-                (ssts.to_vec(), sorted_runs.to_vec())
-            }
-        };
+        let ssts = CompactorJob::get_ssts(db_state, &request.sources());
+        let sorted_runs = CompactorJob::get_sorted_runs(db_state, &request.sources());
         // if there are no SRs when we compact L0 then the resulting SR is the last sorted run.
         let is_dest_last_run = db_state.compacted.is_empty()
             || db_state

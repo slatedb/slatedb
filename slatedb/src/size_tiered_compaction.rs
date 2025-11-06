@@ -426,9 +426,7 @@ mod tests {
     use crate::compactor::CompactionScheduler;
 
     use crate::clock::DefaultSystemClock;
-    use crate::compactor_state::{
-        CompactorJob, CompactorJobInput, CompactorJobRequest, CompactorState, SourceId,
-    };
+    use crate::compactor_state::{CompactorJob, CompactorJobRequest, CompactorState, SourceId};
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::seq_tracker::SequenceTracker;
@@ -564,15 +562,7 @@ mod tests {
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![3, 2, 1, 0]);
-        let job_input: CompactorJobInput = CompactorJobInput::SortedRunJobInputs {
-            ssts: CompactorJob::get_ssts(state.db_state(), request.sources()),
-            sorted_runs: CompactorJob::get_sorted_runs(state.db_state(), request.sources()),
-        };
-        let compactor_job = CompactorJob::new(
-            compaction_id,
-            request,
-            job_input,
-        );
+        let compactor_job = CompactorJob::new(compaction_id, request);
 
         state.submit_compactor_job(compactor_job.clone());
 
@@ -663,15 +653,7 @@ mod tests {
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
-        let job_input: CompactorJobInput = CompactorJobInput::SortedRunJobInputs {
-            ssts: CompactorJob::get_ssts(state.db_state(), request.sources()),
-            sorted_runs: CompactorJob::get_sorted_runs(state.db_state(), request.sources()),
-        };
-        let compactor_job = CompactorJob::new(
-            compaction_id,
-            request,
-            job_input,
-        );
+        let compactor_job = CompactorJob::new(compaction_id, request);
         state.submit_compactor_job(compactor_job.clone());
         let id = state
             .submit_compaction(compaction_job_id, compactor_job)
@@ -709,14 +691,9 @@ mod tests {
 
         let compaction_job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let job_input = CompactorJobInput::SortedRunJobInputs {
-            ssts: state.db_state().l0.clone().into(),
-            sorted_runs: vec![],
-        };
         let compactor_job = CompactorJob::new(
             compaction_id,
             create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
-            job_input,
         );
         state.submit_compactor_job(compactor_job.clone());
         let id = state
