@@ -2260,7 +2260,9 @@ mod tests {
         expected_cache_parts: Vec<(&str, usize)>,
     ) -> (Arc<CachedObjectStore>, Db) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let opts = test_db_options(0, 1024, None);
+        let mut opts = test_db_options(0, 1024, None);
+        // disable manifest polling to avoid caching manifests non-deterministically
+        opts.manifest_poll_interval = Duration::from_millis(u64::MAX);
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_")
             .tempdir()
@@ -2320,7 +2322,8 @@ mod tests {
         let expected_cache_parts =
             vec![
             ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
-            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 1),
+            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 0),
+            // 1 part is cached because of wal_replay after fencing (which reads the SST, thereby caching it)
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 1),
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
         ];
