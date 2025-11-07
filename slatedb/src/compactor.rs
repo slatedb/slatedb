@@ -543,6 +543,7 @@ impl CompactorEventHandler {
     fn finish_failed_compaction(&mut self, id: Ulid) {
         self.state.remove_job(&id);
         self.progress_tracker.remove_job(id);
+        self.update_compaction_low_watermark();
     }
 
     #[instrument(level = "debug", skip_all, fields(id = %id))]
@@ -559,6 +560,7 @@ impl CompactorEventHandler {
         self.stats
             .last_compaction_ts
             .set(self.system_clock.now().timestamp() as u64);
+        self.update_compaction_low_watermark();
         Ok(())
     }
 
@@ -571,6 +573,7 @@ impl CompactorEventHandler {
         }
 
         self.state.add_job(job.clone())?;
+        self.update_compaction_low_watermark();
         // Jobs and attempts are 1:1 right now.
         let attempt_id = job.id();
         tracing::Span::current().record("id", tracing::field::display(&attempt_id));
@@ -594,6 +597,30 @@ impl CompactorEventHandler {
             info!("in-flight compaction [compaction={}]", job);
         }
     }
+
+    /// Updates the `compactor/longest_running_compaction_start_ts_ms` gauge with the
+    /// earliest (oldest) ULID timestamp among active compaction jobs.
+    ///
+    /// This serves as a GC safety barrier: the GC should not delete any compacted SST
+    /// whose ULID timestamp is greater than or equal to this value.
+    ///
+    /// This is a process-local coordination mechanism that only works when the compactor
+    /// and garbage collector run in the same process and share the same StatRegistry. It's
+    /// a hack until we have proper compactor persistence (so GC can retrieve the compactor
+    /// state from the object store). See #604 for details.
+    fn update_compaction_low_watermark(&self) {
+        let mut min_ts = u64::MAX;
+        for job in self.state.jobs() {
+            let ts = job
+                .id()
+                .datetime()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .expect("invalid duration");
+            min_ts = min_ts.min(ts);
+        }
+        self.stats.compaction_low_watermark_ts.set(min_ts);
+    }
 }
 
 pub mod stats {
@@ -609,11 +636,16 @@ pub mod stats {
     pub const BYTES_COMPACTED: &str = compactor_stat_name!("bytes_compacted");
     pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
     pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
+    /// The earliest (oldest) ULID timestamp among active compaction jobs. See
+    /// [super::CompactorEventHandler::update_longest_running_start_metric] for details.
+    pub const COMPACTION_LOW_WATERMARK_TS: &str =
+        compactor_stat_name!("compaction_low_watermark_ts");
 
     pub(crate) struct CompactionStats {
         pub(crate) last_compaction_ts: Arc<Gauge<u64>>,
         pub(crate) running_compactions: Arc<Gauge<i64>>,
         pub(crate) bytes_compacted: Arc<Counter>,
+        pub(crate) compaction_low_watermark_ts: Arc<Gauge<u64>>,
     }
 
     impl CompactionStats {
@@ -622,10 +654,15 @@ pub mod stats {
                 last_compaction_ts: Arc::new(Gauge::default()),
                 running_compactions: Arc::new(Gauge::default()),
                 bytes_compacted: Arc::new(Counter::default()),
+                compaction_low_watermark_ts: Arc::new(Gauge::default()),
             };
             stat_registry.register(LAST_COMPACTION_TS_SEC, stats.last_compaction_ts.clone());
             stat_registry.register(RUNNING_COMPACTIONS, stats.running_compactions.clone());
             stat_registry.register(BYTES_COMPACTED, stats.bytes_compacted.clone());
+            stat_registry.register(
+                COMPACTION_LOW_WATERMARK_TS,
+                stats.compaction_low_watermark_ts.clone(),
+            );
             stats
         }
     }
@@ -1493,6 +1530,41 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_compaction_low_watermark_uses_min_ulid_time() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+
+        // Two artificial jobs with known ULID timestamps
+        let older_ts_ms: u64 = 1_000;
+        let newer_ts_ms: u64 = 2_000;
+        let job_old = CompactorJob::new(
+            Ulid::from_parts(older_ts_ms, 0),
+            CompactorJobSpec::new(vec![], 10),
+        );
+        let job_new = CompactorJob::new(
+            Ulid::from_parts(newer_ts_ms, 0),
+            CompactorJobSpec::new(vec![], 11),
+        );
+
+        fixture
+            .handler
+            .state
+            .add_job(job_old)
+            .expect("failed to add old job");
+        fixture
+            .handler
+            .state
+            .add_job(job_new)
+            .expect("failed to add new job");
+
+        // Update the metric and verify it matches the oldest job's ULID time
+        fixture.handler.update_compaction_low_watermark();
+        assert_eq!(
+            fixture.handler.stats.compaction_low_watermark_ts.value(),
+            older_ts_ms
+        );
     }
 
     struct CompactorEventHandlerTestFixture {

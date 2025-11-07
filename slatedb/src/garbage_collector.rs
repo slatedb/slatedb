@@ -149,7 +149,7 @@ impl GarbageCollector {
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Self {
-        let stats = Arc::new(GcStats::new(stat_registry));
+        let stats = Arc::new(GcStats::new(stat_registry.clone()));
         let wal_gc_task = WalGcTask::new(
             manifest_store.clone(),
             table_store.clone(),
@@ -161,6 +161,7 @@ impl GarbageCollector {
             table_store.clone(),
             stats.clone(),
             options.compacted_options,
+            stat_registry.clone(),
         );
         let manifest_gc_task = ManifestGcTask::new(
             manifest_store.clone(),
