@@ -148,6 +148,18 @@ jobs:
           maturin develop
           pip install -e .[test]
 
+      - name: Install lint dependencies (Ruff)
+        working-directory: ./slatedb-py
+        run: |
+          source .venv/bin/activate
+          pip install -e .[lint]
+
+      - name: Run Ruff linter
+        working-directory: ./slatedb-py
+        run: |
+          source .venv/bin/activate
+          ruff check . --output-format=github
+
       - name: Run Python tests
         working-directory: ./slatedb-py
         run: |

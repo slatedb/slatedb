@@ -1,194 +1,2115 @@
 """
-Python stub file for slatedb module.
+SlateDB Python API typing stubs.
 
-This module provides a Python interface to SlateDB, a key-value database built in Rust.
+This module describes the public Python interface for SlateDB, a
+cloud-native, embeddable, transactional key–value database optimized for
+object storage. The stubs are used by type checkers and IDEs for
+autocompletion, static analysis, and inline documentation.
+
+Overview:
+- :class:`SlateDB` provides read/write access, transactions, and snapshots.
+- :class:`SlateDBReader` provides read-only access, optionally pinned to a
+  checkpoint.
+- :class:`SlateDBAdmin` exposes administrative functionality for manifests,
+  checkpoints, cloning, and garbage collection.
+- Iteration is available via ``scan(...)`` returning :class:`DbIterator` that
+  supports both sync and async iteration.
+
+See also:
+- Project website: https://slatedb.io
+- Root README: README.md (project root)
 """
 
-from typing import Optional, List, Tuple
+from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Literal, TypedDict
+
+# Isolation levels for transactions.
+Isolation = Literal["si", "ssi", "snapshot", "serializable", "serializable_snapshot"]
+
+
+class TransactionError(Exception):
+    """Raised when a transaction conflict occurs (retryable)."""
+
+
+class ClosedError(Exception):
+    """Raised when an operation targets a closed or fenced resource."""
+
+
+class UnavailableError(Exception):
+    """Raised when the underlying object store or network is unavailable."""
+
+
+class InvalidError(Exception):
+    """Raised for invalid arguments, configuration, or method usage."""
+
+
+class DataError(Exception):
+    """Raised for invalid or corrupted on-disk/object-store data."""
+
+
+class InternalError(Exception):
+    """Raised for unexpected internal errors."""
+
 
 class SlateDB:
     """
-    A Python interface to SlateDB, a key-value database.
-    
-    SlateDB is a high-performance key-value store that provides ACID transactions
-    and is built with Rust for safety and performance.
+    Read/write interface to a SlateDB database.
+
+    Use this class to open a database, read and write keys, and run
+    transactions. For read-only access (optionally at a checkpoint), see
+    :class:`SlateDBReader`.
     """
-    
-    def __init__(self, path: str, env_file: Optional[str] = None, **kwargs) -> None:
+
+    def __init__(
+        self,
+        path: str,
+        url: str | None = None,
+        env_file: str | None = None,
+        *,
+        merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
+        settings: str | None = None,
+    ) -> None:
         """
-        Create a new SlateDB instance.
-        
+        Create or open a SlateDB database.
+
         Args:
-            path: The path where the database will be stored
-            
-        Raises:
-            ValueError: If there's an error opening the database
+            path: Local path (or logical DB name) for the database.
+            url: Optional object store URL (e.g. "s3://bucket/prefix",
+                "memory:///"), overrides env_file if provided.
+            env_file: Optional path to a file containing environment variables
+                to configure the object store when ``url`` is omitted.
+            merge_operator: Optional Python callable implementing a merge
+                function with signature ``merge(key: bytes, existing: Optional[bytes], value: bytes) -> bytes``.
+            settings: Optional path to a SlateDB settings TOML file.
+
+        Examples:
+            Open a DB using an env file:
+
+            >>> db = SlateDB("/tmp/mydb", env_file=".env")
+
+            Configure a merge operator:
+
+            >>> def last_write_wins(key: bytes, existing: bytes | None, value: bytes) -> bytes:
+            ...     return value
+            >>> db = SlateDB("/tmp/mydb", merge_operator=last_write_wins)
         """
         ...
-    
+
+    @classmethod
+    async def open_async(
+        cls,
+        path: str,
+        url: str | None = None,
+        env_file: str | None = None,
+        *,
+        merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
+        settings: str | None = None,
+    ) -> SlateDB:
+        """
+        Async constructor that opens the database and returns a :class:`SlateDB`.
+
+        Args:
+            path: Database path.
+            url: Optional object store URL.
+            env_file: Optional env file for object store config.
+            merge_operator: Optional merge function.
+            settings: Optional path to settings TOML file.
+
+        Returns:
+            An initialized :class:`SlateDB` instance.
+
+        Examples:
+            >>> db = await SlateDB.open_async("/tmp/mydb", env_file=".env")
+            >>> await db.put_async(b"k", b"v")
+            >>> await db.get_async(b"k")
+            b'v'
+        """
+        ...
+
+    def snapshot(self) -> SlateDBSnapshot:
+        """
+        Create a read-only snapshot at the current committed state.
+
+        Returns:
+            :class:`SlateDBSnapshot` providing a consistent, read-only view.
+
+        Example:
+            >>> snap = db.snapshot()
+            >>> snap.get(b"missing")
+            None
+        """
+        ...
+
+    async def snapshot_async(self) -> SlateDBSnapshot:
+        """
+        Async variant of ``snapshot``.
+
+        Returns:
+            A :class:`SlateDBSnapshot` instance.
+
+        Examples:
+            >>> snap = await db.snapshot_async()
+            >>> await snap.get_async(b"missing")
+            None
+        """
+        ...
+
+    def begin(self, isolation: Isolation | None = None) -> SlateDBTransaction:
+        """
+        Begin a transaction.
+
+        Args:
+            isolation: Isolation level. Aliases:
+                - "si" or "snapshot" for Snapshot Isolation
+                - "ssi", "serializable", or "serializable_snapshot" for Serializable Snapshot Isolation
+
+        Returns:
+            :class:`SlateDBTransaction` handle.
+
+        Example:
+            >>> txn = db.begin("ssi")
+            >>> txn.put(b"k", b"v")
+            >>> txn.commit()
+            >>> db.get(b"k")
+            b'v'
+        """
+        ...
+
+    async def begin_async(self, isolation: Isolation | None = None) -> SlateDBTransaction:
+        """
+        Async variant of ``begin``.
+
+        Args:
+            isolation: Optional isolation level string.
+
+        Returns:
+            A :class:`SlateDBTransaction` instance.
+
+        Examples:
+            >>> txn = await db.begin_async("si")
+            >>> await txn.put_with_options(b"k2", b"v2")
+            >>> await txn.commit_async()
+            >>> await db.get_async(b"k2")
+            b'v2'
+        """
+        ...
+
     def put(self, key: bytes, value: bytes) -> None:
         """
-        Store a key-value pair in the database.
-        
-        Args:
-            key: The key as bytes (cannot be empty)
-            value: The value as bytes
-            
-        Raises:
-            ValueError: If the key is empty or there's a database error
-        """
-        ...
-
-    
-    def get(self, key: bytes) -> Optional[bytes]:
-        """
-        Retrieve a value by key from the database.
-        
-        Args:
-            key: The key to look up as bytes (cannot be empty)
-            
-        Returns:
-            The value as bytes if found, None if not found
-            
-        Raises:
-            ValueError: If the key is empty or there's a database error
-        """
-        ...
-
-    
-    def scan(self, start: bytes, end: Optional[bytes] = None) -> List[Tuple[bytes, bytes]]:
-        """
-        Scan the database for key-value pairs with a given prefix.
+        Store a key-value pair.
 
         Args:
-            start: The start key to scan from as bytes (cannot be empty)
-            end: The end key to stop at as bytes, exclusive (optional, defaults to None)
-                 if None, scan until the end of start+0xFF
+            key: Non-empty key.
+            value: Value bytes.
 
-        Raises:
-            ValueError: If the start key is empty or there's a database error
-
-        Returns:
-            A list of tuples containing the key and value as bytes, sorted by key
-        """
-        ...
-    
-    def delete(self, key: bytes) -> None:
-        """
-        Delete a key-value pair from the database.
-        
-        Args:
-            key: The key to delete as bytes (cannot be empty)
-            
-        Raises:
-            ValueError: If the key is empty or there's a database error
+        Example:
+            >>> db.put(b"k", b"v")
         """
         ...
 
     async def put_async(self, key: bytes, value: bytes) -> None:
         """
-        Store a key-value pair in the database asynchronously.
+        Async variant of ``put``.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes.
+
+        Examples:
+            >>> await db.put_async(b"k", b"v")
         """
         ...
 
-    async def get_async(self, key: bytes) -> Optional[bytes]:
+    def get(self, key: bytes) -> bytes | None:
         """
-        Retrieve a value by key from the database asynchronously.
+        Get a value by key.
+
+        Args:
+            key: Non-empty key.
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Example:
+            >>> db.get(b"missing")
+            None
+        """
+        ...
+
+    async def get_async(self, key: bytes) -> bytes | None:
+        """
+        Async variant of ``get``.
+
+        Args:
+            key: Non-empty key.
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Examples:
+            >>> await db.put_async(b"k", b"v")
+            >>> await db.get_async(b"k")
+            b'v'
+        """
+        ...
+
+    def get_with_options(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """
+        Get a value with read options.
+
+        Args:
+            key: Non-empty key.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include uncommitted/dirty data if True.
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Example:
+            >>> db.get_with_options(b"k", durability_filter="memory")
+            None
+        """
+        ...
+
+    async def get_with_options_async(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """
+        Async variant of ``get_with_options``.
+
+        Args:
+            key: Non-empty key.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include uncommitted/dirty data if True.
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Examples:
+            >>> await db.get_with_options_async(b"k", durability_filter="remote")
+            None
+        """
+        ...
+
+    def delete(self, key: bytes) -> None:
+        """
+        Delete a key.
+
+        Args:
+            key: Non-empty key to remove.
+
+        Examples:
+            >>> db.put(b"temp", b"1")
+            >>> db.delete(b"temp")
         """
         ...
 
     async def delete_async(self, key: bytes) -> None:
         """
-        Delete a key-value pair from the database asynchronously.
+        Async variant of ``delete``.
+
+        Args:
+            key: Non-empty key to remove.
+
+        Examples:
+            >>> await db.put_async(b"temp", b"1")
+            >>> await db.delete_async(b"temp")
         """
         ...
 
-
-    def close(self) -> None:
+    def scan(self, start: bytes, end: bytes | None = None) -> DbIterator:
         """
-        Close the database connection.
-        
-        Raises:
-            ValueError: If there's an error closing the database
+        Iterate over a key range.
+
+        Args:
+            start: Start key (inclusive, non-empty).
+            end: Optional end key (exclusive). If ``None``, a bound is derived
+                to iterate keys sharing the ``start`` prefix.
+
+        Returns:
+            :class:`DbIterator` yielding ``(key, value)`` sorted by key.
+
+        Examples:
+            Iterate synchronously:
+
+            >>> for k, v in db.scan(b"a", b"z"):
+            ...     print((k, v))
+            (b'a1', b'v1')
+            (b'a2', b'v2')
         """
         ...
 
-class SlateDBReader:
-    """
-    A read-only Python interface to SlateDB.
-    
-    SlateDBReader provides read-only access to a SlateDB database,
-    optionally at a specific checkpoint.
-    """
-    
-    def __init__(
-        self, 
-        path: str, 
-        env_file: Optional[str] = None, 
-        checkpoint_id: Optional[str] = None
+    async def scan_async(self, start: bytes, end: bytes | None = None) -> DbIterator:
+        """
+        Async variant of ``scan``.
+
+        Args:
+            start: Start key (inclusive, non-empty).
+            end: Optional end key (exclusive) or ``None`` for prefix range.
+
+        Returns:
+            A :class:`DbIterator` that supports ``async for``.
+
+        Example:
+            >>> it = await db.scan_async(b"prefix")
+            >>> async for k, v in it:
+            ...     print((k, v))
+            (b'prefix-1', b'v1')
+            (b'prefix-2', b'v2')
+        """
+        ...
+
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: bytes | None = None,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate with advanced scan options.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested range.
+
+        Examples:
+            >>> for k, v in db.scan_with_options(b"a", b"c", read_ahead_bytes=1_000_000):
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'b', b'v2')
+        """
+        ...
+
+    async def scan_with_options_async(
+        self,
+        start: bytes,
+        end: bytes | None = None,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_with_options``.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested range that supports ``async for``.
+
+        Examples:
+            >>> it = await db.scan_with_options_async(b"a")
+            >>> async for k, v in it:
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    def merge(self, key: bytes, value: bytes) -> None:
+        """
+        Merge a value using the configured merge operator.
+
+        Requires that the DB was opened with a ``merge_operator``.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes to merge.
+
+        Examples:
+            >>> def last_write_wins(key: bytes, existing: bytes | None, value: bytes) -> bytes:
+            ...     return value
+            >>> db = SlateDB("/tmp/mydb", merge_operator=last_write_wins)
+            >>> db.merge(b"k", b"v")
+        """
+        ...
+
+    async def merge_async(self, key: bytes, value: bytes) -> None:
+        """
+        Async variant of ``merge``.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes to merge.
+
+        Examples:
+            >>> await db.merge_async(b"k", b"v")
+        """
+        ...
+
+    def put_with_options(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+        await_durable: bool | None = None,
     ) -> None:
         """
-        Create a new SlateDBReader instance.
-        
-        Args:
-            path: The path where the database is stored
-            env_file: Optional environment file for object store configuration
-            checkpoint_id: Optional checkpoint ID (UUID string) to read from
-            
-        Raises:
-            ValueError: If there's an error opening the database or invalid checkpoint_id
-        """
-        ...
-    
-    def get(self, key: bytes) -> Optional[bytes]:
-        """
-        Retrieve a value by key from the database.
-        
-        Args:
-            key: The key to look up as bytes (cannot be empty)
-            
-        Returns:
-            The value as bytes if found, None if not found
-            
-        Raises:
-            ValueError: If the key is empty or there's a database error
-        """
-        ...
-    
-    def scan(self, start: bytes, end: Optional[bytes] = None) -> List[Tuple[bytes, bytes]]:
-        """
-        Scan the database for key-value pairs within a range.
+        Store a key-value pair with per-op options.
 
         Args:
-            start: The start key to scan from as bytes (cannot be empty)
-            end: The end key to stop at as bytes, exclusive (optional)
-                 if None, scan with auto-generated end (start + 0xFF)
+            key: Non-empty key.
+            value: Value bytes.
+            ttl: Optional logical TTL units for this write (depends on logical clock).
+            await_durable: If False, do not wait for durable write.
 
-        Raises:
-            ValueError: If the start key is empty or there's a database error
-
-        Returns:
-            A list of tuples containing the key and value as bytes, sorted by key
+        Example:
+            >>> db.put_with_options(b"k", b"v", await_durable=False)
         """
         ...
-    
-    async def get_async(self, key: bytes) -> Optional[bytes]:
+
+    def delete_with_options(self, key: bytes, *, await_durable: bool | None = None) -> None:
         """
-        Retrieve a value by key from the database asynchronously.
-        
+        Delete a key with write options.
+
         Args:
-            key: The key to look up as bytes (cannot be empty)
-            
-        Returns:
-            The value as bytes if found, None if not found
+            key: Non-empty key.
+            await_durable: If False, do not wait for durable write.
         """
         ...
-    
+
+    def merge_with_options(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+        await_durable: bool | None = None,
+    ) -> None:
+        """
+        Merge a value using the configured merge operator with per-op options.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes to merge.
+            ttl: Optional logical TTL units for this write.
+            await_durable: If False, do not wait for durable write.
+
+        Examples:
+            >>> db.merge_with_options(b"k", b"v", ttl=60_000)
+        """
+        ...
+
+    async def put_with_options_async(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+        await_durable: bool | None = None,
+    ) -> None:
+        """
+        Async variant of ``put_with_options``.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes.
+            ttl: Optional logical TTL units.
+            await_durable: If False, do not wait for durable write.
+
+        Examples:
+            >>> await db.put_with_options_async(b"k", b"v", await_durable=False)
+        """
+        ...
+
+    async def delete_with_options_async(self, key: bytes, *, await_durable: bool | None = None) -> None:
+        """
+        Async variant of ``delete_with_options``.
+
+        Args:
+            key: Non-empty key.
+            await_durable: If False, do not wait for durable write.
+
+        Examples:
+            >>> await db.delete_with_options_async(b"k", await_durable=False)
+        """
+        ...
+
+    async def merge_with_options_async(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+        await_durable: bool | None = None,
+    ) -> None:
+        """
+        Async variant of ``merge_with_options``.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes to merge.
+            ttl: Optional logical TTL units.
+            await_durable: If False, do not wait for durable write.
+
+        Examples:
+            >>> await db.merge_with_options_async(b"k", b"v", ttl=10_000)
+        """
+        ...
+
+    def write(self, batch: WriteBatch) -> None:
+        """
+        Atomically apply a batch of writes (puts/deletes/merges).
+
+        Args:
+            batch: A :class:`WriteBatch` with queued operations.
+
+        Example:
+            >>> wb = WriteBatch()
+            >>> wb.put(b"k1", b"v1")
+            >>> wb.delete(b"k2")
+            >>> db.write(wb)
+        """
+        ...
+
+    def write_with_options(self, batch: WriteBatch, *, await_durable: bool | None = None) -> None:
+        """
+        Atomically apply a batch with write options.
+
+        Args:
+            batch: A :class:`WriteBatch` with queued operations.
+            await_durable: If False, do not wait for durable write.
+
+        Examples:
+            >>> wb = WriteBatch()
+            >>> wb.put(b"k", b"v")
+            >>> db.write_with_options(wb, await_durable=False)
+        """
+        ...
+
+    async def write_async(self, batch: WriteBatch) -> None:
+        """
+        Async variant of ``write``.
+
+        Args:
+            batch: A :class:`WriteBatch` with queued operations.
+
+        Examples:
+            >>> wb = WriteBatch(); wb.put(b"k", b"v")
+            >>> await db.write_async(wb)
+        """
+        ...
+
+    async def write_with_options_async(self, batch: WriteBatch, *, await_durable: bool | None = None) -> None:
+        """
+        Async variant of ``write_with_options``.
+
+        Args:
+            batch: A :class:`WriteBatch` with queued operations.
+            await_durable: If False, do not wait for durable write.
+
+        Examples:
+            >>> wb = WriteBatch(); wb.put(b"k", b"v")
+            >>> await db.write_with_options_async(wb, await_durable=False)
+        """
+        ...
+
+    def flush(self) -> None:
+        """
+        Flush in-memory writes to durable storage.
+
+        Examples:
+            >>> db.flush()
+        """
+        ...
+
+    async def flush_async(self) -> None:
+        """
+        Async variant of ``flush``.
+
+        Examples:
+            >>> await db.flush_async()
+        """
+        ...
+
+    def flush_with_options(self, flush_type: Literal["wal", "memtable"]) -> None:
+        """
+        Flush with explicit type.
+
+        Args:
+            flush_type: "wal" to flush write-ahead log or "memtable" to flush in-memory table.
+
+        Examples:
+            >>> db.flush_with_options("wal")
+        """
+        ...
+
+    async def flush_with_options_async(self, flush_type: Literal["wal", "memtable"]) -> None:
+        """
+        Async variant of ``flush_with_options``.
+
+        Args:
+            flush_type: "wal" or "memtable".
+
+        Examples:
+            >>> await db.flush_with_options_async("memtable")
+        """
+        ...
+
+    def metrics(self) -> dict[str, int]:
+        """
+        Return current :class:`SlateDB` metrics as a dictionary.
+
+        Returns:
+            A mapping of metric name to value. Keys are metric names (for example,
+            ``"db/get_requests"``) and values are integers.
+
+        Examples:
+            >>> db.metrics()
+            {'db/get_requests': 123, ...}
+        """
+        ...
+
+    def create_checkpoint(
+        self,
+        scope: Literal["all", "durable"] = "all",
+        *,
+        lifetime: int | None = None,
+        source: str | None = None,
+    ) -> CheckpointCreateResult:
+        """
+        Create a writer checkpoint that includes data per the requested scope.
+
+        Args:
+            scope: "all" to include recent writes, "durable" to include only durable data.
+            lifetime: Optional lifetime in milliseconds.
+            source: Optional existing checkpoint UUID to base from.
+
+        Returns:
+            Dict with ``id`` (UUID string) and ``manifest_id`` (int).
+
+        Examples:
+            >>> db.create_checkpoint()
+            {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
+        """
+        ...
+
+    async def create_checkpoint_async(
+        self,
+        scope: Literal["all", "durable"] = "all",
+        *,
+        lifetime: int | None = None,
+        source: str | None = None,
+    ) -> CheckpointCreateResult:
+        """
+        Async variant of ``create_checkpoint``.
+
+        Args:
+            scope: "all" or "durable".
+            lifetime: Optional lifetime in milliseconds.
+            source: Optional checkpoint id to base from.
+
+        Returns:
+            A mapping with ``id`` and ``manifest_id``.
+
+        Examples:
+            >>> await db.create_checkpoint_async()
+            {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
+        """
+        ...
+
     def close(self) -> None:
         """
-        Close the database reader.
-        
-        Raises:
-            ValueError: If there's an error closing the database reader
+        Close the database and release resources.
+
+        Examples:
+            >>> db.close()
         """
-        ... 
+        ...
+
+    async def close_async(self) -> None:
+        """
+        Async variant of ``close``.
+
+        Examples:
+            >>> await db.close_async()
+        """
+        ...
+
+
+class SlateDBSnapshot:
+    """Read-only view of a consistent point in time."""
+
+    def get(self, key: bytes) -> bytes | None:
+        """
+        Get a value from the snapshot by key.
+
+        Args:
+            key: Non-empty key.
+
+        Returns:
+            Value bytes or ``None`` if the key does not exist at the snapshot.
+
+        Examples:
+            >>> snap = db.snapshot()
+            >>> snap.get(b"k")
+            None
+        """
+        ...
+
+    async def get_async(self, key: bytes) -> bytes | None:
+        """
+        Async variant of ``get``.
+
+        Args:
+            key: Non-empty key.
+
+        Returns:
+            Value bytes or ``None``.
+
+        Examples:
+            >>> snap = await db.snapshot_async()
+            >>> await snap.get_async(b"k")
+            None
+        """
+        ...
+
+    def scan(self, start: bytes, end: bytes | None = None) -> DbIterator:
+        """
+        Iterate a range within the snapshot.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive). ``None`` derives a prefix bound.
+
+        Returns:
+            :class:`DbIterator` over ``(key, value)`` pairs at the snapshot.
+
+        Examples:
+            >>> it = snap.scan(b"a")
+            >>> for k, v in it:
+            ...     print((k, v))
+            (b'a1', b'v1')
+            (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_async(self, start: bytes, end: bytes | None = None) -> DbIterator:
+        """
+        Async variant of ``scan``.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+
+        Returns:
+            :class:`DbIterator` for async iteration at the snapshot.
+
+        Examples:
+            >>> it = await snap.scan_async(b"a")
+            >>> async for k, v in it:
+            ...     print((k, v))
+            (b'a1', b'v1')
+            (b'a2', b'v2')
+        """
+        ...
+
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: bytes | None = None,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate a range with advanced options within the snapshot.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored for snapshots (reads are committed-only).
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested range.
+
+        Examples:
+            >>> it = snap.scan_with_options(b"a", cache_blocks=True)
+            >>> for k, v in it:
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_with_options_async(
+        self,
+        start: bytes,
+        end: bytes | None = None,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_with_options``.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored for snapshots.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested range for async iteration.
+
+        Examples:
+            >>> it = await snap.scan_with_options_async(b"a")
+            >>> async for k, v in it:
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    def close(self) -> None:
+        """
+        Close the snapshot handle.
+
+        Examples:
+            >>> snap.close()
+        """
+        ...
+
+    async def close_async(self) -> None:
+        """
+        Async variant of ``close``.
+
+        Examples:
+            >>> await snap.close_async()
+        """
+        ...
+
+
+class SlateDBTransaction:
+    """Read/write transaction handle."""
+
+    def get(self, key: bytes) -> bytes | None:
+        """
+        Get a value within the transaction (reads see prior writes).
+
+        Args:
+            key: Non-empty key.
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Examples:
+            >>> txn = db.begin()
+            >>> txn.get(b"k")
+            None
+        """
+        ...
+
+    async def get_async(self, key: bytes) -> bytes | None:
+        """
+        Async variant of ``get`` within the transaction.
+
+        Args:
+            key: Non-empty key.
+
+        Returns:
+            Value bytes or ``None``.
+
+        Examples:
+            >>> txn = await db.begin_async()
+            >>> await txn.get_async(b"k")
+            None
+        """
+        ...
+
+    def get_with_options(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """
+        Get a value with read options within the transaction.
+
+        Args:
+            key: Non-empty key.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include uncommitted/dirty data if True.
+
+        Returns:
+            Value bytes or ``None``.
+
+        Examples:
+            >>> txn = db.begin()
+            >>> txn.get_with_options(b"k", dirty=True)
+            None
+        """
+        ...
+
+    async def get_with_options_async(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """
+        Async variant of ``get_with_options`` within the transaction.
+
+        Args:
+            key: Non-empty key.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include uncommitted/dirty data if True.
+
+        Returns:
+            Value bytes or ``None``.
+
+        Examples:
+            >>> txn = await db.begin_async()
+            >>> await txn.get_with_options_async(b"k", dirty=True)
+            None
+        """
+        ...
+
+    def scan(self, start: bytes, end: bytes | None = None) -> DbIterator:
+        """
+        Iterate a range within the transaction.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+
+        Returns:
+            :class:`DbIterator` over ``(key, value)`` pairs, reflecting in-transaction writes.
+
+        Examples:
+            >>> txn = db.begin()
+            >>> for k, v in txn.scan(b"a"):
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_async(self, start: bytes, end: bytes | None = None) -> DbIterator:
+        """
+        Async variant of ``scan`` returning a :class:`DbIterator`.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+
+        Returns:
+            :class:`DbIterator` for async iteration reflecting in-transaction writes.
+
+        Examples:
+            >>> txn = await db.begin_async()
+            >>> it = await txn.scan_async(b"a")
+            >>> async for k, v in it:
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: bytes | None = None,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate a range with advanced options within the transaction.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested range.
+
+        Examples:
+            >>> txn = db.begin()
+            >>> it = txn.scan_with_options(b"a", read_ahead_bytes=1_000)
+            >>> for k, v in it:
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_with_options_async(
+        self,
+        start: bytes,
+        end: bytes | None = None,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_with_options`` returning a :class:`DbIterator`.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested range for async iteration.
+
+        Examples:
+            >>> txn = await db.begin_async()
+            >>> it = await txn.scan_with_options_async(b"a", cache_blocks=True)
+            >>> async for k, v in it:
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    def put(self, key: bytes, value: bytes) -> None:
+        """
+        Buffer a put in the transaction.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes.
+
+        Examples:
+            >>> txn = db.begin(); txn.put(b"k", b"v")
+        """
+        ...
+
+    def put_with_options(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+    ) -> None:
+        """
+        Buffer a put with per-op options.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes.
+            ttl: Optional logical TTL units for this write.
+
+        Examples:
+            >>> txn = db.begin(); txn.put_with_options(b"k", b"v", ttl=60_000)
+        """
+        ...
+
+    def delete(self, key: bytes) -> None:
+        """
+        Buffer a delete in the transaction.
+
+        Args:
+            key: Non-empty key.
+
+        Examples:
+            >>> txn = db.begin(); txn.delete(b"k")
+        """
+        ...
+
+    def merge(self, key: bytes, value: bytes) -> None:
+        """
+        Buffer a merge in the transaction (requires merge operator).
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes to merge.
+
+        Examples:
+            >>> txn = db.begin(); txn.merge(b"k", b"v")
+        """
+        ...
+
+    def merge_with_options(
+        self,
+        key: bytes,
+        value: bytes,
+        *,
+        ttl: int | None = None,
+    ) -> None:
+        """
+        Buffer a merge with per-op options (e.g., TTL).
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes to merge.
+            ttl: Optional logical TTL units.
+
+        Examples:
+            >>> txn = db.begin(); txn.merge_with_options(b"k", b"v", ttl=10_000)
+        """
+        ...
+
+    def commit(self) -> None:
+        """
+        Commit buffered writes atomically.
+
+        Examples:
+            >>> txn = db.begin(); txn.put(b"k", b"v"); txn.commit()
+        """
+        ...
+
+    async def commit_async(self) -> None:
+        """
+        Async variant of ``commit``.
+
+        Examples:
+            >>> txn = await db.begin_async()
+            >>> await txn.put_with_options(b"k", b"v")
+            >>> await txn.commit_async()
+        """
+        ...
+
+    def rollback(self) -> None:
+        """
+        Discard buffered writes without committing.
+
+        Examples:
+            >>> txn = db.begin(); txn.put(b"k", b"v"); txn.rollback()
+        """
+        ...
+
+
+class SlateDBReader:
+    def __init__(
+        self,
+        path: str,
+        url: str | None = None,
+        env_file: str | None = None,
+        checkpoint_id: str | None = None,
+        *,
+        merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
+        manifest_poll_interval: int | None = None,
+        checkpoint_lifetime: int | None = None,
+        max_memtable_bytes: int | None = None,
+    ) -> None:
+        """
+        Create a read-only reader.
+
+        Args:
+            path: Database path.
+            url: Optional object store URL.
+            env_file: Optional env file for object store config.
+            checkpoint_id: Optional checkpoint UUID string to read at.
+            merge_operator: Optional merge operator for reads.
+            manifest_poll_interval: Optional poll interval in milliseconds to refresh manifests and replay new WALs when no explicit checkpoint is supplied. Must be <= checkpoint_lifetime/2.
+            checkpoint_lifetime: Optional checkpoint lifetime in milliseconds for implicit reader checkpoints. Must be >= 1000 and > 2x manifest_poll_interval.
+            max_memtable_bytes: Optional maximum size in bytes of the internal immutable memtable used when replaying WALs.
+
+        Examples:
+            >>> reader = SlateDBReader("/tmp/mydb", env_file=".env")
+        """
+        ...
+
+    @classmethod
+    async def open_async(
+        cls,
+        path: str,
+        url: str | None = None,
+        env_file: str | None = None,
+        checkpoint_id: str | None = None,
+        *,
+        merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
+        manifest_poll_interval: int | None = None,
+        checkpoint_lifetime: int | None = None,
+        max_memtable_bytes: int | None = None,
+    ) -> SlateDBReader:
+        """
+        Async constructor for a read-only reader.
+
+        Args:
+            path: Database path.
+            url: Optional object store URL.
+            env_file: Optional env file for object store config.
+            checkpoint_id: Optional checkpoint UUID to read at.
+            merge_operator: Optional merge operator for reads.
+            manifest_poll_interval: Optional manifest poll interval (ms).
+            checkpoint_lifetime: Optional checkpoint lifetime (ms).
+            max_memtable_bytes: Optional max size of internal immutable memtable when replaying WALs.
+
+        Returns:
+            A :class:`SlateDBReader` instance.
+
+        Examples:
+            >>> reader = await SlateDBReader.open_async("/tmp/mydb", env_file=".env")
+            >>> await reader.get_async(b"missing")
+            None
+        """
+        ...
+
+    def get(self, key: bytes) -> bytes | None:
+        """
+        Get a value by key from the reader.
+
+        Args:
+            key: Non-empty key.
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Examples:
+            >>> reader.get(b"k")
+            None
+        """
+        ...
+
+    async def get_async(self, key: bytes) -> bytes | None:
+        """
+        Async variant of ``get``.
+
+        Args:
+            key: Non-empty key.
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Examples:
+            >>> await reader.get_async(b"k")
+            None
+        """
+        ...
+
+    def get_with_options(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """
+        Get a value by key with read options.
+
+        Args:
+            key: Non-empty key.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include uncommitted/dirty data if True (ignored by readers; reads are committed-only).
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Example:
+            >>> reader.get_with_options(b"k", durability_filter="memory")
+            None
+        """
+        ...
+
+    async def get_with_options_async(
+        self,
+        key: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+    ) -> bytes | None:
+        """
+        Async variant of ``get_with_options``.
+
+        Args:
+            key: Non-empty key.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include uncommitted/dirty data if True (ignored by readers).
+
+        Returns:
+            Value bytes or ``None`` if not found.
+
+        Examples:
+            >>> await reader.get_with_options_async(b"k", durability_filter="remote")
+            None
+        """
+        ...
+
+    def scan(self, start: bytes, end: bytes | None = None) -> DbIterator:
+        """
+        Iterate a range using the reader.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive). If ``None``, a bound is derived to iterate keys sharing the ``start`` prefix.
+
+        Returns:
+            :class:`DbIterator` over ``(key, value)`` pairs.
+
+        Examples:
+            >>> for k, v in reader.scan(b"a"):
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_async(self, start: bytes, end: bytes | None = None) -> DbIterator:
+        """
+        Async variant of ``scan``.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+
+        Returns:
+            :class:`DbIterator` for async iteration.
+
+        Examples:
+            >>> it = await reader.scan_async(b"a")
+            >>> async for k, v in it:
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    def scan_with_options(
+        self,
+        start: bytes,
+        end: bytes | None = None,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate a range with advanced options using the reader.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored by readers; reads are committed-only.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested range.
+
+        Examples:
+            >>> it = reader.scan_with_options(b"a", read_ahead_bytes=1_000)
+            >>> for k, v in it:
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_with_options_async(
+        self,
+        start: bytes,
+        end: bytes | None = None,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_with_options``.
+
+        Args:
+            start: Start key (inclusive).
+            end: Optional end key (exclusive).
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored by readers.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested range for async iteration.
+
+        Examples:
+            >>> it = await reader.scan_with_options_async(b"a")
+            >>> async for k, v in it:
+            ...     print((k, v))
+            (b'a', b'v')
+            (b'a2', b'v2')
+        """
+        ...
+
+    def close(self) -> None:
+        """
+        Close the reader and release resources.
+
+        Examples:
+            >>> reader.close()
+        """
+        ...
+
+    async def close_async(self) -> None:
+        """
+        Async variant of ``close``.
+
+        Examples:
+            >>> await reader.close_async()
+        """
+        ...
+
+
+class DbIterator(Iterator[tuple[bytes, bytes]], AsyncIterator[tuple[bytes, bytes]]):
+    """Iterator over ``(key, value)`` tuples returned by scans."""
+
+    def __iter__(self) -> DbIterator:
+        """
+        Return ``self`` to support iteration in ``for`` loops.
+
+        Returns:
+            The iterator itself.
+
+        Examples:
+            >>> for kv in db.scan(b"a"):
+            ...     print(kv)
+            (b'a1', b'v1')
+            (b'a2', b'v2')
+        """
+        ...
+
+    def __next__(self) -> tuple[bytes, bytes]:
+        """
+        Return the next ``(key, value)`` pair.
+
+        Returns:
+            Tuple of ``(key, value)`` bytes.
+
+        Examples:
+            >>> it = db.scan(b"a")
+            >>> next(it)
+            (b'a1', b'v1')
+        """
+        ...
+
+    def __aiter__(self) -> DbIterator:
+        """
+        Return ``self`` to support ``async for`` loops.
+
+        Returns:
+            The iterator itself.
+
+        Examples:
+            >>> it = await db.scan_async(b"a")
+            >>> async for kv in it:
+            ...     print(kv)
+            (b'a1', b'v1')
+            (b'a2', b'v2')
+        """
+        ...
+
+    async def __anext__(self) -> tuple[bytes, bytes]:
+        """
+        Await and return the next ``(key, value)`` pair.
+
+        Returns:
+            Tuple of ``(key, value)`` bytes.
+
+        Examples:
+            >>> it = await db.scan_async(b"a")
+            >>> async for kv in it:  # doctest: +SKIP
+            ...     print(kv)        # doctest: +SKIP
+            (b'a1', b'v1')
+            (b'a2', b'v2')
+        """
+        ...
+
+    def seek(self, key: bytes) -> None:
+        """
+        Seek forward to the first key ``>= key`` within the original range.
+
+        Args:
+            key: Non-empty key to seek to.
+
+        Examples:
+            >>> it = db.scan(b"a")
+            >>> it.seek(b"b")
+            >>> next(it)
+            (b'b', b'v')
+        """
+        ...
+
+    async def seek_async(self, key: bytes) -> None:
+        """
+        Async variant of ``seek``.
+
+        Args:
+            key: Non-empty key to seek to.
+
+        Examples:
+            >>> it = await db.scan_async(b"a")
+            >>> await it.seek_async(b"b")
+            >>> await it.__anext__()  # doctest: +SKIP
+            (b'b', b'v')
+        """
+        ...
+
+
+class Checkpoint(TypedDict):
+    """Checkpoint metadata returned by the admin API."""
+
+    id: str
+    manifest_id: int
+    expire_time: int | None
+    create_time: int
+
+
+class CheckpointCreateResult(TypedDict):
+    """Result from ``create_checkpoint`` containing the checkpoint id and manifest id."""
+
+    id: str
+    manifest_id: int
+
+
+class WriteBatch:
+    """Accumulates atomic write operations for :class:`SlateDB`.write(...)."""
+
+    def __init__(self) -> None:
+        """
+        Create an empty write batch.
+
+        Examples:
+            >>> wb = WriteBatch()
+            >>> wb.put(b"k", b"v")
+            >>> db.write(wb)
+            >>> db.get(b"k")
+            b'v'
+        """
+        ...
+
+    def put(self, key: bytes, value: bytes) -> None:
+        """
+        Queue a put operation.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes.
+
+        Examples:
+            >>> wb = WriteBatch(); wb.put(b"k", b"v")
+        """
+        ...
+
+    def put_with_options(self, key: bytes, value: bytes, *, ttl: int | None = None) -> None:
+        """
+        Queue a put with per-op options (e.g., TTL).
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes.
+            ttl: Optional logical TTL units for this write.
+
+        Examples:
+            >>> wb = WriteBatch(); wb.put_with_options(b"k", b"v", ttl=1000)
+        """
+        ...
+
+    def delete(self, key: bytes) -> None:
+        """
+        Queue a delete operation.
+
+        Args:
+            key: Non-empty key.
+
+        Examples:
+            >>> wb = WriteBatch(); wb.delete(b"k")
+        """
+        ...
+
+    def merge(self, key: bytes, value: bytes) -> None:
+        """
+        Queue a merge operation.
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes to merge.
+
+        Examples:
+            >>> wb = WriteBatch(); wb.merge(b"k", b"v")
+        """
+        ...
+
+    def merge_with_options(self, key: bytes, value: bytes, *, ttl: int | None = None) -> None:
+        """
+        Queue a merge with per-op options (e.g., TTL).
+
+        Args:
+            key: Non-empty key.
+            value: Value bytes to merge.
+            ttl: Optional logical TTL units for this write.
+
+        Examples:
+            >>> wb = WriteBatch(); wb.merge_with_options(b"k", b"v", ttl=10_000)
+        """
+        ...
+
+class SlateDBAdmin:
+    """Administrative interface for managing manifests, checkpoints, and GC."""
+
+    def __init__(
+        self,
+        path: str,
+        url: str | None = None,
+        env_file: str | None = None,
+        *,
+        wal_url: str | None = None,
+    ) -> None:
+        """
+        Create an admin handle for a database path/object store.
+
+        Args:
+            path: Database path.
+            url: Optional object store URL.
+            env_file: Optional env file for object store config.
+            wal_url: Optional WAL object store URL override.
+
+        Examples:
+            >>> admin = SlateDBAdmin("/tmp/mydb", env_file=".env")
+        """
+        ...
+
+    def read_manifest(self, id: int | None = None) -> str | None:
+        """
+        Read the latest or a specific manifest as a JSON string.
+
+        Args:
+            id: Optional manifest id to read. If ``None``, reads the latest.
+
+        Returns:
+            JSON string of the manifest, or ``None`` if no manifests exist.
+
+        Examples:
+            >>> admin.read_manifest()
+            '{"id": 123, ...}'
+        """
+        ...
+
+    async def read_manifest_async(self, id: int | None = None) -> str | None:
+        """
+        Async variant of ``read_manifest``.
+
+        Args:
+            id: Optional manifest id to read.
+
+        Returns:
+            JSON string of the manifest, or ``None``.
+
+        Examples:
+            >>> await admin.read_manifest_async()
+            '{"id": 123, ...}'
+        """
+        ...
+
+    def list_manifests(self, start: int | None = None, end: int | None = None) -> str:
+        """
+        List manifests within an optional [start, end) range as JSON.
+
+        Args:
+            start: Optional inclusive start id.
+            end: Optional exclusive end id.
+
+        Returns:
+            JSON string containing a list of manifest metadata.
+
+        Examples:
+            >>> admin.list_manifests()
+            '[{"id": 1, ...}, {"id": 2, ...}]'
+        """
+        ...
+
+    async def list_manifests_async(self, start: int | None = None, end: int | None = None) -> str:
+        """
+        Async variant of ``list_manifests``.
+
+        Args:
+            start: Optional inclusive start id.
+            end: Optional exclusive end id.
+
+        Returns:
+            JSON string containing a list of manifest metadata.
+
+        Examples:
+            >>> await admin.list_manifests_async()
+            '[{"id": 1, ...}, {"id": 2, ...}]'
+        """
+        ...
+
+    def create_checkpoint(
+        self,
+        *,
+        lifetime: int | None = None,
+        source: str | None = None,
+    ) -> CheckpointCreateResult:
+        """
+        Create a detached checkpoint.
+
+        Args:
+            lifetime: Optional checkpoint lifetime in milliseconds.
+            source: Optional source checkpoint UUID string to extend/refresh.
+
+        Returns:
+            Dict with ``id`` (UUID string) and ``manifest_id`` (int).
+
+        Example:
+            >>> admin = SlateDBAdmin("/tmp/mydb", env_file=".env")
+            >>> admin.create_checkpoint()
+            {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
+        """
+        ...
+
+    async def create_checkpoint_async(
+        self,
+        *,
+        lifetime: int | None = None,
+        source: str | None = None,
+    ) -> CheckpointCreateResult:
+        """
+        Async variant of ``create_checkpoint``.
+
+        Args:
+            lifetime: Optional checkpoint lifetime in milliseconds.
+            source: Optional source checkpoint UUID string to extend/refresh.
+
+        Returns:
+            Dict with ``id`` (UUID string) and ``manifest_id`` (int).
+
+        Examples:
+            >>> await admin.create_checkpoint_async()
+            {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
+        """
+        ...
+
+    def list_checkpoints(self) -> list[Checkpoint]:
+        """
+        List known checkpoints for the database path/object store.
+
+        Returns:
+            A list of :class:`Checkpoint` metadata dicts.
+
+        Examples:
+            >>> admin.list_checkpoints()
+            [{'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7, ...}]
+        """
+        ...
+
+    async def list_checkpoints_async(self) -> list[Checkpoint]:
+        """
+        Async variant of ``list_checkpoints``.
+
+        Returns:
+            A list of :class:`Checkpoint` metadata dicts.
+
+        Examples:
+            >>> await admin.list_checkpoints_async()
+            [{'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7, ...}]
+        """
+        ...
+
+    def refresh_checkpoint(self, id: str, lifetime: int | None = None) -> None:
+        """
+        Refresh a checkpoint's lifetime.
+
+        Args:
+            id: Checkpoint UUID string.
+            lifetime: New lifetime in milliseconds.
+
+        Examples:
+            >>> admin.refresh_checkpoint("00000000-0000-0000-0000-000000000000", lifetime=60000)
+        """
+        ...
+
+    async def refresh_checkpoint_async(self, id: str, lifetime: int | None = None) -> None:
+        """
+        Async variant of ``refresh_checkpoint``.
+
+        Args:
+            id: Checkpoint UUID string.
+            lifetime: New lifetime in milliseconds.
+
+        Examples:
+            >>> await admin.refresh_checkpoint_async("00000000-0000-0000-0000-000000000000", lifetime=60000)
+        """
+        ...
+
+    def delete_checkpoint(self, id: str) -> None:
+        """
+        Delete a checkpoint by id.
+
+        Args:
+            id: Checkpoint UUID string.
+
+        Examples:
+            >>> admin.delete_checkpoint("00000000-0000-0000-0000-000000000000")
+        """
+        ...
+
+    async def delete_checkpoint_async(self, id: str) -> None:
+        """
+        Async variant of ``delete_checkpoint``.
+
+        Args:
+            id: Checkpoint UUID string.
+
+        Examples:
+            >>> await admin.delete_checkpoint_async("00000000-0000-0000-0000-000000000000")
+        """
+        ...
+
+    def get_timestamp_for_sequence(self, seq: int, *, round_up: bool = False) -> int | None:
+        """
+        Return timestamp millis for a sequence, or ``None`` if unknown.
+
+        Args:
+            seq: Sequence number.
+            round_up: If True, round up to next known timestamp when exact is missing.
+
+        Returns:
+            Milliseconds since epoch, or ``None``.
+
+        Examples:
+            >>> admin.get_timestamp_for_sequence(42)
+            1700000000000
+        """
+        ...
+
+    async def get_timestamp_for_sequence_async(self, seq: int, *, round_up: bool = False) -> int | None:
+        """
+        Async variant of ``get_timestamp_for_sequence``.
+
+        Args:
+            seq: Sequence number.
+            round_up: If True, round up to next known timestamp when exact is missing.
+
+        Returns:
+            Milliseconds since epoch, or ``None``.
+
+        Examples:
+            >>> await admin.get_timestamp_for_sequence_async(42)
+            1700000000000
+        """
+        ...
+
+    def get_sequence_for_timestamp(self, ts_millis: int, *, round_up: bool = False) -> int | None:
+        """
+        Return sequence for timestamp millis, or ``None`` if unknown.
+
+        Args:
+            ts_millis: Milliseconds since epoch.
+            round_up: If True, round up to next known sequence when exact is missing.
+
+        Returns:
+            Sequence number, or ``None``.
+
+        Examples:
+            >>> admin.get_sequence_for_timestamp(1_700_000_000_000)
+            42
+        """
+        ...
+
+    async def get_sequence_for_timestamp_async(self, ts_millis: int, *, round_up: bool = False) -> int | None:
+        """
+        Async variant of ``get_sequence_for_timestamp``.
+
+        Args:
+            ts_millis: Milliseconds since epoch.
+            round_up: If True, round up to next known sequence when exact is missing.
+
+        Returns:
+            Sequence number, or ``None``.
+
+        Examples:
+            >>> await admin.get_sequence_for_timestamp_async(1_700_000_000_000)
+            42
+        """
+        ...
+
+    def create_clone(self, parent_path: str, parent_checkpoint: str | None = None) -> None:
+        """
+        Create a clone DB at this admin's path from a parent path/checkpoint.
+
+        Args:
+            parent_path: Parent database path to clone from.
+            parent_checkpoint: Optional checkpoint id to clone from; latest if ``None``.
+
+        Examples:
+            >>> admin.create_clone("/tmp/parent", parent_checkpoint=None)
+        """
+        ...
+
+    async def create_clone_async(self, parent_path: str, parent_checkpoint: str | None = None) -> None:
+        """
+        Async variant of ``create_clone``.
+
+        Args:
+            parent_path: Parent database path to clone from.
+            parent_checkpoint: Optional checkpoint id to clone from.
+
+        Examples:
+            >>> await admin.create_clone_async("/tmp/parent")
+        """
+        ...
+
+    def run_gc_once(
+        self,
+        *,
+        manifest_interval: int | None = None,
+        manifest_min_age: int | None = None,
+        wal_interval: int | None = None,
+        wal_min_age: int | None = None,
+        compacted_interval: int | None = None,
+        compacted_min_age: int | None = None,
+    ) -> None:
+        """
+        Run a single garbage-collection pass.
+
+        Args:
+            manifest_interval: Minimum interval between manifest deletions (ms).
+            manifest_min_age: Minimum age before manifests are GC'd (ms).
+            wal_interval: Minimum interval between WAL deletions (ms).
+            wal_min_age: Minimum age before WALs are GC'd (ms).
+            compacted_interval: Minimum interval for compacted file deletions (ms).
+            compacted_min_age: Minimum age before compacted files are GC'd (ms).
+
+        Examples:
+            >>> admin.run_gc_once(manifest_min_age=3_600_000)
+        """
+        ...
+
+    async def run_gc_once_async(
+        self,
+        *,
+        manifest_interval: int | None = None,
+        manifest_min_age: int | None = None,
+        wal_interval: int | None = None,
+        wal_min_age: int | None = None,
+        compacted_interval: int | None = None,
+        compacted_min_age: int | None = None,
+    ) -> None:
+        """
+        Async variant of ``run_gc_once``.
+
+        Args:
+            manifest_interval: Minimum interval between manifest deletions (ms).
+            manifest_min_age: Minimum age before manifests are GC'd (ms).
+            wal_interval: Minimum interval between WAL deletions (ms).
+            wal_min_age: Minimum age before WALs are GC'd (ms).
+            compacted_interval: Minimum interval for compacted file deletions (ms).
+            compacted_min_age: Minimum age before compacted files are GC'd (ms).
+
+        Examples:
+            >>> await admin.run_gc_once_async(manifest_min_age=3_600_000)
+        """
+        ...
+
+    def run_gc(
+        self,
+        *,
+        manifest_interval: int | None = None,
+        manifest_min_age: int | None = None,
+        wal_interval: int | None = None,
+        wal_min_age: int | None = None,
+        compacted_interval: int | None = None,
+        compacted_min_age: int | None = None,
+    ) -> None:
+        """
+        Continuously run garbage-collection with the provided thresholds.
+
+        Args:
+            manifest_interval: Minimum interval between manifest deletions (ms).
+            manifest_min_age: Minimum age before manifests are GC'd (ms).
+            wal_interval: Minimum interval between WAL deletions (ms).
+            wal_min_age: Minimum age before WALs are GC'd (ms).
+            compacted_interval: Minimum interval for compacted file deletions (ms).
+            compacted_min_age: Minimum age before compacted files are GC'd (ms).
+
+        Examples:
+            >>> # Blocks until cancelled; run in a background task
+            >>> # admin.run_gc(manifest_min_age=3_600_000)
+        """
+        ...
+
+    async def run_gc_async(
+        self,
+        *,
+        manifest_interval: int | None = None,
+        manifest_min_age: int | None = None,
+        wal_interval: int | None = None,
+        wal_min_age: int | None = None,
+        compacted_interval: int | None = None,
+        compacted_min_age: int | None = None,
+    ) -> None:
+        """
+        Async variant of ``run_gc``.
+
+        Args:
+            manifest_interval: Minimum interval between manifest deletions (ms).
+            manifest_min_age: Minimum age before manifests are GC'd (ms).
+            wal_interval: Minimum interval between WAL deletions (ms).
+            wal_min_age: Minimum age before WALs are GC'd (ms).
+            compacted_interval: Minimum interval for compacted file deletions (ms).
+            compacted_min_age: Minimum age before compacted files are GC'd (ms).
+
+        Examples:
+            >>> # Typically run in an asyncio Task
+            >>> # await admin.run_gc_async(manifest_min_age=3_600_000)
+        """
+        ...
