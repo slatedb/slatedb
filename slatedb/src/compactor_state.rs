@@ -50,7 +50,7 @@ impl SourceId {
     }
 }
 
-/// Immutable request that describes a compaction job.
+/// Immutable spec that describes a compaction job.
 ///
 /// Holds the logical inputs for a compaction the scheduler decided on:
 /// - `sources`: a set of `SourceId` identifying L0 SSTs and/or existing Sorted Runs
@@ -91,14 +91,8 @@ impl Display for CompactorJobSpec {
 
 /// Canonical, internal record of a compactor job.
 ///
-/// A job is the unit tracked by the compactor: it has a stable `id` (ULID), its `request`
-/// (what to compact and where), an origin `job_request_type`, a `status`, a history of
-/// `attempts`, and optional execution-time `progress`.
-///
-/// Notes:
-/// - Only ids and lightweight request data are stored; inputs are materialized from
-///   `request.sources()` against the manifest when needed.
-/// - Attempts represent retries of the same job; each attempt has its own id.
+/// A job is the unit tracked by the compactor: it has a stable `id` (ULID) and a `spec`
+/// (what to compact and where).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CompactorJob {
     id: Ulid,
