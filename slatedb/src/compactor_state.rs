@@ -59,12 +59,12 @@ impl SourceId {
 /// Materialized inputs (actual `SsTableHandle`/`SortedRun` objects) are derived from
 /// `sources` against the current manifest at execution time.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CompactorJobRequest {
+pub struct CompactorJobSpec {
     sources: Vec<SourceId>,
     destination: u32,
 }
 
-impl CompactorJobRequest {
+impl CompactorJobSpec {
     pub fn new(sources: Vec<SourceId>, destination: u32) -> Self {
         Self {
             sources,
@@ -81,7 +81,7 @@ impl CompactorJobRequest {
     }
 }
 
-impl Display for CompactorJobRequest {
+impl Display for CompactorJobSpec {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let displayed_sources: Vec<String> =
             self.sources().iter().map(|s| format!("{}", s)).collect();
@@ -103,12 +103,12 @@ impl Display for CompactorJobRequest {
 pub(crate) struct CompactorJob {
     id: Ulid,
     /// What to compact (sources) and where to write (destination).
-    request: CompactorJobRequest,
+    spec: CompactorJobSpec,
 }
 
 impl CompactorJob {
-    pub(crate) fn new(id: Ulid, request: CompactorJobRequest) -> Self {
-        Self { id, request }
+    pub(crate) fn new(id: Ulid, spec: CompactorJobSpec) -> Self {
+        Self { id, spec }
     }
 
     pub(crate) fn get_sorted_runs(db_state: &CoreDbState, sources: &[SourceId]) -> Vec<SortedRun> {
@@ -140,25 +140,20 @@ impl CompactorJob {
         self.id
     }
 
-    pub(crate) fn request(&self) -> &CompactorJobRequest {
-        &self.request
+    pub(crate) fn spec(&self) -> &CompactorJobSpec {
+        &self.spec
     }
 }
 
 impl Display for CompactorJob {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let displayed_sources: Vec<_> = self
-            .request
+            .spec
             .sources()
             .iter()
             .map(|s| format!("{}", s))
             .collect();
-        write!(
-            f,
-            "{:?} -> {}",
-            displayed_sources,
-            self.request.destination(),
-        )
+        write!(f, "{:?} -> {}", displayed_sources, self.spec.destination(),)
     }
 }
 
@@ -243,12 +238,12 @@ impl CompactorState {
     }
 
     pub(crate) fn add_job(&mut self, job: CompactorJob) -> Result<(), SlateDBError> {
-        let request = job.request();
+        let spec = job.spec();
         if self
             .jobs
             .values()
-            .map(|c| c.request())
-            .any(|c| c.destination() == request.destination())
+            .map(|c| c.spec())
+            .any(|c| c.destination() == spec.destination())
         {
             // we already have an ongoing job for this destination
             return Err(SlateDBError::InvalidCompaction);
@@ -257,9 +252,9 @@ impl CompactorState {
             .db_state()
             .compacted
             .iter()
-            .any(|sr| sr.id == request.destination())
-            && !request.sources().iter().any(|src| match src {
-                SourceId::SortedRun(sr) => *sr == request.destination(),
+            .any(|sr| sr.id == spec.destination())
+            && !spec.sources().iter().any(|src| match src {
+                SourceId::SortedRun(sr) => *sr == spec.destination(),
                 SourceId::Sst(_) => false,
             })
         {
@@ -278,18 +273,18 @@ impl CompactorState {
 
     pub(crate) fn finish_job(&mut self, job_id: Ulid, output_sr: SortedRun) {
         if let Some(job) = self.jobs.get(&job_id) {
-            let request = job.request();
-            info!("finished compaction [request={}]", request);
+            let spec = job.spec();
+            info!("finished compaction [spec={}]", spec);
             // reconstruct l0
-            let compaction_l0s: HashSet<Ulid> = request
+            let compaction_l0s: HashSet<Ulid> = spec
                 .sources()
                 .iter()
                 .filter_map(|id| id.maybe_unwrap_sst())
                 .collect();
-            let compaction_srs: HashSet<u32> = request
+            let compaction_srs: HashSet<u32> = spec
                 .sources()
                 .iter()
-                .chain(std::iter::once(&SourceId::SortedRun(request.destination())))
+                .chain(std::iter::once(&SourceId::SortedRun(spec.destination())))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
             let mut db_state = self.db_state().clone();
@@ -319,10 +314,10 @@ impl CompactorState {
                 new_compacted.push(output_sr.clone());
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
-            let first_source = request
+            let first_source = spec
                 .sources()
                 .first()
-                .expect("illegal: empty compaction request");
+                .expect("illegal: empty compaction spec");
             if let Some(compacted_l0) = first_source.maybe_unwrap_sst() {
                 // if there are l0s, the newest must be the first entry in sources
                 // TODO: validate that this is the case
@@ -379,16 +374,16 @@ mod tests {
         let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
 
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let request = build_l0_compaction(&state.db_state().l0, 0);
+        let spec = build_l0_compaction(&state.db_state().l0, 0);
         // when:
-        let compactor_job = CompactorJob::new(job_id, request.clone());
+        let compactor_job = CompactorJob::new(job_id, spec.clone());
         state
             .add_job(compactor_job.clone())
             .expect("failed to add job");
 
         // then:
         let mut jobs = state.jobs();
-        let expected = CompactorJob::new(job_id, request.clone());
+        let expected = CompactorJob::new(job_id, spec.clone());
         assert_eq!(jobs.next().expect("job not found"), &expected);
         assert!(jobs.next().is_none());
     }
@@ -400,8 +395,8 @@ mod tests {
         let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let request = build_l0_compaction(&before_compaction.l0, 0);
-        let compactor_job = CompactorJob::new(job_id, request);
+        let spec = build_l0_compaction(&before_compaction.l0, 0);
+        let compactor_job = CompactorJob::new(job_id, spec);
         state
             .add_job(compactor_job.clone())
             .expect("failed to add job");
@@ -449,8 +444,8 @@ mod tests {
         let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let request = build_l0_compaction(&before_compaction.l0, 0);
-        let compactor_job = CompactorJob::new(job_id, request);
+        let spec = build_l0_compaction(&before_compaction.l0, 0);
+        let compactor_job = CompactorJob::new(job_id, spec);
         state
             .add_job(compactor_job.clone())
             .expect("failed to add job");
@@ -507,11 +502,11 @@ mod tests {
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let request = CompactorJobRequest::new(
+        let spec = CompactorJobSpec::new(
             vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
             0,
         );
-        let compactor_job = CompactorJob::new(job_id, request);
+        let compactor_job = CompactorJob::new(job_id, spec);
         state
             .add_job(compactor_job.clone())
             .expect("failed to add job");
@@ -574,14 +569,14 @@ mod tests {
         let original_l0s = &state.db_state().clone().l0;
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
 
-        let request = CompactorJobRequest::new(
+        let spec = CompactorJobSpec::new(
             original_l0s
                 .iter()
                 .map(|h| Sst(h.id.unwrap_compacted_id()))
                 .collect(),
             0,
         );
-        let compactor_job = CompactorJob::new(job_id, request);
+        let compactor_job = CompactorJob::new(job_id, spec);
         state
             .add_job(compactor_job.clone())
             .expect("failed to add job");
@@ -651,7 +646,7 @@ mod tests {
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let request = CompactorJobRequest::new(
+        let spec = CompactorJobSpec::new(
             original_l0s
                 .iter()
                 .enumerate()
@@ -660,7 +655,7 @@ mod tests {
                 .collect::<Vec<SourceId>>(),
             0,
         );
-        let compactor_job = CompactorJob::new(job_id, request);
+        let compactor_job = CompactorJob::new(job_id, spec);
         let result = state.add_job(compactor_job.clone());
 
         // then:
@@ -690,8 +685,8 @@ mod tests {
         let sources: Vec<SourceId> = l0_sources.chain(sr_sources).collect();
 
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let request = CompactorJobRequest::new(sources, 0);
-        let compactor_job = CompactorJob::new(job_id, request);
+        let spec = CompactorJobSpec::new(sources, 0);
+        let compactor_job = CompactorJob::new(job_id, spec);
         let result = state.add_job(compactor_job.clone());
 
         // or simply:
@@ -761,12 +756,12 @@ mod tests {
         .expect("no manifest found with l0 len");
     }
 
-    fn build_l0_compaction(ssts: &VecDeque<SsTableHandle>, dst: u32) -> CompactorJobRequest {
+    fn build_l0_compaction(ssts: &VecDeque<SsTableHandle>, dst: u32) -> CompactorJobSpec {
         let sources = ssts
             .iter()
             .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
             .collect();
-        CompactorJobRequest::new(sources, dst)
+        CompactorJobSpec::new(sources, dst)
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
