@@ -125,9 +125,13 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 - [x] Bloom filters ([#11](https://github.com/slatedb/slatedb/issues/11))
 - [x] Manifest persistence ([#14](https://github.com/slatedb/slatedb/issues/14))
 - [x] Compaction ([#7](https://github.com/slatedb/slatedb/issues/7))
-- [ ] Transactions
+- [x] Transactions ([#785](https://github.com/slatedb/slatedb/issues/785))
 - [x] Merge operator ([#328](https://github.com/slatedb/slatedb/issues/328))
 - [x] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
+- [ ] Range deletions ([#577](https://github.com/slatedb/slatedb/issues/577))
+- [ ] Change data capture (CDC) ([#249](https://github.com/slatedb/slatedb/issues/249))
+- [ ] Database splitting
+- [ ] Database merging
 
 ## Projects
 
