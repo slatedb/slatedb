@@ -50,7 +50,7 @@ impl SourceId {
     }
 }
 
-/// Immutable request that describes a compaction job.
+/// Immutable spec that describes a compaction job.
 ///
 /// Holds the logical inputs for a compaction the scheduler decided on:
 /// - `sources`: a set of `SourceId` identifying L0 SSTs and/or existing Sorted Runs
@@ -91,14 +91,8 @@ impl Display for CompactorJobSpec {
 
 /// Canonical, internal record of a compactor job.
 ///
-/// A job is the unit tracked by the compactor: it has a stable `id` (ULID), its `request`
-/// (what to compact and where), an origin `job_request_type`, a `status`, a history of
-/// `attempts`, and optional execution-time `progress`.
-///
-/// Notes:
-/// - Only ids and lightweight request data are stored; inputs are materialized from
-///   `request.sources()` against the manifest when needed.
-/// - Attempts represent retries of the same job; each attempt has its own id.
+/// A job is the unit tracked by the compactor: it has a stable `id` (ULID) and a `spec`
+/// (what to compact and where).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CompactorJob {
     id: Ulid,
@@ -111,25 +105,27 @@ impl CompactorJob {
         Self { id, spec }
     }
 
-    pub(crate) fn get_sorted_runs(db_state: &CoreDbState, sources: &[SourceId]) -> Vec<SortedRun> {
+    pub(crate) fn get_sorted_runs(&self, db_state: &CoreDbState) -> Vec<SortedRun> {
         let srs_by_id: HashMap<u32, &SortedRun> =
             db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
-        sources
+        self.spec
+            .sources()
             .iter()
             .filter_map(|s| s.maybe_unwrap_sorted_run())
             .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
             .collect()
     }
 
-    pub(crate) fn get_ssts(db_state: &CoreDbState, sources: &[SourceId]) -> Vec<SsTableHandle> {
+    pub(crate) fn get_ssts(&self, db_state: &CoreDbState) -> Vec<SsTableHandle> {
         let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
             .l0
             .iter()
             .map(|sst| (sst.id.unwrap_compacted_id(), sst))
             .collect();
 
-        sources
+        self.spec
+            .sources()
             .iter()
             .filter_map(|s| s.maybe_unwrap_sst())
             .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
