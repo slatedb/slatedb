@@ -416,7 +416,10 @@ impl Admin {
 ///
 /// | Provider | Value | Documentation |
 /// |----------|-------|---------------|
+/// | Local | `local` | [load_local] |
 /// | AWS | `aws` | [load_aws] |
+/// | Azure | `azure` | [load_azure] |
+/// | OpenDAL | `opendal` | [load_opendal] |
 pub fn load_object_store_from_env(
     env_file: Option<String>,
 ) -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
