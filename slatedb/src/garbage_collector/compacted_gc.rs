@@ -116,7 +116,7 @@ impl GcTask for CompactedGcTask {
             .map(|sst| sst.id)
             // Filter out the ones that are active in the manifest
             .filter(|id| !active_ssts.contains(id))
-            // Filter out the ones that are part of a running compaction (See #604 for details)
+            // Filter out the ones that may be part of a running compaction (See #604 for details)
             .filter(|id| match (maybe_compaction_low_watermark_dt, id) {
                 (Some(compaction_low_watermark_dt), SsTableId::Compacted(ulid)) => {
                     let ulid_dt = DateTime::<Utc>::from(ulid.datetime());
