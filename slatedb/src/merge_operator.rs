@@ -36,7 +36,7 @@ pub enum MergeOperatorError {}
 /// struct CounterMergeOperator;
 ///
 /// impl MergeOperator for CounterMergeOperator {
-///     fn merge(&self, existing_value: Option<Bytes>, operand: Bytes) -> Result<Bytes, MergeOperatorError> {
+///     fn merge(&self, _key: &Bytes, existing_value: Option<Bytes>, operand: Bytes) -> Result<Bytes, MergeOperatorError> {
 ///         let existing = existing_value
 ///             .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
 ///             .unwrap_or(0);
@@ -52,6 +52,7 @@ pub trait MergeOperator {
     /// into a single value. The implementation must be associative to ensure correct behavior.
     ///
     /// # Arguments
+    /// * `key` - The key of the entry
     /// * `existing_value` - The current accumulated value
     /// * `value` - The new value to merge with the existing value
     ///
@@ -60,6 +61,7 @@ pub trait MergeOperator {
     /// * `Err(MergeOperatorError)` - If the merge operation fails
     fn merge(
         &self,
+        key: &Bytes,
         existing_value: Option<Bytes>,
         value: Bytes,
     ) -> Result<Bytes, MergeOperatorError>;
@@ -211,7 +213,11 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
 
             match &entry.value {
                 ValueDeletable::Merge(value) => {
-                    merged_value = Some(self.merge_operator.merge(merged_value, value.clone())?);
+                    merged_value = Some(self.merge_operator.merge(
+                        &key,
+                        merged_value,
+                        value.clone(),
+                    )?);
                 }
                 // we collect at most one Tombstone/Value entry in the loop above, and
                 // if we do collect one it will be the first entry (which is removed in
@@ -283,6 +289,7 @@ mod tests {
     impl MergeOperator for MockMergeOperator {
         fn merge(
             &self,
+            _key: &Bytes,
             existing_value: Option<Bytes>,
             value: Bytes,
         ) -> Result<Bytes, MergeOperatorError> {
@@ -460,5 +467,90 @@ mod tests {
                 values: sorted_values.into(),
             }
         }
+    }
+
+    /// A merge operator that routes to different merge strategies based on key prefix
+    struct KeyPrefixMergeOperator;
+
+    impl MergeOperator for KeyPrefixMergeOperator {
+        fn merge(
+            &self,
+            key: &Bytes,
+            existing_value: Option<Bytes>,
+            value: Bytes,
+        ) -> Result<Bytes, MergeOperatorError> {
+            if key.starts_with(b"sum:") {
+                // Sum merge for sum keys
+                match existing_value {
+                    Some(existing) => {
+                        let existing_num =
+                            u64::from_le_bytes(existing.as_ref().try_into().unwrap());
+                        let new_num = u64::from_le_bytes(value.as_ref().try_into().unwrap());
+                        Ok(Bytes::copy_from_slice(
+                            &(existing_num + new_num).to_le_bytes(),
+                        ))
+                    }
+                    None => Ok(value),
+                }
+            } else if key.starts_with(b"max:") {
+                // Max merge for max keys
+                match existing_value {
+                    Some(existing) => {
+                        let existing_num =
+                            u64::from_le_bytes(existing.as_ref().try_into().unwrap());
+                        let new_num = u64::from_le_bytes(value.as_ref().try_into().unwrap());
+                        Ok(Bytes::copy_from_slice(
+                            &existing_num.max(new_num).to_le_bytes(),
+                        ))
+                    }
+                    None => Ok(value),
+                }
+            } else {
+                // Default to concat for unknown prefixes
+                match existing_value {
+                    Some(existing) => {
+                        let mut merged = existing.to_vec();
+                        merged.extend_from_slice(&value);
+                        Ok(Bytes::from(merged))
+                    }
+                    None => Ok(value),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn should_route_merge_based_on_key_prefix() {
+        // given
+        let merge_operator = Arc::new(KeyPrefixMergeOperator {});
+
+        let data = vec![
+            // Sum key - should sum values
+            RowEntry::new_merge(b"sum:counter", &5u64.to_le_bytes(), 1),
+            RowEntry::new_merge(b"sum:counter", &3u64.to_le_bytes(), 2),
+            RowEntry::new_merge(b"sum:counter", &7u64.to_le_bytes(), 3),
+            // Max key - should keep maximum value
+            RowEntry::new_merge(b"max:score", &5u64.to_le_bytes(), 4),
+            RowEntry::new_merge(b"max:score", &10u64.to_le_bytes(), 5),
+            RowEntry::new_merge(b"max:score", &3u64.to_le_bytes(), 6),
+        ];
+
+        // when
+        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            0,
+        );
+
+        // then
+        assert_iterator(
+            &mut iterator,
+            vec![
+                RowEntry::new_merge(b"max:score", &10u64.to_le_bytes(), 6),
+                RowEntry::new_merge(b"sum:counter", &15u64.to_le_bytes(), 3),
+            ],
+        )
+        .await;
     }
 }
