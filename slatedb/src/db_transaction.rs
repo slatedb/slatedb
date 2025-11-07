@@ -113,7 +113,7 @@ impl DBTransaction {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.db_inner.check_error()?;
+        self.db_inner.check_closed()?;
 
         // Track read key for SSI conflict detection if needed
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
@@ -194,7 +194,7 @@ impl DBTransaction {
             None
         };
 
-        self.db_inner.check_error()?;
+        self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
 
         // Clone the WriteBatch for the scan to ensure that the scan within a transaction

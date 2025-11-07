@@ -188,7 +188,7 @@ impl DbInner {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.db_stats.get_requests.inc();
-        self.check_error()?;
+        self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
             .get_with_options(key, options, &db_state, None, None)
@@ -201,7 +201,7 @@ impl DbInner {
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.inc();
-        self.check_error()?;
+        self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
             .scan_with_options(range, options, &db_state, None, None, None)
@@ -257,7 +257,7 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
-        self.check_error()?;
+        self.check_closed()?;
         if batch.ops.is_empty() {
             return Ok(());
         }
@@ -527,9 +527,15 @@ impl DbInner {
         Ok(())
     }
 
-    /// Return an error if the state has encountered
-    /// an unrecoverable error.
-    pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
+    /// Returns an error if the database has been closed.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the DB is still open.
+    /// - `Err(SlateDBError::Closed)` if the DB was closed successfully
+    ///    (state.closed_result_reader() returns Ok(())).
+    /// - `Err(e)` if the DB was closed with an error, where `e` is the error
+    ///    (state.closed_result_reader() returns Err(e)).
+    pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
         let error_reader = {
             let state = self.state.read();
             state.closed_result_reader()
@@ -705,7 +711,7 @@ impl Db {
     /// }
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
-        self.inner.check_error()?;
+        self.inner.check_closed()?;
         let seq = self.inner.oracle.last_committed_seq.load();
         let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
         Ok(snapshot)
@@ -1343,7 +1349,7 @@ impl Db {
         &self,
         isolation_level: IsolationLevel,
     ) -> Result<DBTransaction, crate::Error> {
-        self.inner.check_error()?;
+        self.inner.check_closed()?;
         let seq = self.inner.oracle.last_committed_seq.load();
         let txn = DBTransaction::new(
             self.inner.clone(),
@@ -3306,7 +3312,7 @@ mod tests {
 
         // Verify that the memtable has not been flushed by checking the db for error state
         assert!(
-            kv_store.inner.check_error().is_ok(),
+            kv_store.inner.check_closed().is_ok(),
             "DB should not have an error state"
         );
     }
