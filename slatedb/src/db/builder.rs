@@ -648,6 +648,16 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
+    /// Sets the WAL object store to use for administrative functions.
+    ///
+    /// When configured, administrative operations that need to access WAL data
+    /// (such as garbage collection) will use this object store instead of the
+    /// main object store.
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
+        self
+    }
+
     /// Sets the random number generator to use for randomness.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.rand = Arc::new(DbRand::new(seed));

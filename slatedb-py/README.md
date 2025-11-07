@@ -2,23 +2,12 @@
   <img src="https://github.com/slatedb/slatedb-website/blob/main/assets/png/gh-banner.png?raw=true" alt="SlateDB" width="100%">
 </a>
 
-![PyPI](https://img.shields.io/pypi/v/slatedb?style=flat-square)
+<a href="https://pypi.org/project/slatedb/">![PyPI](https://img.shields.io/pypi/v/slatedb?style=flat-square)</a>
+<a href="https://slatedb.readthedocs.io">![ReadTheDocs](https://img.shields.io/readthedocs/slatedb?style=flat-square)</a>
 ![Python Versions](https://img.shields.io/pypi/pyversions/slatedb?style=flat-square)
 ![GitHub License](https://img.shields.io/github/license/slatedb/slatedb?style=flat-square)
 <a href="https://slatedb.io">![slatedb.io](https://img.shields.io/badge/site-slatedb.io-00A1FF?style=flat-square)</a>
 <a href="https://discord.gg/mHYmGy5MgA">![Discord](https://img.shields.io/discord/1232385660460204122?style=flat-square)</a>
-
-## WARNING
-
-This is alpha software and is not yet ready for production use. Missing features:
-
-- Only uses in-memory object storage
-- No range query
-- No checkpoints
-- No builders
-- ... and more
-
-Please see SlateDB's [Python Github issues](https://github.com/slatedb/slatedb/issues?q=is%3Aissue%20state%3Aopen%20label%3Apython) to contribute.
 
 ## Introduction
 
@@ -32,7 +21,6 @@ To mitigate read latency and read API costs (GETs), SlateDB will use standard LS
 
 Checkout [slatedb.io](https://slatedb.io) to learn more.
 
-
 ## Installation
 
 ```bash
@@ -43,88 +31,97 @@ pip install slatedb
 
 - Python 3.10 or higher
 
+## Features
+
+- Support for in-memory object store and object stores (S3, GCS, ABS, MinIO, memory)
+- Sync and async APIs
+- Range scans with iteration and `seek`
+- Snapshots for consistent, read-only views
+- Transactions with snapshot isolation (SI) and serializable snapshot isolation (SSI)
+- Atomic batched writes
+- Merge operator (user-defined Python callable)
+- Per-operation time-to-live (TTL)
+- Reader for read-only access with optional checkpoint pinning
+- Admin APIs for manifests, checkpoints, clones, garbage collection, and sequence↔timestamp mapping
+
 ## Usage
 
-### Basic Operations
+The example below demonstrates common features in a single script.
 
 ```python
-from slatedb import SlateDB
+from __future__ import annotations
 
-# Create or open a database
-db = SlateDB("/path/to/your/database")
+from slatedb import (
+    SlateDB,
+    SlateDBReader,
+    SlateDBAdmin,
+    WriteBatch,
+)
 
-# Put a key-value pair
-db.put(b"hello", b"world")
 
-# Retrieve a value
-value = db.get(b"hello")  # Returns b"world"
+# Optional: define a merge operator. This example concatenates values.
+def concat(key: bytes, existing: bytes | None, value: bytes) -> bytes:
+    return (existing or b"") + value
 
-# Delete a key-value pair
-db.delete(b"hello")
+# Open a database using the in-memory object store
+db = SlateDB("/tmp/slatedb-demo", url="memory:///", merge_operator=concat)
 
-# Always close when done
+# Basic CRUD
+db.put(b"user:1", b"Alice")
+assert db.get(b"user:1") == b"Alice"
+
+# Per-op TTL and durability control
+db.put_with_options(b"temp", b"ok", ttl=5_000, await_durable=False)
+
+# Batched writes
+wb = WriteBatch()
+wb.put(b"batch:1", b"one")
+wb.delete(b"temp")
+db.write(wb)
+
+# Transactions (SSI or SI). Operations buffer until commit.
+txn = db.begin("ssi")
+txn.put(b"user:2", b"Bob")
+txn.merge(b"counter:visits", b"1")  # uses the configured merge operator
+txn.commit()
+
+# Snapshots provide consistent, read-only views
+snap = db.snapshot()
+assert snap.get(b"user:2") == b"Bob"
+
+# Range scans (prefix scan when end omitted). Iterator supports seek.
+it = db.scan(b"user:")
+first = next(it)
+it.seek(b"user:2")
+rest = list(it)
+
+# Advanced scan options (read-ahead, caching, durability filter)
+_ = list(db.scan_with_options(b"user:", cache_blocks=True, read_ahead_bytes=1 << 20))
+
+# Flush
+db.flush_with_options("wal")
+
+# Get metrics
+metrics = db.metrics()
+
+# Create a durable checkpoint and read it with a read-only reader
+ckpt = db.create_checkpoint(scope="durable")
+reader = SlateDBReader("/tmp/slatedb-demo", url="memory:///", checkpoint_id=ckpt["id"])
+_ = list(reader.scan(b"user:"))
+reader.close()
+
+# Admin: list checkpoints, read manifests, GC, and sequence/timestamp mapping
+admin = SlateDBAdmin("/tmp/slatedb-demo", url="memory///")
+_ = admin.list_checkpoints()
+_ = admin.read_manifest()
+admin.run_gc_once(manifest_min_age=0, wal_min_age=0, compacted_min_age=0)
+
 db.close()
 ```
-
-### Connecting to an object store based on its URL
-
-```python
-
-# Open the database
-db = SlateDB("/tmp/slatedb", url="s3://my-bucket/my-prefix")
-
-# Put a key-value pair
-db.put(b"hello", b"world")
-
-# Retrieve a value
-value = db.get(b"hello")  # Returns b"world"
-
-# Always close when done
-db.close()
-```
-
-### Asynchronous API
-
-SlateDB also provides async methods for use with asyncio:
-
-```python
-import asyncio
-from slatedb import SlateDB
-
-async def main():
-    db = SlateDB("/path/to/your/database")
-
-    # Async operations
-    await db.put_async(b"hello", b"async world")
-    value = await db.get_async(b"hello")
-    await db.delete_async(b"hello")
-
-    # Don't forget to close
-    db.close()
-
-# Run the async example
-asyncio.run(main())
-```
-
-## Error Handling
-
-Most methods raise `ValueError` for errors like empty keys or database operation failures:
-
-```python
-try:
-    db.put(b"", b"This will fail")
-except ValueError as e:
-    print(f"Error: {e}")
-```
-
-## Documentation
-
-- [SlateDB core documentation](https://slatedb.io/docs/introduction) - Comprehensive guide to understand how SlateDB works.
-- [API Reference](https://github.com/slatedb/slatedb/tree/main/slatedb-py) - Detailed Python API documentation embedded in the source code.
 
 ## Contributing
 
-SlateDB's Python bindings use [Uv](https://docs.astral.sh/uv/) to manage the development environment. You can install Uv following the steps on its website. Once you've installed Uv, run `uv venv` to create a virtual environment.
+SlateDB's Python bindings use [uv](https://docs.astral.sh/uv/) to manage the development environment. You can install `uv` following the steps on its website. Once you've installed `uv`, run `uv venv` to create a virtual environment.
 
 ### Installing dependencies
 
