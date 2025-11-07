@@ -153,7 +153,7 @@ impl Display for CompactorJob {
             .iter()
             .map(|s| format!("{}", s))
             .collect();
-        write!(f, "{:?} -> {}", displayed_sources, self.spec.destination(),)
+        write!(f, "{:?} -> {}", displayed_sources, self.spec.destination())
     }
 }
 
