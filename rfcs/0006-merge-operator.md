@@ -111,8 +111,8 @@ trait MergeOperator {
 
     pub fn merge(
         &self,
-        key: Bytes,
-        existing_value: Bytes,
+        key: &Bytes,
+        existing_value: Option<Bytes>,
         value: Bytes
     ) -> Result<Bytes, MergeOperatorError>;
 }
@@ -129,20 +129,30 @@ impl MergeOperator for MyMergeOperator {
 
     fn merge(
         &self,
-        key: Bytes,
-        existing_value: Bytes,
+        key: &Bytes,
+        existing_value: Option<Bytes>,
         value: Bytes
     ) -> Result<Bytes, MergeOperatorError> {
         if key.starts_with(b"list:") {
             // concat values
-            Ok(...
+            match existing_value {
+                Some(existing) => {
+                    let mut result = existing.to_vec();
+                    result.extend_from_slice(&value);
+                    Ok(Bytes::from(result))
+                }
+                None => Ok(value)
+            }
         } else if key.starts_with(b"min:") {
             // calculate min
-            Ok(...)
+            match existing_value {
+                Some(existing) => Ok(...), // min logic here
+                None => Ok(value)
+            }
         } else {
             Err(...)
         }
-    }   
+    }
 }
 ```
 
