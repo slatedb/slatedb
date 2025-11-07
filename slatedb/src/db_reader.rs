@@ -55,7 +55,7 @@ struct DbReaderInner {
     user_checkpoint_id: Option<Uuid>,
     oracle: Arc<Oracle>,
     reader: Reader,
-    error_watcher: WatchableOnceCell<SlateDBError>,
+    closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
     rand: Arc<DbRand>,
 }
 
@@ -95,7 +95,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
-        error_watcher: WatchableOnceCell<SlateDBError>,
+        closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
         logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
@@ -157,7 +157,7 @@ impl DbReaderInner {
             user_checkpoint_id: checkpoint_id,
             oracle,
             reader,
-            error_watcher,
+            closed_result_watcher,
             rand,
         })
     }
@@ -445,9 +445,12 @@ impl DbReaderInner {
     /// Return an error if the state has encountered
     /// an unrecoverable error.
     pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
-        let error_reader = self.error_watcher.reader();
-        if let Some(error) = error_reader.read() {
-            return Err(error.clone());
+        let error_reader = self.closed_result_watcher.reader();
+        if let Some(result) = error_reader.read() {
+            return match result {
+                Ok(()) => Err(SlateDBError::Closed),
+                Err(e) => Err(e.clone()),
+            };
         }
         Ok(())
     }
@@ -565,9 +568,9 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let error_watcher = WatchableOnceCell::new();
+        let closed_result_watcher = WatchableOnceCell::new();
         let task_executor =
-            MessageHandlerExecutor::new(error_watcher.clone(), system_clock.clone());
+            MessageHandlerExecutor::new(closed_result_watcher.clone(), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
         let table_store = store_provider.table_store();
         let inner = Arc::new(
@@ -576,7 +579,7 @@ impl DbReader {
                 table_store,
                 options,
                 checkpoint_id,
-                error_watcher,
+                closed_result_watcher,
                 logical_clock,
                 system_clock,
                 rand,

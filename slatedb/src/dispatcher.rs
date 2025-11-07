@@ -13,7 +13,7 @@
 //! this pattern in a single set of event loops.
 //!
 //! - [MessageHandlerExecutor] spawns background tasks, monitors them for completion, and
-//!   updates [crate::db_state::DbState::error] accordingly.
+//!   updates [crate::db_state::DbState::closed_result] accordingly.
 //! - [MessageDispatcher] runs an event loop for a single background task. It receives
 //!   messages and ticks, and passes them to the [MessageHandler] for processing.
 //! - [MessageHandler] receives callbacks from the dispatcher based on lifetime events
@@ -83,10 +83,10 @@
 //!
 //! let clock = Arc::new(DefaultSystemClock::default());
 //! let (tx, rx) = mpsc::unbounded_channel();
-//! let error_state = WatchableOnceCell::new();
+//! let closed_result = WatchableOnceCell::new();
 //! let handle = Handle::current();
 //! let task_executor = MessageHandlerExecutor::new(
-//!     error_state,
+//!     closed_result,
 //!     clock,
 //! );
 //! task_executor.add_handler(
@@ -241,7 +241,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
     ///
     /// ## Arguments
     ///
-    /// * `result`: The value of [crate::db_state::DbState::error] when
+    /// * `result`: The value of [crate::db_state::DbState::closed_result] when
     ///   [MessageDispatcher::run] returns.
     ///
     /// ## Returns
@@ -348,7 +348,7 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     /// * `messages`: An iterator of messages still in the channel after
     ///   [MessageDispatcher::run] returns. If a handler fails, this iterator will not
     ///   include the message that triggered the failure.
-    /// * `result`: The value of [crate::db_state::DbState::error] when
+    /// * `result`: The value of [crate::db_state::DbState::closed_result] when
     ///   [MessageDispatcher::run] returns.
     ///
     /// ## Returns
@@ -391,7 +391,7 @@ impl std::fmt::Debug for MessageHandlerFuture {
 /// Each dispatcher is associated with a name, which is used to identify the dispatcher
 /// in the [MessageHandlerExecutor]. As dispatchers complete, their results are stored
 /// in the [MessageHandlerExecutor]. The first completed dispatcher's results are also
-/// used for [crate::db_state::DbState::error].
+/// used for [crate::db_state::DbState::closed_result].
 ///
 /// The executor also catches panics, and will convert them to an appropriate
 /// [SlateDBError].
@@ -403,8 +403,9 @@ pub(crate) struct MessageHandlerExecutor {
     tokens: SkipMap<String, CancellationToken>,
     /// A map of (task name, results) for dispatchers that have returned.
     results: Arc<SkipMap<String, WatchableOnceCell<Result<(), SlateDBError>>>>,
-    /// A watchable cell that stores the error state of the database.
-    error_state: WatchableOnceCell<SlateDBError>,
+    /// A watchable cell that stores the final result of the database lifecycle.
+    /// Ok(()) indicates a clean shutdown; Err(e) indicates an error.
+    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     /// A system clock for time keeping.
     clock: Arc<dyn SystemClock>,
     /// A fail point registry for fail points.
@@ -417,19 +418,19 @@ impl MessageHandlerExecutor {
     ///
     /// ## Arguments
     ///
-    /// * `error_state`: A [WatchableOnceCell] that stores the error state of the database.
+    /// * `closed_result`: A [WatchableOnceCell] that stores the database close result.
     /// * `clock`: A [SystemClock] to use for tickers and timekeeping.
     ///
     /// ## Returns
     ///
     /// The new [MessageHandlerExecutor].
     pub(crate) fn new(
-        error_state: WatchableOnceCell<SlateDBError>,
+        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
         clock: Arc<dyn SystemClock>,
     ) -> Self {
         Self {
             futures: Mutex::new(Some(vec![])),
-            error_state,
+            closed_result,
             clock,
             tokens: SkipMap::new(),
             results: Arc::new(SkipMap::new()),
@@ -485,7 +486,7 @@ impl MessageHandlerExecutor {
         let token = CancellationToken::new();
         let mut dispatcher = MessageDispatcher::new(handler, rx, self.clock.clone(), token.clone())
             .with_fp_registry(self.fp_registry.clone());
-        let this_error_state = self.error_state.clone();
+        let this_closed_result = self.closed_result.clone();
         let this_name = name.clone();
         #[allow(unused_variables)]
         let this_fp_registry = self.fp_registry.clone();
@@ -510,13 +511,14 @@ impl MessageHandlerExecutor {
                     panic!("failpoint: executor-wrapper-before-write");
                 }
             );
-            this_error_state.write(run_result.clone().err().unwrap_or(SlateDBError::Closed));
-            // re-read the error since it might have already been set by another task
-            let final_error_state = Err(this_error_state
+            // set result in db state (first writer wins)
+            this_closed_result.write(run_result.clone());
+            // re-read the result since it might have already been set by another task
+            let final_result = this_closed_result
                 .reader()
                 .read()
-                .expect("error state was unexpectedly empty"));
-            let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(final_error_state))
+                .expect("error state was unexpectedly empty");
+            let cleanup_unwind_result = AssertUnwindSafe(dispatcher.cleanup(final_result))
                 .catch_unwind()
                 .await;
             let (cleanup_result, cleanup_maybe_panic) =
@@ -582,7 +584,7 @@ impl MessageHandlerExecutor {
                 &task_definition.handle,
             );
         }
-        let this_error_state = self.error_state.clone();
+        let this_closed_result = self.closed_result.clone();
         let this_results = self.results.clone();
         let this_tokens = self
             .tokens
@@ -603,8 +605,7 @@ impl MessageHandlerExecutor {
                             task_maybe_panic.map(|p| panic_string(&p))
                         );
                     }
-                    this_error_state
-                        .write(task_result.clone().err().unwrap_or(SlateDBError::Closed));
+                    this_closed_result.write(task_result.clone());
                     let entry = this_results
                         .get(&name)
                         .expect("result cell isn't set when expected");
@@ -826,9 +827,9 @@ mod test {
         let (tx, rx) = mpsc::unbounded_channel();
         let clock = Arc::new(MockSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let error_state = WatchableOnceCell::new();
+        let closed_result = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone())
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-run-loop", "1*off->return").unwrap();
         fail_parallel::cfg(fp_registry.clone(), "dispatcher-cleanup", "pause").unwrap();
@@ -867,8 +868,8 @@ mod test {
         // Verify final state
         assert!(matches!(result, Err(SlateDBError::Fenced)));
         assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::Fenced)
+            closed_result.reader().read(),
+            Some(Err(SlateDBError::Fenced))
         ));
         assert!(matches!(
             cleanup_reader.read(),
@@ -1193,8 +1194,8 @@ mod test {
         let (tx, rx) = mpsc::unbounded_channel::<u8>();
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = PanicHandler { cleanup_called };
-        let error_state = WatchableOnceCell::new();
-        let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone());
+        let closed_result = WatchableOnceCell::new();
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone());
 
         // Spawn the panic task
         task_executor
@@ -1227,8 +1228,8 @@ mod test {
         // Check final state
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskPanic(_))
+            closed_result.reader().read(),
+            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
         assert!(matches!(
             cleanup_reader.read(),
@@ -1245,9 +1246,9 @@ mod test {
         drop(tx); // no messages needed
         let clock = Arc::new(DefaultSystemClock::new());
         let handler = TestHandler::new(log.clone(), cleanup_called.clone(), clock.clone());
-        let error_state = WatchableOnceCell::new();
+        let closed_result = WatchableOnceCell::new();
         let fp_registry = Arc::new(FailPointRegistry::default());
-        let task_executor = MessageHandlerExecutor::new(error_state.clone(), clock.clone())
+        let task_executor = MessageHandlerExecutor::new(closed_result.clone(), clock.clone())
             .with_fp_registry(fp_registry.clone());
 
         fail_parallel::cfg(
@@ -1278,11 +1279,11 @@ mod test {
             .await
             .expect("dispatcher did not stop in time");
 
-        // Assertions: panic result, error_state set to panic, cleanup not called
+        // Assertions: panic result, closed_result set to panic, cleanup not called
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
         assert!(matches!(
-            error_state.reader().read(),
-            Some(SlateDBError::BackgroundTaskPanic(_))
+            closed_result.reader().read(),
+            Some(Err(SlateDBError::BackgroundTaskPanic(_)))
         ));
         assert!(cleanup_reader.read().is_none());
     }

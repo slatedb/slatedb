@@ -137,8 +137,8 @@ impl Admin {
         .build();
 
         let (_, rx) = mpsc::unbounded_channel();
-        let error_state = WatchableOnceCell::new();
-        let task_executor = MessageHandlerExecutor::new(error_state, self.system_clock.clone());
+        let closed_result = WatchableOnceCell::new();
+        let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 
         task_executor
             .add_handler(

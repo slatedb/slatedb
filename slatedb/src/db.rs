@@ -274,7 +274,7 @@ impl DbInner {
 
         self.maybe_apply_backpressure().await?;
         self.write_notifier
-            .send_safely(self.state.read().error_reader(), batch_msg)?;
+            .send_safely(self.state.read().closed_result_reader(), batch_msg)?;
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
@@ -388,7 +388,7 @@ impl DbInner {
     async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier.send_safely(
-            self.state.read().error_reader(),
+            self.state.read().closed_result_reader(),
             MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) },
         )?;
         rx.await?
@@ -532,10 +532,13 @@ impl DbInner {
     pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
         let error_reader = {
             let state = self.state.read();
-            state.error_reader()
+            state.closed_result_reader()
         };
-        if let Some(error) = error_reader.read() {
-            return Err(error.clone());
+        if let Some(result) = error_reader.read() {
+            return match result {
+                Ok(()) => Err(SlateDBError::Closed),
+                Err(e) => Err(e.clone()),
+            };
         }
         Ok(())
     }
@@ -659,7 +662,7 @@ impl Db {
             warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
-        self.inner.state.write().error().write(SlateDBError::Closed);
+        self.inner.state.write().closed_result().write(Ok(()));
         info!("db closed");
         Ok(())
     }
