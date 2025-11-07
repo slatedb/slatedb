@@ -117,7 +117,7 @@ async def test_mixed_sync_async_operations(db):
 
 def test_merge_operator_callable_concat(db_path):
     """DB merge using a Python callable merge operator (concat)."""
-    def concat(existing, value):
+    def concat(key, existing, value):
         return (existing or b"") + value
 
     db = SlateDB(db_path, merge_operator=concat)
@@ -629,7 +629,7 @@ async def test_txn_scan_with_options_async(db_path, env_file):
 
 def test_db_put_delete_merge_with_options(db_path, env_file):
     # Use merge operator for merge tests
-    def last_write_wins(existing, value):
+    def last_write_wins(key, existing, value):
         return value
 
     db = SlateDB(db_path, env_file=env_file, merge_operator=last_write_wins)
@@ -669,7 +669,7 @@ def test_db_write_batch_and_write_with_options(db_path, env_file):
         db.close()
 
 def test_db_write_batch_put_with_options_and_merges(db_path, env_file):
-    def concat(existing, value):
+    def concat(key, existing, value):
         return (existing or b"") + value
 
     db = SlateDB(db_path, env_file=env_file, merge_operator=concat)
@@ -719,7 +719,7 @@ async def test_db_create_checkpoint_async(db_path, env_file):
 
 @pytest.mark.asyncio
 async def test_async_put_delete_merge_with_options(db_path, env_file):
-    def last_write_wins(existing, value):
+    def last_write_wins(key, existing, value):
         return value
 
     db = SlateDB(db_path, env_file=env_file, merge_operator=last_write_wins)
@@ -779,7 +779,7 @@ async def test_db_flush_async_and_flush_with_options_async(db_path, env_file):
 
 @pytest.mark.asyncio
 async def test_db_merge_async(db_path, env_file):
-    def last_write_wins(existing, value):
+    def last_write_wins(key, existing, value):
         return value
 
     db = SlateDB(db_path, env_file=env_file, merge_operator=last_write_wins)
@@ -844,10 +844,10 @@ async def test_async_write_batch_and_write_with_options(db_path, env_file):
 
 def test_txn_merge_and_merge_with_options(db_path, env_file):
     # Define merge operators
-    def last_write_wins(existing, value):
+    def last_write_wins(key, existing, value):
         return value
 
-    def concat(existing, value):
+    def concat(key, existing, value):
         return (existing or b"") + value
 
     # Test with last_write_wins

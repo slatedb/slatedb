@@ -59,8 +59,8 @@ from slatedb import (
 )
 
 
-# Optional: define a merge operator. This simple example is last-write-wins.
-def concat(existing: bytes | None, value: bytes) -> bytes:
+# Optional: define a merge operator. This example concatenates values.
+def concat(key: bytes, existing: bytes | None, value: bytes) -> bytes:
     return (existing or b"") + value
 
 # Open a database using the in-memory object store

@@ -66,7 +66,7 @@ class SlateDB:
         url: str | None = None,
         env_file: str | None = None,
         *,
-        merge_operator: Callable[[bytes | None, bytes], bytes] | None = None,
+        merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
         settings: str | None = None,
     ) -> None:
         """
@@ -79,7 +79,7 @@ class SlateDB:
             env_file: Optional path to a file containing environment variables
                 to configure the object store when ``url`` is omitted.
             merge_operator: Optional Python callable implementing a merge
-                function with signature ``merge(existing: Optional[bytes], value: bytes) -> bytes``.
+                function with signature ``merge(key: bytes, existing: Optional[bytes], value: bytes) -> bytes``.
             settings: Optional path to a SlateDB settings TOML file.
 
         Examples:
@@ -89,7 +89,7 @@ class SlateDB:
 
             Configure a merge operator:
 
-            >>> def last_write_wins(existing: bytes | None, value: bytes) -> bytes:
+            >>> def last_write_wins(key: bytes, existing: bytes | None, value: bytes) -> bytes:
             ...     return value
             >>> db = SlateDB("/tmp/mydb", merge_operator=last_write_wins)
         """
@@ -102,7 +102,7 @@ class SlateDB:
         url: str | None = None,
         env_file: str | None = None,
         *,
-        merge_operator: Callable[[bytes | None, bytes], bytes] | None = None,
+        merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
         settings: str | None = None,
     ) -> SlateDB:
         """
@@ -449,7 +449,7 @@ class SlateDB:
             value: Value bytes to merge.
 
         Examples:
-            >>> def last_write_wins(existing: bytes | None, value: bytes) -> bytes:
+            >>> def last_write_wins(key: bytes, existing: bytes | None, value: bytes) -> bytes:
             ...     return value
             >>> db = SlateDB("/tmp/mydb", merge_operator=last_write_wins)
             >>> db.merge(b"k", b"v")
@@ -1242,7 +1242,7 @@ class SlateDBReader:
         env_file: str | None = None,
         checkpoint_id: str | None = None,
         *,
-        merge_operator: Callable[[bytes | None, bytes], bytes] | None = None,
+        merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
         manifest_poll_interval: int | None = None,
         checkpoint_lifetime: int | None = None,
         max_memtable_bytes: int | None = None,
@@ -1273,7 +1273,7 @@ class SlateDBReader:
         env_file: str | None = None,
         checkpoint_id: str | None = None,
         *,
-        merge_operator: Callable[[bytes | None, bytes], bytes] | None = None,
+        merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
         manifest_poll_interval: int | None = None,
         checkpoint_lifetime: int | None = None,
         max_memtable_bytes: int | None = None,

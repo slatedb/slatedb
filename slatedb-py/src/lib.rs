@@ -212,15 +212,17 @@ struct PyMergeOperator {
 impl MergeOperator for PyMergeOperator {
     fn merge(
         &self,
+        key: &bytes::Bytes,
         existing_value: Option<bytes::Bytes>,
         value: bytes::Bytes,
     ) -> Result<bytes::Bytes, MergeOperatorError> {
         // Fall back to returning the operand on any Python error.
         let fallback = value.clone();
         Python::with_gil(|py| {
+            let key_arg: Vec<u8> = key.to_vec();
             let existing_arg: Option<Vec<u8>> = existing_value.as_ref().map(|b| b.to_vec());
             let value_arg: Vec<u8> = value.to_vec();
-            match self.callable.call1(py, (existing_arg, value_arg)) {
+            match self.callable.call1(py, (key_arg, existing_arg, value_arg)) {
                 Ok(obj) => {
                     let obj = obj.bind(py);
                     // Expect bytes return
@@ -245,13 +247,15 @@ impl MergeOperator for PyMergeOperator {
 
 fn parse_merge_operator(py_obj: Option<&Bound<PyAny>>) -> PyResult<Option<MergeOperatorType>> {
     if let Some(obj) = py_obj {
-        // Expect a Python callable: merge(existing: Optional[bytes], value: bytes) -> bytes
+        // Expect a Python callable: merge(key: bytes, existing: Optional[bytes], value: bytes) -> bytes
         if obj.is_callable() {
             let callable: Py<PyAny> = obj.clone().unbind();
             let op: MergeOperatorType = Arc::new(PyMergeOperator { callable });
             Ok(Some(op))
         } else {
-            Err(InvalidError::new_err("merge_operator must be a callable (merge(existing: Optional[bytes], value: bytes) -> bytes)"))
+            Err(InvalidError::new_err(
+                "merge_operator must be a callable (merge(key: bytes, existing: Optional[bytes], value: bytes) -> bytes)",
+            ))
         }
     } else {
         Ok(None)
