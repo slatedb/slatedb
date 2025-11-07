@@ -417,6 +417,7 @@ mod tests {
     impl MergeOperator for StringConcatMergeOperator {
         fn merge(
             &self,
+            _key: &Bytes,
             existing_value: Option<Bytes>,
             operand: Bytes,
         ) -> Result<Bytes, MergeOperatorError> {
