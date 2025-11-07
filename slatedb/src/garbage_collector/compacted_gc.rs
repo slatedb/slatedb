@@ -94,7 +94,7 @@ impl CompactedGcTask {
         if start_ts_ms <= 0 {
             return None;
         }
-        DateTime::<Utc>::from_timestamp_millis(start_ts_ms as i64)
+        DateTime::<Utc>::from_timestamp_millis(start_ts_ms)
     }
 }
 
