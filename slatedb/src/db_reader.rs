@@ -190,7 +190,7 @@ impl DbReaderInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        self.check_error()?;
+        self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
             .get_with_options(key, options, db_state.as_ref(), None, None)
@@ -202,7 +202,7 @@ impl DbReaderInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        self.check_error()?;
+        self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
             .scan_with_options(range, options, db_state.as_ref(), None, None, None)
@@ -442,11 +442,17 @@ impl DbReaderInner {
         Ok((last_wal_id, last_committed_seq))
     }
 
-    /// Return an error if the state has encountered
-    /// an unrecoverable error.
-    pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
-        let error_reader = self.closed_result_watcher.reader();
-        if let Some(result) = error_reader.read() {
+    /// Returns an error if the reader has been closed.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the reader is still open.
+    /// - `Err(SlateDBError::Closed)` if the reader was closed successfully
+    ///   (state.closed_result_reader() returns Ok(())).
+    /// - `Err(e)` if the reader was closed with an error, where `e` is the error
+    ///   (state.closed_result_reader() returns Err(e)).
+    pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
+        let closed_result_reader = self.closed_result_watcher.reader();
+        if let Some(result) = closed_result_reader.read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
                 Err(e) => Err(e.clone()),

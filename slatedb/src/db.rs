@@ -536,11 +536,11 @@ impl DbInner {
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
     ///   (state.closed_result_reader() returns Err(e)).
     pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
-        let error_reader = {
+        let closed_result_reader = {
             let state = self.state.read();
             state.closed_result_reader()
         };
-        if let Some(result) = error_reader.read() {
+        if let Some(result) = closed_result_reader.read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
                 Err(e) => Err(e.clone()),
