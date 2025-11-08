@@ -971,7 +971,7 @@ mod tests {
         let sst_handle_from_store = table_store.open_sst(&SsTableId::Wal(wal_id)).await.unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let index = table_store
-            .read_index(&sst_handle_from_store)
+            .read_index(&sst_handle_from_store, false)
             .await
             .unwrap();
         let sst_info_from_store = sst_handle_from_store.info;
@@ -1026,8 +1026,8 @@ mod tests {
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle).await.unwrap();
-        let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
+        let index = table_store.read_index(&sst_handle, false).await.unwrap();
+        let filter = table_store.read_filter(&sst_handle, false).await.unwrap().unwrap();
 
         assert!(filter.might_contain(filter_hash(b"key1")));
         assert!(filter.might_contain(filter_hash(b"key2")));
@@ -1097,8 +1097,8 @@ mod tests {
             None,
         );
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle).await.unwrap();
-        let filter = table_store.read_filter(&sst_handle).await.unwrap().unwrap();
+        let index = table_store.read_index(&sst_handle, false).await.unwrap();
+        let filter = table_store.read_filter(&sst_handle, false).await.unwrap().unwrap();
 
         assert!(filter.might_contain(filter_hash(b"key1")));
         assert!(filter.might_contain(filter_hash(b"key2")));
@@ -1223,7 +1223,7 @@ mod tests {
         let sst_handle_from_store = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let index = table_store
-            .read_index(&sst_handle_from_store)
+            .read_index(&sst_handle_from_store, false)
             .await
             .unwrap();
 

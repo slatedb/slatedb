@@ -130,6 +130,7 @@ pub fn convert_scan_options(c_opts: *const CSdbScanOptions) -> ScanOptions {
         .with_read_ahead_bytes(opts.read_ahead_bytes as usize)
         .with_cache_blocks(opts.cache_blocks)
         .with_max_fetch_tasks(opts.max_fetch_tasks as usize)
+        .with_bypass_cache(opts.bypass_cache)
 }
 
 // Convert C write options to Rust WriteOptions
@@ -179,6 +180,7 @@ pub fn convert_read_options(c_opts: *const CSdbReadOptions) -> ReadOptions {
     ReadOptions {
         durability_filter,
         dirty: opts.dirty,
+        bypass_cache: opts.bypass_cache,
     }
 }
 

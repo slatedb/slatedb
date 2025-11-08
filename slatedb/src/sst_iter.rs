@@ -32,6 +32,7 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) max_fetch_tasks: usize,
     pub(crate) blocks_to_fetch: usize,
     pub(crate) cache_blocks: bool,
+    pub(crate) bypass_cache: bool,
     pub(crate) eager_spawn: bool,
 }
 
@@ -41,6 +42,7 @@ impl Default for SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 1,
             cache_blocks: true,
+            bypass_cache: false,
             eager_spawn: false,
         }
     }
@@ -165,13 +167,14 @@ impl BloomFilterEvaluator {
         &mut self,
         view: &SstView<'_>,
         table_store: &Arc<TableStore>,
+        bypass_cache: bool,
     ) -> Result<(), SlateDBError> {
         if self.state != FilterState::NotChecked {
             return Ok(());
         }
 
         let key_hash = filter::filter_hash(self.key.as_ref());
-        let maybe_filter = table_store.read_filter(view.table_as_ref()).await?;
+        let maybe_filter = table_store.read_filter(view.table_as_ref(), bypass_cache).await?;
 
         match maybe_filter {
             Some(filter) => {
@@ -386,6 +389,7 @@ impl<'a> InternalSstIterator<'a> {
             let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
             let index = index.clone();
             let cache_blocks = self.options.cache_blocks;
+            let bypass_cache = self.options.bypass_cache;
             self.fetch_tasks
                 .push_back(FetchTask::InFlight(tokio::spawn(async move {
                     table_store
@@ -394,6 +398,7 @@ impl<'a> InternalSstIterator<'a> {
                             index,
                             blocks_start..blocks_end,
                             cache_blocks,
+                            bypass_cache,
                         )
                         .await
                 })));
@@ -460,9 +465,10 @@ impl<'a> InternalSstIterator<'a> {
 
     async fn fetch_index(&mut self) -> Result<(), SlateDBError> {
         if self.index.is_none() {
+            let bypass_cache = self.options.bypass_cache;
             let index = self
                 .table_store
-                .read_index(self.view.table_as_ref())
+                .read_index(self.view.table_as_ref(), bypass_cache)
                 .await?;
             let block_idx_range =
                 InternalSstIterator::blocks_covering_view(&index.borrow(), &self.view);
@@ -588,8 +594,9 @@ impl<'a> BloomFilterIterator<'a> {
 impl KeyValueIterator for BloomFilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
+            let bypass_cache = self.inner.options.bypass_cache;
             self.filter
-                .evaluate(self.inner.view(), self.inner.table_store())
+                .evaluate(self.inner.view(), self.inner.table_store(), bypass_cache)
                 .await?;
 
             if self.is_filtered_out() {
@@ -870,7 +877,7 @@ mod tests {
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle).await.unwrap();
+        let index = table_store.read_index(&sst_handle, false).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
 
         // TODO: Need to verify argument types
@@ -975,7 +982,7 @@ mod tests {
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
         let filter = table_store
-            .read_filter(&sst_handle)
+            .read_filter(&sst_handle, false)
             .await
             .expect("filter read should succeed")
             .expect("filter should exist");
@@ -1072,7 +1079,7 @@ mod tests {
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle).await.unwrap();
+        let index = table_store.read_index(&sst_handle, false).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 10);
 
         // TODO: verify cache_blocks=true is intended
@@ -1259,6 +1266,7 @@ mod tests {
                 max_fetch_tasks: 32,
                 blocks_to_fetch: 256,
                 cache_blocks: true,
+                bypass_cache: false,
                 eager_spawn: false,
             },
         )
@@ -1274,6 +1282,7 @@ mod tests {
                 max_fetch_tasks: 1,
                 blocks_to_fetch: 1,
                 cache_blocks: true,
+                bypass_cache: false,
                 eager_spawn: false,
             },
         )

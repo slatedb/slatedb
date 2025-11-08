@@ -411,6 +411,7 @@ impl DbInner {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
             cache_blocks: false,
+            bypass_cache: false,
             eager_spawn: true,
         };
 
@@ -1495,6 +1496,7 @@ mod tests {
                                     &ReadOptions {
                                         durability_filter: Memory,
                                         dirty: false,
+                                        bypass_cache: false,
                                     }
                                 )
                                 .await
@@ -1795,7 +1797,7 @@ mod tests {
         let state = db.inner.state.read().view();
         assert_eq!(1, state.state.manifest.core.l0.len());
         let sst = state.state.manifest.core.l0.front().unwrap();
-        let index = db.inner.table_store.read_index(sst).await.unwrap();
+        let index = db.inner.table_store.read_index(sst, false).await.unwrap();
         assert!(index.borrow().block_meta().len() >= 3);
         assert_eq!(
             Some(Bytes::copy_from_slice(last_val.as_bytes())),

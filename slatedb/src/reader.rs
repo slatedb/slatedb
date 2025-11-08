@@ -286,6 +286,7 @@ impl Reader {
 
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: true,
+            bypass_cache: options.bypass_cache,
             eager_spawn: true,
             ..SstIteratorOptions::default()
         };
@@ -364,6 +365,7 @@ impl Reader {
             max_fetch_tasks: options.max_fetch_tasks,
             blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
+            bypass_cache: options.bypass_cache,
             eager_spawn: true,
         };
 

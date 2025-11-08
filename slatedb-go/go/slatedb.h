@@ -72,6 +72,8 @@ typedef struct CSdbReadOptions {
     uint32_t durability_filter;
     // Whether to include dirty/uncommitted data
     bool dirty;
+    // Whether to bypass the cache for this read
+    bool bypass_cache;
 } CSdbReadOptions;
 
 typedef struct CSdbValue {
@@ -85,6 +87,7 @@ typedef struct CSdbScanOptions {
     uint64_t read_ahead_bytes;
     bool cache_blocks;
     uint64_t max_fetch_tasks;
+    bool bypass_cache;
 } CSdbScanOptions;
 
 // Type-safe wrapper around a pointer to DbReaderFFI.

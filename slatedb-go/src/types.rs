@@ -88,6 +88,8 @@ pub struct CSdbReadOptions {
     pub durability_filter: u32,
     /// Whether to include dirty/uncommitted data
     pub dirty: bool,
+    /// Whether to bypass the cache for this read
+    pub bypass_cache: bool,
 }
 
 // Scan options for controlling scan behavior
@@ -99,6 +101,7 @@ pub struct CSdbScanOptions {
     pub read_ahead_bytes: u64,  // Buffer size for read-ahead (default: 1)
     pub cache_blocks: bool,     // Whether to cache fetched blocks (default: false)
     pub max_fetch_tasks: u64,   // Maximum concurrent fetch tasks (default: 1)
+    pub bypass_cache: bool,     // Whether to bypass the cache for this scan (default: false)
 }
 
 /// Internal struct for managing database iterators in FFI

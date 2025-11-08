@@ -171,6 +171,7 @@ impl TokioCompactionExecutorInner {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,
             cache_blocks: false, // don't clobber the cache
+            bypass_cache: false,
             eager_spawn: true,
         };
 

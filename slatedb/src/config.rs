@@ -243,6 +243,9 @@ pub struct ReadOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
+    /// Specifies that the results of this query should not be put into
+    /// the cache or evict any existing cache entries
+    pub bypass_cache: bool,
 }
 
 impl ReadOptions {
@@ -257,6 +260,13 @@ impl ReadOptions {
     pub fn with_durability_filter(self, durability_filter: DurabilityLevel) -> Self {
         Self {
             durability_filter,
+            ..self
+        }
+    }
+
+    pub fn with_bypass_cache(self, bypass_cache: bool) -> Self {
+        Self {
+            bypass_cache,
             ..self
         }
     }
@@ -279,6 +289,9 @@ pub struct ScanOptions {
     /// The maximum number of concurrent tasks for fetching blocks during scans.
     /// Higher values can improve throughput but use more resources. The default is 1.
     pub max_fetch_tasks: usize,
+    /// Specifies that the results of this query should not be put into
+    /// the cache or evict any existing cache entries
+    pub bypass_cache: bool,
 }
 
 impl Default for ScanOptions {
@@ -290,6 +303,7 @@ impl Default for ScanOptions {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            bypass_cache: false,
         }
     }
 }
@@ -327,6 +341,13 @@ impl ScanOptions {
     pub fn with_max_fetch_tasks(self, max_fetch_tasks: usize) -> Self {
         Self {
             max_fetch_tasks,
+            ..self
+        }
+    }
+
+    pub fn with_bypass_cache(self, bypass_cache: bool) -> Self {
+        Self {
+            bypass_cache,
             ..self
         }
     }
@@ -1288,6 +1309,7 @@ object_store_cache_options:
         let options = ReadOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
+        assert!(!options.bypass_cache);
 
         let options = ScanOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
@@ -1295,6 +1317,7 @@ object_store_cache_options:
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
         assert_eq!(options.max_fetch_tasks, 1);
+        assert!(!options.bypass_cache);
     }
 
     #[test]
@@ -1307,5 +1330,28 @@ object_store_cache_options:
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
+    }
+
+    #[test]
+    fn test_read_options_with_bypass_cache() {
+        let options = ReadOptions::default().with_bypass_cache(true);
+        assert!(options.bypass_cache);
+
+        // Verify other fields remain unchanged
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+    }
+
+    #[test]
+    fn test_scan_options_with_bypass_cache() {
+        let options = ScanOptions::default().with_bypass_cache(true);
+        assert!(options.bypass_cache);
+
+        // Verify other fields remain unchanged
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+        assert_eq!(options.read_ahead_bytes, 1);
+        assert!(!options.cache_blocks);
+        assert_eq!(options.max_fetch_tasks, 1);
     }
 }

@@ -301,15 +301,18 @@ impl TableStore {
     pub(crate) async fn read_filter(
         &self,
         handle: &SsTableHandle,
+        bypass_cache: bool,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(ref cache) = self.cache {
-            if let Some(filter) = cache
-                .get_filter(&(handle.id, handle.info.filter_offset).into())
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.bloom_filter())
-            {
-                return Ok(Some(filter));
+            if !bypass_cache {
+                if let Some(filter) = cache
+                    .get_filter(&(handle.id, handle.info.filter_offset).into())
+                    .await
+                    .unwrap_or(None)
+                    .and_then(|e| e.bloom_filter())
+                {
+                    return Ok(Some(filter));
+                }
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
@@ -317,13 +320,15 @@ impl TableStore {
         let obj = ReadOnlyObject { object_store, path };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
         if let Some(ref cache) = self.cache {
-            if let Some(filter) = filter.as_ref() {
-                cache
-                    .insert(
-                        (handle.id, handle.info.filter_offset).into(),
-                        CachedEntry::with_bloom_filter(filter.clone()),
-                    )
-                    .await;
+            if !bypass_cache {
+                if let Some(filter) = filter.as_ref() {
+                    cache
+                        .insert(
+                            (handle.id, handle.info.filter_offset).into(),
+                            CachedEntry::with_bloom_filter(filter.clone()),
+                        )
+                        .await;
+                }
             }
         }
         Ok(filter)
@@ -332,15 +337,18 @@ impl TableStore {
     pub(crate) async fn read_index(
         &self,
         handle: &SsTableHandle,
+        bypass_cache: bool,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(ref cache) = self.cache {
-            if let Some(index) = cache
-                .get_index(&(handle.id, handle.info.index_offset).into())
-                .await
-                .unwrap_or(None)
-                .and_then(|e| e.sst_index())
-            {
-                return Ok(index);
+            if !bypass_cache {
+                if let Some(index) = cache
+                    .get_index(&(handle.id, handle.info.index_offset).into())
+                    .await
+                    .unwrap_or(None)
+                    .and_then(|e| e.sst_index())
+                {
+                    return Ok(index);
+                }
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
@@ -348,12 +356,14 @@ impl TableStore {
         let obj = ReadOnlyObject { object_store, path };
         let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
         if let Some(ref cache) = self.cache {
-            cache
-                .insert(
-                    (handle.id, handle.info.index_offset).into(),
-                    CachedEntry::with_sst_index(index.clone()),
-                )
-                .await;
+            if !bypass_cache {
+                cache
+                    .insert(
+                        (handle.id, handle.info.index_offset).into(),
+                        CachedEntry::with_sst_index(index.clone()),
+                    )
+                    .await;
+            }
         }
         Ok(index)
     }
@@ -385,6 +395,7 @@ impl TableStore {
         index: Arc<SsTableIndexOwned>,
         blocks: Range<usize>,
         cache_blocks: bool,
+        bypass_cache: bool,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         // Create a ReadOnlyObject for accessing the SSTable file
         let object_store = self.object_stores.store_for(&handle.id);
@@ -394,42 +405,47 @@ impl TableStore {
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
 
-        // If block cache is available, try to retrieve cached blocks
+        // If block cache is available and bypass_cache is false, try to retrieve cached blocks
         if let Some(ref cache) = self.cache {
-            let index_borrow = index.borrow();
-            // Attempt to get all requested blocks from cache concurrently
-            let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
-                let block_meta = index_borrow.block_meta().get(block_num);
-                let offset = block_meta.offset();
-                cache
-                    .get_block(&(handle.id, offset).into())
-                    .await
-                    .unwrap_or(None)
-                    .and_then(|entry| entry.block())
-            }))
-            .await;
+            if !bypass_cache {
+                let index_borrow = index.borrow();
+                // Attempt to get all requested blocks from cache concurrently
+                let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
+                    let block_meta = index_borrow.block_meta().get(block_num);
+                    let offset = block_meta.offset();
+                    cache
+                        .get_block(&(handle.id, offset).into())
+                        .await
+                        .unwrap_or(None)
+                        .and_then(|entry| entry.block())
+                }))
+                .await;
 
-            let mut last_uncached_start = None;
+                let mut last_uncached_start = None;
 
-            // Process cached block results
-            for (index, block_result) in cached_blocks.into_iter().enumerate() {
-                match block_result {
-                    Some(cached_block) => {
-                        // If a cached block is found, add it to blocks_read
-                        if let Some(start) = last_uncached_start.take() {
-                            uncached_ranges.push((blocks.start + start)..(blocks.start + index));
+                // Process cached block results
+                for (index, block_result) in cached_blocks.into_iter().enumerate() {
+                    match block_result {
+                        Some(cached_block) => {
+                            // If a cached block is found, add it to blocks_read
+                            if let Some(start) = last_uncached_start.take() {
+                                uncached_ranges.push((blocks.start + start)..(blocks.start + index));
+                            }
+                            blocks_read.push_back(cached_block);
                         }
-                        blocks_read.push_back(cached_block);
-                    }
-                    None => {
-                        // If a block is not in cache, mark the start of an uncached range
-                        last_uncached_start.get_or_insert(index);
+                        None => {
+                            // If a block is not in cache, mark the start of an uncached range
+                            last_uncached_start.get_or_insert(index);
+                        }
                     }
                 }
-            }
-            // Add the last uncached range if it exists
-            if let Some(start) = last_uncached_start {
-                uncached_ranges.push((blocks.start + start)..blocks.end);
+                // Add the last uncached range if it exists
+                if let Some(start) = last_uncached_start {
+                    uncached_ranges.push((blocks.start + start)..blocks.end);
+                }
+            } else {
+                // If bypass_cache is true, treat all blocks as uncached
+                uncached_ranges.push(blocks.clone());
             }
         } else {
             // If no cache is available, treat all blocks as uncached
@@ -462,9 +478,9 @@ impl TableStore {
             }
         }
 
-        // Cache the newly read blocks if caching is enabled
+        // Cache the newly read blocks if caching is enabled and bypass_cache is false
         if let Some(ref cache) = self.cache {
-            if !blocks_to_cache.is_empty() {
+            if !blocks_to_cache.is_empty() && !bypass_cache {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
                     cache.insert((id, offset).into(), CachedEntry::with_block(block))
                 }))
