@@ -304,15 +304,13 @@ impl TableStore {
         bypass_cache: bool,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(ref cache) = self.cache {
-            if !bypass_cache {
-                if let Some(filter) = cache
-                    .get_filter(&(handle.id, handle.info.filter_offset).into())
-                    .await
-                    .unwrap_or(None)
-                    .and_then(|e| e.bloom_filter())
-                {
-                    return Ok(Some(filter));
-                }
+            if let Some(filter) = cache
+                .get_filter(&(handle.id, handle.info.filter_offset).into())
+                .await
+                .unwrap_or(None)
+                .and_then(|e| e.bloom_filter())
+            {
+                return Ok(Some(filter));
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
@@ -340,15 +338,13 @@ impl TableStore {
         bypass_cache: bool,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(ref cache) = self.cache {
-            if !bypass_cache {
-                if let Some(index) = cache
-                    .get_index(&(handle.id, handle.info.index_offset).into())
-                    .await
-                    .unwrap_or(None)
-                    .and_then(|e| e.sst_index())
-                {
-                    return Ok(index);
-                }
+            if let Some(index) = cache
+                .get_index(&(handle.id, handle.info.index_offset).into())
+                .await
+                .unwrap_or(None)
+                .and_then(|e| e.sst_index())
+            {
+                return Ok(index);
             }
         }
         let object_store = self.object_stores.store_for(&handle.id);
@@ -405,47 +401,42 @@ impl TableStore {
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
 
-        // If block cache is available and bypass_cache is false, try to retrieve cached blocks
+        // If block cache is available, try to retrieve cached blocks
         if let Some(ref cache) = self.cache {
-            if !bypass_cache {
-                let index_borrow = index.borrow();
-                // Attempt to get all requested blocks from cache concurrently
-                let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
-                    let block_meta = index_borrow.block_meta().get(block_num);
-                    let offset = block_meta.offset();
-                    cache
-                        .get_block(&(handle.id, offset).into())
-                        .await
-                        .unwrap_or(None)
-                        .and_then(|entry| entry.block())
-                }))
-                .await;
+            let index_borrow = index.borrow();
+            // Attempt to get all requested blocks from cache concurrently
+            let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
+                let block_meta = index_borrow.block_meta().get(block_num);
+                let offset = block_meta.offset();
+                cache
+                    .get_block(&(handle.id, offset).into())
+                    .await
+                    .unwrap_or(None)
+                    .and_then(|entry| entry.block())
+            }))
+            .await;
 
-                let mut last_uncached_start = None;
+            let mut last_uncached_start = None;
 
-                // Process cached block results
-                for (index, block_result) in cached_blocks.into_iter().enumerate() {
-                    match block_result {
-                        Some(cached_block) => {
-                            // If a cached block is found, add it to blocks_read
-                            if let Some(start) = last_uncached_start.take() {
-                                uncached_ranges.push((blocks.start + start)..(blocks.start + index));
-                            }
-                            blocks_read.push_back(cached_block);
+            // Process cached block results
+            for (index, block_result) in cached_blocks.into_iter().enumerate() {
+                match block_result {
+                    Some(cached_block) => {
+                        // If a cached block is found, add it to blocks_read
+                        if let Some(start) = last_uncached_start.take() {
+                            uncached_ranges.push((blocks.start + start)..(blocks.start + index));
                         }
-                        None => {
-                            // If a block is not in cache, mark the start of an uncached range
-                            last_uncached_start.get_or_insert(index);
-                        }
+                        blocks_read.push_back(cached_block);
+                    }
+                    None => {
+                        // If a block is not in cache, mark the start of an uncached range
+                        last_uncached_start.get_or_insert(index);
                     }
                 }
-                // Add the last uncached range if it exists
-                if let Some(start) = last_uncached_start {
-                    uncached_ranges.push((blocks.start + start)..blocks.end);
-                }
-            } else {
-                // If bypass_cache is true, treat all blocks as uncached
-                uncached_ranges.push(blocks.clone());
+            }
+            // Add the last uncached range if it exists
+            if let Some(start) = last_uncached_start {
+                uncached_ranges.push((blocks.start + start)..blocks.end);
             }
         } else {
             // If no cache is available, treat all blocks as uncached
@@ -1429,7 +1420,7 @@ mod tests {
             );
         }
 
-        // Test 3: Read with bypass_cache=true should not use cached blocks
+        // Test 3: Read with bypass_cache=true should STILL use cached blocks if available
         // First, manually add block 6 to cache
         let offset_6 = index.borrow().block_meta().get(6).offset();
         let blocks_6_7 = ts
@@ -1446,15 +1437,27 @@ mod tests {
         );
 
         // Now read blocks 6-7 with bypass_cache=true
+        // It should still use the cached block 6
         let blocks_bypass = ts
             .read_blocks_using_index(&handle, index.clone(), 6..7, false, true)
             .await
             .unwrap();
         
-        // Both should return the same data
+        // Both should return the same data (from cache)
         assert_eq!(blocks_6_7.len(), blocks_bypass.len());
+        
+        // Verify block 7 was NOT cached (because it was read with bypass_cache=true)
+        let offset_7 = index.borrow().block_meta().get(7).offset();
+        assert!(
+            test_cache
+                .get_block(&(handle.id, offset_7).into())
+                .await
+                .unwrap_or(None)
+                .is_none(),
+            "Block 7 should NOT be in cache after bypass_cache read"
+        );
 
-        // Test 4: Test bypass_cache with read_filter
+        // Test 4: Test bypass_cache with read_filter - should use cache but not populate
         let _filter_normal = ts.read_filter(&handle, false).await.unwrap();
         // Verify filter is in cache
         assert!(
@@ -1466,35 +1469,69 @@ mod tests {
             "Filter should be in cache after normal read"
         );
 
-        // Clear the filter cache
+        // Read with bypass_cache=true - should still use cached filter
+        let _filter_bypass = ts.read_filter(&handle, true).await.unwrap();
+        // Verify filter is still in cache (because it was already there)
+        assert!(
+            test_cache
+                .get_filter(&(handle.id, handle.info.filter_offset).into())
+                .await
+                .unwrap_or(None)
+                .is_some(),
+            "Filter should still be in cache after bypass_cache read (read from cache)"
+        );
+
+        // Clear the filter cache to test that bypass_cache doesn't populate
         test_cache.remove(&(handle.id, handle.info.filter_offset).into()).await;
 
-        // Read with bypass_cache=true
-        let _filter_bypass = ts.read_filter(&handle, true).await.unwrap();
-        // Verify filter is NOT in cache
+        // Read with bypass_cache=true again
+        let _filter_bypass2 = ts.read_filter(&handle, true).await.unwrap();
+        // Verify filter is NOT in cache (because bypass_cache prevents caching)
         assert!(
             test_cache
                 .get_filter(&(handle.id, handle.info.filter_offset).into())
                 .await
                 .unwrap_or(None)
                 .is_none(),
-            "Filter should NOT be in cache after bypass_cache read"
+            "Filter should NOT be in cache after bypass_cache read (not populated)"
         );
 
-        // Test 5: Test bypass_cache with read_index
-        // Clear the index cache
+        // Test 5: Test bypass_cache with read_index - should use cache but not populate
+        // The index should already be in cache from the initial read
+        assert!(
+            test_cache
+                .get_index(&(handle.id, handle.info.index_offset).into())
+                .await
+                .unwrap_or(None)
+                .is_some(),
+            "Index should be in cache from initial read"
+        );
+
+        // Read with bypass_cache=true - should still use cached index
+        let _index_bypass = ts.read_index(&handle, true).await.unwrap();
+        // Verify index is still in cache (because it was already there)
+        assert!(
+            test_cache
+                .get_index(&(handle.id, handle.info.index_offset).into())
+                .await
+                .unwrap_or(None)
+                .is_some(),
+            "Index should still be in cache after bypass_cache read (read from cache)"
+        );
+
+        // Clear the index cache to test that bypass_cache doesn't populate
         test_cache.remove(&(handle.id, handle.info.index_offset).into()).await;
 
-        // Read with bypass_cache=true
-        let _index_bypass = ts.read_index(&handle, true).await.unwrap();
-        // Verify index is NOT in cache
+        // Read with bypass_cache=true again
+        let _index_bypass2 = ts.read_index(&handle, true).await.unwrap();
+        // Verify index is NOT in cache (because bypass_cache prevents caching)
         assert!(
             test_cache
                 .get_index(&(handle.id, handle.info.index_offset).into())
                 .await
                 .unwrap_or(None)
                 .is_none(),
-            "Index should NOT be in cache after bypass_cache read"
+            "Index should NOT be in cache after bypass_cache read (not populated)"
         );
     }
 

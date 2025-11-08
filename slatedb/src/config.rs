@@ -244,7 +244,7 @@ pub struct ReadOptions {
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
     /// Specifies that the results of this query should not be put into
-    /// the cache or evict any existing cache entries
+    /// the cache. Existing cached entries will still be used if available.
     pub bypass_cache: bool,
 }
 
@@ -290,7 +290,7 @@ pub struct ScanOptions {
     /// Higher values can improve throughput but use more resources. The default is 1.
     pub max_fetch_tasks: usize,
     /// Specifies that the results of this query should not be put into
-    /// the cache or evict any existing cache entries
+    /// the cache. Existing cached entries will still be used if available.
     pub bypass_cache: bool,
 }
 
