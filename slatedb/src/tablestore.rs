@@ -874,7 +874,7 @@ mod tests {
         let handle = writer.close().await.unwrap();
 
         // Read the index
-        let index = ts.read_index(&handle).await.unwrap();
+        let index = ts.read_index(&handle, false).await.unwrap();
 
         // Test 1: SST hit
         let blocks = ts
@@ -1349,6 +1349,153 @@ mod tests {
         } else {
             assert_eq!(count_ssts_in(&main_store).await, 1);
         }
+    }
+
+    #[tokio::test]
+    async fn test_bypass_cache_skips_cache_operations() {
+        // Setup with cache
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
+
+        let stat_registry = StatRegistry::new();
+        let test_cache = Arc::new(TestCache::new());
+
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            test_cache.clone(),
+            &stat_registry,
+            Arc::new(DefaultSystemClock::default()),
+        ));
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format,
+            Path::from("/root"),
+            Some(wrapper),
+        ));
+
+        // Create and write SST with 10 blocks
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let mut writer = ts.table_writer(id);
+        for i in 0..10 {
+            let key = [i as u8; 16];
+            let value = [(i + 1) as u8; 16];
+            writer
+                .add(RowEntry::new_value(key.as_ref(), value.as_ref(), 0))
+                .await
+                .unwrap();
+        }
+        let handle = writer.close().await.unwrap();
+
+        // Test 1: Normal read - should populate cache
+        let index = ts.read_index(&handle, false).await.unwrap();
+        let _blocks = ts
+            .read_blocks_using_index(&handle, index.clone(), 0..5, true, false)
+            .await
+            .unwrap();
+
+        // Verify blocks 0-4 are in cache
+        for i in 0..5 {
+            let offset = index.borrow().block_meta().get(i).offset();
+            assert!(
+                test_cache
+                    .get_block(&(handle.id, offset).into())
+                    .await
+                    .unwrap_or(None)
+                    .is_some(),
+                "Block {} should be in cache after normal read",
+                i
+            );
+        }
+
+        // Test 2: Read with bypass_cache=true - should NOT populate cache
+        let _blocks = ts
+            .read_blocks_using_index(&handle, index.clone(), 5..10, true, true)
+            .await
+            .unwrap();
+
+        // Verify blocks 5-9 are NOT in cache
+        for i in 5..10 {
+            let offset = index.borrow().block_meta().get(i).offset();
+            assert!(
+                test_cache
+                    .get_block(&(handle.id, offset).into())
+                    .await
+                    .unwrap_or(None)
+                    .is_none(),
+                "Block {} should NOT be in cache after bypass_cache read",
+                i
+            );
+        }
+
+        // Test 3: Read with bypass_cache=true should not use cached blocks
+        // First, manually add block 6 to cache
+        let offset_6 = index.borrow().block_meta().get(6).offset();
+        let blocks_6_7 = ts
+            .read_blocks_using_index(&handle, index.clone(), 6..7, true, false)
+            .await
+            .unwrap();
+        assert!(
+            test_cache
+                .get_block(&(handle.id, offset_6).into())
+                .await
+                .unwrap_or(None)
+                .is_some(),
+            "Block 6 should be in cache"
+        );
+
+        // Now read blocks 6-7 with bypass_cache=true
+        let blocks_bypass = ts
+            .read_blocks_using_index(&handle, index.clone(), 6..7, false, true)
+            .await
+            .unwrap();
+        
+        // Both should return the same data
+        assert_eq!(blocks_6_7.len(), blocks_bypass.len());
+
+        // Test 4: Test bypass_cache with read_filter
+        let _filter_normal = ts.read_filter(&handle, false).await.unwrap();
+        // Verify filter is in cache
+        assert!(
+            test_cache
+                .get_filter(&(handle.id, handle.info.filter_offset).into())
+                .await
+                .unwrap_or(None)
+                .is_some(),
+            "Filter should be in cache after normal read"
+        );
+
+        // Clear the filter cache
+        test_cache.remove(&(handle.id, handle.info.filter_offset).into()).await;
+
+        // Read with bypass_cache=true
+        let _filter_bypass = ts.read_filter(&handle, true).await.unwrap();
+        // Verify filter is NOT in cache
+        assert!(
+            test_cache
+                .get_filter(&(handle.id, handle.info.filter_offset).into())
+                .await
+                .unwrap_or(None)
+                .is_none(),
+            "Filter should NOT be in cache after bypass_cache read"
+        );
+
+        // Test 5: Test bypass_cache with read_index
+        // Clear the index cache
+        test_cache.remove(&(handle.id, handle.info.index_offset).into()).await;
+
+        // Read with bypass_cache=true
+        let _index_bypass = ts.read_index(&handle, true).await.unwrap();
+        // Verify index is NOT in cache
+        assert!(
+            test_cache
+                .get_index(&(handle.id, handle.info.index_offset).into())
+                .await
+                .unwrap_or(None)
+                .is_none(),
+            "Index should NOT be in cache after bypass_cache read"
+        );
     }
 
     proptest! {
