@@ -268,6 +268,7 @@ fn build_scan_options(
     read_ahead_bytes: Option<usize>,
     cache_blocks: Option<bool>,
     max_fetch_tasks: Option<usize>,
+    bypass_cache: Option<bool>,
 ) -> PyResult<ScanOptions> {
     let mut opts = ScanOptions::default();
     if let Some(df) = durability_filter {
@@ -293,12 +294,16 @@ fn build_scan_options(
     if let Some(mft) = max_fetch_tasks {
         opts.max_fetch_tasks = mft;
     }
+    if let Some(bc) = bypass_cache {
+        opts.bypass_cache = bc;
+    }
     Ok(opts)
 }
 
 fn build_read_options(
     durability_filter: Option<String>,
     dirty: Option<bool>,
+    bypass_cache: Option<bool>,
 ) -> PyResult<ReadOptions> {
     let mut opts = ReadOptions::default();
     if let Some(df) = durability_filter {
@@ -314,6 +319,9 @@ fn build_read_options(
     }
     if let Some(d) = dirty {
         opts.dirty = d;
+    }
+    if let Some(bc) = bypass_cache {
+        opts.bypass_cache = bc;
     }
     Ok(opts)
 }
@@ -531,19 +539,20 @@ impl PySlateDB {
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, bypass_cache = None))]
     fn get_with_options<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, bypass_cache)?;
         let rt = get_runtime();
         let res: Option<Vec<u8>> = py.allow_threads(|| {
             rt.block_on(async {
@@ -607,7 +616,7 @@ impl PySlateDB {
         py.allow_threads(|| rt.block_on(async { db.delete(&key).await.map_err(map_error) }))
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, bypass_cache = None))]
     fn scan_with_options(
         &self,
         start: Vec<u8>,
@@ -617,6 +626,7 @@ impl PySlateDB {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -632,6 +642,7 @@ impl PySlateDB {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            bypass_cache,
         )?;
         let db = self.inner.clone();
         let rt = get_runtime();
@@ -643,7 +654,7 @@ impl PySlateDB {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, bypass_cache = None))]
     fn scan_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -654,6 +665,7 @@ impl PySlateDB {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -669,6 +681,7 @@ impl PySlateDB {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            bypass_cache,
         )?;
         let db = self.inner.clone();
         future_into_py(py, async move {
@@ -798,19 +811,20 @@ impl PySlateDB {
         })
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, bypass_cache = None))]
     fn get_with_options_async<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, bypass_cache)?;
         future_into_py(py, async move {
             match db.get_with_options(&key, &opts).await {
                 Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
@@ -1185,7 +1199,7 @@ impl PySlateDBSnapshot {
         })
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, bypass_cache = None))]
     fn scan_with_options(
         &self,
         start: Vec<u8>,
@@ -1195,6 +1209,7 @@ impl PySlateDBSnapshot {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1210,6 +1225,7 @@ impl PySlateDBSnapshot {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            bypass_cache,
         )?;
         let snapshot = self.inner_ref()?;
         let rt = get_runtime();
@@ -1222,7 +1238,7 @@ impl PySlateDBSnapshot {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, bypass_cache = None))]
     fn scan_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -1233,6 +1249,7 @@ impl PySlateDBSnapshot {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1248,6 +1265,7 @@ impl PySlateDBSnapshot {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            bypass_cache,
         )?;
         let snapshot = self.inner_ref()?;
         future_into_py(py, async move {
@@ -1391,19 +1409,20 @@ impl PySlateDBTransaction {
         future_into_py(py, async move { Ok(res) })
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, bypass_cache = None))]
     fn get_with_options<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let txn = self.inner_ref()?;
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, bypass_cache)?;
         let rt = get_runtime();
         let res: Option<Vec<u8>> = py.allow_threads(|| {
             rt.block_on(async {
@@ -1417,19 +1436,20 @@ impl PySlateDBTransaction {
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, bypass_cache = None))]
     fn get_with_options_async<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let txn = self.inner_ref()?;
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, bypass_cache)?;
         let rt = get_runtime();
         let res: Option<Vec<u8>> = py.allow_threads(|| {
             rt.block_on(async {
@@ -1482,7 +1502,7 @@ impl PySlateDBTransaction {
         future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, bypass_cache = None))]
     fn scan_with_options(
         &self,
         start: Vec<u8>,
@@ -1492,6 +1512,7 @@ impl PySlateDBTransaction {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1507,6 +1528,7 @@ impl PySlateDBTransaction {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            bypass_cache,
         )?;
         let txn = self.inner_ref()?;
         let rt = get_runtime();
@@ -1518,7 +1540,7 @@ impl PySlateDBTransaction {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, bypass_cache = None))]
     fn scan_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -1529,6 +1551,7 @@ impl PySlateDBTransaction {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1544,6 +1567,7 @@ impl PySlateDBTransaction {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            bypass_cache,
         )?;
         let txn = self.inner_ref()?;
         let rt = get_runtime();
@@ -1765,19 +1789,20 @@ impl PySlateDBReader {
         })
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, bypass_cache = None))]
     fn get_with_options<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let reader = self.inner.clone();
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, bypass_cache)?;
         let rt = get_runtime();
         let res: Option<Vec<u8>> = py.allow_threads(|| {
             rt.block_on(async {
@@ -1791,19 +1816,20 @@ impl PySlateDBReader {
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, bypass_cache = None))]
     fn get_with_options_async<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let reader = self.inner.clone();
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, bypass_cache)?;
         future_into_py(py, async move {
             match reader.get_with_options(&key, &opts).await {
                 Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
@@ -1852,7 +1878,7 @@ impl PySlateDBReader {
         })
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, bypass_cache = None))]
     fn scan_with_options(
         &self,
         start: Vec<u8>,
@@ -1862,6 +1888,7 @@ impl PySlateDBReader {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1877,6 +1904,7 @@ impl PySlateDBReader {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            bypass_cache,
         )?;
         let reader = self.inner.clone();
         let rt = get_runtime();
@@ -1889,7 +1917,7 @@ impl PySlateDBReader {
         Ok(PyDbIterator::from_iter(iter))
     }
 
-    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None, bypass_cache = None))]
     fn scan_with_options_async<'py>(
         &self,
         py: Python<'py>,
@@ -1900,6 +1928,7 @@ impl PySlateDBReader {
         read_ahead_bytes: Option<usize>,
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
+        bypass_cache: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
@@ -1915,6 +1944,7 @@ impl PySlateDBReader {
             read_ahead_bytes,
             cache_blocks,
             max_fetch_tasks,
+            bypass_cache,
         )?;
         let reader = self.inner.clone();
         future_into_py(py, async move {
