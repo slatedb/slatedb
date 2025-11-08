@@ -12,7 +12,7 @@ Any hints on how to best review this PR? Anything you’d like reviewers to focu
 
 ## Checklist
 
-- [ ] Small, scoped PR (< 1000 total lines); or opened as Draft with a plan on how to break it into smaller pieces
+- [ ] Small, scoped PR (< 500 total lines excluding tests); or opened as Draft with a plan on how to break it into smaller pieces
 - [ ] Linked related issue(s) or added context in the description
 - [ ] Self-reviewed the diff; added comments for tricky parts
 - [ ] Tests added/updated and passing locally
