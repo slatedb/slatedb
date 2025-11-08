@@ -14,10 +14,6 @@ What is being changed and why?
 
 -
 
-## Testing
-
-How did you verify the change (tests, local runs, benchmarks)?
-
 ## Notes for Reviewers
 
 Any hints on how to best review this PR? Anything you’d like reviewers to focus on? Any follow-ups planned?
