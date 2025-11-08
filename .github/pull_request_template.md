@@ -1,11 +1,3 @@
-<!--
-Thanks for contributing to SlateDB!
-
-Friendly reminder: small, focused PRs are easiest to review. If the change is
-large or exploratory, please open as a Draft PR and include a brief plan on how
-you plan to break the PR into smaller pieces.
--->
-
 ## Summary
 
 What is being changed and why?
