@@ -4,10 +4,14 @@ SlateDB is an open source project and we welcome contributions. Please open Gith
 
 Join our [Discord server](https://discord.gg/mHYmGy5MgA) to chat with the developers.
 
-Please follow the instructions below before making a PR:
+Please follow the instructions in the [pull request template](.github/PULL_REQUEST_TEMPLATE.md).
 
-- Run `cargo clippy --all-targets --all-features` and `cargo fmt` on your patch to fix lints and formatting issues.
-- Run `cargo nextest run --all-features` to check that your patch doesn't break any tests.
+If you plan on making a substantial change, please follow these steps:
+
+1. Open a Github issue
+2. If requested, write an RFC
+3. Submit incremental PRs that add functionality while moving us toward the goal of the RFC/issue
+4. If you feel the need to submit a large PR, submit it as a draft with a bullet-point list of steps to break it into smaller pieces. We will not accept large PRs.
 
 ## Contributor License Agreement
 
