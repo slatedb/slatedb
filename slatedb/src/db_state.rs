@@ -296,7 +296,12 @@ impl SortedRun {
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
-    // Holds the final closure outcome: Ok(()) for clean close, Err(e) for fatal error.
+
+    /// If the database is closed, this will contain the result of the close operation.
+    /// Otherwise, it will be None.
+    ///
+    /// - `Ok(())` if the database was closed successfully.
+    /// - `Err(e)` if the database was closed with an error.
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
 }
 
