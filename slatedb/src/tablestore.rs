@@ -878,7 +878,7 @@ mod tests {
 
         // Test 1: SST hit
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true, false)
             .await
             .unwrap();
 
@@ -910,7 +910,7 @@ mod tests {
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true, false)
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -935,7 +935,7 @@ mod tests {
 
         // Test 3: All blocks should be in cache after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true, false)
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -956,13 +956,13 @@ mod tests {
 
         // Test 4: Verify that reading specific ranges still works after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 5..10, true)
+            .read_blocks_using_index(&handle, index.clone(), 5..10, true, false)
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[5..10]).await;
 
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 15..20, true)
+            .read_blocks_using_index(&handle, index.clone(), 15..20, true, false)
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[15..20]).await;
