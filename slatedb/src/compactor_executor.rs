@@ -53,8 +53,9 @@ pub(crate) struct CompactorJobAttempt {
     pub(crate) ssts: Vec<SsTableHandle>,
     /// Input existing sorted runs for this attempt.
     pub(crate) sorted_runs: Vec<SortedRun>,
-    /// Compaction timestamp used by the executor (e.g., for retention decisions).
-    pub(crate) attempt_ts: i64,
+    /// The logical clock tick representing the logical time the compaction occurs. This is used
+    /// to make decisions about retention of expiring records.
+    pub(crate) compaction_logical_clock_tick: i64,
     /// Whether the destination sorted run is the last (newest) run after compaction.
     pub(crate) is_dest_last_run: bool,
     /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
@@ -69,7 +70,10 @@ impl std::fmt::Debug for CompactorJobAttempt {
             .field("destination", &self.destination)
             .field("ssts", &self.ssts)
             .field("sorted_runs", &self.sorted_runs)
-            .field("attempt_ts", &self.attempt_ts)
+            .field(
+                "compaction_logical_clock_tick",
+                &self.compaction_logical_clock_tick,
+            )
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("estimated_source_bytes", &self.estimated_source_bytes())
             .field("retention_min_seq", &self.retention_min_seq)
@@ -211,7 +215,7 @@ impl TokioCompactionExecutorInner {
                 merge_operator,
                 merge_iter,
                 false,
-                compaction.attempt_ts,
+                compaction.compaction_logical_clock_tick,
             ))
         } else {
             Box::new(MergeOperatorRequiredIterator::new(merge_iter)) as Box<dyn KeyValueIterator>
@@ -223,7 +227,7 @@ impl TokioCompactionExecutorInner {
             None,
             None,
             compaction.is_dest_last_run,
-            compaction.attempt_ts,
+            compaction.compaction_logical_clock_tick,
             self.clock.clone(),
             Arc::new(stored_manifest.db_state().sequence_tracker.clone()),
         )
