@@ -43,7 +43,7 @@ impl Db {
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner.memtable_flush_notifier.send_safely(
-            self.inner.state.read().error_reader(),
+            self.inner.state.read().closed_result_reader(),
             MemtableFlushMsg::CreateCheckpoint {
                 options: options.clone(),
                 sender: tx,

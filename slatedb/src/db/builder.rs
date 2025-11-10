@@ -499,7 +499,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Setup background tasks
         let tokio_handle = Handle::current();
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            inner.clone().state.read().error(),
+            inner.clone().state.read().closed_result(),
             system_clock.clone(),
         ));
         if inner.wal_enabled {
@@ -769,7 +769,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     rand: Arc<DbRand>,
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
-    error_state: WatchableOnceCell<SlateDBError>,
+    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     merge_operator: Option<MergeOperatorType>,
 }
 
@@ -785,7 +785,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             rand: Arc::new(DbRand::default()),
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
-            error_state: WatchableOnceCell::new(),
+            closed_result: WatchableOnceCell::new(),
             merge_operator: None,
         }
     }
@@ -822,6 +822,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the compaction scheduler supplier to use for the compactor.
     pub fn with_scheduler_supplier(
         mut self,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
@@ -830,11 +831,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    pub(crate) fn with_error_state(mut self, error_state: WatchableOnceCell<SlateDBError>) -> Self {
-        self.error_state = error_state;
-        self
-    }
-
+    /// Sets the merge operator to use for the compactor.
     pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
         self.merge_operator = Some(merge_operator);
         self
@@ -869,7 +866,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.rand,
             self.stat_registry,
             self.system_clock,
-            self.error_state,
+            self.closed_result,
             self.merge_operator,
         )
     }

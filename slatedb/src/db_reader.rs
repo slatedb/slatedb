@@ -55,7 +55,7 @@ struct DbReaderInner {
     user_checkpoint_id: Option<Uuid>,
     oracle: Arc<Oracle>,
     reader: Reader,
-    error_watcher: WatchableOnceCell<SlateDBError>,
+    closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
     rand: Arc<DbRand>,
 }
 
@@ -95,7 +95,7 @@ impl DbReaderInner {
         table_store: Arc<TableStore>,
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
-        error_watcher: WatchableOnceCell<SlateDBError>,
+        closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
         logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
@@ -157,7 +157,7 @@ impl DbReaderInner {
             user_checkpoint_id: checkpoint_id,
             oracle,
             reader,
-            error_watcher,
+            closed_result_watcher,
             rand,
         })
     }
@@ -190,7 +190,7 @@ impl DbReaderInner {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
-        self.check_error()?;
+        self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
             .get_with_options(key, options, db_state.as_ref(), None, None)
@@ -202,7 +202,7 @@ impl DbReaderInner {
         range: BytesRange,
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
-        self.check_error()?;
+        self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
             .scan_with_options(range, options, db_state.as_ref(), None, None, None)
@@ -442,12 +442,21 @@ impl DbReaderInner {
         Ok((last_wal_id, last_committed_seq))
     }
 
-    /// Return an error if the state has encountered
-    /// an unrecoverable error.
-    pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
-        let error_reader = self.error_watcher.reader();
-        if let Some(error) = error_reader.read() {
-            return Err(error.clone());
+    /// Returns an error if the reader has been closed.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the reader is still open.
+    /// - `Err(SlateDBError::Closed)` if the reader was closed successfully
+    ///   (state.closed_result_reader() returns Ok(())).
+    /// - `Err(e)` if the reader was closed with an error, where `e` is the error
+    ///   (state.closed_result_reader() returns Err(e)).
+    pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
+        let closed_result_reader = self.closed_result_watcher.reader();
+        if let Some(result) = closed_result_reader.read() {
+            return match result {
+                Ok(()) => Err(SlateDBError::Closed),
+                Err(e) => Err(e.clone()),
+            };
         }
         Ok(())
     }
@@ -565,9 +574,9 @@ impl DbReader {
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
 
-        let error_watcher = WatchableOnceCell::new();
+        let closed_result_watcher = WatchableOnceCell::new();
         let task_executor =
-            MessageHandlerExecutor::new(error_watcher.clone(), system_clock.clone());
+            MessageHandlerExecutor::new(closed_result_watcher.clone(), system_clock.clone());
         let manifest_store = store_provider.manifest_store();
         let table_store = store_provider.table_store();
         let inner = Arc::new(
@@ -576,7 +585,7 @@ impl DbReader {
                 table_store,
                 options,
                 checkpoint_id,
-                error_watcher,
+                closed_result_watcher,
                 logical_clock,
                 system_clock,
                 rand,
