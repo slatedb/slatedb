@@ -81,38 +81,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
         let current_system_ts = system_clock.now().timestamp_millis();
-        for (idx, (_, entry)) in versions.into_iter().enumerate() {
-            // always keep the latest version (idx == 0), for older versions, check if they are within retention window.
-            // retention window is defined by either timeout or seq, or both. if both are not set, only the latest version
-            // is kept.
-            let in_retention_window_by_time = retention_timeout
-                .map(|timeout| {
-                    let create_sys_ts = sequence_tracker
-                        // Use RoundUp to conservatively estimate creation time. For example:
-                        // - If retention window is 10min and current time is 12:00:00
-                        // - And sequence tracker has timestamps at 11:49:30 and 11:50:30
-                        // - RoundUp will use 11:50:30 (later timestamp) to avoid over-aggressive filtering
-                        .find_ts(entry.seq, FindOption::RoundUp)
-                        .map(|ts| ts.timestamp_millis())
-                        // if the sequence number is greater than the last recorded sequence
-                        // number we just assume that it was produced now (so it effectively
-                        // should be kept in the filtered results)
-                        .unwrap_or(current_system_ts);
-                    create_sys_ts + (timeout.as_millis() as i64) > current_system_ts
-                })
-                .unwrap_or(false);
-            let in_retention_window_by_seq = retention_min_seq
-                .map(|min_seq| entry.seq >= min_seq)
-                .unwrap_or(false);
-
-            let should_keep = idx == 0 || in_retention_window_by_time || in_retention_window_by_seq;
-            if !should_keep {
-                // if an entry is filtered out in retention, we should not
-                // continue have the earlier versions of the same key still
-                // included in the iterator.
-                break;
-            }
-
+        for (_, entry) in versions.into_iter() {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
@@ -132,8 +101,59 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 }
                 _ => entry,
             };
+            let entry_seq = entry.seq;
 
+            // always keep the entry with latest version.
             filtered_versions.insert(Reverse(entry.seq), entry);
+
+            // For older versions, we keep iterating until we find the first entry outside the retention
+            // window (by both time AND seq). This entry serves as a "boundary value" for snapshot reads.
+            //
+            // Example: Why we need the boundary value
+            //   1. set a = 'v0' (seq=1)
+            //   2. set a = 'v1' (seq=2)
+            //   3. set b = 'v2' (seq=3)
+            //   4. create snapshot s1 (captures seq=3, so min_retention_seq=3)
+            //   5. delete a (seq=4, creates tombstone)
+            //   6. run compaction (with retention_min_seq=3)
+            //
+            // For key 'a', the compaction will see:
+            //   - tombstone (seq=4) -> KEEP (latest version, AND seq > min_seq)
+            //   - 'v1' (seq=2) -> KEEP (boundary: first entry with seq <= min_seq)
+            //   - 'v0' (seq=1) -> DROP (older than boundary)
+            //
+            // The boundary value (seq=2) is crucial: if snapshot s1 reads key 'a', it needs to find
+            // a version at or before seq=3. Without keeping seq=2, the snapshot would incorrectly
+            // see the tombstone (seq=4) which didn't exist when the snapshot was created.
+            //
+            // Note: We use OR logic below because we keep iterating as long as the entry is within
+            // EITHER the time window OR the seq window. We only stop when it's outside BOTH.
+            let continue_retain_by_time = retention_timeout
+                .map(|timeout| {
+                    let create_sys_ts = sequence_tracker
+                        // Use RoundUp to conservatively estimate creation time. For example:
+                        // - If retention window is 10min and current time is 12:00:00
+                        // - And sequence tracker has timestamps at 11:49:30 and 11:50:30
+                        // - RoundUp will use 11:50:30 (later timestamp) to avoid over-aggressive filtering
+                        .find_ts(entry_seq, FindOption::RoundUp)
+                        .map(|ts| ts.timestamp_millis())
+                        // if the sequence number is greater than the last recorded sequence
+                        // number we just assume that it was produced now (so it effectively
+                        // should be kept in the filtered results)
+                        .unwrap_or(current_system_ts);
+                    create_sys_ts + (timeout.as_millis() as i64) > current_system_ts
+                })
+                .unwrap_or(false);
+            let continue_retain_by_seq = retention_min_seq
+                .map(|min_seq| entry_seq > min_seq)
+                .unwrap_or(false);
+
+            let continue_retain = continue_retain_by_time || continue_retain_by_seq;
+            if !continue_retain {
+                // if we find the first entry that neither in retention window by time nor by seq,
+                // we should break the loop to filter out the earlier versions of the same key.
+                break;
+            }
         }
 
         if filter_tombstone {
@@ -818,8 +838,9 @@ mod tests {
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest)
-            // value2 and value1 filtered out because seq <= retention_min_seq and not latest
+            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest in retention window)
+            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // Kept (boundary value for snapshots)
+            // value1 filtered out because it's older than the boundary
         ],
         filter_tombstone: false,
     })]
