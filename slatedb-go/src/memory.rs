@@ -17,7 +17,7 @@ pub extern "C" fn slatedb_free_result(result: CSdbResult) {
 pub extern "C" fn slatedb_free_value(value: CSdbValue) {
     if !value.data.is_null() && value.len > 0 {
         unsafe {
-            let _ = Box::from_raw(std::slice::from_raw_parts_mut(value.data, value.len));
+            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(value.data, value.len));
         }
     }
 }
@@ -28,7 +28,7 @@ pub extern "C" fn slatedb_free_scan_result(result: CSdbScanResult) {
         unsafe {
             // Convert back to Box to free properly
             let items_boxed =
-                Box::from_raw(std::slice::from_raw_parts_mut(result.items, result.count));
+                Box::from_raw(std::ptr::slice_from_raw_parts_mut(result.items, result.count));
 
             // Free each individual key/value
             for item in items_boxed.iter() {

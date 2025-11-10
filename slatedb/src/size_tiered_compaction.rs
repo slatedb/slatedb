@@ -439,7 +439,7 @@ mod tests {
     fn test_should_compact_l0s_to_first_sr() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = vec![create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
         let state =
             create_compactor_state(create_db_state(l0.iter().cloned().collect(), Vec::new()));
 
@@ -461,7 +461,7 @@ mod tests {
     fn test_should_compact_l0s_to_new_sr() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = vec![create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
         let state = create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
             vec![create_sr2(10, 2), create_sr2(0, 2)],
@@ -663,7 +663,7 @@ mod tests {
     fn test_should_apply_backpressure_for_l0s() {
         // given:
         let scheduler = SizeTieredCompactionScheduler::default();
-        let l0 = vec![create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
+        let l0 = [create_sst(1), create_sst(1), create_sst(1), create_sst(1)];
         let mut state = create_compactor_state(create_db_state(
             l0.iter().cloned().collect(),
             vec![
