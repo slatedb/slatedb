@@ -1,5 +1,7 @@
 pub(crate) mod store;
 
+pub(in crate::record) mod path_scoped_object_store;
+
 use crate::error::SlateDBError;
 use bytes::Bytes;
 
