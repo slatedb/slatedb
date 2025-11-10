@@ -28,15 +28,54 @@ use crate::utils::{IdGenerator, WatchableOnceCell};
 
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
 
+/// Supplies a concrete [`CompactionScheduler`] implementation.
+///
+/// This indirection lets SlateDB plug different scheduling policies (e.g. size-tiered,
+/// leveled, manual) without coupling the compactor to a specific strategy.
 pub trait CompactionSchedulerSupplier: Send + Sync {
+    /// Creates a new [`CompactionScheduler`] using the provided options.
+    ///
+    /// ## Arguments
+    /// - `options`: Compactor runtime tuning knobs (e.g. concurrency, polling interval).
+    ///
+    /// ## Returns
+    /// - A boxed scheduler that decides which compactions to run next.
     fn compaction_scheduler(
         &self,
         options: &CompactorOptions,
     ) -> Box<dyn CompactionScheduler + Send + Sync>;
 }
 
+/// Policy that decides when and what to compact.
+///
+/// The compactor periodically invokes the scheduler with the latest [`CompactorState`].
+/// Implementations return one or more candidate compaction specs, which the compactor then
+/// validates and submits to the executor.
 pub trait CompactionScheduler: Send + Sync {
+    /// Proposes compaction jobs for the current state.
+    ///
+    /// ## Arguments
+    /// - `state`: Process-local view of the DB's manifest and in-flight jobs.
+    ///
+    /// ## Returns
+    /// - A list of [`CompactorJobSpec`] describing what to compact and where to write.
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactorJobSpec>;
+
+    /// Validates a candidate compaction against scheduler-specific invariants. The
+    /// default implementation accepts everything. Schedulers can override to enforce
+    /// policy-specific constraints prior to execution (e.g. level rules, overlaps).
+    ///
+    /// Not all compactions have to originate from scheduler. Admin/“manual” compactions,
+    /// persisted/resumed plans, or tests can construct a [`CompactorJobSpec`]`. This
+    /// method can be used to validate external compaction specs against scheduler
+    /// specific invariants.
+    ///
+    /// ## Arguments
+    /// - `_state`: Current [`CompactorState`].
+    /// - `_compaction`: Proposed [`CompactorJobSpec`].
+    ///
+    /// ## Returns
+    /// - `Ok(())` if valid, or an [`Error`] if invalid.
     fn validate_compaction(
         &self,
         _state: &CompactorState,
@@ -59,6 +98,7 @@ pub(crate) struct CompactionProgressTracker {
 }
 
 impl CompactionProgressTracker {
+    /// Creates an empty progress tracker.
     pub fn new() -> Self {
         Self {
             processed_bytes: SkipMap::new(),
@@ -67,26 +107,26 @@ impl CompactionProgressTracker {
 
     /// Adds a new compaction job to the tracker.
     ///
-    /// # Arguments
-    /// * `id` - The ID of the compaction job.
-    /// * `total_bytes` - The total number of bytes to be processed for the compaction job.
+    /// ## Arguments
+    /// - `id`: The ID of the compaction job.
+    /// - `total_bytes`: The total number of bytes to be processed for the compaction job.
     pub fn track_attempt(&mut self, id: Ulid, total_bytes: u64) {
         self.processed_bytes.insert(id, (0, total_bytes));
     }
 
     /// Removes a compaction job from the tracker.
     ///
-    /// # Arguments
-    /// * `id` - The ID of the compaction job.
+    /// ## Arguments
+    /// - `id`: The ID of the compaction job.
     pub fn remove_job(&mut self, id: Ulid) {
         self.processed_bytes.remove(&id);
     }
 
     /// Overwrites the progress for a compaction job with the latest processed bytes.
     ///
-    /// # Arguments
-    /// * `id` - The ID of the compaction job.
-    /// * `bytes_processed` - The total number of bytes processed so far.
+    /// ## Arguments
+    /// - `id`: The ID of the compaction job.
+    /// - `bytes_processed`: The total number of bytes processed so far.
     pub fn update_progress(&mut self, id: Ulid, bytes_processed: u64) {
         if let Some((_, total_bytes)) = self.processed_bytes.get(&id).map(|entry| *entry.value()) {
             self.processed_bytes
@@ -114,20 +154,26 @@ impl CompactionProgressTracker {
     }
 }
 
+/// Messages exchanged between the compactor event loop and its collaborators.
 #[derive(Debug)]
 pub(crate) enum CompactorMessage {
+    /// Signals that a compaction attempt has finished execution.
     CompactionJobAttemptFinished {
+        /// Attempt id (distinct from the canonical job id).
         id: Ulid,
+        /// Output SR on success, or the compaction error.
         result: Result<SortedRun, SlateDBError>,
     },
-    /// Sent when an [`CompactionExecutor`] wishes to alert the compactor of progress. This
-    /// information is only used for reporting purposes, and can be an estimate.
+    /// Periodic progress update from the [`CompactionExecutor`].
     CompactionJobAttemptProgress {
+        /// The attempt id associated with this progress report.
         id: Ulid,
-        /// The total number of bytes processed so far.
+        /// The total number of bytes processed so far (estimate).
         bytes_processed: u64,
     },
+    /// Ticker-triggered message to log DB runs and in-flight job state.
     LogStats,
+    /// Ticker-triggered message to refresh the manifest and schedule compactions.
     PollManifest,
 }
 
@@ -203,14 +249,14 @@ impl Compactor {
         }
     }
 
-    /// Starts the compactor. This method performs the actual compaction event loop.
-    /// The compactor runs until the cancellation token is cancelled. The compactor's
-    /// event loop always runs on the current runtime, while the compactor executor
-    /// runs on the provided runtime. This is to keep long-running compaction tasks
-    /// from blocking the main runtime.
+    /// Starts the compactor. This method runs the actual compaction event loop. The
+    /// compactor runs until the cancellation token is cancelled. The compactor's event
+    /// loop always runs on the current runtime, while the compactor executor runs on the
+    /// provided runtime in the [`Compactor::new`] constructor. This is to keep
+    /// long-running compaction tasks from blocking the main runtime.
     ///
     /// ## Returns
-    /// * `Result<(), SlateDBError>` - The result of the compaction event loop.
+    /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     #[allow(dead_code)]
     pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -248,12 +294,21 @@ impl Compactor {
         self.task_executor.join_task(COMPACTOR_TASK_NAME).await
     }
 
+    /// Gracefully stops the compactor task and waits for it to finish.
+    ///
+    /// ## Returns
+    /// - `Ok(())` once the task has shut down, or [`SlateDBError`] if shutdown fails.
     #[allow(dead_code)]
     pub async fn stop(&self) -> Result<(), SlateDBError> {
         self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await
     }
 }
 
+/// Event-driven controller for compaction orchestration.
+///
+/// The [`CompactorEventHandler`] implements [`MessageHandler<CompactorMessage>`] and
+/// runs inside the compactor task's message loop. It reacts to periodic tickers and
+/// executor callbacks, and coordinates scheduling and execution of compactions.
 pub(crate) struct CompactorEventHandler {
     state: CompactorState,
     manifest: FenceableManifest,
@@ -351,11 +406,13 @@ impl CompactorEventHandler {
         })
     }
 
+    /// Emits the current compaction state and per-job progress.
     fn handle_log_ticker(&self) {
         self.log_compaction_state();
         self.progress_tracker.log_progress();
     }
 
+    /// Handles a polling tick by refreshing the manifest and possibly scheduling compactions.
     async fn handle_ticker(&mut self) {
         if !self.is_executor_stopped() {
             self.load_manifest()
@@ -364,6 +421,8 @@ impl CompactorEventHandler {
         }
     }
 
+    /// Stops the underlying compaction executor, aborting the executor and waiting for any
+    /// in-flight tasks to stop gracefully.
     async fn stop_executor(&self) -> Result<(), SlateDBError> {
         let this_executor = self.executor.clone();
         // Explicitly allow spawn_blocking for compactors since we can't trust them
@@ -386,16 +445,27 @@ impl CompactorEventHandler {
         result
     }
 
+    /// ## Returns
+    /// - `true` if the executor has been stopped (but still might be in the process of
+    ///   shutting down).
     fn is_executor_stopped(&self) -> bool {
         self.executor.is_stopped()
     }
 
+    /// Refreshes the manifest and updates the local compactor state with any remote
+    /// changes.
     async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
         self.manifest.refresh().await?;
         self.refresh_db_state().await?;
         Ok(())
     }
 
+    /// Persists the updated manifest after a compaction finishes.
+    ///
+    /// A checkpoint with a 15-minute lifetime is written first to prevent GC from
+    /// deleting SSTs that are about to be removed. This is to keep them around for a
+    /// while in case any in-flight operations (such as iterator scans) are still using
+    /// them.
     async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
         // write the checkpoint first so that it points to the manifest with the ssts
         // being removed
@@ -421,6 +491,7 @@ impl CompactorEventHandler {
         self.manifest.update_manifest(dirty).await
     }
 
+    /// Writes the manifest, retrying on version conflicts by reloading and retrying.
     async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             self.load_manifest().await?;
@@ -434,6 +505,12 @@ impl CompactorEventHandler {
         }
     }
 
+    /// Performs pre-execution validation for a proposed compaction and defers policy-specific
+    /// checks to the scheduler via [`CompactionScheduler::validate_compaction`]. Invariants
+    /// checked in this function:
+    ///
+    /// - Compaction has sources
+    /// - Compactions with only L0 sources must have a destination > highest existing SR ID
     fn validate_compaction(&self, compaction: &CompactorJobSpec) -> Result<(), SlateDBError> {
         // Validate compaction sources exist
         if compaction.sources().is_empty() {
@@ -466,6 +543,8 @@ impl CompactorEventHandler {
             .map_err(|_e| SlateDBError::InvalidCompaction)
     }
 
+    /// Invokes the scheduler and starts accepted jobs, provided that there are fewer than
+    /// [`CompactorOptions::max_concurrent_compactions`] currently running.
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
         let mut specs = self.scheduler.maybe_schedule_compaction(&self.state);
         for spec in specs.drain(..) {
@@ -486,6 +565,7 @@ impl CompactorEventHandler {
         Ok(())
     }
 
+    /// Creates a [`CompactorJobAttempt`] for a [`CompactorJob`] and asks the executor to run it.
     async fn start_compaction(
         &mut self,
         attempt_id: Ulid,
@@ -509,7 +589,7 @@ impl CompactorEventHandler {
             destination: spec.destination(),
             ssts,
             sorted_runs,
-            attempt_ts: db_state.last_l0_clock_tick,
+            compaction_logical_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
         };
@@ -539,13 +619,19 @@ impl CompactorEventHandler {
         result
     }
 
+    //
     // state writers
+    //
+
+    /// Records a failed compaction attempt.
     fn finish_failed_compaction(&mut self, id: Ulid) {
         self.state.remove_job(&id);
         self.progress_tracker.remove_job(id);
         self.update_compaction_low_watermark();
     }
 
+    /// Records a successful compaction, persists the manifest, and checks for new compactions
+    /// to schedule.
     #[instrument(level = "debug", skip_all, fields(id = %id))]
     async fn finish_compaction(
         &mut self,
@@ -564,6 +650,11 @@ impl CompactorEventHandler {
         Ok(())
     }
 
+    /// Validates and submits a compaction job for execution.
+    ///
+    /// Currently, jobs are executed with a 1:1 [`CompactorJob`]:[`CompactorJobAttempt`]
+    /// mapping. Future work may add retries or resume logic with multiple attempts per
+    /// job.
     #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
     async fn submit_compaction(&mut self, job: CompactorJob) -> Result<(), SlateDBError> {
         // Validate the candidate compaction; skip invalid ones
@@ -581,6 +672,8 @@ impl CompactorEventHandler {
         Ok(())
     }
 
+    /// Merges the remote manifest view into local state and checks for new compactions
+    /// to schedule.
     async fn refresh_db_state(&mut self) -> Result<(), SlateDBError> {
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
@@ -590,6 +683,7 @@ impl CompactorEventHandler {
         Ok(())
     }
 
+    /// Logs the current DB runs and in-flight compaction jobs.
     fn log_compaction_state(&self) {
         self.state.db_state().log_db_runs();
         let jobs = self.state.jobs();
@@ -598,8 +692,8 @@ impl CompactorEventHandler {
         }
     }
 
-    /// Updates the `compactor/longest_running_compaction_start_ts_ms` gauge with the
-    /// earliest (oldest) ULID timestamp among active compaction jobs.
+    /// Updates the [`stats::COMPACTION_LOW_WATERMARK_TS`] gauge with the earliest
+    /// (oldest) ULID timestamp among active compaction jobs.
     ///
     /// This serves as a GC safety barrier: the GC should not delete any compacted SST
     /// whose ULID timestamp is greater than or equal to this value.
@@ -649,6 +743,13 @@ pub mod stats {
     }
 
     impl CompactionStats {
+        /// Registers and returns a new set of compactor metrics in the provided registry.
+        ///
+        /// ## Metrics
+        /// - `last_compaction_timestamp_sec`: Unix timestamp of the last completed compaction.
+        /// - `running_compactions`: Gauge tracking active compaction attempts.
+        /// - `bytes_compacted`: Counter of bytes written by the executor.
+        /// - `compaction_low_watermark_ts`: Earliest ULID timestamp among active jobs (GC hint).
         pub(crate) fn new(stat_registry: Arc<StatRegistry>) -> Self {
             let stats = Self {
                 last_compaction_ts: Arc::new(Gauge::default()),

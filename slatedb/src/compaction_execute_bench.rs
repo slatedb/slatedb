@@ -252,7 +252,7 @@ impl CompactionExecuteBench {
             destination: 0,
             ssts,
             sorted_runs: vec![],
-            attempt_ts: manifest.db_state().last_l0_clock_tick,
+            compaction_logical_clock_tick: manifest.db_state().last_l0_clock_tick,
             retention_min_seq: Some(manifest.db_state().recent_snapshot_min_seq),
             is_dest_last_run,
         })
@@ -289,7 +289,7 @@ impl CompactionExecuteBench {
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
-            attempt_ts: state.last_l0_clock_tick,
+            compaction_logical_clock_tick: state.last_l0_clock_tick,
             retention_min_seq: Some(state.recent_snapshot_min_seq),
             is_dest_last_run,
         }

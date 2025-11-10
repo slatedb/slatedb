@@ -8,6 +8,11 @@ use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
 
+/// Identifier for a compaction input source.
+///
+/// A `SourceId` distinguishes between two kinds of inputs a compaction can read:
+/// an existing compacted sorted run (identified by its run id), or an L0 SSTable
+/// (identified by its ULID).
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum SourceId {
     SortedRun(u32),
@@ -30,11 +35,19 @@ impl Display for SourceId {
 }
 
 impl SourceId {
+    /// Unwraps the source as a Sorted Run id, panicking if it is an L0 SST.
+    ///
+    /// ## Returns
+    /// - The sorted run id.
+    ///
+    /// ## Panics
+    /// - If called on `SourceId::Sst`.
     pub(crate) fn unwrap_sorted_run(&self) -> u32 {
         self.maybe_unwrap_sorted_run()
             .expect("tried to unwrap Sst as Sorted Run")
     }
 
+    /// Returns the sorted run id if this source is a `SortedRun`, otherwise `None`.
     pub(crate) fn maybe_unwrap_sorted_run(&self) -> Option<u32> {
         match self {
             SourceId::SortedRun(id) => Some(*id),
@@ -42,6 +55,7 @@ impl SourceId {
         }
     }
 
+    /// Returns the SST ULID if this source is an `Sst`, otherwise `None`.
     pub(crate) fn maybe_unwrap_sst(&self) -> Option<Ulid> {
         match self {
             SourceId::SortedRun(_) => None,
@@ -50,21 +64,22 @@ impl SourceId {
     }
 }
 
-/// Immutable spec that describes a compaction job.
-///
-/// Holds the logical inputs for a compaction the scheduler decided on:
-/// - `sources`: a set of `SourceId` identifying L0 SSTs and/or existing Sorted Runs
-/// - `destination`: the Sorted Run id the compaction will produce
-///
-/// Materialized inputs (actual `SsTableHandle`/`SortedRun` objects) are derived from
-/// `sources` against the current manifest at execution time.
+/// Immutable spec that describes a compaction job. Currently, this only holds the
+/// input sources and destination SR id for a compaction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactorJobSpec {
+    /// Input sources for the compaction.
     sources: Vec<SourceId>,
+    /// Destination sorted run id for the compaction.
     destination: u32,
 }
 
 impl CompactorJobSpec {
+    /// Creates a new job spec describing which sources to compact and the destination SR id.
+    ///
+    /// ## Arguments
+    /// - `sources`: Ordered list of sources (L0 SST ULIDs and/or existing SR ids).
+    /// - `destination`: Sorted Run id for the compaction output.
     pub fn new(sources: Vec<SourceId>, destination: u32) -> Self {
         Self {
             sources,
@@ -72,10 +87,12 @@ impl CompactorJobSpec {
         }
     }
 
+    /// The sources (input SSTs and sorted runs) for this compaction.
     pub fn sources(&self) -> &Vec<SourceId> {
         &self.sources
     }
 
+    /// The destination sorted run id that will be produced by this compaction.
     pub fn destination(&self) -> u32 {
         self.destination
     }
@@ -95,6 +112,7 @@ impl Display for CompactorJobSpec {
 /// (what to compact and where).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CompactorJob {
+    /// Stable job id (ULID) used to track this compaction across messages and attempts.
     id: Ulid,
     /// What to compact (sources) and where to write (destination).
     spec: CompactorJobSpec,
@@ -105,6 +123,10 @@ impl CompactorJob {
         Self { id, spec }
     }
 
+    /// Returns all sorted run sources for this compaction.
+    ///
+    /// ## Arguments
+    /// - `db_state`: The current core DB state from the manifest.
     pub(crate) fn get_sorted_runs(&self, db_state: &CoreDbState) -> Vec<SortedRun> {
         let srs_by_id: HashMap<u32, &SortedRun> =
             db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
@@ -117,6 +139,10 @@ impl CompactorJob {
             .collect()
     }
 
+    /// Returns all L0 SSTable sources for this compaction.
+    ///
+    /// ## Arguments
+    /// - `db_state`: The current core DB state from the manifest.
     pub(crate) fn get_ssts(&self, db_state: &CoreDbState) -> Vec<SsTableHandle> {
         let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
             .l0
@@ -132,10 +158,12 @@ impl CompactorJob {
             .collect()
     }
 
+    /// The stable job id (ULID) used to track this compaction across messages and attempts.
     pub(crate) fn id(&self) -> Ulid {
         self.id
     }
 
+    /// Returns the immutable job spec describing inputs and destination.
     pub(crate) fn spec(&self) -> &CompactorJobSpec {
         &self.spec
     }
@@ -155,33 +183,17 @@ impl Display for CompactorJob {
 
 /// Process-local runtime state owned by the compactor.
 ///
-/// This is the in-memory controller view that a single compactor task uses to:
+/// This is the in-memory view that a single compactor task uses to:
 /// - keep a fresh `DirtyManifest` (view of `CoreDbState`),
-/// - track canonical `compaction_plans` by plan id (ULID), and
-/// - track `scheduled_compactions` by job id for executions owned by this process.
-///
-/// It validates submissions, records lifecycle transitions (Submitted → Pending → InProgress →
-/// Completed/Failed) and mutates the in-memory manifest when jobs finish.
-///
-/// Difference vs `CompactionState`:
-/// - `CompactorState` is transient, process-local runtime state; it is not persisted and is
-///   rebuilt when the process starts.
-/// - `CompactionState` is the durable, object-store representation (future work) of compaction
-///   plans and their statuses across processes, used for recovery/GC and history.
+/// - track in-flight jobs by job id (ULID).
 pub struct CompactorState {
     manifest: DirtyManifest,
     jobs: BTreeMap<Ulid, CompactorJob>,
 }
 
 impl CompactorState {
-    pub(crate) fn db_state(&self) -> &CoreDbState {
-        &self.manifest.core
-    }
-
-    pub(crate) fn manifest(&self) -> &DirtyManifest {
-        &self.manifest
-    }
-
+    /// Creates a new compactor state seeded with the provided dirty manifest. Jobs are
+    /// initialized empty.
     pub(crate) fn new(manifest: DirtyManifest) -> Self {
         Self {
             manifest,
@@ -189,10 +201,26 @@ impl CompactorState {
         }
     }
 
+    /// Returns the current in-memory core DB state derived from the manifest.
+    pub(crate) fn db_state(&self) -> &CoreDbState {
+        &self.manifest.core
+    }
+
+    /// Returns the local dirty manifest that will be written back after compactions.
+    pub(crate) fn manifest(&self) -> &DirtyManifest {
+        &self.manifest
+    }
+
+    /// Returns an iterator over all in-flight jobs.
     pub(crate) fn jobs(&self) -> impl Iterator<Item = &CompactorJob> {
         self.jobs.values()
     }
 
+    /// Merges the remote (writer) manifest view into the compactor's local state.
+    ///
+    /// This preserves local knowledge about compactions already applied (e.g., L0 last
+    /// compacted marker, existing compacted runs) while pulling in newly created L0 SSTs
+    /// and other writer-updated fields.
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
         // the writer may have added more l0 SSTs. Add these to our l0 list.
         let my_db_state = self.db_state();
@@ -233,6 +261,11 @@ impl CompactorState {
         self.manifest = remote_manifest;
     }
 
+    /// Validates and registers a newly submitted job with this compactor.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if accepted, or [`SlateDBError::InvalidCompaction`] if the job conflicts
+    ///   with an existing destination or violates destination overwrite rules.
     pub(crate) fn add_job(&mut self, job: CompactorJob) -> Result<(), SlateDBError> {
         let spec = job.spec();
         if self
@@ -263,10 +296,15 @@ impl CompactorState {
         Ok(())
     }
 
+    /// Removes a job from the in-flight map (called after completion or failure).
     pub(crate) fn remove_job(&mut self, job_id: &Ulid) {
         self.jobs.remove(job_id);
     }
 
+    /// Applies the effects of a finished compaction to the in-memory manifest.
+    ///
+    /// This removes compacted L0 SSTs and source SRs, inserts the output SR in id-descending
+    /// order, updates `l0_last_compacted`, and removes the job from the in-flight map.
     pub(crate) fn finish_job(&mut self, job_id: Ulid, output_sr: SortedRun) {
         if let Some(job) = self.jobs.get(&job_id) {
             let spec = job.spec();
@@ -330,6 +368,7 @@ impl CompactorState {
         }
     }
 
+    /// Debug assertion that compacted sorted runs are kept in strictly descending id order.
     fn assert_compacted_srs_in_id_order(compacted: &[SortedRun]) {
         let mut last_sr_id = u32::MAX;
         for sr in compacted.iter() {
