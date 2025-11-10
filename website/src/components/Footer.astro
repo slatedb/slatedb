@@ -7,9 +7,6 @@ import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
         <div class="copyright-wrapper sl-flex">
             Copyright © 2025 SlateDB Authors. All rights reserved.
         </div>
-        <div class="title-wrapper sl-flex">
-            <SiteTitle />
-        </div>
     </div>
 </div>
 
@@ -35,7 +32,8 @@ import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
 	}
 
     .copyright-wrapper {
-        font-size: clamp(var(--sl-text-sm),calc(0.5rem + 1vw),var(--sl-text-body));
+        font-size: clamp(var(--sl-text-xs),calc(0.5rem + 1vw),var(--sl-text-xs));
+		font-family: monospace;
     }
 
     .title-wrapper {
