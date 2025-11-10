@@ -718,7 +718,7 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
-        self.state.add_job(job.clone())?;
+        self.state.add_compaction(job.clone())?;
         self.update_compaction_low_watermark();
         // Jobs and attempts are 1:1 right now.
         let attempt_id = job.id();
@@ -1707,12 +1707,12 @@ mod tests {
         fixture
             .handler
             .state
-            .add_job(job_old)
+            .add_compaction(job_old)
             .expect("failed to add old job");
         fixture
             .handler
             .state
-            .add_job(job_new)
+            .add_compaction(job_new)
             .expect("failed to add new job");
 
         // Update the metric and verify it matches the oldest job's ULID time

@@ -561,10 +561,10 @@ mod tests {
 
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![3, 2, 1, 0]);
-        let compactor_job = Compaction::new(job_id, request);
+        let compaction = Compaction::new(job_id, request);
 
         state
-            .add_job(compactor_job.clone())
+            .add_compaction(compaction.clone())
             .expect("failed to add job");
 
         // when:
@@ -647,9 +647,9 @@ mod tests {
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
-        let compactor_job = Compaction::new(compaction_id, request);
+        let compaction = Compaction::new(compaction_id, request);
         state
-            .add_job(compactor_job.clone())
+            .add_compaction(compaction.clone())
             .expect("failed to add job");
 
         // when:
@@ -681,12 +681,12 @@ mod tests {
         let system_clock = Arc::new(DefaultSystemClock::new());
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compactor_job = Compaction::new(
+        let compaction = Compaction::new(
             compaction_id,
             create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
         );
         state
-            .add_job(compactor_job.clone())
+            .add_compaction(compaction.clone())
             .expect("failed to add job");
 
         // when:

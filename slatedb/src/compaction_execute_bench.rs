@@ -204,7 +204,7 @@ impl CompactionExecuteBench {
         Ok(())
     }
 
-    async fn load_compaction_job(
+    async fn load_compaction_job_spec(
         manifest: &StoredManifest,
         num_ssts: usize,
         table_store: &Arc<TableStore>,
@@ -258,15 +258,15 @@ impl CompactionExecuteBench {
         })
     }
 
-    fn load_compaction_as_job(
+    fn load_compaction_as_job_spec(
         manifest: &StoredManifest,
-        job: &Compaction,
+        compaction: &Compaction,
         is_dest_last_run: bool,
         rand: Arc<DbRand>,
         system_clock: Arc<dyn SystemClock>,
     ) -> CompactionJobSpec {
         let state = manifest.db_state();
-        let spec = job.spec();
+        let spec = compaction.spec();
         let srs_by_id: HashMap<_, _> = state
             .compacted
             .iter()
@@ -285,7 +285,7 @@ impl CompactionExecuteBench {
         info!("loaded compaction job");
         CompactionJobSpec {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
-            job_id: job.id(),
+            job_id: compaction.id(),
             destination: 0,
             ssts: vec![],
             sorted_runs: srs,
@@ -345,26 +345,26 @@ impl CompactionExecuteBench {
             .map(SourceId::SortedRun)
             .collect();
 
-        let compactor_job = source_sr_ids.map(|_source_sr_ids| {
+        let compaction = source_sr_ids.map(|_source_sr_ids| {
             let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
             let spec = CompactionSpec::new(sources, destination_sr_id);
             Compaction::new(id, spec)
         });
 
         info!("load compaction job");
-        let job = match &compactor_job {
-            Some(compactor_job) => {
+        let job = match &compaction {
+            Some(compaction) => {
                 info!("load job from existing compaction");
-                CompactionExecuteBench::load_compaction_as_job(
+                CompactionExecuteBench::load_compaction_as_job_spec(
                     &manifest,
-                    compactor_job,
+                    compaction,
                     false,
                     self.rand.clone(),
                     self.system_clock.clone(),
                 )
             }
             None => {
-                CompactionExecuteBench::load_compaction_job(
+                CompactionExecuteBench::load_compaction_job_spec(
                     &manifest,
                     num_ssts,
                     &table_store,

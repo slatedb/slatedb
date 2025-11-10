@@ -266,7 +266,7 @@ impl CompactorState {
     /// ## Returns
     /// - `Ok(())` if accepted, or [`SlateDBError::InvalidCompaction`] if the job conflicts
     ///   with an existing destination or violates destination overwrite rules.
-    pub(crate) fn add_job(&mut self, job: Compaction) -> Result<(), SlateDBError> {
+    pub(crate) fn add_compaction(&mut self, job: Compaction) -> Result<(), SlateDBError> {
         let spec = job.spec();
         if self
             .jobs
@@ -413,7 +413,7 @@ mod tests {
         // when:
         let compaction = Compaction::new(job_id, spec.clone());
         state
-            .add_job(compaction.clone())
+            .add_compaction(compaction.clone())
             .expect("failed to add job");
 
         // then:
@@ -433,7 +433,7 @@ mod tests {
         let spec = build_l0_compaction(&before_compaction.l0, 0);
         let compaction = Compaction::new(job_id, spec);
         state
-            .add_job(compaction.clone())
+            .add_compaction(compaction.clone())
             .expect("failed to add job");
 
         // when:
@@ -482,7 +482,7 @@ mod tests {
         let spec = build_l0_compaction(&before_compaction.l0, 0);
         let compaction = Compaction::new(job_id, spec);
         state
-            .add_job(compaction.clone())
+            .add_compaction(compaction.clone())
             .expect("failed to add job");
 
         // when:
@@ -543,7 +543,7 @@ mod tests {
         );
         let compaction = Compaction::new(job_id, spec);
         state
-            .add_job(compaction.clone())
+            .add_compaction(compaction.clone())
             .expect("failed to add job");
         state.finish_job(
             job_id,
@@ -611,9 +611,9 @@ mod tests {
                 .collect(),
             0,
         );
-        let compactor_job = Compaction::new(job_id, spec);
+        let compaction = Compaction::new(job_id, spec);
         state
-            .add_job(compactor_job.clone())
+            .add_compaction(compaction.clone())
             .expect("failed to add job");
         state.finish_job(
             job_id,
@@ -691,7 +691,7 @@ mod tests {
             0,
         );
         let compaction = Compaction::new(job_id, spec);
-        let result = state.add_job(compaction.clone());
+        let result = state.add_compaction(compaction.clone());
 
         // then:
         assert!(result.is_ok());
@@ -722,7 +722,7 @@ mod tests {
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(sources, 0);
         let compaction = Compaction::new(job_id, spec);
-        let result = state.add_job(compaction.clone());
+        let result = state.add_compaction(compaction.clone());
 
         // or simply:
         assert!(result.is_ok());
