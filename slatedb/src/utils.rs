@@ -239,7 +239,7 @@ pub trait SendSafely<T> {
     /// before the sender is shut down.`
     fn send_safely(
         &self,
-        error_reader: WatchableOnceCellReader<SlateDBError>,
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         message: T,
     ) -> Result<(), SlateDBError>;
 }
@@ -249,14 +249,17 @@ impl<T> SendSafely<T> for UnboundedSender<T> {
     #[inline]
     fn send_safely(
         &self,
-        error_reader: WatchableOnceCellReader<SlateDBError>,
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         message: T,
     ) -> Result<(), SlateDBError> {
         match self.send(message) {
             Ok(_) => Ok(()),
             Err(e) => {
-                if let Some(err) = error_reader.read() {
-                    Err(err)
+                if let Some(result) = closed_result_reader.read() {
+                    match result {
+                        Ok(()) => Err(SlateDBError::Closed),
+                        Err(err) => Err(err),
+                    }
                 } else {
                     panic!("Failed to send message to unbounded channel: {}", e);
                 }

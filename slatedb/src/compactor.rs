@@ -227,12 +227,12 @@ impl Compactor {
         rand: Arc<DbRand>,
         stat_registry: Arc<StatRegistry>,
         system_clock: Arc<dyn SystemClock>,
-        error_state: WatchableOnceCell<SlateDBError>,
+        closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
         merge_operator: Option<MergeOperatorType>,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            error_state.clone(),
+            closed_result.clone(),
             system_clock.clone(),
         ));
         Self {

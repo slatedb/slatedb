@@ -36,7 +36,7 @@ impl DbInner {
 
         guard.freeze_memtable(wal_id)?;
         self.memtable_flush_notifier.send_safely(
-            guard.error_reader(),
+            guard.closed_result_reader(),
             MemtableFlushMsg::FlushImmutableMemtables { sender: None },
         )?;
         Ok(())
