@@ -18,8 +18,8 @@ use crate::bytes_generator::OrderedBytesGenerator;
 use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
-use crate::compactor_executor::{CompactionExecutor, CompactorJobAttempt, TokioCompactionExecutor};
-use crate::compactor_state::{CompactorJob, CompactorJobSpec, SourceId};
+use crate::compactor_executor::{CompactionExecutor, CompactionJobSpec, TokioCompactionExecutor};
+use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -211,7 +211,7 @@ impl CompactionExecuteBench {
         is_dest_last_run: bool,
         rand: Arc<DbRand>,
         system_clock: Arc<dyn SystemClock>,
-    ) -> Result<CompactorJobAttempt, SlateDBError> {
+    ) -> Result<CompactionJobSpec, SlateDBError> {
         let sst_ids: Vec<SsTableId> = (0u32..num_ssts as u32)
             .map(CompactionExecuteBench::sst_id)
             .collect();
@@ -246,7 +246,7 @@ impl CompactionExecuteBench {
             .into_iter()
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
-        Ok(CompactorJobAttempt {
+        Ok(CompactionJobSpec {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             job_id: rand.rng().gen_ulid(system_clock.as_ref()),
             destination: 0,
@@ -260,11 +260,11 @@ impl CompactionExecuteBench {
 
     fn load_compaction_as_job(
         manifest: &StoredManifest,
-        job: &CompactorJob,
+        job: &Compaction,
         is_dest_last_run: bool,
         rand: Arc<DbRand>,
         system_clock: Arc<dyn SystemClock>,
-    ) -> CompactorJobAttempt {
+    ) -> CompactionJobSpec {
         let state = manifest.db_state();
         let spec = job.spec();
         let srs_by_id: HashMap<_, _> = state
@@ -283,7 +283,7 @@ impl CompactionExecuteBench {
             })
             .collect();
         info!("loaded compaction job");
-        CompactorJobAttempt {
+        CompactionJobSpec {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             job_id: job.id(),
             destination: 0,
@@ -347,8 +347,8 @@ impl CompactionExecuteBench {
 
         let compactor_job = source_sr_ids.map(|_source_sr_ids| {
             let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let spec = CompactorJobSpec::new(sources, destination_sr_id);
-            CompactorJob::new(id, spec)
+            let spec = CompactionSpec::new(sources, destination_sr_id);
+            Compaction::new(id, spec)
         });
 
         info!("load compaction job");
@@ -380,7 +380,7 @@ impl CompactionExecuteBench {
         #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || executor.start_compaction(job));
         while let Some(msg) = rx.recv().await {
-            if let CompactorMessage::CompactionJobAttemptFinished { id: _, result } = msg {
+            if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
                 match result {
                     Ok(_) => {
                         let elapsed_ms = self
