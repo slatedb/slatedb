@@ -251,7 +251,8 @@ impl CachedObjectStore {
         let part_size_bytes_u64 = self.part_size_bytes as u64;
         assert!(result.range.start.is_multiple_of(part_size_bytes_u64));
         assert!(
-            result.range.end.is_multiple_of(part_size_bytes_u64) || result.range.end == result.meta.size
+            result.range.end.is_multiple_of(part_size_bytes_u64)
+                || result.range.end == result.meta.size
         );
 
         let entry = self

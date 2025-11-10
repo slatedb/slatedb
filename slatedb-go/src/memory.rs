@@ -27,8 +27,10 @@ pub extern "C" fn slatedb_free_scan_result(result: CSdbScanResult) {
     if !result.items.is_null() && result.count > 0 {
         unsafe {
             // Convert back to Box to free properly
-            let items_boxed =
-                Box::from_raw(std::ptr::slice_from_raw_parts_mut(result.items, result.count));
+            let items_boxed = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                result.items,
+                result.count,
+            ));
 
             // Free each individual key/value
             for item in items_boxed.iter() {
