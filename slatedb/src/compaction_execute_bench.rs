@@ -260,7 +260,7 @@ impl CompactionExecuteBench {
         })
     }
 
-    fn load_compaction_as_job(
+    fn load_compaction_as_job_args(
         manifest: &StoredManifest,
         job: &Compaction,
         is_dest_last_run: bool,
@@ -357,7 +357,7 @@ impl CompactionExecuteBench {
         let job = match &compactor_job {
             Some(compactor_job) => {
                 info!("load job from existing compaction");
-                CompactionExecuteBench::load_compaction_as_job(
+                CompactionExecuteBench::load_compaction_as_job_args(
                     &manifest,
                     compactor_job,
                     false,
