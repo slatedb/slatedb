@@ -188,7 +188,7 @@ impl DbInner {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.db_stats.get_requests.inc();
-        self.check_error()?;
+        self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
             .get_with_options(key, options, &db_state, None, None)
@@ -201,7 +201,7 @@ impl DbInner {
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.inc();
-        self.check_error()?;
+        self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader
             .scan_with_options(range, options, &db_state, None, None, None)
@@ -257,7 +257,7 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
-        self.check_error()?;
+        self.check_closed()?;
         if batch.ops.is_empty() {
             return Ok(());
         }
@@ -274,7 +274,7 @@ impl DbInner {
 
         self.maybe_apply_backpressure().await?;
         self.write_notifier
-            .send_safely(self.state.read().error_reader(), batch_msg)?;
+            .send_safely(self.state.read().closed_result_reader(), batch_msg)?;
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
@@ -388,7 +388,7 @@ impl DbInner {
     async fn flush_immutable_memtables(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.memtable_flush_notifier.send_safely(
-            self.state.read().error_reader(),
+            self.state.read().closed_result_reader(),
             MemtableFlushMsg::FlushImmutableMemtables { sender: Some(tx) },
         )?;
         rx.await?
@@ -527,15 +527,24 @@ impl DbInner {
         Ok(())
     }
 
-    /// Return an error if the state has encountered
-    /// an unrecoverable error.
-    pub(crate) fn check_error(&self) -> Result<(), SlateDBError> {
-        let error_reader = {
+    /// Returns an error if the database has been closed.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the DB is still open.
+    /// - `Err(SlateDBError::Closed)` if the DB was closed successfully
+    ///   (state.closed_result_reader() returns Ok(())).
+    /// - `Err(e)` if the DB was closed with an error, where `e` is the error
+    ///   (state.closed_result_reader() returns Err(e)).
+    pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
+        let closed_result_reader = {
             let state = self.state.read();
-            state.error_reader()
+            state.closed_result_reader()
         };
-        if let Some(error) = error_reader.read() {
-            return Err(error.clone());
+        if let Some(result) = closed_result_reader.read() {
+            return match result {
+                Ok(()) => Err(SlateDBError::Closed),
+                Err(e) => Err(e.clone()),
+            };
         }
         Ok(())
     }
@@ -659,7 +668,7 @@ impl Db {
             warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
-        self.inner.state.write().error().write(SlateDBError::Closed);
+        self.inner.state.write().closed_result().write(Ok(()));
         info!("db closed");
         Ok(())
     }
@@ -702,7 +711,7 @@ impl Db {
     /// }
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
-        self.inner.check_error()?;
+        self.inner.check_closed()?;
         let seq = self.inner.oracle.last_committed_seq.load();
         let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
         Ok(snapshot)
@@ -1046,7 +1055,7 @@ impl Db {
     /// struct StringConcatMergeOperator;
     ///
     /// impl MergeOperator for StringConcatMergeOperator {
-    ///     fn merge(&self, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+    ///     fn merge(&self, _key: &Bytes, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
     ///         let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
     ///         result.extend_from_slice(&value);
     ///         Ok(Bytes::from(result))
@@ -1100,7 +1109,7 @@ impl Db {
     /// struct StringConcatMergeOperator;
     ///
     /// impl MergeOperator for StringConcatMergeOperator {
-    ///     fn merge(&self, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+    ///     fn merge(&self, _key: &Bytes, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
     ///         let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
     ///         result.extend_from_slice(&value);
     ///         Ok(Bytes::from(result))
@@ -1340,7 +1349,7 @@ impl Db {
         &self,
         isolation_level: IsolationLevel,
     ) -> Result<DBTransaction, crate::Error> {
-        self.inner.check_error()?;
+        self.inner.check_closed()?;
         let seq = self.inner.oracle.last_committed_seq.load();
         let txn = DBTransaction::new(
             self.inner.clone(),
@@ -2260,7 +2269,9 @@ mod tests {
         expected_cache_parts: Vec<(&str, usize)>,
     ) -> (Arc<CachedObjectStore>, Db) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let opts = test_db_options(0, 1024, None);
+        let mut opts = test_db_options(0, 1024, None);
+        // disable manifest polling to avoid caching manifests non-deterministically
+        opts.manifest_poll_interval = Duration::from_millis(u64::MAX);
         let temp_dir = tempfile::Builder::new()
             .prefix("objstore_cache_test_")
             .tempdir()
@@ -2320,7 +2331,8 @@ mod tests {
         let expected_cache_parts =
             vec![
             ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000001.manifest", 0),
-            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 1),
+            ("tmp/test_kv_store_with_cache_stored_files/manifest/00000000000000000002.manifest", 0),
+            // 1 part is cached because of wal_replay after fencing (which reads the SST, thereby caching it)
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000001.sst", 1),
             ("tmp/test_kv_store_with_cache_stored_files/wal/00000000000000000002.sst", 0),
         ];
@@ -3300,7 +3312,7 @@ mod tests {
 
         // Verify that the memtable has not been flushed by checking the db for error state
         assert!(
-            kv_store.inner.check_error().is_ok(),
+            kv_store.inner.check_closed().is_ok(),
             "DB should not have an error state"
         );
     }
@@ -4944,6 +4956,7 @@ mod tests {
     impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
         fn merge(
             &self,
+            _key: &Bytes,
             existing_value: Option<Bytes>,
             value: Bytes,
         ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {

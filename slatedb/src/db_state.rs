@@ -296,7 +296,13 @@ impl SortedRun {
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
-    error: WatchableOnceCell<SlateDBError>,
+
+    /// If the database is closed, this will contain the result of the close operation.
+    /// Otherwise, it will be None.
+    ///
+    /// - `Ok(())` if the database was closed successfully.
+    /// - `Err(e)` if the database was closed with an error.
+    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
@@ -421,7 +427,7 @@ impl DbState {
                 imm_memtable: VecDeque::new(),
                 manifest,
             }),
-            error: WatchableOnceCell::new(),
+            closed_result: WatchableOnceCell::new(),
         }
     }
 
@@ -436,12 +442,12 @@ impl DbState {
         }
     }
 
-    pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
-        self.error.reader()
+    pub fn closed_result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+        self.closed_result.reader()
     }
 
-    pub(crate) fn error(&self) -> WatchableOnceCell<SlateDBError> {
-        self.error.clone()
+    pub(crate) fn closed_result(&self) -> WatchableOnceCell<Result<(), SlateDBError>> {
+        self.closed_result.clone()
     }
 
     pub fn memtable(&self) -> &WritableKVTable {
@@ -449,8 +455,11 @@ impl DbState {
     }
 
     pub fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) -> Result<(), SlateDBError> {
-        if let Some(err) = self.error.reader().read() {
-            return Err(err.clone());
+        if let Some(result) = self.closed_result.reader().read() {
+            return match result {
+                Ok(()) => Err(SlateDBError::Closed),
+                Err(e) => Err(e.clone()),
+            };
         }
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
         self.modify(|modifier| {
@@ -469,8 +478,11 @@ impl DbState {
         &mut self,
         memtable: WritableKVTable,
     ) -> Result<(), SlateDBError> {
-        if let Some(err) = self.error.reader().read() {
-            return Err(err.clone());
+        if let Some(result) = self.closed_result.reader().read() {
+            return match result {
+                Ok(()) => Err(SlateDBError::Closed),
+                Err(e) => Err(e.clone()),
+            };
         }
         assert!(self.memtable.is_empty());
         let _ = std::mem::replace(&mut self.memtable, memtable);

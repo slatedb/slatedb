@@ -137,8 +137,8 @@ impl Admin {
         .build();
 
         let (_, rx) = mpsc::unbounded_channel();
-        let error_state = WatchableOnceCell::new();
-        let task_executor = MessageHandlerExecutor::new(error_state, self.system_clock.clone());
+        let closed_result = WatchableOnceCell::new();
+        let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 
         task_executor
             .add_handler(
@@ -416,7 +416,10 @@ impl Admin {
 ///
 /// | Provider | Value | Documentation |
 /// |----------|-------|---------------|
+/// | Local | `local` | [load_local] |
 /// | AWS | `aws` | [load_aws] |
+/// | Azure | `azure` | [load_azure] |
+/// | OpenDAL | `opendal` | [load_opendal] |
 pub fn load_object_store_from_env(
     env_file: Option<String>,
 ) -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
