@@ -577,8 +577,8 @@ mod tests {
             None,
         );
 
-        wal_buffer.append(&[entry1.clone()]).unwrap();
-        wal_buffer.append(&[entry2.clone()]).unwrap();
+        wal_buffer.append(std::slice::from_ref(&entry1)).unwrap();
+        wal_buffer.append(std::slice::from_ref(&entry2)).unwrap();
 
         // Flush the buffer
         wal_buffer.flush().await.unwrap();
