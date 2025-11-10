@@ -1,3 +1,58 @@
+//! Compactor Orchestration and Naming Overview
+//!
+//! This module implements the event loop ("compactor") that orchestrates database
+//! compactions. It coordinates three concerns:
+//!
+//! 1. deciding what to compact,
+//! 2. executing the work,
+//! 3. and persisting the effects.
+//!
+//! The key types follow a consistent naming hierarchy to distinguish “what should happen”
+//! from “what is currently running”.
+//!
+//! Naming hierarchy (logical → runtime):
+//! - [`CompactionSpec`]: Description of a compaction to perform. Pure specification of
+//!   inputs and destination (e.g., L0 SST ULIDs and/or Sorted Run ids → destination SR id).
+//! - [`Compaction`]: A concrete compaction entity the system decided to run. It has a
+//!   stable id (ULID) and references a [`CompactionSpec`]. Compactions live in the
+//!   process-local [`CompactorState`] and represent the lifecycle of a single planned
+//!   transformation of the DB’s structure. Today each [`Compaction`] has exactly one
+//!   runtime job; future retries would attach multiple jobs to a single [`Compaction`].
+//! - [`CompactionJobSpec`]: A single job attempt the executor runs. It materializes the
+//!   execution-time inputs (opened SST handles and Sorted Runs), carries runtime
+//!   context like the logical compaction clock tick, and is sent to the executor.
+//!   Currently there is a 1:1 mapping between [`Compaction`] and [`CompactionJobSpec`], but
+//!   if retries are introduced, multiple [`CompactionJobSpec`] instances would be
+//!   associated with a single [`Compaction`].
+//!
+//! Roles:
+//! - [`CompactionScheduler`]: Policy that proposes [`CompactionSpec`] values based on the
+//!   current [`CompactorState`] (e.g., size-tiered scheduling). It validates logical
+//!   invariants (such as consecutive sources and destination rules).
+//! - [`CompactionExecutor`]: Runs [`CompactionJobSpec`] attempts, merges inputs, applies
+//!   merge and retention logic, writes output SSTs, and reports progress/finish.
+//! - [`CompactorEventHandler`]: Event-driven controller. It polls the manifest, asks
+//!   the scheduler for new [`CompactionSpec`] proposals, registers [`Compaction`] entities,
+//!   spawns [`CompactionJobSpec`] attempts on the executor, and persists results by
+//!   updating the manifest.
+//!
+//! Progress and GC safety:
+//! - [`CompactionProgressTracker`] keeps an approximate byte-level progress per running
+//!   job (id → processed/total). It is used only for observability.
+//! - The lowest start time among active compaction ids (ULIDs) is exported as a
+//!   “low-watermark” hint so GC can avoid deleting inputs required by running work.
+//!
+//! High-level flow:
+//! 1) Poll manifest and merge remote state into local [`CompactorState`].
+//! 2) Ask the [`CompactionScheduler`] for candidate [`CompactionSpec`] values.
+//! 3) For each accepted spec, create a [`Compaction`] (id + spec), derive a
+//!    [`CompactionJobSpec`] with concrete inputs, and start it on the executor.
+//! 4) Upon completion, update [`CompactorState`], write a new manifest, and repeat.
+//!
+//! These names are used consistently across modules so it is clear whether a type
+//! represents a description (Spec), a durable decision (Compaction), or a running
+//! attempt (JobSpec).
+
 use std::sync::Arc;
 use std::time::Duration;
 
