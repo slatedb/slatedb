@@ -994,6 +994,106 @@ mod tests {
         assert!(next.is_none());
     }
 
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_should_not_filter_tombstone_with_snapshot() {
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+
+        let os = Arc::new(InMemory::new());
+        let logical_clock = Arc::new(TestClock::new());
+
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| {
+                // compact when there are at least 2 SSTs in L0
+                state.db_state().l0.len() == 2 ||
+                // or when there is one SST in L0 and one in L1
+                (state.db_state().l0.len() == 1 && state.db_state().compacted.len() == 1)
+            },
+        )));
+
+        let mut options = db_options(Some(compactor_options()));
+        options.wal_enabled = false;
+        options.l0_sst_size_bytes = 128;
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_logical_clock(logical_clock)
+            .with_compaction_scheduler_supplier(scheduler.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let (manifest_store, table_store) = build_test_stores(os.clone());
+
+        // Write and flush key 'a' first (seq=1)
+        db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
+        db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
+
+        // Create a snapshot after first flush. This protects seq >= 1
+        let _snapshot = db.snapshot().await.unwrap();
+        db.flush().await.unwrap();
+
+        // Compact L0 to L1
+        let db_state = await_compaction(&db).await.unwrap();
+        assert_eq!(db_state.compacted.len(), 1);
+        assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
+
+        // Now delete key 'a', creating a tombstone (seq=3)
+        db.delete_with_options(
+            &[b'a'; 16],
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush().await.unwrap();
+
+        // We should now have a tombstone for 'a' in L0 and both 'a' and 'b' values in L1
+        let db_state = get_db_state(manifest_store.clone()).await;
+        assert_eq!(db_state.l0.len(), 1, "{:?}", db_state.l0);
+        assert_eq!(db_state.compacted.len(), 1);
+
+        // Trigger compaction of L0 (tombstone) + L1 (values)
+        let db_state = await_compacted_compaction(manifest_store.clone(), db_state.compacted)
+            .await
+            .unwrap();
+        assert_eq!(db_state.compacted.len(), 1);
+
+        let compacted = &db_state.compacted.first().unwrap().ssts;
+        assert_eq!(compacted.len(), 1);
+        let handle = compacted.first().unwrap();
+
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            handle,
+            table_store.clone(),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        // After compaction with an active snapshot (protecting seq >= 1):
+        // - Key 'a': Both the tombstone(seq=3) and original value(seq=1) are protected
+        //   The SST contains both versions, but the iterator returns the latest (tombstone)
+        // - Key 'b': value(seq=2) is protected
+        // Expected result: both 'a' (as tombstone) and 'b' (as value) should be present
+        let next = iter.next().await.unwrap();
+        let entry_a = next.unwrap();
+        assert_eq!(entry_a.key.as_ref(), &[b'a'; 16]);
+
+        let next = iter.next().await.unwrap();
+        let entry_b = next.unwrap();
+        assert_eq!(entry_b.key.as_ref(), &[b'b'; 16]);
+
+        let next = iter.next().await.unwrap();
+        assert!(
+            next.is_none(),
+            "Expected two keys (a and b) in the compacted SST"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn should_apply_merge_during_l0_compaction() {
         use crate::test_utils::OnDemandCompactionSchedulerSupplier;
