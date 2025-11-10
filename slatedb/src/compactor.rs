@@ -572,7 +572,11 @@ impl CompactorEventHandler {
         job: CompactorJob,
     ) -> Result<(), SlateDBError> {
         self.log_compaction_state();
-        let db_state = self.state.db_state();
+        // Refresh manifest to ensure we have the latest recent_snapshot_min_seq
+        self.manifest.refresh().await?;
+        let dirty_manifest = self.manifest.prepare_dirty()?;
+        let db_state = &dirty_manifest.core;
+
         let ssts = job.get_ssts(db_state);
         let sorted_runs = job.get_sorted_runs(db_state);
         let spec = job.spec();
