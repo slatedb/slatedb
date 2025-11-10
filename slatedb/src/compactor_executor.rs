@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 
 use crate::clock::SystemClock;
 use crate::compactor::CompactorMessage;
-use crate::compactor::CompactorMessage::CompactionJobAttemptFinished;
+use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
@@ -32,26 +32,26 @@ use log::{debug, error};
 use tracing::instrument;
 use ulid::Ulid;
 
-/// Execution unit (attempt) for a compaction plan.
+/// Arguments for starting a compaction job.
 ///
-/// - `id` is the job id (ULID) and uniquely identifies a single execution attempt. This is
+/// - `id` is the job id (ULID) and uniquely identifies a single job. This is
 ///   used as the runtime key in `scheduled_compactions`.
-/// - `job_id` is the canonical plan id (ULID) that ties this job attempt back to its
-///   `CompactionJob` entry in the compactor's canonical map.
+/// - `job_id` is the canonical plan id (ULID) that ties this job back to its
+///   `Compaction`
 ///
 /// Jobs carry fully materialized inputs (L0 `ssts` and `sorted_runs`) along with execution-time
 /// metadata for progress reporting, retention, and resume logic.
 #[derive(Clone, PartialEq)]
-pub(crate) struct CompactorJobAttempt {
-    /// Job attempt id. Unique per attempt and used for scheduling/routing.
+pub(crate) struct StartCompactionJobArgs {
+    /// Job id. Unique per job.
     pub(crate) id: Ulid,
     /// Canonical compaction job id this job belongs to.
-    pub(crate) job_id: Ulid,
+    pub(crate) compaction_id: Ulid,
     /// Destination sorted run id to be produced by this job.
     pub(crate) destination: u32,
-    /// Input L0 SSTs for this attempt.
+    /// Input L0 SSTs for this job.
     pub(crate) ssts: Vec<SsTableHandle>,
-    /// Input existing sorted runs for this attempt.
+    /// Input existing sorted runs for this job.
     pub(crate) sorted_runs: Vec<SortedRun>,
     /// The logical clock tick representing the logical time the compaction occurs. This is used
     /// to make decisions about retention of expiring records.
@@ -62,11 +62,11 @@ pub(crate) struct CompactorJobAttempt {
     pub(crate) retention_min_seq: Option<u64>,
 }
 
-impl std::fmt::Debug for CompactorJobAttempt {
+impl std::fmt::Debug for StartCompactionJobArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CompactorJobAttempt")
+        f.debug_struct("StartCompactionJobArgs")
             .field("id", &self.id)
-            .field("job_id", &self.job_id)
+            .field("job_id", &self.compaction_id)
             .field("destination", &self.destination)
             .field("ssts", &self.ssts)
             .field("sorted_runs", &self.sorted_runs)
@@ -81,7 +81,7 @@ impl std::fmt::Debug for CompactorJobAttempt {
     }
 }
 
-impl CompactorJobAttempt {
+impl StartCompactionJobArgs {
     /// Estimates the total number of input bytes (L0 SSTs + Sorted Runs).
     ///
     /// Used by the compactor to track progress percentages for reporting.
@@ -96,10 +96,10 @@ impl CompactorJobAttempt {
     }
 }
 
-/// Executes compaction attempts produced by the compactor.
+/// Executes compaction jobs produced by the compactor.
 pub(crate) trait CompactionExecutor {
-    /// Starts executing a compaction attempt asynchronously.
-    fn start_compaction(&self, compaction: CompactorJobAttempt);
+    /// Starts executing a compaction job asynchronously.
+    fn start_compaction_job(&self, compaction: StartCompactionJobArgs);
 
     /// Stops the executor and cancels any in-flight tasks, waiting for them to finish.
     fn stop(&self);
@@ -143,8 +143,8 @@ impl TokioCompactionExecutor {
 }
 
 impl CompactionExecutor for TokioCompactionExecutor {
-    fn start_compaction(&self, compaction: CompactorJobAttempt) {
-        self.inner.start_compaction(compaction);
+    fn start_compaction_job(&self, compaction: StartCompactionJobArgs) {
+        self.inner.start_compaction_job(compaction);
     }
 
     fn stop(&self) {
@@ -179,7 +179,7 @@ impl TokioCompactionExecutorInner {
     /// merge and retention logic.
     async fn load_iterators<'a>(
         &self,
-        compaction: &'a CompactorJobAttempt,
+        job_args: &'a StartCompactionJobArgs,
     ) -> Result<RetentionIterator<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
@@ -188,15 +188,15 @@ impl TokioCompactionExecutorInner {
             eager_spawn: true,
         };
 
-        let max_parallel = compute_max_parallel(compaction.ssts.len(), &compaction.sorted_runs, 4);
+        let max_parallel = compute_max_parallel(job_args.ssts.len(), &job_args.sorted_runs, 4);
         // L0 (borrowed)
-        let l0_iters_futures = build_concurrent(compaction.ssts.iter(), max_parallel, |h| {
+        let l0_iters_futures = build_concurrent(job_args.ssts.iter(), max_parallel, |h| {
             SstIterator::new_borrowed_initialized(.., h, self.table_store.clone(), sst_iter_options)
         });
 
         // SR (borrowed)
         let sr_iters_futures =
-            build_concurrent(compaction.sorted_runs.iter(), max_parallel, |sr| async {
+            build_concurrent(job_args.sorted_runs.iter(), max_parallel, |sr| async {
                 SortedRunIterator::new_borrowed(.., sr, self.table_store.clone(), sst_iter_options)
                     .await
                     .map(Some)
@@ -215,7 +215,7 @@ impl TokioCompactionExecutorInner {
                 merge_operator,
                 merge_iter,
                 false,
-                compaction.compaction_logical_clock_tick,
+                job_args.compaction_logical_clock_tick,
             ))
         } else {
             Box::new(MergeOperatorRequiredIterator::new(merge_iter)) as Box<dyn KeyValueIterator>
@@ -225,9 +225,9 @@ impl TokioCompactionExecutorInner {
         let mut retention_iter = RetentionIterator::new(
             merge_iter,
             None,
-            compaction.retention_min_seq,
-            compaction.is_dest_last_run,
-            compaction.compaction_logical_clock_tick,
+            job_args.retention_min_seq,
+            job_args.is_dest_last_run,
+            job_args.compaction_logical_clock_tick,
             self.clock.clone(),
             Arc::new(stored_manifest.db_state().sequence_tracker.clone()),
         )
@@ -236,7 +236,7 @@ impl TokioCompactionExecutorInner {
         Ok(retention_iter)
     }
 
-    /// Executes a single compaction attempt and returns the resulting [`SortedRun`].
+    /// Executes a single compaction job and returns the resulting [`SortedRun`].
     ///
     /// ## Steps
     /// - Streams and merges input keys across all sources
@@ -245,13 +245,13 @@ impl TokioCompactionExecutorInner {
     ///
     /// ## Returns
     /// - The destination [`SortedRun`] with all output SST handles.
-    #[instrument(level = "debug", skip_all, fields(id = %attempt.id))]
-    async fn execute_compaction(
+    #[instrument(level = "debug", skip_all, fields(id = %args.id))]
+    async fn execute_compaction_job(
         &self,
-        attempt: CompactorJobAttempt,
+        args: StartCompactionJobArgs,
     ) -> Result<SortedRun, SlateDBError> {
-        debug!("executing compaction [attempt={:?}]", attempt);
-        let mut all_iter = self.load_iterators(&attempt).await?;
+        debug!("executing compaction [job_args={:?}]", args);
+        let mut all_iter = self.load_iterators(&args).await?;
         let mut output_ssts = Vec::new();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
@@ -269,8 +269,8 @@ impl TokioCompactionExecutorInner {
                 // not already an error (i.e. if the DB is not already shut down).
                 #[allow(clippy::disallowed_methods)]
                 self.worker_tx
-                    .send(CompactorMessage::CompactionJobAttemptProgress {
-                        id: attempt.id,
+                    .send(CompactorMessage::CompactionJobProgress {
+                        id: args.id,
                         bytes_processed: all_iter.total_bytes_processed(),
                     })
                     .expect("failed to send compaction progress");
@@ -304,22 +304,22 @@ impl TokioCompactionExecutorInner {
         }
 
         Ok(SortedRun {
-            id: attempt.destination,
+            id: args.destination,
             ssts: output_ssts,
         })
     }
 
-    /// Starts a background task to run the compaction attempt.
-    fn start_compaction(self: &Arc<Self>, attempt: CompactorJobAttempt) {
+    /// Starts a background task to run the compaction job.
+    fn start_compaction_job(self: &Arc<Self>, args: StartCompactionJobArgs) {
         let mut tasks = self.tasks.lock();
         if self.is_stopped.load(atomic::Ordering::SeqCst) {
             return;
         }
-        let dst = attempt.destination;
+        let dst = args.destination;
         self.stats.running_compactions.inc();
         assert!(!tasks.contains_key(&dst));
 
-        let id = attempt.id;
+        let id = args.id;
 
         // TODO(sujeetsawala): Add compaction plan to object store with InProgress status
 
@@ -341,11 +341,11 @@ impl TokioCompactionExecutorInner {
                 #[allow(clippy::disallowed_methods)]
                 this_cleanup
                     .worker_tx
-                    .send(CompactionJobAttemptFinished { id, result })
+                    .send(CompactionJobFinished { id, result })
                     .expect("failed to send compaction finished msg");
                 this_cleanup.stats.running_compactions.dec();
             },
-            async move { this.execute_compaction(attempt).await },
+            async move { this.execute_compaction_job(args).await },
         );
         tasks.insert(dst, TokioCompactionTask { task });
     }
