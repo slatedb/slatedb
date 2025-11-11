@@ -229,7 +229,7 @@ impl WalBufferManager {
                 .as_ref()
                 .expect("flush_tx not initialized, please call start_background first.")
                 .send_safely(
-                    self.db_state.read().error_reader(),
+                    self.db_state.read().closed_result_reader(),
                     WalFlushWork { result_tx: None },
                 )?
         }
@@ -273,7 +273,7 @@ impl WalBufferManager {
             .expect("flush_tx not initialized, please call start_background first.");
         let (result_tx, result_rx) = oneshot::channel();
         flush_tx.send_safely(
-            self.db_state.read().error_reader(),
+            self.db_state.read().closed_result_reader(),
             WalFlushWork {
                 result_tx: Some(result_tx),
             },
@@ -547,7 +547,7 @@ mod tests {
             Some(Duration::from_millis(10)), // max_flush_interval
         ));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            db_state.read().error(),
+            db_state.read().closed_result(),
             system_clock.clone(),
         ));
         wal_buffer.init(task_executor.clone()).await.unwrap();
@@ -577,8 +577,8 @@ mod tests {
             None,
         );
 
-        wal_buffer.append(&[entry1.clone()]).unwrap();
-        wal_buffer.append(&[entry2.clone()]).unwrap();
+        wal_buffer.append(std::slice::from_ref(&entry1)).unwrap();
+        wal_buffer.append(std::slice::from_ref(&entry2)).unwrap();
 
         // Flush the buffer
         wal_buffer.flush().await.unwrap();

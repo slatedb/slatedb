@@ -282,7 +282,7 @@ pub struct ScanOptions {
 }
 
 impl Default for ScanOptions {
-    /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Remote`].
+    /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Memory`].
     fn default() -> Self {
         Self {
             durability_filter: DurabilityLevel::default(),

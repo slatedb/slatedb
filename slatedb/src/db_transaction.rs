@@ -113,7 +113,7 @@ impl DBTransaction {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.db_inner.check_error()?;
+        self.db_inner.check_closed()?;
 
         // Track read key for SSI conflict detection if needed
         if self.isolation_level == IsolationLevel::SerializableSnapshot {
@@ -194,7 +194,7 @@ impl DBTransaction {
             None
         };
 
-        self.db_inner.check_error()?;
+        self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
 
         // Clone the WriteBatch for the scan to ensure that the scan within a transaction
@@ -317,6 +317,22 @@ impl DBTransaction {
     ///   - Database I/O errors
     ///   - Concurrency conflicts detected during WriteBatch processing
     pub async fn commit(self) -> Result<(), crate::Error> {
+        self.commit_with_options(&WriteOptions::default()).await
+    }
+
+    /// Commit the transaction with custom write options.
+    ///
+    /// This method behaves the same as [`DBTransaction::commit`], but allows callers
+    /// to specify custom [`WriteOptions`], such as `await_durable`.
+    ///
+    /// ## Arguments
+    /// - `options`: the write options to use for the commit
+    ///
+    /// ## Errors
+    /// - Returns `Error` if the commit operation fails, which could be due to:
+    ///   - Database I/O errors
+    ///   - Concurrency conflicts detected during WriteBatch processing
+    pub async fn commit_with_options(self, options: &WriteOptions) -> Result<(), crate::Error> {
         // If the WriteBatch is empty, it's a no-op. it's impossible to have read-write
         // conflict, neither write-write conflict.
         if self.write_batch.read().is_empty() {
@@ -346,7 +362,7 @@ impl DBTransaction {
         // sequentially, ensuring no concurrent writes. Both conflict checking & persisting
         // are handled there.
         self.db_inner
-            .write_with_options(write_batch, &WriteOptions::default())
+            .write_with_options(write_batch, options)
             .await
             .map_err(Into::into)
     }
@@ -568,6 +584,53 @@ mod tests {
         // because it read a range that was modified by transaction 1
         let result = txn2.commit().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_txn_commit_await_durable_false() {
+        use crate::config::{DurabilityLevel::*, ReadOptions, WriteOptions};
+        use fail_parallel::FailPointRegistry;
+
+        // Setup database with failpoints to pause durable writes
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder("/tmp/test_txn_commit_await_durable_false", object_store)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Pause durable writes to object storage
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+
+        // Begin a transaction and write a key
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        txn.put(b"k", b"v").unwrap();
+
+        // Commit without waiting for durability
+        txn.commit_with_options(&WriteOptions {
+            await_durable: false,
+        })
+        .await
+        .unwrap();
+
+        // Memory (in-memory) read should see the value
+        let val = db
+            .get_with_options(b"k", &ReadOptions::new().with_durability_filter(Memory))
+            .await
+            .unwrap();
+        assert_eq!(val, Some(Bytes::from_static(b"v")));
+
+        // Remote (durable) read should not see the value yet
+        let val = db
+            .get_with_options(b"k", &ReadOptions::new().with_durability_filter(Remote))
+            .await
+            .unwrap();
+        assert_eq!(val, None);
+
+        // Clean up
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "off").unwrap();
+        db.close().await.unwrap();
     }
 
     // Transaction test structures for table-driven tests
