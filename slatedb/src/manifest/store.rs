@@ -10,7 +10,9 @@ use crate::error::SlateDBError::{
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{ExternalDb, Manifest};
 use crate::rand::DbRand;
-use crate::record::store::{FenceableRecord, RecordStore, StoredRecord};
+use crate::record::store::{
+    FenceableTransactionalObject, ObjectStoreSequencedObjectOps, SimpleTransactionalObject,
+};
 use chrono::Utc;
 use log::debug;
 use object_store::path::Path;
@@ -62,7 +64,7 @@ impl DirtyManifest {
 
 pub(crate) struct FenceableManifest {
     clock: Arc<dyn SystemClock>,
-    inner: FenceableRecord<Manifest>,
+    inner: FenceableTransactionalObject<Manifest>,
 }
 
 // This type wraps StoredManifest, and fences other conflicting writers by incrementing
@@ -76,7 +78,7 @@ impl FenceableManifest {
     ) -> Result<Self, SlateDBError> {
         let clock = system_clock.clone();
         // Initialize generic fenceable record using writer epoch
-        let fr = FenceableRecord::init(
+        let fr = FenceableTransactionalObject::init(
             stored_manifest.inner,
             manifest_update_timeout,
             system_clock,
@@ -93,7 +95,7 @@ impl FenceableManifest {
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let clock = system_clock.clone();
-        let fr = FenceableRecord::init(
+        let fr = FenceableTransactionalObject::init(
             stored_manifest.inner,
             manifest_update_timeout,
             system_clock,
@@ -134,7 +136,7 @@ impl FenceableManifest {
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
         let clock = self.clock.clone();
-        let db_state = &self.inner.record().core;
+        let db_state = &self.inner.object().core;
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
                 let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
@@ -171,7 +173,7 @@ impl FenceableManifest {
         .await?;
         let checkpoint = self
             .inner
-            .record()
+            .object()
             .core
             .find_checkpoint(checkpoint_id)
             .expect("update applied but checkpoint not found")
@@ -210,14 +212,15 @@ impl FenceableManifest {
 // can use the `refresh` method to refresh the locally stored manifest+id with the latest
 // manifest stored in the object store.
 pub(crate) struct StoredManifest {
-    inner: StoredRecord<Manifest>,
+    inner: SimpleTransactionalObject<Manifest>,
     clock: Arc<dyn SystemClock>,
 }
 
 impl StoredManifest {
     async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
         // Preserve original behavior: write via ManifestStore (object-store path and semantics)
-        let inner = StoredRecord::init(Arc::clone(&store.inner), manifest.clone()).await?;
+        let inner =
+            SimpleTransactionalObject::init(Arc::clone(&store.inner), manifest.clone()).await?;
         Ok(Self {
             inner,
             clock: Arc::clone(&store.clock),
@@ -251,7 +254,8 @@ impl StoredManifest {
     /// manifest store's path then this fn returns None. Otherwise, on success it returns a
     /// Result with an instance of StoredManifest.
     pub(crate) async fn try_load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
-        let Some(inner) = StoredRecord::<Manifest>::try_load(Arc::clone(&store.inner)).await?
+        let Some(inner) =
+            SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner)).await?
         else {
             return Ok(None);
         };
@@ -265,7 +269,7 @@ impl StoredManifest {
     /// this method returns a [`Result`] with an instance of [`StoredManifest`].
     /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
     pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
-        StoredRecord::<Manifest>::try_load(Arc::clone(&store.inner))
+        SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner))
             .await?
             .map(|inner| Self {
                 inner,
@@ -280,7 +284,7 @@ impl StoredManifest {
     }
 
     pub(crate) fn manifest(&self) -> &Manifest {
-        self.inner.record()
+        self.inner.object()
     }
 
     pub(crate) fn prepare_dirty(&self) -> DirtyManifest {
@@ -334,7 +338,7 @@ impl StoredManifest {
         let clock = Arc::clone(&self.clock);
         self.inner
             .maybe_apply_update(|sr| {
-                let mut new_val = sr.record().clone();
+                let mut new_val = sr.object().clone();
                 let checkpoint = Self::new_checkpoint(
                     &new_val,
                     sr.id(),
@@ -361,7 +365,7 @@ impl StoredManifest {
     ) -> Result<(), SlateDBError> {
         self.inner
             .maybe_apply_update(|sr| {
-                let mut new_val = sr.record().clone();
+                let mut new_val = sr.object().clone();
                 let before = new_val.core.checkpoints.len();
                 new_val.core.checkpoints.retain(|cp| cp.id != checkpoint_id);
                 if new_val.core.checkpoints.len() == before {
@@ -387,7 +391,7 @@ impl StoredManifest {
         let clock = Arc::clone(&self.clock);
         self.inner
             .maybe_apply_update(|sr| {
-                let mut new_val = sr.record().clone();
+                let mut new_val = sr.object().clone();
                 // compute new checkpoint
                 let checkpoint = Self::new_checkpoint(
                     &new_val,
@@ -422,7 +426,7 @@ impl StoredManifest {
         let clock = Arc::clone(&self.clock);
         self.inner
             .maybe_apply_update(|sr| {
-                let mut new_val = sr.record().clone();
+                let mut new_val = sr.object().clone();
                 let Some(cp) = new_val
                     .core
                     .checkpoints
@@ -510,7 +514,7 @@ where
 }
 
 pub(crate) struct ManifestStore {
-    inner: Arc<RecordStore<Manifest>>,
+    inner: Arc<ObjectStoreSequencedObjectOps<Manifest>>,
     clock: Arc<dyn SystemClock>,
 }
 
@@ -520,7 +524,7 @@ impl ManifestStore {
         object_store: Arc<dyn ObjectStore>,
         clock: Arc<dyn SystemClock>,
     ) -> Self {
-        let inner = Arc::new(RecordStore::<Manifest>::new(
+        let inner = Arc::new(ObjectStoreSequencedObjectOps::<Manifest>::new(
             root_path,
             object_store,
             "manifest",
@@ -873,9 +877,9 @@ mod tests {
     }
 
     async fn assert_state_not_updated(fm: &mut FenceableManifest) {
-        let original_db_state = fm.inner.record().core.clone();
+        let original_db_state = fm.inner.object().core.clone();
         fm.refresh().await.unwrap();
-        let refreshed_db_state = fm.inner.record().core.clone();
+        let refreshed_db_state = fm.inner.object().core.clone();
         assert_eq!(refreshed_db_state, original_db_state);
     }
 
@@ -1025,7 +1029,7 @@ mod tests {
             .await
             .unwrap();
 
-        let initial_manifest = sm.inner.record().clone();
+        let initial_manifest = sm.inner.object().clone();
         let initial_manifest_id = sm.inner.id();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(1, active_manifests.len());

@@ -1,33 +1,24 @@
-//! SlateDB Generic Record Store
+//! SlateDB Transactional Object
 //!
-//! This module provides generic, reusable primitives for persisting versioned records
-//! as flat files in an object store, with optimistic concurrency control and optional
+//! This module provides generic, reusable primitives for persisting data
+//! as objects in a durable store, with optimistic concurrency control and optional
 //! epoch-based fencing.
-//!
-//! File layout and naming
-//! ----------------------
-//! - Records are stored under a root directory and logical subdirectory provided at
-//!   construction time (see `RecordStore::new`).
-//! - Each version is a single file whose name is a zero-padded 20-digit decimal id
-//!   followed by a fixed suffix, e.g. `00000000000000000001.manifest`.
-//! - New versions must use the next consecutive id (`current_id + 1`).
-//! - We rely on `put_if_not_exists` to enforce CAS at the storage layer. If a file with
-//!   the same id already exists, the write fails with `FileVersionExists`.
 //!
 //! Core types
 //! ----------
-//! - `RecordStore<T>`: Owns the object store handle, codec, file suffix, and clock. It
-//!   can `write(id, &T)`, `try_read(id)`, `try_read_latest()`, `list(range)`, and
-//!   `delete(id)`.
-//! - `StoredRecord<T>`: In-memory view of the latest known `{ id, record }`. Supports:
+//! - `ObjectStoreSequencedObjectOps<T>`: Implements a protocol for transactionally writing
+//!   an object as a sequence of object version ids. Supports reading the latest or a given
+//!   version id of an object, and then writing it under the condition that a newer version
+//!   has not been written.
+//! - `SimpleTransactionalObject<T>`: In-memory view of the latest known `{ id, object }`. Supports:
 //!   - `refresh()` to load the current latest version from storage
-//!   - `update(DirtyRecord<T>)` to perform a CAS write to `next_id()`
+//!   - `update(DirtyObject<T>)` to perform a CAS write given the dirty object's version id
 //!   - `maybe_apply_update(mutator)` to loop: mutate -> write -> on conflict refresh and retry
-//! - `DirtyRecord<T>`: A local, mutable candidate `{ id, value }` to be written.
-//! - `FenceableRecord<T>`: Wraps `StoredRecord<T>` and enforces epoch fencing for writers.
-//!   On `init`, it bumps the epoch field (via provided `get_epoch`/`set_epoch` fns) and writes
-//!   that update, fencing out stale writers. Subsequent operations check the stored epoch and
-//!   return `Fenced` if the local epoch is behind.
+//! - `DirtyObject<T>`: A local, mutable candidate `{ id, value }` to be written.
+//! - `FenceableTransactionalObject<T>`: Wraps `SimpleTransactionalObject<T>` and enforces epoch
+//!   fencing for writers. On `init`, it bumps the epoch field (via provided `get_epoch`/`set_epoch`
+//!   fns) and writes that update, fencing out stale writers. Subsequent operations check the stored
+//!   epoch and return `Fenced` if the local epoch is behind.
 //!
 //! Error semantics
 //! ---------------
@@ -36,24 +27,19 @@
 //! - `InvalidDBState` may be returned when an expected record is missing or file names are
 //!   malformed.
 //!
-//! Listing and latest
-//! ------------------
-//! - `RecordStore::list(range)` scans the subdirectory, parses ids from filenames matching the
-//!   configured suffix, filters by `RangeBounds`, sorts ascending by id, and returns metadata.
-//! - `try_read_latest()` lists unbounded (`..`), takes the last entry (highest id), and reads it.
-//!
 //! Example (Manifest)
 //! ------------------
-//! A `ManifestStore` composes `RecordStore<Manifest>` with suffix `"manifest"`. File names look
-//! like `00000000000000000001.manifest`, `00000000000000000002.manifest`, etc. `StoredManifest`
-//! is a thin wrapper around `StoredRecord<Manifest>` that adds domain-specific helpers (e.g.
-//! checkpoint calculations) and maps generic CAS conflicts to `ManifestVersionExists`.
+//! A `ManifestStore` composes `ObjectStoreSequencedObjectOps<Manifest>` with suffix `"manifest"`.
+//! File names look  like `00000000000000000001.manifest`, `00000000000000000002.manifest`,
+//! etc. `StoredManifest` is a thin wrapper around `SimpleTransactionalObject<Manifest>` that adds
+//! domain-specific helpers (e.g. checkpoint calculations) and maps generic CAS conflicts to
+//! `ManifestVersionExists`.
 //!
 //! Concurrency
 //! -----------
 //! - Use `maybe_apply_update` for optimistic updates that automatically retry on conflicts.
-//! - For writers that must be fenced, initialize a `FenceableRecord` to atomically bump the
-//!   epoch, then rely on `check_epoch` during subsequent updates.
+//! - For writers that must be fenced, initialize a `FenceableTransactionalObject` to atomically
+//!   bump the  epoch, then rely on `check_epoch` during subsequent updates.
 //!
 //! Timing and timeouts
 //! -------------------
@@ -77,12 +63,12 @@ use object_store::{Error, ObjectStore, PutMode, PutOptions, PutPayload};
 use crate::clock::SystemClock;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{FileVersionExists, InvalidDBState};
-use crate::record::RecordCodec;
+use crate::record::ObjectCodec;
 use crate::utils;
 
 // Generic file metadata for versioned records
 #[derive(Debug)]
-pub(crate) struct GenericFileMetadata {
+pub(crate) struct GenericObjectMetadata {
     pub(crate) id: u64,
     pub(crate) location: Path,
     pub(crate) last_modified: chrono::DateTime<Utc>,
@@ -90,38 +76,14 @@ pub(crate) struct GenericFileMetadata {
     pub(crate) size: u32,
 }
 
-// Local, mutable view of a versioned record
+// View of a transactional object with local mutations
 #[derive(Clone, Debug)]
-pub(crate) struct DirtyRecord<T> {
+pub(crate) struct DirtyObject<T> {
     id: u64,
     pub(crate) value: T,
 }
 
-// Generic fenceable wrapper using epoch getters/setters
-pub(crate) struct FenceableRecord<T: Clone> {
-    stored: StoredRecord<T>,
-    local_epoch: u64,
-    get_epoch: fn(&T) -> u64,
-    #[allow(dead_code)]
-    set_epoch: fn(&mut T, u64),
-}
-
-// Generic stored record with optimistic versioned updates
-#[derive(Clone)]
-pub(crate) struct StoredRecord<T> {
-    id: u64,
-    record: T,
-    store: Arc<RecordStore<T>>,
-}
-
-// Generic, versioned store for records persisted as numbered files under a directory
-pub(crate) struct RecordStore<T> {
-    object_store: Box<dyn ObjectStore>,
-    codec: Box<dyn RecordCodec<T>>,
-    file_suffix: &'static str,
-}
-
-impl<T> DirtyRecord<T> {
+impl<T> DirtyObject<T> {
     #[allow(dead_code)]
     pub(crate) fn id(&self) -> u64 {
         self.id
@@ -132,9 +94,18 @@ impl<T> DirtyRecord<T> {
     }
 }
 
-impl<T: Clone + Send + Sync> FenceableRecord<T> {
+// Generic fenceable wrapper of `SimpleTransactionalObject` using epoch getters/setters
+pub(crate) struct FenceableTransactionalObject<T: Clone> {
+    delegate: SimpleTransactionalObject<T>,
+    local_epoch: u64,
+    get_epoch: fn(&T) -> u64,
+    #[allow(dead_code)]
+    set_epoch: fn(&mut T, u64),
+}
+
+impl<T: Clone + Send + Sync> FenceableTransactionalObject<T> {
     pub(crate) async fn init(
-        mut stored: StoredRecord<T>,
+        mut delegate: SimpleTransactionalObject<T>,
         record_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
         get_epoch: fn(&T) -> u64,
@@ -148,20 +119,20 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
             },
             async {
                 loop {
-                    let local_epoch = get_epoch(stored.record()) + 1;
-                    let mut new_val = stored.record().clone();
+                    let local_epoch = get_epoch(delegate.object()) + 1;
+                    let mut new_val = delegate.object().clone();
                     set_epoch(&mut new_val, local_epoch);
-                    let mut dirty = stored.prepare_dirty();
+                    let mut dirty = delegate.prepare_dirty();
                     dirty.value = new_val;
-                    match stored.update(dirty).await {
+                    match delegate.update(dirty).await {
                         Err(SlateDBError::FileVersionExists) => {
-                            stored.refresh().await?;
+                            delegate.refresh().await?;
                             continue;
                         }
                         Err(err) => return Err(err),
                         Ok(()) => {
                             return Ok(Self {
-                                stored,
+                                delegate,
                                 local_epoch,
                                 get_epoch,
                                 set_epoch,
@@ -180,16 +151,16 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
     }
 
     pub(crate) fn next_id(&self) -> u64 {
-        self.stored.next_id()
+        self.delegate.next_id()
     }
 
-    pub(crate) fn record(&self) -> &T {
-        self.stored.record()
+    pub(crate) fn object(&self) -> &T {
+        self.delegate.object()
     }
 
-    pub(crate) fn prepare_dirty(&self) -> Result<DirtyRecord<T>, SlateDBError> {
+    pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<T>, SlateDBError> {
         self.check_epoch()?;
-        Ok(self.stored.prepare_dirty())
+        Ok(self.delegate.prepare_dirty())
     }
 
     // The file may have been updated by a readers, another process, or
@@ -197,18 +168,18 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
     // if we failed to get the response. Either way, refresh
     // the file and try the bump again.
     pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
-        self.stored.refresh().await?;
+        self.delegate.refresh().await?;
         self.check_epoch()
     }
 
-    pub(crate) async fn update(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
+    pub(crate) async fn update(&mut self, dirty: DirtyObject<T>) -> Result<(), SlateDBError> {
         self.check_epoch()?;
-        self.stored.update(dirty).await
+        self.delegate.update(dirty).await
     }
 
     #[allow(clippy::panic)]
     fn check_epoch(&self) -> Result<(), SlateDBError> {
-        let stored_epoch = (self.get_epoch)(self.stored.record());
+        let stored_epoch = (self.get_epoch)(self.delegate.object());
         if self.local_epoch < stored_epoch {
             return Err(SlateDBError::Fenced);
         }
@@ -219,20 +190,31 @@ impl<T: Clone + Send + Sync> FenceableRecord<T> {
     }
 }
 
-impl<T: Clone> StoredRecord<T> {
-    pub(crate) async fn init(store: Arc<RecordStore<T>>, value: T) -> Result<Self, SlateDBError> {
+// Basic transactional object
+#[derive(Clone)]
+pub(crate) struct SimpleTransactionalObject<T> {
+    id: u64,
+    record: T,
+    ops: Arc<ObjectStoreSequencedObjectOps<T>>,
+}
+
+impl<T: Clone> SimpleTransactionalObject<T> {
+    pub(crate) async fn init(
+        store: Arc<ObjectStoreSequencedObjectOps<T>>,
+        value: T,
+    ) -> Result<Self, SlateDBError> {
         store.write(1, &value).await?;
         Ok(Self {
             id: 1,
             record: value,
-            store,
+            ops: store,
         })
     }
 
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
-    pub(crate) fn record(&self) -> &T {
+    pub(crate) fn object(&self) -> &T {
         &self.record
     }
 
@@ -241,14 +223,14 @@ impl<T: Clone> StoredRecord<T> {
     }
 
     /// Create a dirty snapshot of the current record for mutation-and-write flows
-    pub(crate) fn prepare_dirty(&self) -> DirtyRecord<T> {
-        DirtyRecord {
+    pub(crate) fn prepare_dirty(&self) -> DirtyObject<T> {
+        DirtyObject {
             id: self.id,
             value: self.record.clone(),
         }
     }
 
-    /// Refreshes this `StoredRecord` with the latest value from the backing store.
+    /// Refreshes this `SimpleTransactionalObject` with the latest value from the backing store.
     ///
     /// On success, updates this instance's id and value to the latest persisted
     /// version and returns a reference to the updated value.
@@ -260,7 +242,7 @@ impl<T: Clone> StoredRecord<T> {
     /// This method does not create any records; it is commonly used after a
     /// version conflict to load the current latest state before retrying.
     pub(crate) async fn refresh(&mut self) -> Result<&T, SlateDBError> {
-        let Some((id, new_val)) = self.store.try_read_latest().await? else {
+        let Some((id, new_val)) = self.ops.try_read_latest().await? else {
             return Err(InvalidDBState);
         };
         self.id = id;
@@ -268,42 +250,46 @@ impl<T: Clone> StoredRecord<T> {
         Ok(&self.record)
     }
 
-    /// Attempts to load the latest stored record from the given `RecordStore`.
+    /// Attempts to load the latest stored record from the given `ObjectStoreSequencedObjectOps`.
     ///
-    /// Returns `Ok(Some(StoredRecord<T>))` when a record exists, or `Ok(None)` when
+    /// Returns `Ok(Some(SimpleTransactionalObject<T>))` when a record exists, or `Ok(None)` when
     /// no records are present in the store. This method does not create any new
     /// records and is useful when callers need to proceed conditionally based on
     /// the presence of persisted state.
     ///
     /// For a variant that treats a missing record as an error, use [`load`], which
     /// maps the absence of a record to `SlateDBError::LatestRecordMissing`.
-    pub(crate) async fn try_load(store: Arc<RecordStore<T>>) -> Result<Option<Self>, SlateDBError> {
+    pub(crate) async fn try_load(
+        store: Arc<ObjectStoreSequencedObjectOps<T>>,
+    ) -> Result<Option<Self>, SlateDBError> {
         let Some((id, val)) = store.try_read_latest().await? else {
             return Ok(None);
         };
         Ok(Some(Self {
             id,
             record: val,
-            store,
+            ops: store,
         }))
     }
 
     /// Load the current record from the supplied record store. If successful,
-    /// this method returns a [`Result`] with an instance of [`StoredRecord`].
+    /// this method returns a [`Result`] with an instance of [`SimpleTransactionalObject`].
     /// If no records could be found, the error [`LatestRecordMissing`] is returned.
     #[allow(dead_code)]
-    pub(crate) async fn load(store: Arc<RecordStore<T>>) -> Result<Self, SlateDBError> {
+    pub(crate) async fn load(
+        store: Arc<ObjectStoreSequencedObjectOps<T>>,
+    ) -> Result<Self, SlateDBError> {
         Self::try_load(store)
             .await?
             .ok_or_else(|| SlateDBError::LatestRecordMissing)
     }
 
-    pub(crate) async fn update(&mut self, dirty: DirtyRecord<T>) -> Result<(), SlateDBError> {
+    pub(crate) async fn update(&mut self, dirty: DirtyObject<T>) -> Result<(), SlateDBError> {
         if dirty.id != self.id {
             return Err(FileVersionExists);
         }
         let next = self.next_id();
-        self.store.write(next, &dirty.value).await?;
+        self.ops.write(next, &dirty.value).await?;
         self.id = next;
         self.record = dirty.value;
         Ok(())
@@ -311,7 +297,7 @@ impl<T: Clone> StoredRecord<T> {
 
     pub(crate) async fn maybe_apply_update<F>(&mut self, mutator: F) -> Result<(), SlateDBError>
     where
-        F: Fn(&StoredRecord<T>) -> Result<Option<DirtyRecord<T>>, SlateDBError>,
+        F: Fn(&SimpleTransactionalObject<T>) -> Result<Option<DirtyObject<T>>, SlateDBError>,
     {
         loop {
             let Some(dirty) = mutator(self)? else {
@@ -329,13 +315,20 @@ impl<T: Clone> StoredRecord<T> {
     }
 }
 
-impl<T> RecordStore<T> {
+// Implements basic operations on transactional objects using a log-based algorithm.
+pub(crate) struct ObjectStoreSequencedObjectOps<T> {
+    object_store: Box<dyn ObjectStore>,
+    codec: Box<dyn ObjectCodec<T>>,
+    file_suffix: &'static str,
+}
+
+impl<T> ObjectStoreSequencedObjectOps<T> {
     pub(crate) fn new(
         root_path: &Path,
         object_store: Arc<dyn ObjectStore>,
         subdir: &str,
         file_suffix: &'static str,
-        codec: Box<dyn RecordCodec<T>>,
+        codec: Box<dyn ObjectCodec<T>>,
     ) -> Self {
         Self {
             object_store: Box::new(object_store::prefix::PrefixStore::new(
@@ -398,6 +391,7 @@ impl<T> RecordStore<T> {
         }
     }
 
+    /// lists unbounded (`..`), takes the last entry (highest id), and reads it.
     pub(crate) async fn try_read_latest(&self) -> Result<Option<(u64, T)>, SlateDBError> {
         let files = self.list(..).await?;
         if let Some(file) = files.last() {
@@ -409,11 +403,12 @@ impl<T> RecordStore<T> {
         Ok(None)
     }
 
-    // List files for this record type within an id range
+    /// scans the subdirectory, parses ids from filenames  matching the configured suffix,
+    /// filters by `RangeBounds`, sorts ascending by id, and returns metadata.
     pub(crate) async fn list<R: RangeBounds<u64>>(
         &self,
         id_range: R,
-    ) -> Result<Vec<GenericFileMetadata>, SlateDBError> {
+    ) -> Result<Vec<GenericObjectMetadata>, SlateDBError> {
         let base = &Path::from("/");
         let mut files_stream = self.object_store.list(Some(base));
         let mut items = Vec::new();
@@ -423,7 +418,7 @@ impl<T> RecordStore<T> {
         } {
             match self.parse_id(&file.location) {
                 Ok(id) if id_range.contains(&id) => {
-                    items.push(GenericFileMetadata {
+                    items.push(GenericObjectMetadata {
                         id,
                         location: file.location,
                         last_modified: file.last_modified,
@@ -455,7 +450,10 @@ impl<T> RecordStore<T> {
 #[cfg(test)]
 mod tests {
     use crate::clock::DefaultSystemClock;
-    use crate::record::store::{FenceableRecord, RecordCodec, RecordStore, StoredRecord};
+    use crate::record::store::{
+        FenceableTransactionalObject, ObjectCodec, ObjectStoreSequencedObjectOps,
+        SimpleTransactionalObject,
+    };
     use crate::record::SlateDBError;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -471,7 +469,7 @@ mod tests {
 
     struct TestValCodec;
 
-    impl RecordCodec<TestVal> for TestValCodec {
+    impl ObjectCodec<TestVal> for TestValCodec {
         fn encode(&self, value: &TestVal) -> Bytes {
             // simple "epoch:payload" encoding
             Bytes::from(format!("{}:{}", value.epoch, value.payload))
@@ -494,9 +492,9 @@ mod tests {
         }
     }
 
-    fn new_store() -> Arc<RecordStore<TestVal>> {
+    fn new_store() -> Arc<ObjectStoreSequencedObjectOps<TestVal>> {
         let os = Arc::new(InMemory::new());
-        Arc::new(RecordStore::new(
+        Arc::new(ObjectStoreSequencedObjectOps::new(
             &Path::from("/root"),
             os,
             "test",
@@ -508,7 +506,7 @@ mod tests {
     #[tokio::test]
     async fn test_init_write_and_read_latest() {
         let store = new_store();
-        let mut sr = StoredRecord::init(
+        let mut sr = SimpleTransactionalObject::init(
             Arc::clone(&store),
             TestVal {
                 epoch: 0,
@@ -523,7 +521,7 @@ mod tests {
                 epoch: 0,
                 payload: 1
             },
-            *sr.record()
+            *sr.object()
         );
 
         // update to next id
@@ -539,7 +537,7 @@ mod tests {
                 epoch: 0,
                 payload: 2
             },
-            *sr.record()
+            *sr.object()
         );
 
         // try_read_latest matches stored
@@ -557,7 +555,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_dirty_version_conflict() {
         let store = new_store();
-        let mut a = StoredRecord::init(
+        let mut a = SimpleTransactionalObject::init(
             Arc::clone(&store),
             TestVal {
                 epoch: 0,
@@ -569,10 +567,10 @@ mod tests {
 
         // Create another view B from latest
         let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
-        let mut b: StoredRecord<TestVal> = StoredRecord {
+        let mut b: SimpleTransactionalObject<TestVal> = SimpleTransactionalObject {
             id: id_b,
             record: val_b,
-            store: Arc::clone(&store),
+            ops: Arc::clone(&store),
         };
 
         // A updates first
@@ -585,7 +583,7 @@ mod tests {
 
         // B attempts update based on stale id; maybe_apply_update should refresh and succeed
         b.maybe_apply_update(|sr| {
-            let mut next = sr.record().clone();
+            let mut next = sr.object().clone();
             next.payload = 12;
             let mut dirty = sr.prepare_dirty();
             dirty.value = next;
@@ -607,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_ranges_sorted() {
         let store = new_store();
-        let mut sr = StoredRecord::init(
+        let mut sr = SimpleTransactionalObject::init(
             Arc::clone(&store),
             TestVal {
                 epoch: 0,
@@ -643,7 +641,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_dirty_id_mismatch_errors() {
         let store = new_store();
-        let sr = StoredRecord::init(
+        let sr = SimpleTransactionalObject::init(
             Arc::clone(&store),
             TestVal {
                 epoch: 0,
@@ -658,7 +656,7 @@ mod tests {
             epoch: 0,
             payload: 2,
         };
-        let err = sr.store.write(dirty.id(), &dirty.value).await.unwrap_err();
+        let err = sr.ops.write(dirty.id(), &dirty.value).await.unwrap_err();
         assert!(matches!(err, SlateDBError::FileVersionExists));
     }
 
@@ -666,7 +664,7 @@ mod tests {
     async fn test_fenceable_record_epoch_bump_and_fence() {
         let store = new_store();
         // initial record
-        let sr = StoredRecord::init(
+        let sr = SimpleTransactionalObject::init(
             Arc::clone(&store),
             TestVal {
                 epoch: 0,
@@ -677,7 +675,7 @@ mod tests {
         .unwrap();
 
         // writer A bumps to epoch 1
-        let mut fa = FenceableRecord::init(
+        let mut fa = FenceableTransactionalObject::init(
             sr.clone(),
             TokioDuration::from_secs(5),
             Arc::new(DefaultSystemClock::new()),
@@ -692,12 +690,12 @@ mod tests {
 
         // writer B bumps to epoch 2
         let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
-        let sb = StoredRecord {
+        let sb = SimpleTransactionalObject {
             id: id_b,
             record: val_b,
-            store: Arc::clone(&store),
+            ops: Arc::clone(&store),
         };
-        let mut fb = FenceableRecord::init(
+        let mut fb = FenceableTransactionalObject::init(
             sb,
             TokioDuration::from_secs(5),
             Arc::new(DefaultSystemClock::new()),
