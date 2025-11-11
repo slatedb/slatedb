@@ -116,11 +116,17 @@ pub(crate) struct Compaction {
     id: Ulid,
     /// What to compact (sources) and where to write (destination).
     spec: CompactionSpec,
+    /// Total number of bytes processed so far for this compaction.
+    bytes_processed: u64,
 }
 
 impl Compaction {
     pub(crate) fn new(id: Ulid, spec: CompactionSpec) -> Self {
-        Self { id, spec }
+        Self {
+            id,
+            spec,
+            bytes_processed: 0,
+        }
     }
 
     /// Returns all sorted run sources for this compaction.
@@ -167,6 +173,11 @@ impl Compaction {
     pub(crate) fn spec(&self) -> &CompactionSpec {
         &self.spec
     }
+
+    /// Sets bytes processed so far for this compaction.
+    pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
+        self.bytes_processed = bytes;
+    }
 }
 
 impl Display for Compaction {
@@ -177,7 +188,11 @@ impl Display for Compaction {
             .iter()
             .map(|s| format!("{}", s))
             .collect();
-        write!(f, "{:?} -> {}", displayed_sources, self.spec.destination())
+        write!(f, "{:?} -> {}", displayed_sources, self.spec.destination(),)?;
+        if self.bytes_processed > 0 {
+            write!(f, " ({} bytes processed)", self.bytes_processed)?;
+        }
+        Ok(())
     }
 }
 
@@ -299,6 +314,16 @@ impl CompactorState {
     /// Removes a compaction from the in-flight map (called after completion or failure).
     pub(crate) fn remove_compaction(&mut self, compaction_id: &Ulid) {
         self.compactions.remove(compaction_id);
+    }
+
+    /// Mutates a running compaction in place if it exists.
+    pub(crate) fn update_compaction<F>(&mut self, compaction_id: &Ulid, f: F)
+    where
+        F: FnOnce(&mut Compaction),
+    {
+        if let Some(compaction) = self.compactions.get_mut(compaction_id) {
+            f(compaction);
+        }
     }
 
     /// Applies the effects of a finished compaction to the in-memory manifest.
