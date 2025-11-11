@@ -46,6 +46,19 @@ pub enum MergeOperatorError {
 ///         let increment = u64::from_le_bytes(operand.as_ref().try_into().unwrap());
 ///         Ok(Bytes::copy_from_slice(&(existing + increment).to_le_bytes()))
 ///     }
+///
+///     fn merge_batch(&self, existing_value: Option<Bytes>, operands: &[Bytes]) -> Result<Bytes, MergeOperatorError> {
+///         let mut total = existing_value
+///             .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
+///             .unwrap_or(0);
+///         
+///         for operand in operands {
+///             let increment = u64::from_le_bytes(operand.as_ref().try_into().unwrap());
+///             total += increment;
+///         }
+///         
+///         Ok(Bytes::copy_from_slice(&total.to_le_bytes()))
+///     }
 /// }
 /// ```
 pub trait MergeOperator {
@@ -96,6 +109,8 @@ pub trait MergeOperator {
 }
 
 pub(crate) type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
+// TODO: Make this configurable
+// we can change to better value based on the system memory
 const MERGE_BATCH_SIZE: usize = 100;
 
 /// An iterator that ensures merge operands are not returned when no merge operator is configured.
@@ -174,7 +189,6 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         let key = first_entry.key.clone();
         let first_expire_ts = first_entry.expire_ts;
 
-        // Initialize tracking variables from first entry
         let mut max_create_ts = first_entry.create_ts;
         let mut min_expire_ts = first_entry.expire_ts;
         let mut seq = first_entry.seq;
@@ -186,13 +200,11 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         };
         let mut found_base_value = matches!(first_entry.value, ValueDeletable::Value(_));
 
-        // Collect batch results (to be reversed later for correct order)
         let mut batch_results: Vec<Bytes> = Vec::new();
 
         // Stream and process entries in batches of MERGE_BATCH_SIZE
         let mut batch = Vec::with_capacity(MERGE_BATCH_SIZE);
 
-        // Add first entry to batch if it's a merge operand
         if !found_base_value && is_not_expired(&first_entry, self.now) {
             if let ValueDeletable::Merge(value) = &first_entry.value {
                 batch.push((first_entry.seq, value.clone()));
@@ -217,7 +229,6 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                             return Err(SlateDBError::InvalidDBState);
                         }
 
-                        // Update tracking variables
                         max_create_ts =
                             merge_options(max_create_ts, next_entry.create_ts, i64::max);
                         min_expire_ts =
@@ -244,21 +255,17 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
                         done = true;
                     }
                     None => {
-                        // End of iterator
                         done = true;
                     }
                 }
             }
 
-            // If we have entries in the batch, process them
             if !batch.is_empty() {
                 // Reverse batch to process oldest to newest within this batch
                 batch.reverse();
 
-                // Extract just the values (seq was only for validation)
                 let operands: Vec<Bytes> = batch.iter().map(|(_, v)| v.clone()).collect();
 
-                // Merge this batch
                 let batch_result = self.merge_operator.merge_batch(None, &operands)?;
                 batch_results.push(batch_result);
 
@@ -270,7 +277,6 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         // Reverse batch results to get correct global order (oldest to newest)
         batch_results.reverse();
 
-        // Merge all batch results with the base value
         let mut merged_value = base_value;
         if !batch_results.is_empty() {
             merged_value = Some(
@@ -644,11 +650,6 @@ mod tests {
 
     #[tokio::test]
     async fn should_route_merge_based_on_key_prefix() {
-        // Note: This test demonstrates a limitation of merge_batch() - it doesn't receive the key,
-        // so key-prefix routing doesn't work with batched merging. The operator falls back to
-        // concat logic for all keys when using merge_batch().
-        // In practice, you'd use separate MergeOperator instances per key prefix to avoid this.
-
         let merge_operator = Arc::new(KeyPrefixMergeOperator {});
 
         let data = vec![
@@ -738,11 +739,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_batch_is_actually_called() {
-        // Create operator with call counter
         let (merge_operator, call_count) = MockBatchedMergeOperator::new();
         let merge_operator = Arc::new(merge_operator);
 
-        // Create 250 merge operands (will require 3 batches of 100)
         let mut data = vec![];
         for i in 1..=250 {
             data.push(RowEntry::new_merge(b"key1", &[i as u8], i));
@@ -755,13 +754,10 @@ mod tests {
             0,
         );
 
-        // Execute the merge
         let expected_bytes: Vec<u8> = (1..=250).map(|i| i as u8).collect();
         let expected = vec![RowEntry::new_merge(b"key1", &expected_bytes, 250)];
         assert_iterator(&mut iterator, expected).await;
 
-        // Verify merge_batch was called
-        // With streaming: 3 calls for batches (100+100+50) + 1 call to merge batch results = 4 total
         let actual_calls = call_count.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             actual_calls, 4,
@@ -772,7 +768,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_batch_with_base_value_call_count() {
-        // Create operator with call counter
         let (merge_operator, call_count) = MockBatchedMergeOperator::new();
         let merge_operator = Arc::new(merge_operator);
 
@@ -790,14 +785,11 @@ mod tests {
             0,
         );
 
-        // Execute the merge
         let mut expected_bytes = b"BASE".to_vec();
         expected_bytes.extend((1..=150).map(|i| i as u8));
         let expected = vec![RowEntry::new_value(b"key1", &expected_bytes, 150)];
         assert_iterator(&mut iterator, expected).await;
 
-        // Verify merge_batch was called
-        // With streaming: 2 calls for batches (100+50) + 1 call to merge batch results with base = 3 total
         let actual_calls = call_count.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             actual_calls, 3,
