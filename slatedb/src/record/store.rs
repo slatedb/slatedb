@@ -72,15 +72,12 @@ use futures::StreamExt;
 use log::{debug, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
-use object_store::{Error, ObjectStore};
+use object_store::{Error, ObjectStore, PutMode, PutOptions, PutPayload};
 
 use crate::clock::SystemClock;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{FileVersionExists, InvalidDBState};
 use crate::record::RecordCodec;
-use crate::transactional_object_store::{
-    DelegatingTransactionalObjectStore, TransactionalObjectStore,
-};
 use crate::utils;
 
 // Generic file metadata for versioned records
@@ -119,7 +116,7 @@ pub(crate) struct StoredRecord<T> {
 
 // Generic, versioned store for records persisted as numbered files under a directory
 pub(crate) struct RecordStore<T> {
-    object_store: Box<dyn TransactionalObjectStore>,
+    object_store: Box<dyn ObjectStore>,
     codec: Box<dyn RecordCodec<T>>,
     file_suffix: &'static str,
 }
@@ -341,9 +338,9 @@ impl<T> RecordStore<T> {
         codec: Box<dyn RecordCodec<T>>,
     ) -> Self {
         Self {
-            object_store: Box::new(DelegatingTransactionalObjectStore::new(
-                root_path.child(subdir),
+            object_store: Box::new(object_store::prefix::PrefixStore::new(
                 object_store,
+                root_path.child(subdir),
             )),
             codec,
             file_suffix,
@@ -371,7 +368,11 @@ impl<T> RecordStore<T> {
     pub(crate) async fn write(&self, id: u64, value: &T) -> Result<(), SlateDBError> {
         let path = self.path_for(id);
         self.object_store
-            .put_if_not_exists(&path, self.codec.encode(value))
+            .put_opts(
+                &path,
+                PutPayload::from_bytes(self.codec.encode(value)),
+                PutOptions::from(PutMode::Create),
+            )
             .await
             .map_err(|err| {
                 if let AlreadyExists { path: _, source: _ } = err {

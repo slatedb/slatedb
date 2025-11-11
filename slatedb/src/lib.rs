@@ -121,7 +121,6 @@ mod tablestore;
 #[cfg(test)]
 mod test_utils;
 mod transaction_manager;
-mod transactional_object_store;
 mod types;
 mod utils;
 mod wal_buffer;
