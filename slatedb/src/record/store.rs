@@ -77,7 +77,6 @@ use object_store::{Error, ObjectStore, PutMode, PutOptions, PutPayload};
 use crate::clock::SystemClock;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{FileVersionExists, InvalidDBState};
-use crate::record::path_scoped_object_store::PathScopedObjectStoreAccessor;
 use crate::record::RecordCodec;
 use crate::utils;
 
@@ -117,7 +116,7 @@ pub(crate) struct StoredRecord<T> {
 
 // Generic, versioned store for records persisted as numbered files under a directory
 pub(crate) struct RecordStore<T> {
-    object_store: Box<PathScopedObjectStoreAccessor>,
+    object_store: Box<dyn ObjectStore>,
     codec: Box<dyn RecordCodec<T>>,
     file_suffix: &'static str,
 }
@@ -339,9 +338,9 @@ impl<T> RecordStore<T> {
         codec: Box<dyn RecordCodec<T>>,
     ) -> Self {
         Self {
-            object_store: Box::new(PathScopedObjectStoreAccessor::new(
-                root_path.child(subdir),
+            object_store: Box::new(object_store::prefix::PrefixStore::new(
                 object_store,
+                root_path.child(subdir),
             )),
             codec,
             file_suffix,
