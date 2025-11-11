@@ -137,7 +137,7 @@ impl FsCacheEntry {
     ) -> std::path::PathBuf {
         // containing the part size in the file name, allows user change the part size on
         // the fly, without the need to invalidate the cache.
-        let part_size_name = if part_size % (1024 * 1024) == 0 {
+        let part_size_name = if part_size.is_multiple_of(1024 * 1024) {
             format!("{}mb", part_size / (1024 * 1024))
         } else {
             format!("{}kb", part_size / 1024)

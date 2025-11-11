@@ -306,7 +306,7 @@ impl SsTableFormat {
         self.decode_block(bytes, compression_codec)
     }
 
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
         EncodedSsTableBuilder::new(
             self.block_size,
             self.min_filter_keys,

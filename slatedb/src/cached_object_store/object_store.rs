@@ -32,7 +32,7 @@ impl CachedObjectStore {
         cache_puts: bool,
         stats: Arc<CachedObjectStoreStats>,
     ) -> Result<Arc<Self>, SlateDBError> {
-        if part_size_bytes == 0 || part_size_bytes % 1024 != 0 {
+        if part_size_bytes == 0 || !part_size_bytes.is_multiple_of(1024) {
             return Err(SlateDBError::InvalidCachePartSize);
         }
 
@@ -249,9 +249,10 @@ impl CachedObjectStore {
     /// aligned with the part size.
     async fn save_get_result(&self, result: GetResult) -> object_store::Result<u64> {
         let part_size_bytes_u64 = self.part_size_bytes as u64;
-        assert!(result.range.start % part_size_bytes_u64 == 0);
+        assert!(result.range.start.is_multiple_of(part_size_bytes_u64));
         assert!(
-            result.range.end % part_size_bytes_u64 == 0 || result.range.end == result.meta.size
+            result.range.end.is_multiple_of(part_size_bytes_u64)
+                || result.range.end == result.meta.size
         );
 
         let entry = self
@@ -335,7 +336,7 @@ impl CachedObjectStore {
                 .expect("Part size is too large to fit in a usize");
         }
         if let Some(last_part) = parts.last_mut() {
-            if range.end % part_size_bytes_u64 != 0 {
+            if !range.end.is_multiple_of(part_size_bytes_u64) {
                 last_part.1.end = usize::try_from(range.end % part_size_bytes_u64)
                     .expect("Part size is too large to fit in a usize");
             }
