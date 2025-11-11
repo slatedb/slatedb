@@ -172,83 +172,111 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         first_entry: RowEntry,
     ) -> Result<Option<RowEntry>, SlateDBError> {
         let key = first_entry.key.clone();
+        let first_expire_ts = first_entry.expire_ts;
 
-        let mut entries = vec![first_entry];
-        let mut found_base_value = false;
+        // Initialize tracking variables from first entry
+        let mut max_create_ts = first_entry.create_ts;
+        let mut min_expire_ts = first_entry.expire_ts;
+        let mut seq = first_entry.seq;
 
-        loop {
-            let next = self.delegate.next_entry().await?;
-            match next {
-                Some(next_entry)
-                    if key == next_entry.key
-                        && (self.merge_different_expire_ts
-                            || entries[0].expire_ts == next_entry.expire_ts) =>
-                {
-                    // Validate sequence number ordering (descending)
-                    if entries.last().expect("should have at least one entry").seq < next_entry.seq
-                    {
-                        return Err(SlateDBError::InvalidDBState);
-                    }
+        // Check if first entry is a base value
+        let mut base_value: Option<Bytes> = match &first_entry.value {
+            ValueDeletable::Value(bytes) => Some(bytes.clone()),
+            _ => None,
+        };
+        let mut found_base_value = matches!(first_entry.value, ValueDeletable::Value(_));
 
-                    // If we hit a Value or Tombstone, include it and stop
-                    found_base_value = !matches!(next_entry.value, ValueDeletable::Merge(_));
-                    entries.push(next_entry);
-                    if found_base_value {
-                        break;
-                    }
-                }
-                Some(next_entry) => {
-                    // Different key or expire timestamp. Store it in the buffer.
-                    self.buffered_entry = Some(next_entry);
-                    break;
-                }
-                None => {
-                    // End of iterator
-                    break;
-                }
+        // Collect batch results (to be reversed later for correct order)
+        let mut batch_results: Vec<Bytes> = Vec::new();
+
+        // Stream and process entries in batches of MERGE_BATCH_SIZE
+        let mut batch = Vec::with_capacity(MERGE_BATCH_SIZE);
+
+        // Add first entry to batch if it's a merge operand
+        if !found_base_value && is_not_expired(&first_entry, self.now) {
+            if let ValueDeletable::Merge(value) = &first_entry.value {
+                batch.push((first_entry.seq, value.clone()));
             }
         }
 
-        // Reverse entries so we merge from oldest to newest
-        entries.reverse();
+        let mut done = false;
 
-        // Extract base value if present (now at the front after reverse)
-        let mut merged_value: Option<Bytes> =
-            if let ValueDeletable::Value(bytes) = &entries[0].value {
-                Some(bytes.clone())
-            } else {
-                None
-            };
+        while !done {
+            // Collect up to MERGE_BATCH_SIZE entries
+            while batch.len() < MERGE_BATCH_SIZE && !done {
+                let next = self.delegate.next_entry().await?;
+                match next {
+                    Some(next_entry)
+                        if key == next_entry.key
+                            && (self.merge_different_expire_ts
+                                || first_expire_ts == next_entry.expire_ts) =>
+                    {
+                        // Validate sequence number ordering (descending)
+                        let last_seq = batch.last().map(|(s, _)| *s).unwrap_or(seq);
+                        if last_seq < next_entry.seq {
+                            return Err(SlateDBError::InvalidDBState);
+                        }
 
-        let mut max_create_ts = entries[0].create_ts;
-        let mut min_expire_ts = entries[0].expire_ts;
-        let mut seq = entries[0].seq;
+                        // Update tracking variables
+                        max_create_ts =
+                            merge_options(max_create_ts, next_entry.create_ts, i64::max);
+                        min_expire_ts =
+                            merge_options(min_expire_ts, next_entry.expire_ts, i64::min);
+                        seq = std::cmp::max(seq, next_entry.seq);
 
-        // Skip base value if present
-        if found_base_value {
-            entries.remove(0);
+                        // If we hit a Value or Tombstone, handle it and stop
+                        if !matches!(next_entry.value, ValueDeletable::Merge(_)) {
+                            found_base_value = true;
+                            if let ValueDeletable::Value(bytes) = &next_entry.value {
+                                base_value = Some(bytes.clone());
+                            }
+                            done = true;
+                        } else if is_not_expired(&next_entry, self.now) {
+                            // Add merge operand to batch
+                            if let ValueDeletable::Merge(value) = next_entry.value {
+                                batch.push((next_entry.seq, value));
+                            }
+                        }
+                    }
+                    Some(next_entry) => {
+                        // Different key or expire timestamp. Store it in the buffer.
+                        self.buffered_entry = Some(next_entry);
+                        done = true;
+                    }
+                    None => {
+                        // End of iterator
+                        done = true;
+                    }
+                }
+            }
+
+            // If we have entries in the batch, process them
+            if !batch.is_empty() {
+                // Reverse batch to process oldest to newest within this batch
+                batch.reverse();
+
+                // Extract just the values (seq was only for validation)
+                let operands: Vec<Bytes> = batch.iter().map(|(_, v)| v.clone()).collect();
+
+                // Merge this batch
+                let batch_result = self.merge_operator.merge_batch(None, &operands)?;
+                batch_results.push(batch_result);
+
+                // Clear batch for next iteration (frees RowEntry memory!)
+                batch.clear();
+            }
         }
 
-        // Process merge operands in batches to reduce function call overhead
-        let merge_operands: Vec<Bytes> = entries
-            .iter()
-            .filter(|e| is_not_expired(e, self.now))
-            .filter_map(|entry| {
-                // Accumulate timestamps and seq
-                max_create_ts = merge_options(max_create_ts, entry.create_ts, i64::max);
-                min_expire_ts = merge_options(min_expire_ts, entry.expire_ts, i64::min);
-                seq = std::cmp::max(seq, entry.seq);
+        // Reverse batch results to get correct global order (oldest to newest)
+        batch_results.reverse();
 
-                match &entry.value {
-                    ValueDeletable::Merge(value) => Some(value.clone()),
-                    _ => None,
-                }
-            })
-            .collect();
-
-        // Merge operands in batches of MERGE_BATCH_SIZE
-        for chunk in merge_operands.chunks(MERGE_BATCH_SIZE) {
-            merged_value = Some(self.merge_operator.merge_batch(merged_value, chunk)?);
+        // Merge all batch results with the base value
+        let mut merged_value = base_value;
+        if !batch_results.is_empty() {
+            merged_value = Some(
+                self.merge_operator
+                    .merge_batch(merged_value, &batch_results)?,
+            );
         }
 
         if let Some(result_value) = merged_value {
@@ -732,11 +760,12 @@ mod tests {
         let expected = vec![RowEntry::new_merge(b"key1", &expected_bytes, 250)];
         assert_iterator(&mut iterator, expected).await;
 
-        // Verify merge_batch was called (should be 3 times: 100 + 100 + 50)
+        // Verify merge_batch was called
+        // With streaming: 3 calls for batches (100+100+50) + 1 call to merge batch results = 4 total
         let actual_calls = call_count.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
-            actual_calls, 3,
-            "Expected merge_batch to be called 3 times for 250 operands (100+100+50), but was called {} times",
+            actual_calls, 4,
+            "Expected merge_batch to be called 4 times for 250 operands (3 batches + 1 final merge), but was called {} times",
             actual_calls
         );
     }
@@ -767,11 +796,12 @@ mod tests {
         let expected = vec![RowEntry::new_value(b"key1", &expected_bytes, 150)];
         assert_iterator(&mut iterator, expected).await;
 
-        // Verify merge_batch was called (should be 2 times: 100 + 50)
+        // Verify merge_batch was called
+        // With streaming: 2 calls for batches (100+50) + 1 call to merge batch results with base = 3 total
         let actual_calls = call_count.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
-            actual_calls, 2,
-            "Expected merge_batch to be called 2 times for 150 operands (100+50), but was called {} times",
+            actual_calls, 3,
+            "Expected merge_batch to be called 3 times for 150 operands (2 batches + 1 final merge), but was called {} times",
             actual_calls
         );
     }
