@@ -11,7 +11,8 @@ use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{ExternalDb, Manifest};
 use crate::rand::DbRand;
 use crate::record::store::{
-    FenceableTransactionalObject, ObjectStoreSequencedObjectOps, SimpleTransactionalObject,
+    FenceableTransactionalObject, MonotonicId, ObjectStoreSequencedObjectOps, SequencedObjectOps,
+    SimpleTransactionalObject, TransactionalObject,
 };
 use chrono::Utc;
 use log::debug;
@@ -106,13 +107,13 @@ impl FenceableManifest {
         Ok(Self { inner: fr, clock })
     }
 
-    pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
+    pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
         self.inner.refresh().await
     }
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyManifest, SlateDBError> {
         let dirty = self.inner.prepare_dirty()?;
-        Ok(DirtyManifest::new(dirty.id(), dirty.into_value()))
+        Ok(DirtyManifest::new(dirty.id().into(), dirty.into_value()))
     }
 
     pub(crate) async fn update_manifest(
@@ -120,7 +121,7 @@ impl FenceableManifest {
         manifest: DirtyManifest,
     ) -> Result<(), SlateDBError> {
         let mut dirty = self.inner.prepare_dirty()?;
-        if dirty.id() != manifest.id() {
+        if dirty.id().id() != manifest.id() {
             return Err(SlateDBError::ManifestVersionExists);
         }
         dirty.value = Manifest::from(manifest);
@@ -148,7 +149,7 @@ impl FenceableManifest {
                 if !db_state.initialized {
                     return Err(InvalidDBState);
                 }
-                self.inner.next_id()
+                self.inner.id().next().into()
             }
         };
         Ok(Checkpoint {
@@ -220,7 +221,8 @@ impl StoredManifest {
     async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
         // Preserve original behavior: write via ManifestStore (object-store path and semantics)
         let inner =
-            SimpleTransactionalObject::init(Arc::clone(&store.inner), manifest.clone()).await?;
+            SimpleTransactionalObject::<Manifest>::init(Arc::clone(&store.inner), manifest.clone())
+                .await?;
         Ok(Self {
             inner,
             clock: Arc::clone(&store.clock),
@@ -280,7 +282,7 @@ impl StoredManifest {
 
     #[allow(dead_code)]
     pub(crate) fn id(&self) -> u64 {
-        self.inner.id()
+        self.inner.id().into()
     }
 
     pub(crate) fn manifest(&self) -> &Manifest {
@@ -341,13 +343,13 @@ impl StoredManifest {
                 let mut new_val = sr.object().clone();
                 let checkpoint = Self::new_checkpoint(
                     &new_val,
-                    sr.id(),
+                    sr.id().into(),
                     clock.as_ref(),
                     checkpoint_id,
                     options,
                 )?;
                 new_val.core.checkpoints.push(checkpoint);
-                let mut dirty = sr.prepare_dirty();
+                let mut dirty = sr.prepare_dirty()?;
                 dirty.value = new_val;
                 Ok(Some(dirty))
             })
@@ -371,7 +373,7 @@ impl StoredManifest {
                 if new_val.core.checkpoints.len() == before {
                     Ok(None)
                 } else {
-                    let mut dirty = sr.prepare_dirty();
+                    let mut dirty = sr.prepare_dirty()?;
                     dirty.value = new_val;
                     Ok(Some(dirty))
                 }
@@ -395,7 +397,7 @@ impl StoredManifest {
                 // compute new checkpoint
                 let checkpoint = Self::new_checkpoint(
                     &new_val,
-                    sr.id(),
+                    sr.id().into(),
                     clock.as_ref(),
                     new_checkpoint_id,
                     new_checkpoint_options,
@@ -405,7 +407,7 @@ impl StoredManifest {
                     .checkpoints
                     .retain(|cp| cp.id != old_checkpoint_id);
                 new_val.core.checkpoints.push(checkpoint);
-                let mut dirty = sr.prepare_dirty();
+                let mut dirty = sr.prepare_dirty()?;
                 dirty.value = new_val;
                 Ok(Some(dirty))
             })
@@ -436,7 +438,7 @@ impl StoredManifest {
                     return Err(CheckpointMissing(checkpoint_id));
                 };
                 cp.expire_time = Some(clock.now() + new_lifetime);
-                let mut dirty = sr.prepare_dirty();
+                let mut dirty = sr.prepare_dirty()?;
                 dirty.value = new_val;
                 Ok(Some(dirty))
             })
@@ -457,7 +459,7 @@ impl StoredManifest {
             return Err(ManifestVersionExists);
         }
         let manifest = manifest.into();
-        let mut dirty = self.inner.prepare_dirty();
+        let mut dirty = self.inner.prepare_dirty()?;
         dirty.value = manifest;
         self.inner.update(dirty).await.map_err(|e| match e {
             SlateDBError::FileVersionExists => SlateDBError::ManifestVersionExists,
@@ -514,7 +516,7 @@ where
 }
 
 pub(crate) struct ManifestStore {
-    inner: Arc<ObjectStoreSequencedObjectOps<Manifest>>,
+    inner: Arc<dyn SequencedObjectOps<Manifest>>,
     clock: Arc<dyn SystemClock>,
 }
 
@@ -551,7 +553,7 @@ impl ManifestStore {
         }
 
         debug!("deleting manifest [id={}]", id);
-        self.inner.delete(id).await
+        self.inner.delete(MonotonicId::new(id)).await
     }
 
     /// Read a manifest from the object store. The last element in an unbounded
@@ -564,11 +566,14 @@ impl ManifestStore {
     ) -> Result<Vec<ManifestFileMetadata>, SlateDBError> {
         let manifests = self
             .inner
-            .list(id_range)
+            .list(
+                id_range.start_bound().map(|b| (*b).into()),
+                id_range.end_bound().map(|b| (*b).into()),
+            )
             .await?
             .into_iter()
             .map(|f| ManifestFileMetadata {
-                id: f.id,
+                id: f.id.into(),
                 location: f.location,
                 last_modified: f.last_modified,
                 size: f.size,
@@ -602,7 +607,10 @@ impl ManifestStore {
     pub(crate) async fn try_read_latest_manifest(
         &self,
     ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
-        self.inner.try_read_latest().await
+        self.inner
+            .try_read_latest()
+            .await
+            .map(|opt| opt.map(|(id, manifest)| (id.into(), manifest)))
     }
 
     pub(crate) async fn read_latest_manifest(&self) -> Result<(u64, Manifest), SlateDBError> {
@@ -615,7 +623,7 @@ impl ManifestStore {
         &self,
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
-        self.inner.try_read(id).await
+        self.inner.try_read(MonotonicId::new(id)).await
     }
 
     pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {
@@ -655,6 +663,7 @@ mod tests {
     use crate::error;
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::record::store::TransactionalObject;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use chrono::Timelike;
@@ -898,7 +907,10 @@ mod tests {
             .unwrap();
 
         let mut dirty = sm.prepare_dirty();
-        dirty.core.checkpoints.push(new_checkpoint(sm.inner.id()));
+        dirty
+            .core
+            .checkpoints
+            .push(new_checkpoint(sm.inner.id().into()));
         sm.update_manifest(dirty).await.unwrap();
 
         // When
@@ -1030,7 +1042,7 @@ mod tests {
             .unwrap();
 
         let initial_manifest = sm.inner.object().clone();
-        let initial_manifest_id = sm.inner.id();
+        let initial_manifest_id = sm.inner.id().into();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(1, active_manifests.len());
         assert_eq!(
@@ -1040,7 +1052,10 @@ mod tests {
 
         // Add a checkpoint referencing the latest manifest
         let mut dirty = sm.prepare_dirty();
-        dirty.core.checkpoints.push(new_checkpoint(sm.inner.id()));
+        dirty
+            .core
+            .checkpoints
+            .push(new_checkpoint(sm.inner.id().into()));
         sm.update_manifest(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(2, active_manifests.len());
@@ -1080,7 +1095,7 @@ mod tests {
         sm.maybe_apply_manifest_update(|sm| Ok(Some(sm.prepare_dirty())))
             .await
             .unwrap();
-        assert_eq!(initial_id + 1, sm.inner.id());
+        assert_eq!(initial_id + 1, sm.inner.id().id());
     }
 
     #[tokio::test]
@@ -1238,7 +1253,7 @@ mod tests {
             .unwrap();
 
         let checkpoint_id = uuid::Uuid::new_v4();
-        let manifest_id = sm.inner.id();
+        let manifest_id = sm.inner.id().id();
         sm.delete_checkpoint(checkpoint_id).await.unwrap();
         sm.refresh().await.unwrap();
         assert_eq!(manifest_id, sm.id());
