@@ -462,24 +462,25 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         mut messages: BoxStream<'async_trait, WalFlushWork>,
         result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
+        let error = result.err().unwrap_or(SlateDBError::Closed);
+
         // drain remaining messages
         while let Some(WalFlushWork { result_tx }) = messages.next().await {
             if let Some(result_tx) = result_tx {
                 result_tx
-                    .send(result.clone())
+                    .send(Err(error.clone()))
                     .expect("failed to send flush result");
             }
         }
-        // notify all the flushing wals to be finished with fatal error or shutdown error. we need ensure all the wal
-        // tables finally get notified.
-        let fatal_or_shutdown = result.err().unwrap_or(SlateDBError::Closed);
 
-        // freeze current WAL to notify writers in the subsequent flushing_wals loop
+        // notify all the flushing wals to be finished with fatal error or shutdown
+        // error. we need ensure all the wal tables finally get notified. freeze current
+        // WAL to notify writers in the subsequent flushing_wals loop.
         self.wal_buffer.freeze_current_wal()?;
 
         let flushing_wals = self.wal_buffer.flushing_wals();
         for (_, wal) in flushing_wals.iter() {
-            wal.notify_durable(Err(fatal_or_shutdown.clone()));
+            wal.notify_durable(Err(error.clone()));
         }
         Ok(())
     }
