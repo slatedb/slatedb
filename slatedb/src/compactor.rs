@@ -39,8 +39,7 @@
 //!   updating the manifest.
 //!
 //! Progress and GC safety:
-//! - [`CompactionProgressTracker`] keeps an approximate byte-level progress per running
-//!   job (id → processed/total). It is used only for observability.
+//! - Progress is tracked per compaction as `bytes_processed` (approximate, for observability).
 //! - The lowest start time among active compaction ids (ULIDs) is exported as a
 //!   “low-watermark” hint so GC can avoid deleting inputs required by running work.
 //!
@@ -59,7 +58,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use crossbeam_skiplist::SkipMap;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
@@ -143,74 +141,7 @@ pub trait CompactionScheduler: Send + Sync {
     }
 }
 
-/// Tracks progress of various compactions. Progress is updated from the executor with
-/// [`CompactionProgressTracker::update_progress`]. This isn't guaranteed to be fully accurate.
-///
-/// **WARN: This will definitely be inaccurate if compression is used.**
-pub(crate) struct CompactionProgressTracker {
-    /// Tracks the number of bytes processed and total bytes (all source SSTs and sorted runs)
-    /// for each compaction job. Can be an estimate.
-    ///
-    /// (processed_bytes, total_bytes)
-    processed_bytes: SkipMap<Ulid, (u64, u64)>,
-}
-
-impl CompactionProgressTracker {
-    /// Creates an empty progress tracker.
-    pub fn new() -> Self {
-        Self {
-            processed_bytes: SkipMap::new(),
-        }
-    }
-
-    /// Adds a new compaction job to the tracker.
-    ///
-    /// ## Arguments
-    /// - `id`: The ID of the compaction job.
-    /// - `total_bytes`: The total number of bytes to be processed for the compaction job.
-    pub fn track_job(&mut self, id: Ulid, total_bytes: u64) {
-        self.processed_bytes.insert(id, (0, total_bytes));
-    }
-
-    /// Removes a compaction job from the tracker.
-    ///
-    /// ## Arguments
-    /// - `id`: The ID of the compaction job.
-    pub fn remove_job(&mut self, id: Ulid) {
-        self.processed_bytes.remove(&id);
-    }
-
-    /// Overwrites the progress for a compaction job with the latest processed bytes.
-    ///
-    /// ## Arguments
-    /// - `id`: The ID of the compaction job.
-    /// - `bytes_processed`: The total number of bytes processed so far.
-    pub fn update_progress(&mut self, id: Ulid, bytes_processed: u64) {
-        if let Some((_, total_bytes)) = self.processed_bytes.get(&id).map(|entry| *entry.value()) {
-            self.processed_bytes
-                .insert(id, (bytes_processed, total_bytes));
-        } else {
-            warn!("compaction progress tracker missing for job [id={}]", id);
-        }
-    }
-
-    /// Outputs the progress of each compaction job to debug.
-    pub fn log_progress(&self) {
-        for entry in self.processed_bytes.iter() {
-            let id = entry.key();
-            let (processed_bytes, total_bytes) = entry.value();
-            // max() to avoid division by zero
-            let percentage = (processed_bytes * 100 / (total_bytes.max(&1))) as u32;
-            debug!(
-                "compaction progress [id={}, current_percentage={}%, processed_bytes={}, estimated_total_bytes={}]",
-                id,
-                percentage,
-                processed_bytes,
-                total_bytes,
-            );
-        }
-    }
-}
+// Progress is tracked per Compaction via its `bytes_processed` field.
 
 /// Messages exchanged between the compactor event loop and its collaborators.
 #[derive(Debug)]
@@ -376,7 +307,6 @@ pub(crate) struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
-    progress_tracker: CompactionProgressTracker,
 }
 
 #[async_trait]
@@ -412,7 +342,8 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 id,
                 bytes_processed,
             } => {
-                self.progress_tracker.update_progress(id, bytes_processed);
+                self.state
+                    .update_compaction(&id, |c| c.set_bytes_processed(bytes_processed));
             }
         }
         Ok(())
@@ -457,14 +388,12 @@ impl CompactorEventHandler {
             rand,
             stats,
             system_clock,
-            progress_tracker: CompactionProgressTracker::new(),
         })
     }
 
     /// Emits the current compaction state and per-job progress.
     fn handle_log_ticker(&self) {
         self.log_compaction_state();
-        self.progress_tracker.log_progress();
     }
 
     /// Handles a polling tick by refreshing the manifest and possibly scheduling compactions.
@@ -651,9 +580,6 @@ impl CompactorEventHandler {
         };
 
         // TODO(sujeetsawala): Add job attempt to compaction
-
-        self.progress_tracker
-            .track_job(job_id, job_args.estimated_source_bytes());
         let this_executor = self.executor.clone();
         // Explicitly allow spawn_blocking for compactors since we can't trust them
         // not to block the runtime. This could cause non-determinism, since it creates
@@ -682,7 +608,6 @@ impl CompactorEventHandler {
     /// Records a failed compaction attempt.
     fn finish_failed_compaction(&mut self, id: Ulid) {
         self.state.remove_compaction(&id);
-        self.progress_tracker.remove_job(id);
         self.update_compaction_low_watermark();
     }
 
@@ -695,7 +620,6 @@ impl CompactorEventHandler {
         output_sr: SortedRun,
     ) -> Result<(), SlateDBError> {
         self.state.finish_compaction(id, output_sr);
-        self.progress_tracker.remove_job(id);
         self.log_compaction_state();
         self.write_manifest_safely().await?;
         self.maybe_schedule_compactions().await?;
