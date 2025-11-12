@@ -10,7 +10,7 @@ use crate::error::SlateDBError::{
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::{ExternalDb, Manifest};
 use crate::rand::DbRand;
-use crate::record::store::{
+use crate::transactional_object::{
     FenceableTransactionalObject, MonotonicId, ObjectStoreSequencedObjectOps, SequencedObjectOps,
     SimpleTransactionalObject, TransactionalObject, TransactionalObjectOps,
 };
@@ -669,9 +669,9 @@ mod tests {
     use crate::error;
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-    use crate::record::store::TransactionalObject;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
+    use crate::transactional_object::TransactionalObject;
     use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;

@@ -54,7 +54,12 @@
 //! The goal is to keep this module fully generic and free of slatedb-specific logic; For example,
 //! manifest semantics live in `manifest/store.rs` and use these primitives by delegation.
 
+use crate::clock::SystemClock;
+use crate::error::SlateDBError;
+use crate::error::SlateDBError::{FileVersionExists, InvalidDBState};
+use crate::utils;
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
 use log::{debug, warn};
@@ -66,11 +71,11 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::clock::SystemClock;
-use crate::error::SlateDBError;
-use crate::error::SlateDBError::{FileVersionExists, InvalidDBState};
-use crate::record::ObjectCodec;
-use crate::utils;
+// Generic codec to serialize/deserialize versioned records stored as files
+pub(crate) trait ObjectCodec<T>: Send + Sync {
+    fn encode(&self, value: &T) -> Bytes;
+    fn decode(&self, bytes: &Bytes) -> Result<T, SlateDBError>;
+}
 
 /// A monotonically increasing object version ID
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -593,11 +598,11 @@ impl<T: Send + Sync> SequencedObjectOps<T> for ObjectStoreSequencedObjectOps<T> 
 #[cfg(test)]
 mod tests {
     use crate::clock::DefaultSystemClock;
-    use crate::record::store::{
+    use crate::transactional_object::SlateDBError;
+    use crate::transactional_object::{
         FenceableTransactionalObject, MonotonicId, ObjectCodec, ObjectStoreSequencedObjectOps,
         SequencedObjectOps, SimpleTransactionalObject, TransactionalObject, TransactionalObjectOps,
     };
-    use crate::record::SlateDBError;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
