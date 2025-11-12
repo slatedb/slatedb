@@ -34,12 +34,11 @@ export default defineConfig({
 				Header: './src/components/Header.astro',
 				// Override the default social icons to configure size and color behavior.
 				SocialIcons: './src/components/SocialIcons.astro',
-				// Override the default hero to be able to use the Rive animation.
-				Hero: './src/components/Hero.astro',
 				// Override the default page frame to add the footer.
 				PageFrame: './src/components/PageFrame.astro',
-				// Override the default theme provider to ensure dark mode is always enabled.
+				// Override the default theme provider to ensure light mode is always enabled.
 				ThemeProvider: './src/components/ThemeProvider.astro',
+				Hero: './src/components/Hero.astro',
 			},
 			customCss: ['./src/styles/custom.css'],
 			editLink: {
