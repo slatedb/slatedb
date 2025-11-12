@@ -46,7 +46,7 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
 			</header>
 			<main class="main">
                 <h1>
-                    slatedb is an embedded key-value database built on object storage
+                    slatedb is an OSS embedded key-value database built on object storage
                 </h1>
 
                 <div class="terminal">
@@ -97,6 +97,7 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
                             <img src="/img/logos/merklemap.svg" alt="MerkleMap" />
                         </a>
                     </div>
+                    <a href="https://github.com/slatedb/slatedb/issues/new?title=add%20%3Cmy%20company%3E%27s%20logo%20to%20used%20by&body=Please%20add%20%3Cmy%20company%3E%27s%20logo%20to%20the%20slatedb%20website.%0A%0A**Logo%20SVG%3A**%0A%0A**Company%20Link%3A**%0A%0A**How%20you%20use%20slatedb%3A**%0A" target="_blank" rel="noopener noreferrer" class="add-logo-link">+ add your logo</a>
                 </div>
 
 			</main>
@@ -376,11 +377,35 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
 		white-space: nowrap;
 	}
 
+	.add-logo-link {
+		font-family: monospace;
+		font-size: 0.75rem;
+		color: #666;
+		position: absolute;
+		bottom: -0.5rem;
+		right: -0.5rem;
+		background-color: white;
+		padding: 0.25rem 0.5rem;
+		white-space: nowrap;
+		text-decoration: none;
+		border: 1px solid #666;
+		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+		transition: all 0.2s ease;
+		display: inline-block;
+	}
+
+	.add-logo-link:hover {
+		color: #000;
+		box-shadow: 0 4px 6px rgba(0, 0, 0, 0.15);
+		transform: translateY(-1px);
+	}
+
 	.logos-section {
 		display: grid;
 		grid-template-columns: repeat(4, 1fr);
 		align-items: center;
 		gap: 1rem;
+        padding-bottom: 0.5rem;
 		width: 100%;
 	}
 
