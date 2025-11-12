@@ -2,6 +2,8 @@
 import SocialIcons from '../components/SocialIcons.astro';
 import ThemeProvider from '../components/ThemeProvider.astro';
 import TerminalContent from '../components/TerminalContent.astro';
+import barsIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/bars.svg?raw';
+import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.svg?raw';
 ---
 
 <html lang="en">
@@ -30,6 +32,15 @@ import TerminalContent from '../components/TerminalContent.astro';
 							<a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="header-link">discord</a>
 							<a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="header-link" id="github-link">github</a>
 						</div>
+						<button class="mobile-menu-toggle" id="mobile-menu-toggle" aria-label="Toggle menu" aria-expanded="false">
+							<span class="menu-icon menu-icon-bars" set:html={barsIcon}></span>
+							<span class="menu-icon menu-icon-times" set:html={timesIcon}></span>
+						</button>
+					</div>
+					<div class="mobile-menu" id="mobile-menu">
+						<a href="/docs/get-started/introduction/" class="mobile-menu-link">docs</a>
+						<a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="mobile-menu-link">discord</a>
+						<a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="mobile-menu-link" id="mobile-github-link">github</a>
 					</div>
 				</div>
 			</header>
@@ -148,7 +159,7 @@ import TerminalContent from '../components/TerminalContent.astro';
 		padding: 1rem 1.5rem;
 		background-color: white;
 		box-sizing: border-box;
-		overflow: hidden;
+		overflow: visible;
 	}
 
 	.header-content {
@@ -160,6 +171,7 @@ import TerminalContent from '../components/TerminalContent.astro';
 		width: 100%;
 		max-width: 100%;
 		box-sizing: border-box;
+		position: relative;
 	}
 
 	.title-wrapper {
@@ -221,6 +233,104 @@ import TerminalContent from '../components/TerminalContent.astro';
 
 	#github-link .star-count {
 		color: #666 !important;
+	}
+
+	.mobile-menu-toggle {
+		display: none;
+		background: none;
+		border: none;
+		cursor: pointer;
+		padding: 0.5rem;
+		margin: -0.5rem;
+		align-items: center;
+		justify-content: center;
+		position: relative;
+		width: 2rem;
+		height: 2rem;
+	}
+
+	.menu-icon {
+		position: absolute;
+		width: 1.0rem;
+		height: 1.0rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: opacity 0.2s ease;
+	}
+
+	.menu-icon svg {
+		width: 100%;
+		height: 100%;
+		fill: currentColor;
+	}
+
+	.menu-icon-bars {
+		opacity: 1;
+	}
+
+	.menu-icon-times {
+		opacity: 0;
+	}
+
+	.mobile-menu-toggle[aria-expanded="true"] .menu-icon-bars {
+		opacity: 0;
+	}
+
+	.mobile-menu-toggle[aria-expanded="true"] .menu-icon-times {
+		opacity: 1;
+	}
+
+	.mobile-menu {
+		display: none;
+		flex-direction: column;
+		gap: 1rem;
+		padding: 1rem 0;
+		border-top: 1px solid #e2e8f0;
+		background-color: white;
+		position: absolute;
+		top: 100%;
+		left: -1.5rem;
+		right: -1.5rem;
+		z-index: 1000;
+		box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+		padding-left: 1.5rem;
+		padding-right: 1.5rem;
+	}
+
+	.mobile-menu.open {
+		display: flex;
+	}
+
+	.mobile-menu-link {
+		font-size: 0.875rem;
+		font-family: monospace;
+		color: #000;
+		text-decoration: none;
+		transition: color 0.2s ease;
+		padding: 0.5rem 0;
+	}
+
+	.mobile-menu-link:hover {
+		color: #666;
+	}
+
+	.mobile-menu-link .star-count {
+		display: inline-block;
+		color: #666 !important;
+		font-weight: normal;
+		margin-left: 0.25rem;
+		transition: none !important;
+	}
+
+	@media (max-width: 768px) {
+		.header-links {
+			display: none;
+		}
+
+		.mobile-menu-toggle {
+			display: flex;
+		}
 	}
 
 	.main {
@@ -488,30 +598,57 @@ import TerminalContent from '../components/TerminalContent.astro';
 			});
 		});
 
+		// Mobile menu toggle
+		const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
+		const mobileMenu = document.getElementById('mobile-menu');
+		
+		if (mobileMenuToggle && mobileMenu) {
+			mobileMenuToggle.addEventListener('click', () => {
+				const isExpanded = mobileMenuToggle.getAttribute('aria-expanded') === 'true';
+				mobileMenuToggle.setAttribute('aria-expanded', (!isExpanded).toString());
+				mobileMenu.classList.toggle('open', !isExpanded);
+			});
+
+			// Close menu when clicking on a link
+			const mobileMenuLinks = mobileMenu.querySelectorAll('.mobile-menu-link');
+			mobileMenuLinks.forEach(link => {
+				link.addEventListener('click', () => {
+					mobileMenuToggle.setAttribute('aria-expanded', 'false');
+					mobileMenu.classList.remove('open');
+				});
+			});
+		}
+
 		// Fetch GitHub star count
 		const githubLink = document.getElementById('github-link');
-		if (githubLink) {
+		const mobileGithubLink = document.getElementById('mobile-github-link');
+		
+		const updateGithubLinks = (stars: number) => {
+			let formattedStars;
+			
+			if (stars >= 1000) {
+				formattedStars = (stars / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+			} else {
+				formattedStars = stars.toString();
+			}
+			
+			const starHtml = `github <span class="star-count">[${formattedStars}★]</span>`;
+			
+			if (githubLink) {
+				githubLink.innerHTML = starHtml;
+			}
+			
+			if (mobileGithubLink) {
+				mobileGithubLink.innerHTML = starHtml;
+			}
+		};
+
+		if (githubLink || mobileGithubLink) {
 			fetch('https://api.github.com/repos/slatedb/slatedb')
 				.then(response => response.json())
 				.then(data => {
 					if (data.stargazers_count) {
-						const stars = data.stargazers_count;
-						let formattedStars;
-						
-						if (stars >= 1000) {
-							formattedStars = (stars / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
-						} else {
-							formattedStars = stars.toString();
-						}
-						
-						githubLink.innerHTML = `github <span class="star-count">[${formattedStars}★]</span>`;
-						const starCount = githubLink.querySelector('.star-count');
-						if (starCount && starCount instanceof HTMLElement) {
-                            // I'll leave this here for now since it took me some time
-                            // to figure out how to style the star count, but ultimately
-                            // I decided it's better to just keep it the same
-							// starCount.style.color = '#AA6C39';
-						}
+						updateGithubLinks(data.stargazers_count);
 					}
 				})
 				.catch(error => {
