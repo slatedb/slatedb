@@ -63,8 +63,12 @@ jobs:
 
   flatbuffers:
     runs-on: ubuntu-latest
+    needs: tests
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Allow script to fetch base ref/commits if needed
+          fetch-depth: 0
 
       # Install specific version of flatc (24.3.25)
       - name: Install flatc
@@ -72,6 +76,10 @@ jobs:
           wget https://github.com/google/flatbuffers/releases/download/v24.3.25/Linux.flatc.binary.g++-13.zip
           unzip Linux.flatc.binary.g++-13.zip
           sudo mv flatc /usr/local/bin/
+
+      # Check schema evolution rules against the base revision
+      - name: Check FlatBuffers evolution
+        run: bash scripts/check_flatbuffers_evolution.sh
 
       # Check for differences
       - name: Generate and validate files
@@ -195,6 +203,7 @@ jobs:
 
   microbenchmarks:
     runs-on: ubuntu-latest
+    needs: tests
     steps:
       - uses: actions/checkout@v4
 
@@ -221,6 +230,7 @@ jobs:
 
   test_website:
     runs-on: ubuntu-latest
+    needs: tests
     steps:
       - uses: actions/checkout@v4
       - name: Get changed files
