@@ -12,7 +12,7 @@ use crate::manifest::{ExternalDb, Manifest};
 use crate::rand::DbRand;
 use crate::record::store::{
     FenceableTransactionalObject, MonotonicId, ObjectStoreSequencedObjectOps, SequencedObjectOps,
-    SimpleTransactionalObject, TransactionalObject,
+    SimpleTransactionalObject, TransactionalObject, TransactionalObjectOps,
 };
 use chrono::Utc;
 use log::debug;
@@ -220,9 +220,11 @@ pub(crate) struct StoredManifest {
 impl StoredManifest {
     async fn init(store: Arc<ManifestStore>, manifest: Manifest) -> Result<Self, SlateDBError> {
         // Preserve original behavior: write via ManifestStore (object-store path and semantics)
-        let inner =
-            SimpleTransactionalObject::<Manifest>::init(Arc::clone(&store.inner), manifest.clone())
-                .await?;
+        let inner = SimpleTransactionalObject::<Manifest>::init(
+            Arc::clone(&store.inner) as Arc<dyn TransactionalObjectOps<Manifest, MonotonicId>>,
+            manifest.clone(),
+        )
+        .await?;
         Ok(Self {
             inner,
             clock: Arc::clone(&store.clock),
@@ -256,8 +258,10 @@ impl StoredManifest {
     /// manifest store's path then this fn returns None. Otherwise, on success it returns a
     /// Result with an instance of StoredManifest.
     pub(crate) async fn try_load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
-        let Some(inner) =
-            SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner)).await?
+        let Some(inner) = SimpleTransactionalObject::<Manifest>::try_load(
+            Arc::clone(&store.inner) as Arc<dyn TransactionalObjectOps<Manifest, MonotonicId>>
+        )
+        .await?
         else {
             return Ok(None);
         };
@@ -271,13 +275,15 @@ impl StoredManifest {
     /// this method returns a [`Result`] with an instance of [`StoredManifest`].
     /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
     pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
-        SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner))
-            .await?
-            .map(|inner| Self {
-                inner,
-                clock: Arc::clone(&store.clock),
-            })
-            .ok_or(LatestManifestMissing)
+        SimpleTransactionalObject::<Manifest>::try_load(
+            Arc::clone(&store.inner) as Arc<dyn TransactionalObjectOps<Manifest, MonotonicId>>
+        )
+        .await?
+        .map(|inner| Self {
+            inner,
+            clock: Arc::clone(&store.clock),
+        })
+        .ok_or(LatestManifestMissing)
     }
 
     #[allow(dead_code)]

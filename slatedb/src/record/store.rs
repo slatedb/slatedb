@@ -99,6 +99,10 @@ impl std::ops::Add<u64> for MonotonicId {
 }
 
 impl MonotonicId {
+    pub(crate) fn initial() -> Self {
+        Self { id: 1 }
+    }
+
     pub(crate) fn new(id: u64) -> Self {
         Self { id }
     }
@@ -124,7 +128,7 @@ impl From<MonotonicId> for u64 {
     }
 }
 
-/// Generic file metadata for versioned records
+/// Generic file metadata for versioned objects
 #[derive(Debug)]
 pub(crate) struct GenericObjectMetadata<Id: Copy = MonotonicId> {
     pub(crate) id: Id,
@@ -218,16 +222,16 @@ pub(crate) struct FenceableTransactionalObject<T: Clone, Id: Copy = MonotonicId>
 impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
     pub(crate) async fn init(
         mut delegate: SimpleTransactionalObject<T, MonotonicId>,
-        record_update_timeout: Duration,
+        object_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
         get_epoch: fn(&T) -> u64,
         set_epoch: fn(&mut T, u64),
     ) -> Result<Self, SlateDBError> {
         utils::timeout(
             system_clock.clone(),
-            record_update_timeout,
+            object_update_timeout,
             || SlateDBError::ManifestUpdateTimeout {
-                timeout: record_update_timeout,
+                timeout: object_update_timeout,
             },
             async {
                 loop {
@@ -308,25 +312,24 @@ impl<T: Clone + Send + Sync> TransactionalObject<T>
 #[derive(Clone)]
 pub(crate) struct SimpleTransactionalObject<T, Id: Copy = MonotonicId> {
     id: Id,
-    record: T,
-    ops: Arc<dyn SequencedObjectOps<T>>,
+    object: T,
+    ops: Arc<dyn TransactionalObjectOps<T, Id>>,
 }
 
 impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
     pub(crate) async fn init(
-        store: Arc<dyn SequencedObjectOps<T>>,
+        store: Arc<dyn TransactionalObjectOps<T, Id>>,
         value: T,
-    ) -> Result<SimpleTransactionalObject<T, MonotonicId>, SlateDBError> {
-        let id = MonotonicId::new(1);
-        store.write(id, &value).await?;
+    ) -> Result<SimpleTransactionalObject<T, Id>, SlateDBError> {
+        let id = store.write(None, &value).await?;
         Ok(SimpleTransactionalObject {
             id,
-            record: value,
+            object: value,
             ops: store,
         })
     }
 
-    /// Attempts to load the latest stored record from the given `TransactionalObjectOps`.
+    /// Attempts to load the latest object using the given `TransactionalObjectOps`.
     ///
     /// Returns `Ok(Some(SimpleTransactionalObject<T>))` when an object exists, or `Ok(None)` when
     /// no object is present in the store. This method does not create any new
@@ -336,25 +339,25 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
     /// For a variant that treats a missing record as an error, use [`load`], which
     /// maps the absence of a record to `SlateDBError::LatestRecordMissing`.
     pub(crate) async fn try_load(
-        store: Arc<dyn SequencedObjectOps<T>>,
-    ) -> Result<Option<SimpleTransactionalObject<T, MonotonicId>>, SlateDBError> {
+        store: Arc<dyn TransactionalObjectOps<T, Id>>,
+    ) -> Result<Option<SimpleTransactionalObject<T, Id>>, SlateDBError> {
         let Some((id, val)) = store.try_read_latest().await? else {
             return Ok(None);
         };
         Ok(Some(SimpleTransactionalObject {
             id,
-            record: val,
+            object: val,
             ops: store,
         }))
     }
 
-    /// Load the current record from the supplied record store. If successful,
+    /// Load the current object using the supplied `TransactionalObjectOps`. If successful,
     /// this method returns a [`Result`] with an instance of [`SimpleTransactionalObject`].
-    /// If no records could be found, the error [`LatestRecordMissing`] is returned.
+    /// If no objects could be found, the error [`LatestRecordMissing`] is returned.
     #[allow(dead_code)]
     pub(crate) async fn load(
-        store: Arc<dyn SequencedObjectOps<T>>,
-    ) -> Result<SimpleTransactionalObject<T, MonotonicId>, SlateDBError> {
+        store: Arc<dyn TransactionalObjectOps<T, Id>>,
+    ) -> Result<SimpleTransactionalObject<T, Id>, SlateDBError> {
         Self::try_load(store)
             .await?
             .ok_or_else(|| SlateDBError::LatestRecordMissing)
@@ -362,19 +365,21 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
 }
 
 #[async_trait::async_trait]
-impl<T: Clone + Send + Sync> TransactionalObject<T> for SimpleTransactionalObject<T, MonotonicId> {
-    fn id(&self) -> MonotonicId {
+impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalObject<T, Id>
+    for SimpleTransactionalObject<T, Id>
+{
+    fn id(&self) -> Id {
         self.id
     }
 
     fn object(&self) -> &T {
-        &self.record
+        &self.object
     }
 
-    fn prepare_dirty(&self) -> Result<DirtyObject<T, MonotonicId>, SlateDBError> {
+    fn prepare_dirty(&self) -> Result<DirtyObject<T, Id>, SlateDBError> {
         Ok(DirtyObject {
             id: self.id,
-            value: self.record.clone(),
+            value: self.object.clone(),
         })
     }
 
@@ -383,18 +388,16 @@ impl<T: Clone + Send + Sync> TransactionalObject<T> for SimpleTransactionalObjec
             return Err(InvalidDBState);
         };
         self.id = id;
-        self.record = new_val;
-        Ok(&self.record)
+        self.object = new_val;
+        Ok(&self.object)
     }
 
-    async fn update(&mut self, dirty: DirtyObject<T, MonotonicId>) -> Result<(), SlateDBError> {
+    async fn update(&mut self, dirty: DirtyObject<T, Id>) -> Result<(), SlateDBError> {
         if dirty.id != self.id {
             return Err(FileVersionExists);
         }
-        let next = self.id.next();
-        self.ops.write(next, &dirty.value).await?;
-        self.id = next;
-        self.record = dirty.value;
+        self.id = self.ops.write(Some(dirty.id), &dirty.value).await?;
+        self.object = dirty.value;
         Ok(())
     }
 }
@@ -405,7 +408,10 @@ impl<T: Clone + Send + Sync> TransactionalObject<T> for SimpleTransactionalObjec
 /// match.
 #[async_trait]
 pub(crate) trait TransactionalObjectOps<T, Id: Copy>: Send + Sync {
-    async fn write(&self, id: Id, value: &T) -> Result<(), SlateDBError>;
+    /// Write the object given the expected current version ID. If the version ID is None then
+    /// `write` expects that no object currently exists in durable storage. If the version condition
+    /// fails then this fn returns `FileVersionExists`
+    async fn write(&self, current_id: Option<Id>, new_value: &T) -> Result<Id, SlateDBError>;
 
     /// Read the latest version of the object and return it along with its version ID. If no
     /// object is found, returns `Ok(None)`
@@ -435,8 +441,8 @@ pub(crate) trait SequencedObjectOps<T>: TransactionalObjectOps<T, MonotonicId> {
 ///
 /// File layout and naming
 /// ----------------------
-/// - Records are stored under a root directory and logical subdirectory provided at
-///   construction time (see `RecordStore::new`).
+/// - Objects are stored under a root directory and logical subdirectory provided at
+///   construction time (see `ObjectStoreSequencedObjectOps::new`).
 /// - Each version is a single file whose name is a zero-padded 20-digit decimal id
 ///   followed by a fixed suffix, e.g. `00000000000000000001.manifest`.
 /// - New versions must use the next consecutive id (`current_id + 1`).
@@ -488,12 +494,19 @@ impl<T> ObjectStoreSequencedObjectOps<T> {
 
 #[async_trait]
 impl<T: Send + Sync> TransactionalObjectOps<T, MonotonicId> for ObjectStoreSequencedObjectOps<T> {
-    async fn write(&self, id: MonotonicId, value: &T) -> Result<(), SlateDBError> {
+    async fn write(
+        &self,
+        current_id: Option<MonotonicId>,
+        new_value: &T,
+    ) -> Result<MonotonicId, SlateDBError> {
+        let id = current_id
+            .map(|id| id.next())
+            .unwrap_or(MonotonicId::initial());
         let path = self.path_for(id);
         self.object_store
             .put_opts(
                 &path,
-                PutPayload::from_bytes(self.codec.encode(value)),
+                PutPayload::from_bytes(self.codec.encode(new_value)),
                 PutOptions::from(PutMode::Create),
             )
             .await
@@ -504,7 +517,7 @@ impl<T: Send + Sync> TransactionalObjectOps<T, MonotonicId> for ObjectStoreSeque
                     SlateDBError::from(err)
                 }
             })?;
-        Ok(())
+        Ok(id)
     }
 
     async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, SlateDBError> {
@@ -535,7 +548,7 @@ impl<T: Send + Sync> SequencedObjectOps<T> for ObjectStoreSequencedObjectOps<T> 
         }
     }
 
-    // List files for this record type within an id range
+    // List files for this object type within an id range
     async fn list(
         &self,
         from: Bound<MonotonicId>,
@@ -558,10 +571,7 @@ impl<T: Send + Sync> SequencedObjectOps<T> for ObjectStoreSequencedObjectOps<T> 
                         size: file.size as u32,
                     });
                 }
-                Err(_) => warn!(
-                    "unknown file in record directory [location={:?}]",
-                    file.location
-                ),
+                Err(_) => warn!("unknown file in directory [location={:?}]", file.location),
                 _ => {}
             }
         }
@@ -572,7 +582,7 @@ impl<T: Send + Sync> SequencedObjectOps<T> for ObjectStoreSequencedObjectOps<T> 
     // Delete a specific versioned file (no additional validation)
     async fn delete(&self, id: MonotonicId) -> Result<(), SlateDBError> {
         let path = self.path_for(id);
-        debug!("deleting record [record_path={}]", path);
+        debug!("deleting object [record_path={}]", path);
         self.object_store
             .delete(&path)
             .await
@@ -584,8 +594,8 @@ impl<T: Send + Sync> SequencedObjectOps<T> for ObjectStoreSequencedObjectOps<T> 
 mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::record::store::{
-        FenceableTransactionalObject, ObjectCodec, ObjectStoreSequencedObjectOps,
-        SequencedObjectOps, SimpleTransactionalObject, TransactionalObject,
+        FenceableTransactionalObject, MonotonicId, ObjectCodec, ObjectStoreSequencedObjectOps,
+        SequencedObjectOps, SimpleTransactionalObject, TransactionalObject, TransactionalObjectOps,
     };
     use crate::record::SlateDBError;
     use bytes::Bytes;
@@ -626,7 +636,7 @@ mod tests {
         }
     }
 
-    fn new_store() -> Arc<dyn SequencedObjectOps<TestVal>> {
+    fn new_store() -> Arc<ObjectStoreSequencedObjectOps<TestVal>> {
         let os = Arc::new(InMemory::new());
         Arc::new(ObjectStoreSequencedObjectOps::new(
             &Path::from("/root"),
@@ -641,7 +651,7 @@ mod tests {
     async fn test_init_write_and_read_latest() {
         let store = new_store();
         let mut sr = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store),
+            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
             TestVal {
                 epoch: 0,
                 payload: 1,
@@ -690,7 +700,7 @@ mod tests {
     async fn test_update_dirty_version_conflict() {
         let store = new_store();
         let mut a = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store),
+            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
             TestVal {
                 epoch: 0,
                 payload: 10,
@@ -703,8 +713,8 @@ mod tests {
         let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
         let mut b: SimpleTransactionalObject<TestVal> = SimpleTransactionalObject {
             id: id_b,
-            record: val_b,
-            ops: Arc::clone(&store),
+            object: val_b,
+            ops: Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
         };
 
         // A updates first
@@ -740,7 +750,7 @@ mod tests {
     async fn test_list_ranges_sorted() {
         let store = new_store();
         let mut sr = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store),
+            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
             TestVal {
                 epoch: 0,
                 payload: 1,
@@ -776,7 +786,7 @@ mod tests {
     async fn test_update_dirty_id_mismatch_errors() {
         let store = new_store();
         let sr = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store),
+            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
             TestVal {
                 epoch: 0,
                 payload: 1,
@@ -790,7 +800,12 @@ mod tests {
             epoch: 0,
             payload: 2,
         };
-        let err = sr.ops.write(dirty.id(), &dirty.value).await.unwrap_err();
+        sr.ops.write(Some(dirty.id()), &dirty.value).await.unwrap();
+        let err = sr
+            .ops
+            .write(Some(dirty.id()), &dirty.value)
+            .await
+            .unwrap_err();
         assert!(matches!(err, SlateDBError::FileVersionExists));
     }
 
@@ -799,7 +814,7 @@ mod tests {
         let store = new_store();
         // initial record
         let sr = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store),
+            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
             TestVal {
                 epoch: 0,
                 payload: 0,
@@ -826,8 +841,8 @@ mod tests {
         let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
         let sb = SimpleTransactionalObject {
             id: id_b,
-            record: val_b,
-            ops: Arc::clone(&store),
+            object: val_b,
+            ops: Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
         };
         let mut fb = FenceableTransactionalObject::init(
             sb,
