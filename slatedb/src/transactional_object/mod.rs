@@ -27,9 +27,9 @@
 //!
 //! Error semantics
 //! ---------------
-//! - `FileVersionExists` is returned when a CAS write fails because a concurrent writer
+//! - `ObjectVersionExists` is returned when a CAS write fails because a concurrent writer
 //!   created the target id first. Callers typically handle this by `refresh()` and retrying.
-//! - `InvalidDBState` may be returned when an expected record is missing or file names are
+//! - `InvalidState` may be returned when an expected record is missing or file names are
 //!   malformed.
 //!
 //! Example (Manifest)
@@ -55,8 +55,7 @@
 //! manifest semantics live in `manifest/store.rs` and use these primitives by delegation.
 
 use crate::clock::SystemClock;
-use crate::error::SlateDBError;
-use crate::error::SlateDBError::{FileVersionExists, InvalidDBState};
+use crate::transactional_object::TransactionalObjectError::CallbackError;
 use crate::utils;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -71,10 +70,39 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TransactionalObjectError {
+    #[error("io error")]
+    IoError(#[from] Arc<std::io::Error>),
+
+    #[error("object store error")]
+    ObjectStoreError(#[from] object_store::Error),
+
+    #[error("object update timed out")]
+    ObjectUpdateTimeout { timeout: Duration },
+
+    #[error("failed to find latest record")]
+    LatestRecordMissing,
+
+    #[error("object version exists")]
+    ObjectVersionExists,
+
+    #[error("detected newer client")]
+    Fenced,
+
+    #[error("invalid state")]
+    InvalidState,
+
+    // used to pass through errors from callbacks like codecs and mutators
+    #[error("callback error")]
+    CallbackError(Box<dyn std::error::Error + Send + Sync>),
+}
+
 // Generic codec to serialize/deserialize versioned records stored as files
 pub(crate) trait ObjectCodec<T>: Send + Sync {
     fn encode(&self, value: &T) -> Bytes;
-    fn decode(&self, bytes: &Bytes) -> Result<T, SlateDBError>;
+    fn decode(&self, bytes: &Bytes) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// A monotonically increasing object version ID
@@ -175,31 +203,35 @@ pub(crate) trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
 
     /// Returns a `DirtyObject` with the current version ID and object which can be
     /// modified locally and passed to `update` to persist mutations durably.
-    fn prepare_dirty(&self) -> Result<DirtyObject<T, Id>, SlateDBError>;
+    fn prepare_dirty(&self) -> Result<DirtyObject<T, Id>, TransactionalObjectError>;
 
     /// Refreshes the in-memory view of the object with the latest version stored durably.
     /// This may result in a different in-memory view returned by `object` (and different id
     /// returned by `id`) if another process has successfully updated the object.
-    async fn refresh(&mut self) -> Result<&T, SlateDBError>;
+    async fn refresh(&mut self) -> Result<&T, TransactionalObjectError>;
 
     /// Transactionally update the object. Will succeed iff the version id in durable storage
     /// matches the version id of the provided `DirtyObject`. If the versions don't match
-    /// then this fn returns `FileVersionExists`.
-    async fn update(&mut self, dirty: DirtyObject<T, Id>) -> Result<(), SlateDBError>;
+    /// then this fn returns `ObjectVersionExists`.
+    async fn update(&mut self, dirty: DirtyObject<T, Id>) -> Result<(), TransactionalObjectError>;
 
     /// Transactionally update the object using the supplied mutator, if the mutator returns
     /// `Some`. This fn will indefinitely retry the mutation on a version conflict by refreshing
     /// and re-applying the mutation.
-    async fn maybe_apply_update<F>(&mut self, mutator: F) -> Result<(), SlateDBError>
+    async fn maybe_apply_update<F, Err>(
+        &mut self,
+        mutator: F,
+    ) -> Result<(), TransactionalObjectError>
     where
-        F: Fn(&Self) -> Result<Option<DirtyObject<T, Id>>, SlateDBError> + Send + Sync,
+        Err: std::error::Error + Send + Sync + 'static,
+        F: Fn(&Self) -> Result<Option<DirtyObject<T, Id>>, Err> + Send + Sync,
     {
         loop {
-            let Some(dirty) = mutator(self)? else {
+            let Some(dirty) = mutator(self).map_err(|e| CallbackError(Box::new(e)))? else {
                 return Ok(());
             };
             match self.update(dirty).await {
-                Err(SlateDBError::FileVersionExists) => {
+                Err(TransactionalObjectError::ObjectVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -231,11 +263,11 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
         system_clock: Arc<dyn SystemClock>,
         get_epoch: fn(&T) -> u64,
         set_epoch: fn(&mut T, u64),
-    ) -> Result<Self, SlateDBError> {
+    ) -> Result<Self, TransactionalObjectError> {
         utils::timeout(
             system_clock.clone(),
             object_update_timeout,
-            || SlateDBError::ManifestUpdateTimeout {
+            || TransactionalObjectError::ObjectUpdateTimeout {
                 timeout: object_update_timeout,
             },
             async {
@@ -246,7 +278,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                     let mut dirty = delegate.prepare_dirty()?;
                     dirty.value = new_val;
                     match delegate.update(dirty).await {
-                        Err(SlateDBError::FileVersionExists) => {
+                        Err(TransactionalObjectError::ObjectVersionExists) => {
                             delegate.refresh().await?;
                             continue;
                         }
@@ -271,10 +303,10 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
     }
 
     #[allow(clippy::panic)]
-    fn check_epoch(&self) -> Result<(), SlateDBError> {
+    fn check_epoch(&self) -> Result<(), TransactionalObjectError> {
         let stored_epoch = (self.get_epoch)(self.delegate.object());
         if self.local_epoch < stored_epoch {
-            return Err(SlateDBError::Fenced);
+            return Err(TransactionalObjectError::Fenced);
         }
         if self.local_epoch > stored_epoch {
             panic!("the stored epoch is lower than the local epoch");
@@ -295,18 +327,21 @@ impl<T: Clone + Send + Sync> TransactionalObject<T>
         self.delegate.object()
     }
 
-    fn prepare_dirty(&self) -> Result<DirtyObject<T, MonotonicId>, SlateDBError> {
+    fn prepare_dirty(&self) -> Result<DirtyObject<T, MonotonicId>, TransactionalObjectError> {
         self.check_epoch()?;
         self.delegate.prepare_dirty()
     }
 
-    async fn refresh(&mut self) -> Result<&T, SlateDBError> {
+    async fn refresh(&mut self) -> Result<&T, TransactionalObjectError> {
         self.delegate.refresh().await?;
         self.check_epoch()?;
         Ok(self.object())
     }
 
-    async fn update(&mut self, dirty: DirtyObject<T, MonotonicId>) -> Result<(), SlateDBError> {
+    async fn update(
+        &mut self,
+        dirty: DirtyObject<T, MonotonicId>,
+    ) -> Result<(), TransactionalObjectError> {
         self.check_epoch()?;
         self.delegate.update(dirty).await
     }
@@ -325,7 +360,7 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
     pub(crate) async fn init(
         store: Arc<dyn TransactionalObjectOps<T, Id>>,
         value: T,
-    ) -> Result<SimpleTransactionalObject<T, Id>, SlateDBError> {
+    ) -> Result<SimpleTransactionalObject<T, Id>, TransactionalObjectError> {
         let id = store.write(None, &value).await?;
         Ok(SimpleTransactionalObject {
             id,
@@ -342,10 +377,10 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
     /// the presence of persisted state.
     ///
     /// For a variant that treats a missing record as an error, use [`load`], which
-    /// maps the absence of a record to `SlateDBError::LatestRecordMissing`.
+    /// maps the absence of a record to `TransactionalObjectError::LatestRecordMissing`.
     pub(crate) async fn try_load(
         store: Arc<dyn TransactionalObjectOps<T, Id>>,
-    ) -> Result<Option<SimpleTransactionalObject<T, Id>>, SlateDBError> {
+    ) -> Result<Option<SimpleTransactionalObject<T, Id>>, TransactionalObjectError> {
         let Some((id, val)) = store.try_read_latest().await? else {
             return Ok(None);
         };
@@ -362,10 +397,10 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
     #[allow(dead_code)]
     pub(crate) async fn load(
         store: Arc<dyn TransactionalObjectOps<T, Id>>,
-    ) -> Result<SimpleTransactionalObject<T, Id>, SlateDBError> {
+    ) -> Result<SimpleTransactionalObject<T, Id>, TransactionalObjectError> {
         Self::try_load(store)
             .await?
-            .ok_or_else(|| SlateDBError::LatestRecordMissing)
+            .ok_or_else(|| TransactionalObjectError::LatestRecordMissing)
     }
 }
 
@@ -381,25 +416,25 @@ impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalOb
         &self.object
     }
 
-    fn prepare_dirty(&self) -> Result<DirtyObject<T, Id>, SlateDBError> {
+    fn prepare_dirty(&self) -> Result<DirtyObject<T, Id>, TransactionalObjectError> {
         Ok(DirtyObject {
             id: self.id,
             value: self.object.clone(),
         })
     }
 
-    async fn refresh(&mut self) -> Result<&T, SlateDBError> {
+    async fn refresh(&mut self) -> Result<&T, TransactionalObjectError> {
         let Some((id, new_val)) = self.ops.try_read_latest().await? else {
-            return Err(InvalidDBState);
+            return Err(TransactionalObjectError::InvalidState);
         };
         self.id = id;
         self.object = new_val;
         Ok(&self.object)
     }
 
-    async fn update(&mut self, dirty: DirtyObject<T, Id>) -> Result<(), SlateDBError> {
+    async fn update(&mut self, dirty: DirtyObject<T, Id>) -> Result<(), TransactionalObjectError> {
         if dirty.id != self.id {
-            return Err(FileVersionExists);
+            return Err(TransactionalObjectError::ObjectVersionExists);
         }
         self.id = self.ops.write(Some(dirty.id), &dirty.value).await?;
         self.object = dirty.value;
@@ -415,12 +450,16 @@ impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalOb
 pub(crate) trait TransactionalObjectOps<T, Id: Copy>: Send + Sync {
     /// Write the object given the expected current version ID. If the version ID is None then
     /// `write` expects that no object currently exists in durable storage. If the version condition
-    /// fails then this fn returns `FileVersionExists`
-    async fn write(&self, current_id: Option<Id>, new_value: &T) -> Result<Id, SlateDBError>;
+    /// fails then this fn returns `ObjectVersionExists`
+    async fn write(
+        &self,
+        current_id: Option<Id>,
+        new_value: &T,
+    ) -> Result<Id, TransactionalObjectError>;
 
     /// Read the latest version of the object and return it along with its version ID. If no
     /// object is found, returns `Ok(None)`
-    async fn try_read_latest(&self) -> Result<Option<(Id, T)>, SlateDBError>;
+    async fn try_read_latest(&self) -> Result<Option<(Id, T)>, TransactionalObjectError>;
 }
 
 /// Extends TransactionalObjectOps<T, MonotonicId> by requiring that the protocol persist objects
@@ -428,7 +467,7 @@ pub(crate) trait TransactionalObjectOps<T, Id: Copy>: Send + Sync {
 /// observe earlier versions of the object.
 #[async_trait]
 pub(crate) trait SequencedObjectOps<T>: TransactionalObjectOps<T, MonotonicId> {
-    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, SlateDBError>;
+    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError>;
 
     async fn list(
         &self,
@@ -437,9 +476,9 @@ pub(crate) trait SequencedObjectOps<T>: TransactionalObjectOps<T, MonotonicId> {
         // object-safe
         from: Bound<MonotonicId>,
         to: Bound<MonotonicId>,
-    ) -> Result<Vec<GenericObjectMetadata>, SlateDBError>;
+    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError>;
 
-    async fn delete(&self, id: MonotonicId) -> Result<(), SlateDBError>;
+    async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
 }
 
 /// Implements `SequencedObjectOps<T>` on object storage.
@@ -452,7 +491,7 @@ pub(crate) trait SequencedObjectOps<T>: TransactionalObjectOps<T, MonotonicId> {
 ///   followed by a fixed suffix, e.g. `00000000000000000001.manifest`.
 /// - New versions must use the next consecutive id (`current_id + 1`).
 /// - We rely on `put_if_not_exists` to enforce CAS at the storage layer. If a file with
-///   the same id already exists, the write fails with `FileVersionExists`.
+///   the same id already exists, the write fails with `ObjectVersionExists`.
 pub(crate) struct ObjectStoreSequencedObjectOps<T> {
     object_store: Box<dyn ObjectStore>,
     codec: Box<dyn ObjectCodec<T>>,
@@ -481,18 +520,18 @@ impl<T> ObjectStoreSequencedObjectOps<T> {
         Path::from(format!("{:020}.{}", id.id(), self.file_suffix))
     }
 
-    fn parse_id(&self, path: &Path) -> Result<MonotonicId, SlateDBError> {
+    fn parse_id(&self, path: &Path) -> Result<MonotonicId, TransactionalObjectError> {
         match path.extension() {
             Some(ext) if ext == self.file_suffix => path
                 .filename()
                 .expect("invalid filename")
                 .split('.')
                 .next()
-                .ok_or_else(|| InvalidDBState)?
+                .ok_or_else(|| TransactionalObjectError::InvalidState)?
                 .parse()
                 .map(MonotonicId::new)
-                .map_err(|_| InvalidDBState),
-            _ => Err(InvalidDBState),
+                .map_err(|_| TransactionalObjectError::InvalidState),
+            _ => Err(TransactionalObjectError::InvalidState),
         }
     }
 }
@@ -503,7 +542,7 @@ impl<T: Send + Sync> TransactionalObjectOps<T, MonotonicId> for ObjectStoreSeque
         &self,
         current_id: Option<MonotonicId>,
         new_value: &T,
-    ) -> Result<MonotonicId, SlateDBError> {
+    ) -> Result<MonotonicId, TransactionalObjectError> {
         let id = current_id
             .map(|id| id.next())
             .unwrap_or(MonotonicId::initial());
@@ -517,15 +556,15 @@ impl<T: Send + Sync> TransactionalObjectOps<T, MonotonicId> for ObjectStoreSeque
             .await
             .map_err(|err| {
                 if let AlreadyExists { path: _, source: _ } = err {
-                    SlateDBError::FileVersionExists
+                    TransactionalObjectError::ObjectVersionExists
                 } else {
-                    SlateDBError::from(err)
+                    TransactionalObjectError::from(err)
                 }
             })?;
         Ok(id)
     }
 
-    async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, SlateDBError> {
+    async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
         let files = self.list(Unbounded, Unbounded).await?;
         if let Some(file) = files.last() {
             return self
@@ -539,16 +578,20 @@ impl<T: Send + Sync> TransactionalObjectOps<T, MonotonicId> for ObjectStoreSeque
 
 #[async_trait]
 impl<T: Send + Sync> SequencedObjectOps<T> for ObjectStoreSequencedObjectOps<T> {
-    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, SlateDBError> {
+    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError> {
         let path = self.path_for(id);
         match self.object_store.get(&path).await {
             Ok(obj) => match obj.bytes().await {
-                Ok(bytes) => self.codec.decode(&bytes).map(Some),
-                Err(e) => Err(SlateDBError::from(e)),
+                Ok(bytes) => self
+                    .codec
+                    .decode(&bytes)
+                    .map(Some)
+                    .map_err(|e| CallbackError(e)),
+                Err(e) => Err(TransactionalObjectError::from(e)),
             },
             Err(e) => match e {
                 Error::NotFound { .. } => Ok(None),
-                _ => Err(SlateDBError::from(e)),
+                _ => Err(TransactionalObjectError::from(e)),
             },
         }
     }
@@ -558,13 +601,13 @@ impl<T: Send + Sync> SequencedObjectOps<T> for ObjectStoreSequencedObjectOps<T> 
         &self,
         from: Bound<MonotonicId>,
         to: Bound<MonotonicId>,
-    ) -> Result<Vec<GenericObjectMetadata>, SlateDBError> {
+    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
         let base = &Path::from("/");
         let mut files_stream = self.object_store.list(Some(base));
         let mut items = Vec::new();
         while let Some(file) = match files_stream.next().await.transpose() {
             Ok(file) => file,
-            Err(e) => return Err(SlateDBError::from(e)),
+            Err(e) => return Err(TransactionalObjectError::from(e)),
         } {
             let id_range = (from, to);
             match self.parse_id(&file.location) {
@@ -585,20 +628,20 @@ impl<T: Send + Sync> SequencedObjectOps<T> for ObjectStoreSequencedObjectOps<T> 
     }
 
     // Delete a specific versioned file (no additional validation)
-    async fn delete(&self, id: MonotonicId) -> Result<(), SlateDBError> {
+    async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
         let path = self.path_for(id);
         debug!("deleting object [record_path={}]", path);
         self.object_store
             .delete(&path)
             .await
-            .map_err(SlateDBError::from)
+            .map_err(TransactionalObjectError::from)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::clock::DefaultSystemClock;
-    use crate::transactional_object::SlateDBError;
+    use crate::transactional_object::TransactionalObjectError;
     use crate::transactional_object::{
         FenceableTransactionalObject, MonotonicId, ObjectCodec, ObjectStoreSequencedObjectOps,
         SequencedObjectOps, SimpleTransactionalObject, TransactionalObject, TransactionalObjectOps,
@@ -624,19 +667,23 @@ mod tests {
             Bytes::from(format!("{}:{}", value.epoch, value.payload))
         }
 
-        fn decode(&self, bytes: &Bytes) -> Result<TestVal, SlateDBError> {
-            let s = std::str::from_utf8(bytes).map_err(|_| SlateDBError::InvalidDBState)?;
+        fn decode(
+            &self,
+            bytes: &Bytes,
+        ) -> Result<TestVal, Box<dyn std::error::Error + Send + Sync>> {
+            let s =
+                std::str::from_utf8(bytes).map_err(|_| TransactionalObjectError::InvalidState)?;
             let mut parts = s.split(':');
             let epoch = parts
                 .next()
-                .ok_or(SlateDBError::InvalidDBState)?
+                .ok_or(TransactionalObjectError::InvalidState)?
                 .parse()
-                .map_err(|_| SlateDBError::InvalidDBState)?;
+                .map_err(|_| TransactionalObjectError::InvalidState)?;
             let payload = parts
                 .next()
-                .ok_or(SlateDBError::InvalidDBState)?
+                .ok_or(TransactionalObjectError::InvalidState)?
                 .parse()
-                .map_err(|_| SlateDBError::InvalidDBState)?;
+                .map_err(|_| TransactionalObjectError::InvalidState)?;
             Ok(TestVal { epoch, payload })
         }
     }
@@ -736,7 +783,7 @@ mod tests {
             next.payload = 12;
             let mut dirty = sr.prepare_dirty().unwrap();
             dirty.value = next;
-            Ok(Some(dirty))
+            Ok::<_, TransactionalObjectError>(Some(dirty))
         })
         .await
         .unwrap();
@@ -811,7 +858,7 @@ mod tests {
             .write(Some(dirty.id()), &dirty.value)
             .await
             .unwrap_err();
-        assert!(matches!(err, SlateDBError::FileVersionExists));
+        assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
     }
 
     #[tokio::test]
@@ -864,7 +911,7 @@ mod tests {
 
         // A is now fenced
         let res = fa.refresh().await;
-        assert!(matches!(res, Err(SlateDBError::Fenced)));
+        assert!(matches!(res, Err(TransactionalObjectError::Fenced)));
 
         // B can refresh
         assert!(fb.refresh().await.is_ok());
