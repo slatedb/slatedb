@@ -1,0 +1,275 @@
+---
+interface Props {
+    language: string;
+    command: string;
+    docsUrl: string;
+    isDefault?: boolean;
+}
+
+const { language, command, docsUrl, isDefault = false } = Astro.props;
+
+const features = [
+    "> Range Scans",
+    "> ACID Transactions",
+    "> Merge Operator",
+    "> TTL",
+    "> Checkpoints & Snapshots",
+    "> Separate Compaction Process",
+];
+
+const benefits = [
+    "> 99.999999999% Durability",
+    "> Diskless Architecture",
+    "> $0 Network Replication",
+    "> Multi-Reader Scalability",
+    "> Tunable Performance",
+    "> Built in Rust",
+];
+
+const isExternal = docsUrl.startsWith("http");
+const displayStyle = isDefault ? "" : "display: none;";
+---
+
+<div class="terminal-content" data-content={language} style={displayStyle}>
+    <div class="terminal-line">
+        <span class="terminal-prompt">$</span>
+        <span class="terminal-command">{command}</span>
+    </div>
+    <div class="terminal-benefits">
+        <div class="terminal-section-title">benefits</div>
+        <div class="benefits-grid">
+            {benefits.map((benefit) => <div class="benefit">{benefit}</div>)}
+        </div>
+    </div>
+    <div class="terminal-features functional-features">
+        <div class="terminal-section-title">features</div>
+        <div class="features functional-features-grid">
+            {features.map((feature) => <div class="feature">{feature}</div>)}
+        </div>
+    </div>
+    <div class="terminal-buttons">
+        <a
+            href="https://discord.gg/mHYmGy5MgA"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="discord-button"
+        >
+            join discord
+        </a>
+        <a
+            href={docsUrl}
+            target={isExternal ? "_blank" : undefined}
+            rel={isExternal ? "noopener noreferrer" : undefined}
+            class="docs-button"
+        >
+            read the docs
+        </a>
+    </div>
+</div>
+
+<style>
+    .terminal-content {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+    }
+
+    .terminal-line {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+        font-size: 0.875rem;
+        line-height: 1.5;
+        flex: 1;
+        min-width: 0;
+    }
+
+    .terminal-prompt {
+        color: #4ec9b0;
+        font-weight: 500;
+    }
+
+    .terminal-command {
+        color: #d4d4d4;
+    }
+
+    .terminal-benefits {
+        border: 1px solid #4ec9b0;
+        position: relative;
+        padding: 1rem;
+        margin-top: 0.5rem;
+        background-color: rgba(78, 201, 176, 0.05);
+        transition: all 0.2s ease;
+    }
+
+    .terminal-benefits:hover {
+        border-color: #4ec9b0;
+        background-color: rgba(78, 201, 176, 0.1);
+    }
+
+    .terminal-benefits .benefits-grid {
+        color: #d4d4d4;
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 0.5rem;
+        width: 100%;
+    }
+
+    .terminal-benefits .benefit {
+        font-family: monospace;
+        font-size: 0.875rem;
+        cursor: default;
+        transition: color 0.2s ease;
+        color: #a0a0a0;
+    }
+
+    .terminal-benefits .benefit:hover {
+        color: #4ec9b0;
+    }
+
+    .terminal-features {
+        border: 1px solid #4ec9b0;
+        position: relative;
+        padding: 1rem;
+        margin-top: 0.5rem;
+        background-color: rgba(78, 201, 176, 0.05);
+        transition: all 0.2s ease;
+    }
+
+    .terminal-features:hover {
+        border-color: #4ec9b0;
+        background-color: rgba(78, 201, 176, 0.1);
+    }
+
+    .terminal-section-title {
+        font-family: monospace;
+        font-size: 0.75rem;
+        color: #4ec9b0;
+        position: absolute;
+        top: -0.5rem;
+        left: 1rem;
+        background-color: #1e1e1e;
+        padding: 0 0.1rem;
+        white-space: nowrap;
+    }
+
+    .terminal-features .features {
+        color: #d4d4d4;
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 0.5rem;
+        width: 100%;
+    }
+
+    .terminal-features .features.functional-features-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .terminal-features .feature {
+        font-family: monospace;
+        font-size: 0.875rem;
+        cursor: default;
+        transition: color 0.2s ease;
+        color: #a0a0a0;
+    }
+
+    .terminal-features .feature:hover {
+        color: #4ec9b0;
+    }
+
+    .terminal-buttons {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+        align-self: flex-end;
+        flex-wrap: wrap;
+    }
+
+    .docs-button {
+        display: inline-block;
+        position: relative;
+        padding: 0.5rem 1rem;
+        background-color: #ffc107;
+        color: #1e1e1e;
+        text-decoration: none;
+        border: 2px solid #1e1e1e;
+        font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+        font-size: 0.875rem;
+        transition: all 0.1s ease;
+        flex-shrink: 0;
+        font-weight: 500;
+        text-transform: lowercase;
+        box-shadow:
+            3px 3px 0px 0px rgba(100, 100, 100, 0.6),
+            4px 4px 0px 0px rgba(100, 100, 100, 0.4),
+            5px 5px 0px 0px rgba(100, 100, 100, 0.2);
+        image-rendering: pixelated;
+        -ms-interpolation-mode: nearest-neighbor;
+    }
+
+    .docs-button:hover {
+        background-color: #ffd54f;
+        color: #000000;
+        transform: translate(-1px, -1px);
+        box-shadow:
+            4px 4px 0px 0px rgba(100, 100, 100, 0.6),
+            5px 5px 0px 0px rgba(100, 100, 100, 0.4),
+            6px 6px 0px 0px rgba(100, 100, 100, 0.2);
+    }
+
+    .docs-button:active {
+        transform: translate(2px, 2px);
+        box-shadow:
+            1px 1px 0px 0px rgba(100, 100, 100, 0.6),
+            2px 2px 0px 0px rgba(100, 100, 100, 0.4);
+    }
+
+    .discord-button {
+        display: inline-block;
+        position: relative;
+        padding: 0.5rem 1rem;
+        background-color: #5865f2;
+        color: #ffffff;
+        text-decoration: none;
+        border: 2px solid #1e1e1e;
+        font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+        font-size: 0.875rem;
+        transition: all 0.1s ease;
+        flex-shrink: 0;
+        font-weight: 500;
+        text-transform: lowercase;
+        box-shadow:
+            3px 3px 0px 0px rgba(100, 100, 100, 0.6),
+            4px 4px 0px 0px rgba(100, 100, 100, 0.4),
+            5px 5px 0px 0px rgba(100, 100, 100, 0.2);
+        image-rendering: pixelated;
+        -ms-interpolation-mode: nearest-neighbor;
+    }
+
+    .discord-button:hover {
+        background-color: #6b77ff;
+        transform: translate(-1px, -1px);
+        box-shadow:
+            4px 4px 0px 0px rgba(100, 100, 100, 0.6),
+            5px 5px 0px 0px rgba(100, 100, 100, 0.4),
+            6px 6px 0px 0px rgba(100, 100, 100, 0.2);
+    }
+
+    .discord-button:active {
+        transform: translate(2px, 2px);
+        box-shadow:
+            1px 1px 0px 0px rgba(100, 100, 100, 0.6),
+            2px 2px 0px 0px rgba(100, 100, 100, 0.4);
+    }
+
+    @media (max-width: 768px) {
+        .terminal-benefits .benefits-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .terminal-features .features.functional-features-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>

@@ -1,9 +1,12 @@
 ---
-import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
+import SocialIcons from './SocialIcons.astro';
 ---
 
 <div class="footer">
     <div class="footer-content">
+        <div class="footer-icons">
+            <SocialIcons />
+        </div>
         <div class="copyright-wrapper sl-flex">
             Copyright © 2025 SlateDB Authors. All rights reserved.
         </div>
@@ -25,16 +28,43 @@ import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
 
     .footer-content {
 		display: flex;
-		gap: var(--sl-nav-gap);
-		justify-content: space-between;
+		flex-direction: column;
+		gap: 1rem;
 		align-items: center;
 		height: 100%;
+	}
+
+	.footer-icons {
+		display: flex;
+		gap: 1rem;
+		align-items: center;
+		justify-content: center;
+		order: 1;
 	}
 
     .copyright-wrapper {
         font-size: clamp(var(--sl-text-xs),calc(0.5rem + 1vw),var(--sl-text-xs));
 		font-family: monospace;
-    }
+		order: 2;
+		text-align: center;
+	}
+
+	@media (min-width: 50rem) {
+		.footer-content {
+			flex-direction: row;
+			justify-content: space-between;
+			align-items: center;
+		}
+
+		.footer-icons {
+			order: 2;
+		}
+
+		.copyright-wrapper {
+			order: 1;
+			text-align: left;
+		}
+	}
 
     .title-wrapper {
 		/* Prevent long titles overflowing and covering the search and menu buttons on narrow viewports. */

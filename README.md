@@ -1,5 +1,5 @@
 <a href="https://slatedb.io">
-  <img src="https://github.com/slatedb/slatedb-website/blob/main/assets/png/gh-banner.png?raw=true" alt="SlateDB" width="100%">
+  <img src="https://github.com/slatedb/slatedb/blob/main/website/public/img/slatedb-gh-banner.png?raw=true" alt="SlateDB" width="100%">
 </a>
 
 <a href="https://crates.io/crates/slatedb">![Crates.io Version](https://img.shields.io/crates/v/slatedb?style=flat-square)</a>

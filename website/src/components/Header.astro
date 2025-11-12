@@ -1,5 +1,4 @@
 ---
-import SocialIcons from './SocialIcons.astro';
 import SiteTitle from '@astrojs/starlight/components/SiteTitle.astro';
 import Search from '@astrojs/starlight/components/Search.astro';
 
@@ -13,8 +12,10 @@ import Search from '@astrojs/starlight/components/Search.astro';
 		<div class="search-wrapper print:hidden">
 			<Search />
 		</div>
-		<div class="sl-flex social-icons">
-			<SocialIcons />
+		<div class="sl-flex header-links">
+			<a href="/docs/get-started/introduction/" class="header-link">docs</a>
+			<a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="header-link">github</a>
+			<a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="header-link">discord</a>
 		</div>
 	</div>
 </div>
@@ -43,18 +44,30 @@ import Search from '@astrojs/starlight/components/Search.astro';
 			justify-content: flex-end;
 		}
 
-		.right-group,
-		.social-icons {
+		.right-group {
 			gap: 1rem;
 			align-items: center;
 		}
 
+		.header-links {
+			display: flex;
+			gap: 1.5rem;
+			align-items: center;
+		}
+
+		.header-link {
+			font-size: 0.875rem;
+			font-family: monospace;
+			color: var(--sl-color-text);
+			text-decoration: none;
+			transition: color 0.2s ease;
+		}
+
+		.header-link:hover {
+			color: var(--sl-color-gray-3);
+		}
+
         .sl-flex {
             display: flex;
-        }
-        
-        .social-icons::after {
-            content: none;
-            border-inline-end: none;
         }
 </style>
