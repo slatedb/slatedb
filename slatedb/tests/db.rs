@@ -2,10 +2,10 @@
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use slatedb::admin;
 use slatedb::config::{
     CompactorOptions, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, WriteOptions,
 };
-use slatedb::admin;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
