@@ -101,11 +101,11 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
     async fn cleanup(
         &mut self,
         mut messages: BoxStream<'async_trait, WriteBatchMessage>,
-        _result: Result<(), SlateDBError>,
+        result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        // drain messages
+        let error = result.clone().err().unwrap_or(SlateDBError::Closed);
         while let Some(msg) = messages.next().await {
-            self.handle(msg).await?;
+            let _ = msg.done.send(Err(error.clone()));
         }
         Ok(())
     }

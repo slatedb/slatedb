@@ -340,8 +340,8 @@ pub(crate) trait MessageHandler<T: Send>: Send {
     /// The [Result] after handling the message.
     async fn handle(&mut self, message: T) -> Result<(), SlateDBError>;
 
-    /// Cleans up resources. This method should not be used to continue attempting to
-    /// write to the database.
+    /// Cleans up resources. This method should not be used to continue processing
+    /// messages or writing to the database.
     ///
     /// ## Arguments
     ///

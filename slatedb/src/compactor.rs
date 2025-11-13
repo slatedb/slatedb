@@ -59,7 +59,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use futures::StreamExt;
 use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
 use tracing::instrument;
@@ -352,14 +351,11 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
 
     async fn cleanup(
         &mut self,
-        mut messages: BoxStream<'async_trait, CompactorMessage>,
+        mut _messages: BoxStream<'async_trait, CompactorMessage>,
         _result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        // drain remaining messages
-        while let Some(msg) = messages.next().await {
-            self.handle(msg).await?;
-        }
-        // shutdown the executor
+        // CompactionJobFinished triggers new jobs and other msgs don't matter, so don't
+        // process any remaining messages. Just stop the executor.
         self.stop_executor().await?;
         Ok(())
     }
