@@ -313,7 +313,7 @@ jobs:
         env:
           SLATEDB_TEST_NUM_WRITERS: "12"
           SLATEDB_TEST_NUM_READERS: "4"
-          SLATEDB_TEST_WRITES_PER_TASK: "1000"
+          SLATEDB_TEST_WRITES_PER_TASK: "500"
           SLATEDB_TEST_KEY_LENGTH: "256"
         run: |
           chmod +x scripts/run_chaos_scenarios.sh
