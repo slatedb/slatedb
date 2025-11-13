@@ -52,25 +52,6 @@ MIKKMOKK_API=http://127.0.0.1:7070
 # Print a prefixed message for easier scanning in CI logs.
 log() { echo "[chaos] $*"; }
 
-# Idempotently create a Toxiproxy proxy mapping listen -> upstream.
-# Args:
-#   $1 name     : proxy name (e.g., s3)
-#   $2 listen   : listen port (e.g., 9001)
-#   $3 upstream : upstream host:port (e.g., mikkmokk:8080)
-init_toxiproxy() {
-  local name=$1
-  local listen=$2
-  local upstream=$3
-  if curl -fsS "$TOXIPROXY_API/proxies/$name" >/dev/null 2>&1; then
-    log "proxy '$name' already exists"
-  else
-    log "creating proxy '$name' -> $upstream (:$listen)"
-    curl -fsS -X POST "$TOXIPROXY_API/proxies" \
-      -H 'Content-Type: application/json' \
-      -d "{\"name\":\"$name\",\"listen\":\"0.0.0.0:$listen\",\"upstream\":\"$upstream\"}"
-  fi
-}
-
 # Globally reset all toxics/proxies via Toxiproxy. Safe here (single proxy).
 clear_toxics() {
   log "toxiproxy: resetting all proxies/toxics"
@@ -137,9 +118,6 @@ run_smoke() {
   RUST_LOG=${RUST_LOG:-info} \
   cargo test --quiet -p slatedb --test db test_concurrent_writers_and_readers -- --nocapture
 }
-
-# Initialize proxies
-init_toxiproxy s3 9001 minio:9000
 
 # Scenarios
 pass=0; fail=0
