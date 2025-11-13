@@ -119,14 +119,14 @@ clear_http_failures() {
 run_smoke() {
   local name=$1
   log "running scenario: $name"
-  # Force path-style S3 URLs to avoid virtual-hosted-style Host/SigV4 issues
-  # when routing through localhost ports and proxies (Toxiproxy + mikkmokk).
-  export AWS_S3_FORCE_PATH_STYLE=true
+  # `AWS_S3_FORCE_PATH_STYLE` is set below to avoid virtual-hosted-style Host/SigV4
+  # issues when routing through localhost ports and proxies (Toxiproxy + mikkmokk).
   CLOUD_PROVIDER=aws \
   AWS_ACCESS_KEY_ID=minioadmin \
   AWS_SECRET_ACCESS_KEY=minioadmin \
   AWS_BUCKET=slatedb-test \
   AWS_REGION=us-east-1 \
+  AWS_S3_FORCE_PATH_STYLE=true \
   AWS_ENDPOINT="http://127.0.0.1:9001" \
   RUST_LOG=${RUST_LOG:-info} \
   cargo test --quiet -p slatedb --test db test_concurrent_writers_and_readers -- --nocapture
