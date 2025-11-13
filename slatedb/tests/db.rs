@@ -1,5 +1,6 @@
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
+use backon::{ExponentialBuilder, Retryable};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use slatedb::admin;
@@ -104,13 +105,25 @@ async fn test_concurrent_writers_and_readers() {
             ..Default::default()
         },
     ));
+    // Build the DB with exponential backoff to tolerate transient object store errors.
     let db = Arc::new(
-        Db::builder("/tmp/test_concurrent_writers_readers", object_store.clone())
-            .with_settings(config)
-            .with_compaction_scheduler_supplier(supplier)
-            .build()
-            .await
-            .unwrap(),
+        (|| async {
+            Db::builder("/tmp/test_concurrent_writers_readers", object_store.clone())
+                .with_settings(config.clone())
+                .with_compaction_scheduler_supplier(supplier.clone())
+                .build()
+                .await
+        })
+        .retry(ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300))))
+        .notify(|err: &slatedb::Error, dur| {
+            log::warn!(
+                "retrying Db::build after transient error [error={:?}, elapsed={:?}]",
+                err,
+                dur
+            );
+        })
+        .await
+        .expect("failed to build DB after retries"),
     );
     let reader_cancellation_token = CancellationToken::new();
 
@@ -219,5 +232,16 @@ async fn test_concurrent_writers_and_readers() {
         .await
         .expect("Reader handles failed");
 
-    db.close().await.unwrap();
+    // Close with retries to handle transient failures on teardown.
+    (|| async { db.close().await })
+        .retry(ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300))))
+        .notify(|err: &slatedb::Error, dur| {
+            log::warn!(
+                "retrying Db::close after transient error [error={:?}, elapsed={:?}]",
+                err,
+                dur
+            );
+        })
+        .await
+        .expect("failed to close DB after retries");
 }
