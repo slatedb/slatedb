@@ -271,5 +271,22 @@ const displayStyle = isDefault ? "" : "display: none;";
         .terminal-features .features.functional-features-grid {
             grid-template-columns: 1fr;
         }
+
+        /* Make action buttons full-width on mobile */
+        .terminal-buttons {
+            flex-direction: column;
+            align-items: stretch;
+            align-self: stretch;
+            width: 100%;
+            gap: 0.75rem;
+        }
+
+        .terminal-buttons > a {
+            display: block;
+            width: 100%;
+            max-width: 100%;
+            text-align: center;
+            box-sizing: border-box; /* include 2px border in width */
+        }
     }
 </style>
