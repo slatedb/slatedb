@@ -239,8 +239,8 @@ jobs:
           completed=$((iteration - 1))
           echo "Completed $completed iteration(s) in ${SECONDS}s without failures"
 
-  toxiproxy-chaos:
-    name: Toxiproxy Chaos
+  chaos:
+    name: Chaos tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
