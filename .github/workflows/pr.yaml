@@ -257,7 +257,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y awscli jq curl
+          sudo apt-get install -y jq curl
+          sudo snap install aws-cli --classic
 
       - name: Create docker network
         run: docker network create chaos-net
