@@ -201,6 +201,7 @@ pub(crate) enum SlateDBError {
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
+    #[allow(clippy::panic)]
     fn from(_value: TransactionalObjectError) -> Self {
         // TransactionalObjectError should never be converted directly to SlateDBError. Rather,
         // users of transactional objects should write their own mappings to SlateDBError

@@ -1,72 +1,69 @@
-//! SlateDB Transactional Object
+//! # SlateDB Transactional Object
 //!
-//! This module provides generic, reusable primitives for persisting data
-//! as objects in a durable store, with optimistic concurrency control and optional
-//! epoch-based fencing.
+//! This module provides generic, reusable primitives for reading/writing an object in a durable
+//! store, with optimistic concurrency control and optional epoch-based fencing.
 //!
-//! Core types
-//! ----------
-//! - `TransactionalObjectOps<T, Id>`: A trait that defines how a transactional object should
-//!   interact with backing storage. Implementations implement some protocol for providing
+//! The main interface callers will interact with is `TransactionalObject`. A `TransactionalObject`
+//! is an in-memory register representing a view of an object stored in durable storage. Further,
+//! it supports atomic updates that are isolated from concurrent updates to durable storage.
+//! Atomicity/isolation are implemented using some protocol on the durable storage system. The
+//! specific protocol and storage system is flexible. The operations the protocol+storage system
+//! must support are defined by the `TransactionalStorageProtocol`. Callers provide an
+//! implementation of `TransactionalStorageProtocol` when creating transactional objects.
+//!
+//! ## Core types
+//! - `TransactionalStorageProtocol<T, Id>`: A trait that defines how a transactional object
+//!   interacts with backing storage. Implementations implement some protocol for providing
 //!   transactional guarantees. The trait supports reading the latest object and its version id
-//!   and writing a new version conditional on the current id.
-//! - `SequencedObjectOps<T>`: Extends TransactionalObjectOps<T, MonotonicId> by requiring that
-//!   the protocol persist objects as a series of versions with monotonically increasing IDs. This
-//!   is useful if it's important to observe earlier versions of the object.
-//! - `ObjectStoreSequencedObjectOps<T>`: Implements SequencedObjectOps<T> on Object Stores.
+//!   and writing a new version conditional on the existing stored version matching the current id.
+//! - `SequencedStorageProtocol<T>`: Extends TransactionalStorageProtocol<T, MonotonicId> by
+//!   requiring that the protocol persist objects as a series of versions with monotonically
+//!   increasing IDs. This  is useful if it's important to observe earlier versions of the object.
+//! - `ObjectStoreSequencedStorageProtocol<T>`: Implements SequencedStorageProtocol<T> on
+//!   Object Stores.
 //! - `MonotonicId`: A monotonically increasing version ID.
-//! - `SimpleTransactionalObject<T>`: In-memory view of the latest known `{ id, object }`. Supports:
-//!   - `refresh()` to load the current latest version from storage
-//!   - `update(DirtyObject<T>)` to perform a CAS write given the dirty object's version id
-//!   - `maybe_apply_update(mutator)` to loop: mutate -> write -> on conflict refresh and retry
-//! - `DirtyObject<T>`: A local, mutable candidate `{ id, value }` to be written.
+//! - `TransactionalObject`: An in-memory register that is backed by durable storage and can be
+//!   transactionally updated. Supports:
+//!     - `refresh()` to load the current latest version of the object from storage
+//!     - `update(DirtyObject<T>)` to perform a write conditional on the dirty object's version id
+//!     - `maybe_apply_update(mutator)` to loop: mutate -> write -> on conflict refresh and retry
+//! - `SimpleTransactionalObject<T>`: Implements `TransactionalObject` using a provided
+//!   `TransactionalStorageProtocol`.
 //! - `FenceableTransactionalObject<T>`: Wraps `SimpleTransactionalObject<T>` and enforces epoch
 //!   fencing for writers. On `init`, it bumps the epoch field (via provided `get_epoch`/`set_epoch`
 //!   fns) and writes that update, fencing out stale writers. Subsequent operations check the stored
 //!   epoch and return `Fenced` if the local epoch is behind.
+//! - `DirtyObject<T>`: A local, mutable candidate `{ id, value }` to be written. Callers get an
+//!   instance of `DirtyObject` by calling `TransactionalObject#prepare_dirty`. They can then apply
+//!   local mutations and persist them by calling `TransactionalObject#update`.
 //!
-//! Error semantics
-//! ---------------
+//! ## Error semantics
 //! - `ObjectVersionExists` is returned when a CAS write fails because a concurrent writer
 //!   created the target id first. Callers typically handle this by `refresh()` and retrying.
 //! - `InvalidState` may be returned when an expected record is missing or file names are
 //!   malformed.
 //!
-//! Example (Manifest)
-//! ------------------
-//! A `ManifestStore` composes `ObjectStoreSequencedObjectOps<Manifest>` with suffix `"manifest"`.
+//! ## Example (Manifest)
+//! A `ManifestStore` composes `ObjectStoreSequencedStorageProtocol<Manifest>` with suffix
+//! `"manifest"`.
 //! File names look  like `00000000000000000001.manifest`, `00000000000000000002.manifest`,
 //! etc. `StoredManifest` is a thin wrapper around `SimpleTransactionalObject<Manifest>` that adds
 //! domain-specific helpers (e.g. checkpoint calculations) and maps generic CAS conflicts to
 //! `ManifestVersionExists`.
 //!
-//! Concurrency
-//! -----------
-//! - Use `maybe_apply_update` for optimistic updates that automatically retry on conflicts.
-//! - For writers that must be fenced, initialize a `FenceableTransactionalObject` to atomically
-//!   bump the  epoch, then rely on `check_epoch` during subsequent updates.
-//!
-//! Timing and timeouts
-//! -------------------
-//! - Operations that must complete within a bounded time (like epoch bump on init) can be
-//!   wrapped with `utils::timeout`, using the provided `SystemClock`.
-//!
 //! The goal is to keep this module fully generic and free of slatedb-specific logic; For example,
 //! manifest semantics live in `manifest/store.rs` and use these primitives by delegation.
+
+pub(crate) mod object_store;
 
 use crate::clock::SystemClock;
 use crate::transactional_object::TransactionalObjectError::CallbackError;
 use crate::utils;
+use ::object_store::path::Path;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
-use futures::StreamExt;
-use log::{debug, warn};
-use object_store::path::Path;
-use object_store::Error::AlreadyExists;
-use object_store::{Error, ObjectStore, PutMode, PutOptions, PutPayload};
-use std::ops::Bound::Unbounded;
-use std::ops::{Bound, RangeBounds};
+use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,7 +74,7 @@ pub(crate) enum TransactionalObjectError {
     IoError(#[from] Arc<std::io::Error>),
 
     #[error("object store error")]
-    ObjectStoreError(#[from] object_store::Error),
+    ObjectStoreError(#[from] ::object_store::Error),
 
     #[error("object update timed out")]
     ObjectUpdateTimeout { timeout: Duration },
@@ -347,18 +344,18 @@ impl<T: Clone + Send + Sync> TransactionalObject<T>
     }
 }
 
-/// A basic transactional object that uses `TransactionalObjectOps` to provide transactional
+/// A basic transactional object that uses `TransactionalStorageProtocol` to provide transactional
 /// updates to an object.
 #[derive(Clone)]
 pub(crate) struct SimpleTransactionalObject<T, Id: Copy = MonotonicId> {
     id: Id,
     object: T,
-    ops: Arc<dyn TransactionalObjectOps<T, Id>>,
+    ops: Arc<dyn TransactionalStorageProtocol<T, Id>>,
 }
 
 impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
     pub(crate) async fn init(
-        store: Arc<dyn TransactionalObjectOps<T, Id>>,
+        store: Arc<dyn TransactionalStorageProtocol<T, Id>>,
         value: T,
     ) -> Result<SimpleTransactionalObject<T, Id>, TransactionalObjectError> {
         let id = store.write(None, &value).await?;
@@ -369,7 +366,7 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
         })
     }
 
-    /// Attempts to load the latest object using the given `TransactionalObjectOps`.
+    /// Attempts to load the latest object using the given `TransactionalStorageProtocol`.
     ///
     /// Returns `Ok(Some(SimpleTransactionalObject<T>))` when an object exists, or `Ok(None)` when
     /// no object is present in the store. This method does not create any new
@@ -379,7 +376,7 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
     /// For a variant that treats a missing record as an error, use [`load`], which
     /// maps the absence of a record to `TransactionalObjectError::LatestRecordMissing`.
     pub(crate) async fn try_load(
-        store: Arc<dyn TransactionalObjectOps<T, Id>>,
+        store: Arc<dyn TransactionalStorageProtocol<T, Id>>,
     ) -> Result<Option<SimpleTransactionalObject<T, Id>>, TransactionalObjectError> {
         let Some((id, val)) = store.try_read_latest().await? else {
             return Ok(None);
@@ -391,12 +388,12 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
         }))
     }
 
-    /// Load the current object using the supplied `TransactionalObjectOps`. If successful,
+    /// Load the current object using the supplied `TransactionalStorageProtocol`. If successful,
     /// this method returns a [`Result`] with an instance of [`SimpleTransactionalObject`].
     /// If no objects could be found, the error [`LatestRecordMissing`] is returned.
     #[allow(dead_code)]
     pub(crate) async fn load(
-        store: Arc<dyn TransactionalObjectOps<T, Id>>,
+        store: Arc<dyn TransactionalStorageProtocol<T, Id>>,
     ) -> Result<SimpleTransactionalObject<T, Id>, TransactionalObjectError> {
         Self::try_load(store)
             .await?
@@ -447,7 +444,7 @@ impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalOb
 /// the expected latest version ID and fail if the current version ID in durable storage does not
 /// match.
 #[async_trait]
-pub(crate) trait TransactionalObjectOps<T, Id: Copy>: Send + Sync {
+pub(crate) trait TransactionalStorageProtocol<T, Id: Copy>: Send + Sync {
     /// Write the object given the expected current version ID. If the version ID is None then
     /// `write` expects that no object currently exists in durable storage. If the version condition
     /// fails then this fn returns `ObjectVersionExists`
@@ -462,17 +459,19 @@ pub(crate) trait TransactionalObjectOps<T, Id: Copy>: Send + Sync {
     async fn try_read_latest(&self) -> Result<Option<(Id, T)>, TransactionalObjectError>;
 }
 
-/// Extends TransactionalObjectOps<T, MonotonicId> by requiring that the protocol persist objects
+/// Extends TransactionalStorageProtocol<T, MonotonicId> by requiring that the protocol persist objects
 /// as a series of versions with monotonically increasing IDs. This is useful if it's important to
 /// observe earlier versions of the object.
 #[async_trait]
-pub(crate) trait SequencedObjectOps<T>: TransactionalObjectOps<T, MonotonicId> {
+pub(crate) trait SequencedStorageProtocol<T>:
+    TransactionalStorageProtocol<T, MonotonicId>
+{
     async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError>;
 
     async fn list(
         &self,
         // use explicit from/to params here because RangeBounds is not object safe (so can't use
-        // &dyn), and leaving the bound type as a type-parameter makes SequencedObjectOps not
+        // &dyn), and leaving the bound type as a type-parameter makes SequencedStorageProtocol not
         // object-safe
         from: Bound<MonotonicId>,
         to: Bound<MonotonicId>,
@@ -481,185 +480,28 @@ pub(crate) trait SequencedObjectOps<T>: TransactionalObjectOps<T, MonotonicId> {
     async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
 }
 
-/// Implements `SequencedObjectOps<T>` on object storage.
-///
-/// File layout and naming
-/// ----------------------
-/// - Objects are stored under a root directory and logical subdirectory provided at
-///   construction time (see `ObjectStoreSequencedObjectOps::new`).
-/// - Each version is a single file whose name is a zero-padded 20-digit decimal id
-///   followed by a fixed suffix, e.g. `00000000000000000001.manifest`.
-/// - New versions must use the next consecutive id (`current_id + 1`).
-/// - We rely on `put_if_not_exists` to enforce CAS at the storage layer. If a file with
-///   the same id already exists, the write fails with `ObjectVersionExists`.
-pub(crate) struct ObjectStoreSequencedObjectOps<T> {
-    object_store: Box<dyn ObjectStore>,
-    codec: Box<dyn ObjectCodec<T>>,
-    file_suffix: &'static str,
-}
-
-impl<T> ObjectStoreSequencedObjectOps<T> {
-    pub(crate) fn new(
-        root_path: &Path,
-        object_store: Arc<dyn ObjectStore>,
-        subdir: &str,
-        file_suffix: &'static str,
-        codec: Box<dyn ObjectCodec<T>>,
-    ) -> Self {
-        Self {
-            object_store: Box::new(object_store::prefix::PrefixStore::new(
-                object_store,
-                root_path.child(subdir),
-            )),
-            codec,
-            file_suffix,
-        }
-    }
-
-    fn path_for(&self, id: MonotonicId) -> Path {
-        Path::from(format!("{:020}.{}", id.id(), self.file_suffix))
-    }
-
-    fn parse_id(&self, path: &Path) -> Result<MonotonicId, TransactionalObjectError> {
-        match path.extension() {
-            Some(ext) if ext == self.file_suffix => path
-                .filename()
-                .expect("invalid filename")
-                .split('.')
-                .next()
-                .ok_or_else(|| TransactionalObjectError::InvalidState)?
-                .parse()
-                .map(MonotonicId::new)
-                .map_err(|_| TransactionalObjectError::InvalidState),
-            _ => Err(TransactionalObjectError::InvalidState),
-        }
-    }
-}
-
-#[async_trait]
-impl<T: Send + Sync> TransactionalObjectOps<T, MonotonicId> for ObjectStoreSequencedObjectOps<T> {
-    async fn write(
-        &self,
-        current_id: Option<MonotonicId>,
-        new_value: &T,
-    ) -> Result<MonotonicId, TransactionalObjectError> {
-        let id = current_id
-            .map(|id| id.next())
-            .unwrap_or(MonotonicId::initial());
-        let path = self.path_for(id);
-        self.object_store
-            .put_opts(
-                &path,
-                PutPayload::from_bytes(self.codec.encode(new_value)),
-                PutOptions::from(PutMode::Create),
-            )
-            .await
-            .map_err(|err| {
-                if let AlreadyExists { path: _, source: _ } = err {
-                    TransactionalObjectError::ObjectVersionExists
-                } else {
-                    TransactionalObjectError::from(err)
-                }
-            })?;
-        Ok(id)
-    }
-
-    async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
-        let files = self.list(Unbounded, Unbounded).await?;
-        if let Some(file) = files.last() {
-            return self
-                .try_read(file.id)
-                .await
-                .map(|opt| opt.map(|v| (file.id, v)));
-        }
-        Ok(None)
-    }
-}
-
-#[async_trait]
-impl<T: Send + Sync> SequencedObjectOps<T> for ObjectStoreSequencedObjectOps<T> {
-    async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError> {
-        let path = self.path_for(id);
-        match self.object_store.get(&path).await {
-            Ok(obj) => match obj.bytes().await {
-                Ok(bytes) => self
-                    .codec
-                    .decode(&bytes)
-                    .map(Some)
-                    .map_err(|e| CallbackError(e)),
-                Err(e) => Err(TransactionalObjectError::from(e)),
-            },
-            Err(e) => match e {
-                Error::NotFound { .. } => Ok(None),
-                _ => Err(TransactionalObjectError::from(e)),
-            },
-        }
-    }
-
-    // List files for this object type within an id range
-    async fn list(
-        &self,
-        from: Bound<MonotonicId>,
-        to: Bound<MonotonicId>,
-    ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
-        let base = &Path::from("/");
-        let mut files_stream = self.object_store.list(Some(base));
-        let mut items = Vec::new();
-        while let Some(file) = match files_stream.next().await.transpose() {
-            Ok(file) => file,
-            Err(e) => return Err(TransactionalObjectError::from(e)),
-        } {
-            let id_range = (from, to);
-            match self.parse_id(&file.location) {
-                Ok(id) if id_range.contains(&id) => {
-                    items.push(GenericObjectMetadata {
-                        id,
-                        location: file.location,
-                        last_modified: file.last_modified,
-                        size: file.size as u32,
-                    });
-                }
-                Err(_) => warn!("unknown file in directory [location={:?}]", file.location),
-                _ => {}
-            }
-        }
-        items.sort_by_key(|m| m.id);
-        Ok(items)
-    }
-
-    // Delete a specific versioned file (no additional validation)
-    async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
-        let path = self.path_for(id);
-        debug!("deleting object [record_path={}]", path);
-        self.object_store
-            .delete(&path)
-            .await
-            .map_err(TransactionalObjectError::from)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::clock::DefaultSystemClock;
+    use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
     use crate::transactional_object::TransactionalObjectError;
     use crate::transactional_object::{
-        FenceableTransactionalObject, MonotonicId, ObjectCodec, ObjectStoreSequencedObjectOps,
-        SequencedObjectOps, SimpleTransactionalObject, TransactionalObject, TransactionalObjectOps,
+        FenceableTransactionalObject, MonotonicId, ObjectCodec, SimpleTransactionalObject,
+        TransactionalObject, TransactionalStorageProtocol,
     };
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use std::ops::Bound::{Excluded, Included, Unbounded};
     use std::sync::Arc;
     use tokio::time::Duration as TokioDuration;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
-    struct TestVal {
-        epoch: u64,
-        payload: u64,
+    pub(in crate::transactional_object) struct TestVal {
+        pub(in crate::transactional_object) epoch: u64,
+        pub(in crate::transactional_object) payload: u64,
     }
 
-    struct TestValCodec;
+    pub(in crate::transactional_object) struct TestValCodec;
 
     impl ObjectCodec<TestVal> for TestValCodec {
         fn encode(&self, value: &TestVal) -> Bytes {
@@ -688,9 +530,10 @@ mod tests {
         }
     }
 
-    fn new_store() -> Arc<ObjectStoreSequencedObjectOps<TestVal>> {
+    pub(in crate::transactional_object) fn new_store(
+    ) -> Arc<ObjectStoreSequencedStorageProtocol<TestVal>> {
         let os = Arc::new(InMemory::new());
-        Arc::new(ObjectStoreSequencedObjectOps::new(
+        Arc::new(ObjectStoreSequencedStorageProtocol::new(
             &Path::from("/root"),
             os,
             "test",
@@ -703,7 +546,7 @@ mod tests {
     async fn test_init_write_and_read_latest() {
         let store = new_store();
         let mut sr = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
             TestVal {
                 epoch: 0,
                 payload: 1,
@@ -752,7 +595,7 @@ mod tests {
     async fn test_update_dirty_version_conflict() {
         let store = new_store();
         let mut a = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
             TestVal {
                 epoch: 0,
                 payload: 10,
@@ -766,7 +609,7 @@ mod tests {
         let mut b: SimpleTransactionalObject<TestVal> = SimpleTransactionalObject {
             id: id_b,
             object: val_b,
-            ops: Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
+            ops: Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
         };
 
         // A updates first
@@ -799,46 +642,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_ranges_sorted() {
-        let store = new_store();
-        let mut sr = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
-            TestVal {
-                epoch: 0,
-                payload: 1,
-            },
-        )
-        .await
-        .unwrap();
-        for p in 2..=4u64 {
-            let mut dirty = sr.prepare_dirty().unwrap();
-            dirty.value = TestVal {
-                epoch: 0,
-                payload: p,
-            };
-            sr.update(dirty).await.unwrap();
-        }
-
-        let all = store.list(Unbounded, Unbounded).await.unwrap();
-        assert_eq!(4, all.len());
-        assert!(all.windows(2).all(|w| w[0].id < w[1].id));
-
-        let right_bounded = store.list(Unbounded, Excluded(3.into())).await.unwrap();
-        assert_eq!(2, right_bounded.len());
-        assert_eq!(1, right_bounded[0].id);
-        assert_eq!(2, right_bounded[1].id);
-
-        let left_bounded = store.list(Included(3.into()), Unbounded).await.unwrap();
-        assert_eq!(2, left_bounded.len());
-        assert_eq!(3, left_bounded[0].id);
-        assert_eq!(4, left_bounded[1].id);
-    }
-
-    #[tokio::test]
     async fn test_update_dirty_id_mismatch_errors() {
         let store = new_store();
         let sr = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
             TestVal {
                 epoch: 0,
                 payload: 1,
@@ -866,7 +673,7 @@ mod tests {
         let store = new_store();
         // initial record
         let sr = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
             TestVal {
                 epoch: 0,
                 payload: 0,
@@ -894,7 +701,7 @@ mod tests {
         let sb = SimpleTransactionalObject {
             id: id_b,
             object: val_b,
-            ops: Arc::clone(&store) as Arc<dyn TransactionalObjectOps<TestVal, MonotonicId>>,
+            ops: Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
         };
         let mut fb = FenceableTransactionalObject::init(
             sb,
