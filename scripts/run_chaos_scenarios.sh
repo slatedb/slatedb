@@ -2,6 +2,7 @@
 set -euo pipefail
 
 # Env: expects MinIO, Envoy and Toxiproxy containers running and mapped to localhost
+# Traffic flow is: SlateDB -> mikkmokk-proxy -> Toxiproxy -> MinIO
 # - MinIO S3:       localhost:9000
 # - mikkmokk-proxy: localhost:8080 (proxies to minio:9000)
 # - Toxiproxy API:  localhost:8474
@@ -27,13 +28,8 @@ create_proxy() {
 }
 
 clear_toxics() {
-  local name=$1
-  # list toxics
-  local toxics=$(curl -fsS "$API/proxies/$name/toxics" | jq -r '.[].name')
-  for t in $toxics; do
-    log "removing toxic $t"
-    curl -fsS -X DELETE "$API/proxies/$name/toxics/$t" >/dev/null
-  done
+  log "toxiproxy: resetting all proxies/toxics"
+  curl -fsS -X POST "$API/reset" >/dev/null
 }
 
 add_toxic() {
@@ -42,10 +38,11 @@ add_toxic() {
   local type=$1; shift
   local stream=$1; shift
   local attrs_json=$1; shift
-  log "adding toxic $toxic_name ($type/$stream) attrs=$attrs_json"
+  local toxicity=${1:-1.0}
+  log "adding toxic $toxic_name ($type/$stream) toxicity=$toxicity attrs=$attrs_json"
   curl -fsS -X POST "$API/proxies/$name/toxics" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$toxic_name\",\"type\":\"$type\",\"stream\":\"$stream\",\"toxicity\":1.0,\"attributes\":$attrs_json}"
+    -d "{\"name\":\"$toxic_name\",\"type\":\"$type\",\"stream\":\"$stream\",\"toxicity\":$toxicity,\"attributes\":$attrs_json}"
 }
 
 mikkmokk_update_fail_before() {
@@ -99,32 +96,32 @@ baseline() {
 
 latency_jitter() {
   clear_toxics s3; mikkmokk_reset
-  add_toxic s3 t_latency latency downstream '{"latency":1000,"jitter":300}'
-  add_toxic s3 t_latency_up latency upstream '{"latency":600,"jitter":200}'
+  add_toxic s3 t_latency latency downstream '{"latency":1000,"jitter":300}' 1.0
+  add_toxic s3 t_latency_up latency upstream '{"latency":600,"jitter":200}' 1.0
   run_smoke latency_jitter
 }
 
 bandwidth_cap() {
   clear_toxics s3; mikkmokk_reset
-  add_toxic s3 t_bw bandwidth downstream '{"rate":200}'
+  add_toxic s3 t_bw bandwidth downstream '{"rate":200}' 1.0
   run_smoke bandwidth_cap
 }
 
 reset_peer() {
   clear_toxics s3; mikkmokk_reset
-  add_toxic s3 t_reset reset_peer downstream '{}'
+  add_toxic s3 t_reset reset_peer downstream '{}' 0.15
   run_smoke reset_peer
 }
 
 slow_close() {
   clear_toxics s3; mikkmokk_reset
-  add_toxic s3 t_slow slow_close downstream '{"delay":2000}'
+  add_toxic s3 t_slow slow_close downstream '{"delay":2000}' 0.3
   run_smoke slow_close
 }
 
 timeoutish() {
   clear_toxics s3; mikkmokk_reset
-  add_toxic s3 t_timeout latency downstream '{"latency":3000}'
+  add_toxic s3 t_timeout latency downstream '{"latency":3000}' 0.35
   run_smoke timeoutish
 }
 
