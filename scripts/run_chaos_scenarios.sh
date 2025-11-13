@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # SlateDB Chaos Scenarios Runner
-# --------------------------------
+#
 # Orchestrates network- and HTTP-level chaos to validate SlateDB resilience against
 # latency, bandwidth constraints, TCP failures, and transient HTTP error responses.
 #
@@ -13,18 +13,29 @@
 # Local bindings used by this script:
 # - mikkmokk-proxy HTTP: localhost:8080 (for Toxiproxy upstream)
 # - mikkmokk-proxy admin: localhost:7070 (runtime fault config)
-# - Toxiproxy API       : localhost:8474
-# - Toxiproxy S3 proxy  : localhost:9001
+# - Toxiproxy API: localhost:8474
+# - Toxiproxy S3 proxy: localhost:9001
 #
 # Data path:
 #   SlateDB -> Toxiproxy (localhost:9001) -> mikkmokk-proxy:8080 -> MinIO:9000
 #
+# Scenarios executed by this script:
+# - baseline: No HTTP or TCP faults (green path).
+# - latency_jitter: Add latency with jitter both ways.
+# - bandwidth_cap: Cap downstream bandwidth to ~200 kbps.
+# - reset_peer: Intermittent downstream TCP resets.
+# - slow_close: Delay downstream TCP close by ~2000ms.
+# - timeoutish: Large downstream latency (~3000ms).
+# - http_500s: ~10% fail-before responses with HTTP 500 (transient server errors).
+# - http_404s: ~5% fail-before responses with HTTP 404 (transient missing paths/keys).
+# - http_429s: ~5% fail-before responses with HTTP 429 (transient throttling).
+#
 # Environment variables respected:
-# - SLATEDB_TEST_NUM_WRITERS     : Number of writer tasks (default: 10)
-# - SLATEDB_TEST_NUM_READERS     : Number of concurrent reader tasks (default: 2)
-# - SLATEDB_TEST_WRITES_PER_TASK : Writes per writer task (default: 100)
-# - SLATEDB_TEST_KEY_LENGTH      : Key length in bytes for padded keys (default: 256)
-# - RUST_LOG                     : Optional logging level for the test (default: info)
+# - SLATEDB_TEST_NUM_WRITERS: Number of writer tasks (default: 10)
+# - SLATEDB_TEST_NUM_READERS: Number of concurrent reader tasks (default: 2)
+# - SLATEDB_TEST_WRITES_PER_TASK: Writes per writer task (default: 100)
+# - SLATEDB_TEST_KEY_LENGTH: Key length in bytes for padded keys (default: 256)
+# - RUST_LOG: Optional logging level for the test (default: info)
 #
 # Exit behavior: prints a summary and returns non-zero if any scenario failed.
 
