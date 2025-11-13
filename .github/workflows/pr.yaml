@@ -266,7 +266,7 @@ jobs:
       - name: Start MinIO
         run: |
           docker run -d --name minio --network chaos-net \
-            -p 9000:9000 -p 9001:9001 \
+            -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
             minio/minio server /data --console-address :9001
