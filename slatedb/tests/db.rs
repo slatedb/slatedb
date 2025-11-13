@@ -106,6 +106,9 @@ async fn test_concurrent_writers_and_readers() {
         },
     ));
     // Build the DB with exponential backoff to tolerate transient object store errors.
+    let retry_builder = ExponentialBuilder::default()
+        .with_total_delay(Some(Duration::from_secs(300)))
+        .without_max_times();
     let db = Arc::new(
         (|| async {
             Db::builder("/tmp/test_concurrent_writers_readers", object_store.clone())
@@ -115,13 +118,6 @@ async fn test_concurrent_writers_and_readers() {
                 .await
         })
         .retry(ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300))))
-        .notify(|err: &slatedb::Error, dur| {
-            log::warn!(
-                "retrying Db::build after transient error [error={:?}, elapsed={:?}]",
-                err,
-                dur
-            );
-        })
         .await
         .expect("failed to build DB after retries"),
     );
@@ -234,14 +230,7 @@ async fn test_concurrent_writers_and_readers() {
 
     // Close with retries to handle transient failures on teardown.
     (|| async { db.close().await })
-        .retry(ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300))))
-        .notify(|err: &slatedb::Error, dur| {
-            log::warn!(
-                "retrying Db::close after transient error [error={:?}, elapsed={:?}]",
-                err,
-                dur
-            );
-        })
+        .retry(retry_builder)
         .await
         .expect("failed to close DB after retries");
 }
