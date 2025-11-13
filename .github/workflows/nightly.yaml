@@ -249,7 +249,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y awscli jq curl
+          sudo apt-get install -y jq curl
+          sudo snap install aws-cli --classic
 
       - name: Create docker network
         run: docker network create chaos-net
@@ -257,7 +258,7 @@ jobs:
       - name: Start MinIO
         run: |
           docker run -d --name minio --network chaos-net \
-            -p 9000:9000 -p 9001:9001 \
+            -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
             minio/minio server /data --console-address :9001
@@ -291,11 +292,12 @@ jobs:
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
           AWS_REGION: us-east-1
+          AWS_S3_FORCE_PATH_STYLE: "true"
         run: |
-          # Create proxy to Envoy (if not exists)
+          # Create proxy if not exists (TCP-level path only)
           curl -sf -X POST http://127.0.0.1:8474/proxies \
             -H 'Content-Type: application/json' \
-            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"mikkmokk:8080"}' || true
+            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"minio:9000"}' || true
           # Create bucket via the proxied endpoint
           aws --endpoint-url http://127.0.0.1:9001 s3api create-bucket --bucket slatedb-test || true
 

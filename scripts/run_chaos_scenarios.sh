@@ -11,13 +11,16 @@
 # - Toxiproxy (TCP faults): API on 8474
 #
 # Local bindings used by this script:
-# - mikkmokk-proxy HTTP: localhost:8080 (for Toxiproxy upstream)
-# - mikkmokk-proxy admin: localhost:7070 (runtime fault config)
-# - Toxiproxy API: localhost:8474
-# - Toxiproxy S3 proxy: localhost:9001
+# - mikkmokk-proxy S3: localhost:8080
+# - mikkmokk-proxy admin API: localhost:7070
+# - Toxiproxy S3: localhost:9001 -> MinIO:9000
+# - Toxiproxy admin API: localhost:8474
 #
 # Data path:
-#   SlateDB -> Toxiproxy (localhost:9001) -> mikkmokk-proxy:8080 -> MinIO:9000
+#   TCP-level scenarios:
+#     SlateDB -> Toxiproxy (localhost:9001) -> MinIO:9000
+#   HTTP-level scenarios (fail-before only):
+#     SlateDB -> mikkmokk-proxy (localhost:8080) -> MinIO:9000
 #
 # Scenarios executed by this script:
 # - baseline: No HTTP or TCP faults (green path).
@@ -41,7 +44,9 @@
 
 set -euo pipefail
 
+TOXIPROXY_S3=http://127.0.0.1:9001
 TOXIPROXY_API=http://127.0.0.1:8474
+MIKKMOKK_S3=http://127.0.0.1:8080
 MIKKMOKK_API=http://127.0.0.1:7070
 
 # Print a prefixed message for easier scanning in CI logs.
@@ -118,7 +123,8 @@ clear_http_failures() {
 #   $1 name : scenario label for logging
 run_smoke() {
   local name=$1
-  log "running scenario: $name"
+  local endpoint=$2
+  log "running scenario: $name (endpoint=$endpoint)"
   # `AWS_S3_FORCE_PATH_STYLE` is set below to avoid virtual-hosted-style Host/SigV4
   # issues when routing through localhost ports and proxies (Toxiproxy + mikkmokk).
   CLOUD_PROVIDER=aws \
@@ -127,13 +133,13 @@ run_smoke() {
   AWS_BUCKET=slatedb-test \
   AWS_REGION=us-east-1 \
   AWS_S3_FORCE_PATH_STYLE=true \
-  AWS_ENDPOINT="http://127.0.0.1:9001" \
+  AWS_ENDPOINT="$endpoint" \
   RUST_LOG=${RUST_LOG:-info} \
   cargo test --quiet -p slatedb --test db test_concurrent_writers_and_readers -- --nocapture
 }
 
 # Initialize proxies
-init_toxiproxy s3 9001 mikkmokk:8080
+init_toxiproxy s3 9001 minio:9000
 
 # Scenarios
 pass=0; fail=0
@@ -155,7 +161,7 @@ scenario() {
 
 # No HTTP faults, no TCP faults (green path).
 baseline() {
-  clear_toxics s3; clear_http_failures; run_smoke baseline
+  clear_toxics s3; clear_http_failures; run_smoke baseline "$TOXIPROXY_S3"
 }
 
 # Add high latency + jitter both directions; HTTP faults disabled.
@@ -163,53 +169,53 @@ latency_jitter() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_latency latency downstream '{"latency":1000,"jitter":300}' 1.0
   add_toxic s3 t_latency_up latency upstream '{"latency":600,"jitter":200}' 1.0
-  run_smoke latency_jitter
+  run_smoke latency_jitter "$TOXIPROXY_S3"
 }
 
 # Limit downstream bandwidth to 200 kbps.
 bandwidth_cap() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_bw bandwidth downstream '{"rate":200}' 1.0
-  run_smoke bandwidth_cap
+  run_smoke bandwidth_cap "$TOXIPROXY_S3"
 }
 
 # Inject intermittent TCP RST on downstream (15% of connections).
 reset_peer() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_reset reset_peer downstream '{}' 0.15
-  run_smoke reset_peer
+  run_smoke reset_peer "$TOXIPROXY_S3"
 }
 
 # Delay TCP close on downstream (30% of connections).
 slow_close() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_slow slow_close downstream '{"delay":2000}' 0.3
-  run_smoke slow_close
+  run_smoke slow_close "$TOXIPROXY_S3"
 }
 
 # Large downstream latency (3s) affecting ~35% of connections.
 timeoutish() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_timeout latency downstream '{"latency":3000}' 0.35
-  run_smoke timeoutish
+  run_smoke timeoutish "$TOXIPROXY_S3"
 }
 
 # 10% fail-before with HTTP 500 (transient server errors).
 http_500s() {
   clear_toxics s3; add_http_failure 10 500
-  run_smoke http_500s
+  run_smoke http_500s "$MIKKMOKK_S3"
 }
 
 # 5% fail-before with HTTP 404 (transient missing paths/keys).
 http_404s() {
   clear_toxics s3; add_http_failure 5 404
-  run_smoke http_404s
+  run_smoke http_404s "$MIKKMOKK_S3"
 }
 
 # 5% fail-before with HTTP 429 (transient throttling).
 http_429s() {
   clear_toxics s3; add_http_failure 5 429
-  run_smoke http_429s
+  run_smoke http_429s "$MIKKMOKK_S3"
 }
 
 # Execute

@@ -301,10 +301,10 @@ jobs:
           AWS_SECRET_ACCESS_KEY: minioadmin
           AWS_REGION: us-east-1
         run: |
-          # Create proxy to Envoy (if not exists)
+          # Create s3 toxiproxy if not exist (TCP-level path only)
           curl -sf -X POST http://127.0.0.1:8474/proxies \
             -H 'Content-Type: application/json' \
-            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"mikkmokk:8080"}' || true
+            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"minio:9000"}' || true
           # Create bucket via the proxied endpoint
           aws --endpoint-url http://127.0.0.1:9001 s3api create-bucket --bucket slatedb-test || true
 
