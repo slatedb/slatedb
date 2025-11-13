@@ -1,0 +1,64 @@
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901
+
+static_resources:
+  listeners:
+  - name: s3_listener
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 8080
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: s3_hcm
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: s3
+              domains: ["*"]
+              routes:
+              - match: { prefix: "/" }
+                route: { cluster: s3_cluster }
+          http_filters:
+          - name: envoy.filters.http.fault
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault
+              # Delay settings (disabled by default, controlled via runtime)
+              delay:
+                fixed_delay: { seconds: 0 }
+                percentage:
+                  numerator: 0
+                  denominator: HUNDRED
+                header_delay: false
+              abort:
+                http_status: 503
+                percentage:
+                  numerator: 0
+                  denominator: HUNDRED
+              # Runtime keys to adjust behavior live from admin
+              # Set via: curl -X POST localhost:9901/runtime_modify -d 'fault.http.abort.abort_percent:10' -d 'fault.http.abort.http_status:500'
+              #          curl -X POST localhost:9901/runtime_modify -d 'fault.http.delay.fixed_delay_percent:20' -d 'fault.http.delay.fixed_duration_ms:500'
+              runtime_enabled: { default_value: true, runtime_key: fault.http.enable }
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+  - name: s3_cluster
+    connect_timeout: 5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: s3_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: minio
+                port_value: 9000

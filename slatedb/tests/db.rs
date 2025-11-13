@@ -5,6 +5,7 @@ use rand::{Rng, SeedableRng};
 use slatedb::config::{
     CompactorOptions, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, WriteOptions,
 };
+use slatedb::admin;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -26,10 +27,22 @@ async fn test_concurrent_writers_and_readers() {
         .with_test_writer()
         .init();
 
-    const NUM_WRITERS: usize = 10;
-    const NUM_READERS: usize = 2;
-    const WRITES_PER_TASK: usize = 100;
-    const KEY_LENGTH: usize = 256;
+    let num_writers: usize = std::env::var("SLATEDB_TEST_NUM_WRITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    let num_readers: usize = std::env::var("SLATEDB_TEST_NUM_READERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+    let writes_per_task: usize = std::env::var("SLATEDB_TEST_WRITES_PER_TASK")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
+    let key_length: usize = std::env::var("SLATEDB_TEST_KEY_LENGTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
 
     // Pad keys to allow us to control how many blocks we take up
     // Since block size is not configurable
@@ -40,8 +53,12 @@ async fn test_concurrent_writers_and_readers() {
         padded_key
     }
 
-    // Create an InMemory object store and DB
-    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let object_store: Arc<dyn ObjectStore> = if let Ok(provider) = std::env::var("CLOUD_PROVIDER") {
+        log::info!("Using object store from env (CLOUD_PROVIDER={})", provider);
+        admin::load_object_store_from_env(None).expect("failed to load object store from env")
+    } else {
+        Arc::new(InMemory::new()) as Arc<dyn ObjectStore>
+    };
     let config = Settings {
         flush_interval: Some(Duration::from_millis(100)),
         manifest_poll_interval: Duration::from_millis(100),
@@ -74,12 +91,12 @@ async fn test_concurrent_writers_and_readers() {
     let reader_cancellation_token = CancellationToken::new();
 
     // Writer tasks: each writer writes to its own key with incrementing values
-    let writer_handles = (0..NUM_WRITERS)
+    let writer_handles = (0..num_writers)
         .map(|writer_id| {
             let db = db.clone();
             tokio::spawn(async move {
-                let key = zero_pad_key(writer_id.try_into().unwrap(), KEY_LENGTH);
-                for i in 1..=WRITES_PER_TASK {
+                let key = zero_pad_key(writer_id.try_into().unwrap(), key_length);
+                for i in 1..=writes_per_task {
                     // Write the incremented value
                     db.put_with_options(
                         &key,
@@ -96,12 +113,14 @@ async fn test_concurrent_writers_and_readers() {
                         log::info!("wrote values [writer_id={}, write_count={}]", writer_id, i);
                     }
                 }
+                // Flush to ensure all writes are durable before returning
+                db.flush().await.expect("Failed to flush");
             })
         })
         .collect::<Vec<_>>();
 
     // Reader tasks: each reader reads all keys and verifies values are increasing
-    let reader_handles = (0..NUM_READERS)
+    let reader_handles = (0..num_readers)
         .map(|reader_id| {
             let db = db.clone();
             let reader_cancellation_token = reader_cancellation_token.clone();
@@ -113,9 +132,9 @@ async fn test_concurrent_writers_and_readers() {
 
                 while !reader_cancellation_token.is_cancelled() {
                     // Pick a random key and validate that it's higher than the last value for that key
-                    let key = rng.random_range(0..NUM_WRITERS);
+                    let key = rng.random_range(0..num_writers);
                     if let Some(bytes) = db
-                        .get(zero_pad_key(key.try_into().unwrap(), KEY_LENGTH))
+                        .get(zero_pad_key(key.try_into().unwrap(), key_length))
                         .await?
                     {
                         // Convert bytes to u64 value

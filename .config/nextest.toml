@@ -28,3 +28,11 @@ default-filter = "package(slatedb-dst) & test(test_dst_nightly)"
 [[profile.dst-nightly.scripts]]
 filter = "all()"
 run-wrapper = "backtrace-on-timeout"
+
+# Nightly Chaos profile
+[profile.chaos-nightly]
+slow-timeout = { period = "10m", terminate-after = 1 }
+
+[[profile.chaos-nightly.scripts]]
+filter = "all()"
+run-wrapper = "backtrace-on-timeout"
