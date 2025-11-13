@@ -47,7 +47,7 @@
 //! A `ManifestStore` composes `RecordStore<Manifest>` with suffix `"manifest"`. File names look
 //! like `00000000000000000001.manifest`, `00000000000000000002.manifest`, etc. `StoredManifest`
 //! is a thin wrapper around `StoredRecord<Manifest>` that adds domain-specific helpers (e.g.
-//! checkpoint calculations) and maps generic CAS conflicts to `ManifestVersionExists`.
+//! checkpoint calculations) and maps generic CAS conflicts to `FileVersionExists`.
 //!
 //! Concurrency
 //! -----------

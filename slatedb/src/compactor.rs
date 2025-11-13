@@ -481,7 +481,7 @@ impl CompactorEventHandler {
             self.load_manifest().await?;
             match self.write_manifest().await {
                 Ok(_) => return Ok(()),
-                Err(SlateDBError::ManifestVersionExists) => {
+                Err(SlateDBError::FileVersionExists) => {
                     debug!("conflicting manifest version. updating and retrying write again.");
                 }
                 Err(err) => return Err(err),
