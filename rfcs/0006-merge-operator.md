@@ -118,23 +118,19 @@ trait MergeOperator {
 
     pub fn merge_batch(
         &self,
+        key: &Bytes,
         existing_value: Option<Bytes>,
         operands: &[Bytes],
     ) -> Result<Bytes, MergeOperatorError> {
         // Default implementation: pairwise merging (backward compatible)
         let mut result = existing_value;
         for operand in operands {
-            result = Some(self.merge(&Bytes::new(), result, operand.clone())?);
+            result = Some(self.merge(key, result, operand.clone())?);
         }
         result.ok_or(MergeOperatorError::EmptyBatch)
     }
 }
 ```
-
-**Performance Benefits**: The `merge_batch` method enables significant performance improvements:
-- **Reduced function call overhead**: For 10,000 operands, this results in ~100 `merge_batch()` calls instead of 10,000 `merge()` calls
-- **User optimization**: Implementations can override `merge_batch()` to perform O(1) batch operations (e.g., a counter can sum all operands at once)
-- **Backward compatible**: The default implementation maintains existing behavior
 
 Initially, the implementation is limited to a single optional merge operator per database. The user must ensure that both the compactor and writer use the same merge operator to guarantee correct results.
 
@@ -176,28 +172,36 @@ impl MergeOperator for MyMergeOperator {
     // Optional: Override merge_batch for better performance
     fn merge_batch(
         &self,
+        key: &Bytes,
         existing_value: Option<Bytes>,
         operands: &[Bytes],
     ) -> Result<Bytes, MergeOperatorError> {
-        // For counters, we can sum all operands at once (O(1) instead of O(N))
-        if operands.is_empty() {
-            return existing_value.ok_or(MergeOperatorError::EmptyBatch);
+        if key.starts_with(b"counter:") {
+            // For counters, we can sum all operands at once (O(1) instead of O(N))
+            let sum = existing_value
+                .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
+                .unwrap_or(0)
+                + operands.iter()
+                    .map(|b| u64::from_le_bytes(b.as_ref().try_into().unwrap()))
+                    .sum::<u64>();
+            Ok(Bytes::copy_from_slice(&sum.to_le_bytes()))
+        } else {
+            // For other prefixes, use default pairwise merging
+            let mut result = existing_value;
+            for operand in operands {
+                result = Some(self.merge(key, result, operand.clone())?);
+            }
+            result.ok_or(MergeOperatorError::EmptyBatch)
         }
-        
-        // Assume all operands are for the same key prefix
-        // (In practice, you'd check the key, but it's not passed to merge_batch)
-        let sum = existing_value
-            .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
-            .unwrap_or(0)
-            + operands.iter()
-                .map(|b| u64::from_le_bytes(b.as_ref().try_into().unwrap()))
-                .sum::<u64>();
-        Ok(Bytes::copy_from_slice(&sum.to_le_bytes()))
     }
 }
 ```
 
 It's **user's responsibility to ensure** that the merge operator is correctly implemented and **the same instance of the operator is used across all components** (compactor, writer, garbage collector).
+
+#### Performance Optimization: Overriding `merge_batch`
+
+While the default `merge_batch` implementation provides backward compatibility by calling `merge` pairwise, users may optionally override `merge_batch` to improve performance and reduce intermediate memory allocations. For example, a counter merge operator can sum all operands in a single pass instead of performing N-1 merge operations, avoiding the creation of N-1 intermediate `Bytes` objects. This optimization is particularly beneficial when processing large batches of operands, as it can reduce both function call overhead and memory allocations for certain use cases.
 
 ### Merge Operator Configuration
 

@@ -47,7 +47,7 @@ pub enum MergeOperatorError {
 ///         Ok(Bytes::copy_from_slice(&(existing + increment).to_le_bytes()))
 ///     }
 ///
-///     fn merge_batch(&self, existing_value: Option<Bytes>, operands: &[Bytes]) -> Result<Bytes, MergeOperatorError> {
+///     fn merge_batch(&self, _key: &Bytes, existing_value: Option<Bytes>, operands: &[Bytes]) -> Result<Bytes, MergeOperatorError> {
 ///         let mut total = existing_value
 ///             .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
 ///             .unwrap_or(0);
@@ -89,6 +89,7 @@ pub trait MergeOperator {
     /// can override this for better performance (e.g., a counter can sum all values at once).
     ///
     /// # Arguments
+    /// * `key` - The key of the entry
     /// * `existing_value` - The current accumulated value (if any)
     /// * `operands` - A slice of operands to merge, ordered from oldest to newest
     ///
@@ -97,12 +98,13 @@ pub trait MergeOperator {
     /// * `Err(MergeOperatorError)` - If the merge operation fails
     fn merge_batch(
         &self,
+        key: &Bytes,
         existing_value: Option<Bytes>,
         operands: &[Bytes],
     ) -> Result<Bytes, MergeOperatorError> {
         let mut result = existing_value;
         for operand in operands {
-            result = Some(self.merge(&Bytes::new(), result, operand.clone())?);
+            result = Some(self.merge(key, result, operand.clone())?);
         }
         result.ok_or(MergeOperatorError::EmptyBatch)
     }
@@ -266,7 +268,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
 
                 let operands: Vec<Bytes> = batch.iter().map(|(_, v)| v.clone()).collect();
 
-                let batch_result = self.merge_operator.merge_batch(None, &operands)?;
+                let batch_result = self.merge_operator.merge_batch(&key, None, &operands)?;
                 batch_results.push(batch_result);
 
                 // Clear batch for next iteration (frees RowEntry memory!)
@@ -279,10 +281,11 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
 
         let mut merged_value = base_value;
         if !batch_results.is_empty() {
-            merged_value = Some(
-                self.merge_operator
-                    .merge_batch(merged_value, &batch_results)?,
-            );
+            merged_value = Some(self.merge_operator.merge_batch(
+                &key,
+                merged_value,
+                &batch_results,
+            )?);
         }
 
         if let Some(result_value) = merged_value {
@@ -400,6 +403,7 @@ mod tests {
 
         fn merge_batch(
             &self,
+            _key: &Bytes,
             existing_value: Option<Bytes>,
             operands: &[Bytes],
         ) -> Result<Bytes, MergeOperatorError> {
@@ -630,21 +634,33 @@ mod tests {
             }
         }
 
-        // Override merge_batch to handle batches efficiently
-        // Note: merge_batch doesn't have access to the key, so we can't route based on prefix.
-        // For this test, we'll use the default implementation which falls back to pairwise merge()
+        // Override merge_batch to handle batches efficiently with key-based routing
         fn merge_batch(
             &self,
+            key: &Bytes,
             existing_value: Option<Bytes>,
             operands: &[Bytes],
         ) -> Result<Bytes, MergeOperatorError> {
-            // Since we can't route by key in merge_batch, use the default pairwise implementation
-            // This will call merge() with an empty key for each operand
-            let mut result = existing_value;
-            for operand in operands {
-                result = Some(self.merge(&Bytes::new(), result, operand.clone())?);
+            if key.starts_with(b"max:") {
+                // For max operator, find the maximum value across all operands
+                let mut max_val = existing_value
+                    .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
+                    .unwrap_or(0);
+
+                for operand in operands {
+                    let val = u64::from_le_bytes(operand.as_ref().try_into().unwrap());
+                    max_val = max_val.max(val);
+                }
+
+                Ok(Bytes::copy_from_slice(&max_val.to_le_bytes()))
+            } else {
+                // For other prefixes, use pairwise merge
+                let mut result = existing_value;
+                for operand in operands {
+                    result = Some(self.merge(key, result, operand.clone())?);
+                }
+                result.ok_or(MergeOperatorError::EmptyBatch)
             }
-            result.ok_or(MergeOperatorError::EmptyBatch)
         }
     }
 
@@ -653,11 +669,11 @@ mod tests {
         let merge_operator = Arc::new(KeyPrefixMergeOperator {});
 
         let data = vec![
-            // Sum key - with batching and no key, this will concat instead of sum
+            // Sum key
             RowEntry::new_merge(b"sum:counter", &5u64.to_le_bytes(), 1),
             RowEntry::new_merge(b"sum:counter", &3u64.to_le_bytes(), 2),
             RowEntry::new_merge(b"sum:counter", &7u64.to_le_bytes(), 3),
-            // Max key - with batching and no key, this will concat instead of max
+            // Max key
             RowEntry::new_merge(b"max:score", &5u64.to_le_bytes(), 4),
             RowEntry::new_merge(b"max:score", &10u64.to_le_bytes(), 5),
             RowEntry::new_merge(b"max:score", &3u64.to_le_bytes(), 6),
@@ -670,16 +686,9 @@ mod tests {
             0,
         );
 
-        // Expected: concat of all values since merge_batch doesn't have access to key for routing
-        let mut max_expected = Vec::new();
-        max_expected.extend_from_slice(&5u64.to_le_bytes());
-        max_expected.extend_from_slice(&10u64.to_le_bytes());
-        max_expected.extend_from_slice(&3u64.to_le_bytes());
-
-        let mut sum_expected = Vec::new();
-        sum_expected.extend_from_slice(&5u64.to_le_bytes());
-        sum_expected.extend_from_slice(&3u64.to_le_bytes());
-        sum_expected.extend_from_slice(&7u64.to_le_bytes());
+        // Expected: max should return 10, sum should return 15
+        let max_expected = 10u64.to_le_bytes();
+        let sum_expected = 15u64.to_le_bytes();
 
         assert_iterator(
             &mut iterator,
