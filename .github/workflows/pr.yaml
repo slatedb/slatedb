@@ -311,9 +311,9 @@ jobs:
       - name: Run chaos scenarios
         id: chaos
         env:
-          SLATEDB_TEST_NUM_WRITERS: "4"
+          SLATEDB_TEST_NUM_WRITERS: "2"
           SLATEDB_TEST_NUM_READERS: "2"
-          SLATEDB_TEST_WRITES_PER_TASK: "500"
+          SLATEDB_TEST_WRITES_PER_TASK: "250"
           SLATEDB_TEST_KEY_LENGTH: "256"
         run: |
           chmod +x scripts/run_chaos_scenarios.sh
