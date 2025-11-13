@@ -26,9 +26,9 @@
 # - baseline: No HTTP or TCP faults (green path).
 # - latency_jitter: Add latency with jitter both ways.
 # - bandwidth_cap: Cap downstream bandwidth to ~200 kbps.
-# - reset_peer: Intermittent downstream TCP resets.
-# - slow_close: Delay downstream TCP close by ~2000ms.
-# - timeoutish: Large downstream latency (~3000ms).
+# - reset_peer: ~15% intermittent downstream TCP resets.
+# - slow_close: ~30% downstream TCP close delay by ~2000ms.
+# - timeoutish: ~35% downstream latency (~3000ms).
 # - http_500s: ~10% fail-before responses with HTTP 500 (transient server errors).
 # - http_404s: ~5% fail-before responses with HTTP 404 (transient missing paths/keys).
 # - http_429s: ~5% fail-before responses with HTTP 429 (transient throttling).
@@ -74,7 +74,7 @@ add_toxic() {
   local attrs_json=$1; shift
   local toxicity=${1:-1.0}
   log "adding toxic $toxic_name ($type/$stream) toxicity=$toxicity attrs=$attrs_json"
-  curl -fsS -X POST "$TOXIPROXY_API/proxies/$name/toxics" \
+  curl -fsS -w '\n' -X POST "$TOXIPROXY_API/proxies/$name/toxics" \
     -H 'Content-Type: application/json' \
     -d "{\"name\":\"$toxic_name\",\"type\":\"$type\",\"stream\":\"$stream\",\"toxicity\":$toxicity,\"attributes\":$attrs_json}"
 }
