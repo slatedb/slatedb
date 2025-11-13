@@ -5,7 +5,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use slatedb::admin;
 use slatedb::config::{
-    CompactorOptions, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, WriteOptions,
+    CompactorOptions, DurabilityLevel, PutOptions, ReadOptions, Settings,
+    SizeTieredCompactionSchedulerOptions, WriteOptions,
 };
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
@@ -167,8 +168,11 @@ async fn test_concurrent_writers_and_readers() {
                     // Pick a random key and validate that it's higher than the last value for that key
                     let key = rng.random_range(0..num_writers);
                     if let Some(bytes) = db
-                        .get(zero_pad_key(key.try_into().unwrap(), key_length))
-                        .await?
+                        .get_with_options(
+                            zero_pad_key(key.try_into().unwrap(), key_length),
+                            // Make sure we don't see in-memory values that might later get lost in chaos tests
+                            &ReadOptions::new().with_durability_filter(DurabilityLevel::Remote),
+                        ).await?
                     {
                         // Convert bytes to u64 value
                         let value_bytes: [u8; 8] =
