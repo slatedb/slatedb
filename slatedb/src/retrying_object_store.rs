@@ -25,7 +25,9 @@ impl RetryingObjectStore {
 
     #[inline]
     fn retry_builder() -> ExponentialBuilder {
-        ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300)))
+        ExponentialBuilder::default()
+            .without_max_times()
+            .with_total_delay(Some(Duration::from_secs(300)))
     }
 
     #[inline]
