@@ -265,60 +265,17 @@ jobs:
           for i in {1..60}; do
             if curl -sf http://127.0.0.1:9000/minio/health/ready >/dev/null; then echo ready; break; fi; sleep 1; done
 
-      - name: Start Envoy
+      - name: Start mikkmokk-proxy (baseline)
         run: |
-          # Write a minimal Envoy config (no repo file)
-          cat > /tmp/envoy-s3.yaml << 'EOF'
-          admin:
-            address:
-              socket_address: { address: 0.0.0.0, port_value: 9901 }
-          static_resources:
-            listeners:
-            - name: s3_listener
-              address:
-                socket_address: { address: 0.0.0.0, port_value: 8080 }
-              filter_chains:
-              - filters:
-                - name: envoy.filters.network.http_connection_manager
-                  typed_config:
-                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                    stat_prefix: s3_hcm
-                    route_config:
-                      name: local_route
-                      virtual_hosts:
-                      - name: s3
-                        domains: ["*"]
-                        routes:
-                        - match: { prefix: "/" }
-                          route: { cluster: s3_cluster }
-                    http_filters:
-                    - name: envoy.filters.http.fault
-                      typed_config:
-                        "@type": type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault
-                        abort: { http_status: 503, percentage: { numerator: 0, denominator: HUNDRED } }
-                        delay: { fixed_delay: { seconds: 0 }, percentage: { numerator: 0, denominator: HUNDRED } }
-                    - name: envoy.filters.http.router
-            clusters:
-            - name: s3_cluster
-              connect_timeout: 5s
-              type: STRICT_DNS
-              lb_policy: ROUND_ROBIN
-              load_assignment:
-                cluster_name: s3_cluster
-                endpoints:
-                - lb_endpoints:
-                  - endpoint:
-                      address:
-                        socket_address: { address: minio, port_value: 9000 }
-          EOF
-
-          docker run -d --name envoy --network chaos-net \
-            -p 8080:8080 -p 9901:9901 \
-            -v /tmp/envoy-s3.yaml:/etc/envoy/envoy.yaml:ro \
-            envoyproxy/envoy:latest -c /etc/envoy/envoy.yaml
-          # Wait for admin
-          for i in {1..60}; do
-            if curl -sf http://127.0.0.1:9901/server_info >/dev/null; then echo ready; break; fi; sleep 1; done
+          # Start with no HTTP faults; Toxiproxy handles TCP faults
+          docker run -d --name mikkmokk --network chaos-net \
+            -e DESTINATION_URL=http://minio:9000 \
+            -e PROXY_BIND=0.0.0.0 \
+            -e PROXY_PORT=8080 \
+            -e ADMIN_BIND=0.0.0.0 \
+            -e ADMIN_PORT=7070 \
+            -p 8080:8080 -p 7070:7070 \
+            docker.io/ivarref/mikkmokk-proxy:v0.1.63
 
       - name: Start Toxiproxy
         run: |
@@ -338,7 +295,7 @@ jobs:
           # Create proxy to Envoy (if not exists)
           curl -sf -X POST http://127.0.0.1:8474/proxies \
             -H 'Content-Type: application/json' \
-            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"envoy:8080"}' || true
+            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"mikkmokk:8080"}' || true
           # Create bucket via the proxied endpoint
           aws --endpoint-url http://127.0.0.1:9001 s3api create-bucket --bucket slatedb-test || true
 
@@ -373,7 +330,6 @@ jobs:
         if: failure()
         run: |
           echo "--- MinIO logs ---"; docker logs --tail 500 minio || true
-          echo "--- Envoy logs ---"; docker logs --tail 500 envoy || true
+          echo "--- mikkmokk logs ---"; docker logs --tail 500 mikkmokk || true
           echo "--- Toxiproxy logs ---"; docker logs --tail 500 toxiproxy || true
-          echo "--- Envoy runtime ---"; curl -sf http://127.0.0.1:9901/runtime || true
           echo "--- Toxiproxy proxies ---"; curl -sf http://127.0.0.1:8474/proxies || true
