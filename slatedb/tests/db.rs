@@ -18,6 +18,30 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
+/// This test exercises SlateDB under concurrent load. By default, it uses an in-memory
+/// object store for fast local testing, but it can also be used with a remote object store
+/// (e.g., S3-compatible) by setting the `CLOUD_PROVIDER` environment variable.
+///
+/// The test behaves as follows:
+///
+/// - Spawns N writer tasks, each writing an incrementing `u64` value to a unique key.
+/// - Spawns M reader tasks which sample random keys and assert values are non-decreasing.
+/// - Writers call `flush()` at the end to accelerate durability during CI/chaos runs.
+/// - If `CLOUD_PROVIDER` is set, the object store is loaded from the environment (see
+///   [`slatedb::admin::load_object_store_from_env`] for details).
+///
+/// ## Environment variables
+/// - `SLATEDB_TEST_NUM_WRITERS` (default: `10`) — number of writer tasks.
+/// - `SLATEDB_TEST_NUM_READERS` (default: `2`) — number of concurrent reader tasks.
+/// - `SLATEDB_TEST_WRITES_PER_TASK` (default: `100`) — number of writes per writer.
+/// - `SLATEDB_TEST_KEY_LENGTH` (default: `256`) — padded key length in byte.
+///
+/// ## Usage
+///
+/// This test runs as a normal integration test as part of the crate's test suite. It is also
+/// used as a chaos test in the nightly.yaml CI test suite to verify that SlateDB functions as
+/// expected under intermittent network and object store failures. Take a look at
+/// `scripts/run_chaos_scenarios.sh` to see how the chaos tests work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrent_writers_and_readers() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
