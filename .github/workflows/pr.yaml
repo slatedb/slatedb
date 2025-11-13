@@ -246,3 +246,98 @@ jobs:
         run: |
           npm install
           npm run build
+
+  chaos:
+    name: Chaos tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y awscli jq curl
+
+      - name: Create docker network
+        run: docker network create chaos-net
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio --network chaos-net \
+            -p 9000:9000 -p 9001:9001 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data --console-address :9001
+          # Wait for readiness
+          for i in {1..60}; do
+            if curl -sf http://127.0.0.1:9000/minio/health/ready >/dev/null; then echo ready; break; fi; sleep 1; done
+
+      - name: Start mikkmokk-proxy (baseline)
+        run: |
+          # Start with no HTTP faults; Toxiproxy handles TCP faults
+          docker run -d --name mikkmokk --network chaos-net \
+            -e DESTINATION_URL=http://minio:9000 \
+            -e PROXY_BIND=0.0.0.0 \
+            -e PROXY_PORT=8080 \
+            -e ADMIN_BIND=0.0.0.0 \
+            -e ADMIN_PORT=7070 \
+            -p 8080:8080 -p 7070:7070 \
+            docker.io/ivarref/mikkmokk-proxy:v0.1.63
+
+      - name: Start Toxiproxy
+        run: |
+          docker run -d --name toxiproxy --network chaos-net \
+            -p 8474:8474 -p 9001:9001 \
+            ghcr.io/shopify/toxiproxy:latest
+          # Wait for API
+          for i in {1..60}; do
+            if curl -sf http://127.0.0.1:8474/proxies >/dev/null; then echo ready; break; fi; sleep 1; done
+
+      - name: Create S3 bucket (through proxy)
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_REGION: us-east-1
+        run: |
+          # Create proxy to Envoy (if not exists)
+          curl -sf -X POST http://127.0.0.1:8474/proxies \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"mikkmokk:8080"}' || true
+          # Create bucket via the proxied endpoint
+          aws --endpoint-url http://127.0.0.1:9001 s3api create-bucket --bucket slatedb-test || true
+
+      - name: Run chaos scenarios
+        id: chaos
+        env:
+          SLATEDB_TEST_NUM_WRITERS: "12"
+          SLATEDB_TEST_NUM_READERS: "4"
+          SLATEDB_TEST_WRITES_PER_TASK: "1000"
+          SLATEDB_TEST_KEY_LENGTH: "256"
+        run: |
+          chmod +x scripts/run_chaos_scenarios.sh
+          if scripts/run_chaos_scenarios.sh; then
+            echo "ok=true" >> $GITHUB_OUTPUT
+          else
+            echo "ok=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Summarize results
+        if: always()
+        run: |
+          echo "## 🌪️ SlateDB Toxiproxy Chaos" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.chaos.outputs.ok }}" = "true" ]; then
+            echo "All scenarios passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "One or more scenarios failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "--- MinIO logs ---"; docker logs --tail 500 minio || true
+          echo "--- mikkmokk logs ---"; docker logs --tail 500 mikkmokk || true
+          echo "--- Toxiproxy logs ---"; docker logs --tail 500 toxiproxy || true
+          echo "--- Toxiproxy proxies ---"; curl -sf http://127.0.0.1:8474/proxies || true
