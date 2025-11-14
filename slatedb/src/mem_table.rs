@@ -11,8 +11,12 @@ use ouroboros::self_referencing;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
+use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
+
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
@@ -93,6 +97,9 @@ pub(crate) struct KVTable {
     last_tick: AtomicI64,
     /// the sequence number of the most recent operation on this KVTable
     last_seq: AtomicU64,
+    /// A sequence tracker that correlates sequence numbers with system clock ticks.
+    /// The tracker is limited to 8192 entries and downsamples data when it gets full.
+    sequence_tracker: Mutex<SequenceTracker>,
 }
 
 pub(crate) struct KVTableMetadata {
@@ -133,6 +140,10 @@ impl WritableKVTable {
     pub(crate) fn is_empty(&self) -> bool {
         self.table.is_empty()
     }
+
+    pub(crate) fn record_sequence(&self, seq: u64, ts: DateTime<Utc>) {
+        self.table.record_sequence(seq, ts);
+    }
 }
 
 pub(crate) struct ImmutableMemtable {
@@ -148,6 +159,9 @@ pub(crate) struct ImmutableMemtable {
     table: Arc<KVTable>,
     /// This flushed watchable cell is useful for users who enable `await_durable` on the writes.
     flushed: WatchableOnceCell<Result<(), SlateDBError>>,
+    /// A snapshot of the sequence tracker taken when this immutable memtable was created.
+    /// This avoids needing to access the sequence tracker through a mutex on the underlying table.
+    sequence_tracker: SequenceTracker,
 }
 
 #[self_referencing]
@@ -201,10 +215,12 @@ impl MemTableIterator {
 
 impl ImmutableMemtable {
     pub(crate) fn new(table: WritableKVTable, recent_flushed_wal_id: u64) -> Self {
+        let sequence_tracker = table.table.sequence_tracker_snapshot();
         Self {
             table: table.table,
             recent_flushed_wal_id,
             flushed: WatchableOnceCell::new(),
+            sequence_tracker,
         }
     }
 
@@ -223,6 +239,10 @@ impl ImmutableMemtable {
     pub(crate) fn notify_flush_to_l0(&self, result: Result<(), SlateDBError>) {
         self.flushed.write(result);
     }
+
+    pub(crate) fn sequence_tracker(&self) -> &SequenceTracker {
+        &self.sequence_tracker
+    }
 }
 
 impl KVTable {
@@ -233,6 +253,7 @@ impl KVTable {
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
             last_seq: AtomicU64::new(0),
+            sequence_tracker: Mutex::new(SequenceTracker::new()),
         }
     }
 
@@ -335,6 +356,15 @@ impl KVTable {
 
     pub(crate) fn notify_durable(&self, result: Result<(), SlateDBError>) {
         self.durable.write(result);
+    }
+
+    pub(crate) fn record_sequence(&self, seq: u64, ts: DateTime<Utc>) {
+        let mut tracker = self.sequence_tracker.lock();
+        tracker.insert(TrackedSeq { seq, ts });
+    }
+
+    pub(crate) fn sequence_tracker_snapshot(&self) -> SequenceTracker {
+        self.sequence_tracker.lock().clone()
     }
 }
 

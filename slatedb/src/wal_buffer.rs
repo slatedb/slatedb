@@ -531,7 +531,7 @@ mod tests {
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());
-        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0), system_clock.clone()));
+        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
         let db_state = Arc::new(RwLock::new(DbState::new(DirtyManifest::new(
             0,
             Manifest::initial(CoreDbState::new()),
