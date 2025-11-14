@@ -108,8 +108,10 @@ async fn test_concurrent_writers_and_readers() {
     ));
     // Build the DB with exponential backoff to tolerate transient object store errors.
     let retry_builder = ExponentialBuilder::default()
-        .with_total_delay(Some(Duration::from_secs(300)))
-        .without_max_times();
+        .without_max_times()
+        // Retry fast so we don't wait too long for transient errors
+        .with_min_delay(Duration::from_millis(1))
+        .with_max_delay(Duration::from_millis(1));
     // Always use a unique DB path per test run to avoid cross-run residue
     // in remote object stores (important for chaos scenarios).
     let ts = std::time::SystemTime::now()
