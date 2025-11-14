@@ -53,6 +53,12 @@ MIKKMOKK_API=http://127.0.0.1:7070
 # Print a prefixed message for easier scanning in CI logs.
 log() { echo "[chaos] $*"; }
 
+# Require aws CLI for bucket reset and environment setup.
+if ! command -v aws >/dev/null 2>&1; then
+  log "aws CLI not found; please install aws-cli before running chaos scenarios"
+  exit 1
+fi
+
 # Globally reset all toxics/proxies via Toxiproxy. Safe here (single proxy).
 clear_toxics() {
   log "toxiproxy: resetting all proxies/toxics"
@@ -100,6 +106,24 @@ clear_http_failures() {
   curl -fsS -X POST "$MIKKMOKK_API/api/v1/reset" >/dev/null
 }
 
+# Drop and recreate the LocalStack S3 bucket used by tests.
+reset_bucket() {
+  local bucket="slatedb-test"
+  log "s3: resetting bucket s3://${bucket}"
+
+  # Remove bucket and all its contents if it exists.
+  AWS_ACCESS_KEY_ID=test \
+  AWS_SECRET_ACCESS_KEY=test \
+  AWS_REGION=us-east-1 \
+  aws --endpoint-url "$LOCALSTACK_S3" s3 rb "s3://${bucket}" --force >/dev/null 2>&1 || true
+
+  # Recreate the bucket.
+  AWS_ACCESS_KEY_ID=test \
+  AWS_SECRET_ACCESS_KEY=test \
+  AWS_REGION=us-east-1 \
+  aws --endpoint-url "$LOCALSTACK_S3" s3 mb "s3://${bucket}" >/dev/null
+}
+
 # Execute the SlateDB integration test against the configured proxies.
 # Args:
 #   $1 name : scenario label for logging
@@ -128,6 +152,8 @@ scenarios=()
 scenario() {
   local name=$1; shift
   scenarios+=("$name")
+  log "resetting S3 bucket before scenario '$name'"
+  reset_bucket
   if "$@"; then
     log "scenario '$name' OK"; pass=$((pass+1))
   else

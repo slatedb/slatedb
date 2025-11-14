@@ -295,18 +295,12 @@ jobs:
           for i in {1..60}; do
             if curl -sf http://127.0.0.1:8474/proxies >/dev/null; then echo ready; break; fi; sleep 1; done
 
-      - name: Create S3 bucket (through proxy)
-        env:
-          AWS_ACCESS_KEY_ID: test
-          AWS_SECRET_ACCESS_KEY: test
-          AWS_REGION: us-east-1
+      - name: Configure S3 toxiproxy proxy
         run: |
           # Create s3 toxiproxy if not exist (TCP-level path only)
           curl -sf -X POST http://127.0.0.1:8474/proxies \
             -H 'Content-Type: application/json' \
             -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"localstack:4566"}' || true
-          # Create bucket via the proxied endpoint
-          aws --endpoint-url http://127.0.0.1:9001 s3api create-bucket --bucket slatedb-test || true
 
       - name: Run chaos scenarios
         id: chaos
