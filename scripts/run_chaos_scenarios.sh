@@ -29,7 +29,7 @@
 # - reset_peer: ~15% intermittent downstream TCP resets.
 # - slow_close: ~30% downstream TCP close delay by ~2000ms.
 # - timeoutish: ~35% downstream latency (~3000ms).
-# - http_500s: ~10% fail-before responses with HTTP 500 (transient server errors).
+# - http_503s: ~10% fail-before responses with HTTP 503 (transient server errors).
 # - http_404s: ~5% fail-before responses with HTTP 404 (transient missing paths/keys).
 # - http_429s: ~5% fail-before responses with HTTP 429 (transient throttling).
 #
@@ -83,7 +83,7 @@ add_toxic() {
 # Set mikkmokk-proxy default fail-before percentage/code at runtime.
 # Args:
 #   $1 percent : 0..100 (chance to fail-before)
-#   $2 code    : HTTP status code to return (e.g., 404|429|500)
+#   $2 code    : HTTP status code to return (e.g., 404|429|503)
 add_http_failure() {
   local percent=${1:-0}
   local code=${2:-503}
@@ -179,10 +179,10 @@ timeoutish() {
   run_smoke timeoutish "$TOXIPROXY_S3"
 }
 
-# 10% fail-before with HTTP 500 (transient server errors).
-http_500s() {
+# 10% fail-before with HTTP 503 (transient server errors).
+http_503s() {
   clear_toxics s3; add_http_failure 10 503
-  AWS_HTTP_PROXY="$MIKKMOKK_S3" run_smoke http_500s "$MIKKMOKK_S3"
+  AWS_HTTP_PROXY="$MIKKMOKK_S3" run_smoke http_503s "$MIKKMOKK_S3"
 }
 
 # 5% fail-before with HTTP 404 (transient missing paths/keys).
@@ -204,7 +204,7 @@ scenario bandwidth_cap bandwidth_cap
 scenario reset_peer reset_peer
 scenario slow_close slow_close
 scenario timeoutish timeoutish
-scenario http_500s http_500s
+scenario http_503s http_503s
 scenario http_404s http_404s
 scenario http_429s http_429s
 
