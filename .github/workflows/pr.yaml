@@ -250,7 +250,7 @@ jobs:
   chaos:
     name: Chaos tests
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 

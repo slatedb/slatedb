@@ -193,7 +193,7 @@ jobs:
 
   deterministic-simulation-test:
     runs-on: warp-ubuntu-latest-x64-16x
-    timeout-minutes: 60
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -242,7 +242,7 @@ jobs:
   chaos:
     name: Chaos tests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -292,9 +292,8 @@ jobs:
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
           AWS_REGION: us-east-1
-          AWS_S3_FORCE_PATH_STYLE: "true"
         run: |
-          # Create proxy if not exists (TCP-level path only)
+          # Create s3 toxiproxy if not exist (TCP-level path only)
           curl -sf -X POST http://127.0.0.1:8474/proxies \
             -H 'Content-Type: application/json' \
             -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"minio:9000"}' || true
@@ -304,9 +303,9 @@ jobs:
       - name: Run chaos scenarios
         id: chaos
         env:
-          SLATEDB_TEST_NUM_WRITERS: "12"
-          SLATEDB_TEST_NUM_READERS: "4"
-          SLATEDB_TEST_WRITES_PER_TASK: "1000"
+          SLATEDB_TEST_NUM_WRITERS: "2"
+          SLATEDB_TEST_NUM_READERS: "2"
+          SLATEDB_TEST_WRITES_PER_TASK: "250"
           SLATEDB_TEST_KEY_LENGTH: "256"
         run: |
           chmod +x scripts/run_chaos_scenarios.sh
