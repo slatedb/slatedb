@@ -125,7 +125,7 @@ async fn test_concurrent_writers_and_readers() {
                 .build()
                 .await
         })
-        .retry(ExponentialBuilder::default().with_total_delay(Some(Duration::from_secs(300))))
+        .retry(retry_builder)
         .await
         .expect("failed to build DB after retries"),
     );
