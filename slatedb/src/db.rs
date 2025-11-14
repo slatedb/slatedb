@@ -393,13 +393,21 @@ impl DbInner {
     }
 
     pub(crate) async fn flush_memtables(&self) -> Result<(), SlateDBError> {
-        {
+        let frozen = {
             let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {
                 guard.freeze_memtable(last_flushed_wal_id)?;
-                fail_point!(Arc::clone(&self.fp_registry), "flush-memtable-after-freeze");
+                true
+            } else {
+                false
             }
+        };
+
+        // this failpoint has to be here outside of holding the guard to the state.
+        // or else it can cause deadlocks in the test that uses it
+        if frozen {
+            fail_point!(Arc::clone(&self.fp_registry), "flush-memtable-after-freeze");
         }
 
         self.flush_immutable_memtables().await
