@@ -46,6 +46,7 @@ set -euo pipefail
 
 TOXIPROXY_S3=http://127.0.0.1:9001
 TOXIPROXY_API=http://127.0.0.1:8474
+MINIO_S3=http://127.0.0.1:9000
 MIKKMOKK_S3=http://127.0.0.1:8080
 MIKKMOKK_API=http://127.0.0.1:7070
 
@@ -181,19 +182,19 @@ timeoutish() {
 # 10% fail-before with HTTP 500 (transient server errors).
 http_500s() {
   clear_toxics s3; add_http_failure 10 500
-  run_smoke http_500s "$MIKKMOKK_S3"
+  AWS_HTTP_PROXY="$MIKKMOKK_S3" run_smoke http_500s "$MIKKMOKK_S3"
 }
 
 # 5% fail-before with HTTP 404 (transient missing paths/keys).
 http_404s() {
   clear_toxics s3; add_http_failure 5 404
-  run_smoke http_404s "$MIKKMOKK_S3"
+  AWS_HTTP_PROXY="$MIKKMOKK_S3" run_smoke http_404s "$MIKKMOKK_S3"
 }
 
 # 5% fail-before with HTTP 429 (transient throttling).
 http_429s() {
   clear_toxics s3; add_http_failure 5 429
-  run_smoke http_429s "$MIKKMOKK_S3"
+  AWS_HTTP_PROXY="$MIKKMOKK_S3" run_smoke http_429s "$MIKKMOKK_S3"
 }
 
 # Execute

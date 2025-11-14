@@ -462,6 +462,7 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// | AWS_BUCKET | The bucket to use within S3 | Yes |
 /// | AWS_REGION | The AWS region to use | Yes |
 /// | AWS_ENDPOINT | The endpoint to use for S3 (disables https) | No |
+/// | AWS_HTTP_PROXY | Optional forward HTTP proxy URL to reach the endpoint | No |
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     use object_store::aws::S3ConditionalPut;
@@ -494,11 +495,16 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         }
     }
 
-    let builder = if let Some(endpoint) = endpoint {
-        builder.with_allow_http(true).with_endpoint(endpoint)
-    } else {
-        builder
-    };
+    if let Some(endpoint) = endpoint {
+        builder = builder.with_allow_http(true).with_endpoint(endpoint);
+    }
+
+    if let Some(proxy_url) = env::var("AWS_HTTP_PROXY")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        builder = builder.with_proxy_url(proxy_url);
+    }
 
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
