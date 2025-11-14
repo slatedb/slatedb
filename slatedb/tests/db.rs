@@ -214,6 +214,12 @@ async fn test_concurrent_writers_and_readers() {
                                 current_value
                             );
                         }
+                    } else {
+                        assert!(
+                            latest_values.get(&key).is_none(),
+                            "Expected key {} in DB, but not found",
+                            key,
+                        );
                     }
                 }
                 Ok::<(), slatedb::Error>(())
