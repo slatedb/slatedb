@@ -150,7 +150,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                     });
                 }
                 Err(_) => warn!(
-                    "unknown file in directory [base={:?}, location={:?}]",
+                    "unknown file in directory [base={}, location={}]",
                     base, file.location,
                 ),
                 _ => {}
