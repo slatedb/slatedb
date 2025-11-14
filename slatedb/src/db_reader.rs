@@ -130,11 +130,7 @@ impl DbReaderInner {
         // to last_l0_seq.
         let last_committed_seq = MonotonicSeq::new(initial_state.core().last_l0_seq);
         last_committed_seq.store_if_greater(initial_state.last_committed_seq);
-        let sequence_tracker = initial_state.core().sequence_tracker.clone();
-        let oracle = Arc::new(
-            Oracle::new(last_committed_seq, system_clock.clone())
-                .with_sequence_tracker(sequence_tracker),
-        );
+        let oracle = Arc::new(Oracle::new(last_committed_seq));
 
         let stat_registry = Arc::new(StatRegistry::new());
         let db_stats = DbStats::new(stat_registry.as_ref());

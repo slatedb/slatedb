@@ -399,7 +399,7 @@ mod tests {
     use rstest::rstest;
 
     use crate::batch::WriteBatch;
-    use crate::clock::{DefaultSystemClock, LogicalClock, MonotonicClock};
+    use crate::clock::{LogicalClock, MonotonicClock};
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::object_stores::ObjectStores;
     use crate::oracle::Oracle;
@@ -1282,10 +1282,7 @@ mod tests {
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn LogicalClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
-        let oracle = Arc::new(Oracle::new(
-            crate::utils::MonotonicSeq::new(0),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let oracle = Arc::new(Oracle::new(crate::utils::MonotonicSeq::new(0)));
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
         oracle.last_committed_seq.store(last_committed_seq);
 
@@ -1753,10 +1750,7 @@ mod tests {
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn LogicalClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
-        let oracle = Arc::new(Oracle::new(
-            crate::utils::MonotonicSeq::new(0),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let oracle = Arc::new(Oracle::new(crate::utils::MonotonicSeq::new(0)));
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
         oracle.last_committed_seq.store(last_committed_seq);
 
