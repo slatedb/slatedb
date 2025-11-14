@@ -24,7 +24,7 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fail_parallel::FailPointRegistry;
+use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
@@ -115,15 +115,13 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.core.last_l0_seq;
-        let initial_sequence_tracker = manifest.core.sequence_tracker.clone();
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
         let oracle = Arc::new(
-            Oracle::new(last_committed_seq, system_clock.clone())
+            Oracle::new(last_committed_seq)
                 .with_last_seq(last_seq)
-                .with_last_remote_persisted_seq(last_remote_persisted_seq)
-                .with_sequence_tracker(initial_sequence_tracker),
+                .with_last_remote_persisted_seq(last_remote_persisted_seq),
         );
 
         let mono_clock = Arc::new(MonotonicClock::new(
@@ -395,12 +393,18 @@ impl DbInner {
     }
 
     pub(crate) async fn flush_memtables(&self) -> Result<(), SlateDBError> {
+        let mut froze_memtable = false;
         {
             let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {
                 guard.freeze_memtable(last_flushed_wal_id)?;
+                froze_memtable = true;
             }
+        }
+
+        if froze_memtable {
+            fail_point!(Arc::clone(&self.fp_registry), "flush-memtable-after-freeze");
         }
 
         self.flush_immutable_memtables().await
@@ -3132,7 +3136,12 @@ mod tests {
         let path = "/tmp/test_sequence_tracker_flush";
         let mut settings = test_db_options(0, 256, None);
         settings.flush_interval = None;
-        settings.wal_enabled = wal_enabled;
+        #[cfg(feature = "wal_disable")]
+        {
+            settings.wal_enabled = wal_enabled;
+        }
+        #[cfg(not(feature = "wal_disable"))]
+        let _ = wal_enabled;
         let logical_clock = Arc::new(TestClock::new());
         let system_clock = Arc::new(MockSystemClock::new());
 
@@ -3187,8 +3196,15 @@ mod tests {
         .await;
 
         let tracker = persisted_state.sequence_tracker.clone();
-        let oracle_tracker = kv_store.inner.oracle.sequence_tracker_snapshot();
-        assert_eq!(tracker, oracle_tracker);
+        let live_tracker = kv_store
+            .inner
+            .state
+            .read()
+            .state()
+            .core()
+            .sequence_tracker
+            .clone();
+        assert_eq!(tracker, live_tracker);
 
         let seq1_ts = tracker.find_ts(1, FindOption::RoundDown).unwrap();
         assert_eq!(seq1_ts.timestamp(), 0);
@@ -3212,7 +3228,14 @@ mod tests {
             .await
             .unwrap();
 
-        let reopened_tracker = reopened.inner.oracle.sequence_tracker_snapshot();
+        let reopened_tracker = reopened
+            .inner
+            .state
+            .read()
+            .state()
+            .core()
+            .sequence_tracker
+            .clone();
         assert_eq!(tracker, reopened_tracker);
 
         reopened.close().await.unwrap();
@@ -3228,6 +3251,101 @@ mod tests {
     #[cfg(all(feature = "test-util", feature = "wal_disable"))]
     async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_disabled() {
         test_sequence_tracker_persisted_across_flush_and_reload_impl(false).await;
+    }
+
+    #[cfg(feature = "test-util")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_sequence_tracker_not_ahead_of_last_l0_seq_when_flush_races_with_writes() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut settings = test_db_options(0, 512, None);
+        settings.flush_interval = None;
+
+        let system_clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(
+            "/tmp/test_sequence_tracker_flush_race",
+            object_store.clone(),
+        )
+        .with_settings(settings)
+        .with_system_clock(system_clock.clone())
+        .with_fp_registry(fp_registry.clone())
+        .build()
+        .await
+        .unwrap();
+
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+
+        async fn put_with_timestamp(
+            db: &Db,
+            system_clock: &Arc<MockSystemClock>,
+            idx: usize,
+            write_options: &WriteOptions,
+        ) {
+            system_clock.set((idx as i64) * 60_000);
+            let key = format!("race-key-{idx}").into_bytes();
+            let value = format!("race-value-{idx}").into_bytes();
+            db.put_with_options(&key, &value, &PutOptions::default(), write_options)
+                .await
+                .unwrap();
+        }
+
+        put_with_timestamp(&db, &system_clock, 0, &write_options).await;
+        put_with_timestamp(&db, &system_clock, 1, &write_options).await;
+
+        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-after-freeze", "pause").unwrap();
+
+        let flush_handle = {
+            let inner = Arc::clone(&db.inner);
+            tokio::spawn(async move { inner.flush_memtables().await })
+        };
+
+        let mut froze_memtable = false;
+        for _ in 0..200 {
+            {
+                let guard = db.inner.state.read();
+                if !guard.state().imm_memtable.is_empty() {
+                    froze_memtable = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(froze_memtable, "memtable was not frozen before flush");
+
+        put_with_timestamp(&db, &system_clock, 2, &write_options).await;
+        put_with_timestamp(&db, &system_clock, 3, &write_options).await;
+
+        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-after-freeze", "off").unwrap();
+
+        flush_handle.await.unwrap().unwrap();
+
+        {
+            let guard = db.inner.state.read();
+            assert!(guard.state().imm_memtable.is_empty());
+        }
+
+        let manifest_state = {
+            let guard = db.inner.state.read();
+            guard.state().manifest.core.clone()
+        };
+        let last_l0_seq = manifest_state.last_l0_seq;
+        assert!(
+            last_l0_seq >= 2,
+            "expected flushed memtable to advance last_l0_seq"
+        );
+
+        assert!(
+            manifest_state
+                .sequence_tracker
+                .find_ts(last_l0_seq + 1, FindOption::RoundUp)
+                .is_none(),
+            "sequence tracker should not advance beyond last_l0_seq (last_l0_seq={})",
+            last_l0_seq
+        );
+
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
