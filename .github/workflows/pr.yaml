@@ -12,8 +12,8 @@ env:
   RUSTFLAGS: "-Dwarnings"
 
 permissions:
-  # Required for PR comments
-  pull-requests: write
+  # Required for PR comments on issues/PRs
+  issues: write
   # Required for storing benchmark results
   contents: write
 
@@ -22,6 +22,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  checklist:
+    name: PR Checklist Reminder
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    steps:
+      - name: Comment checklist on PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const body = `Thanks for opening this pull request! Please confirm you've gone through the checklist below:
+
+            ## Checklist
+
+            - [ ] Small, scoped PR (< 500 total lines excluding tests); or opened as Draft with a plan on how to break it into smaller pieces
+            - [ ] Linked related issue(s) or added context in the description
+            - [ ] Self-reviewed the diff; added comments for tricky parts
+            - [ ] Tests added/updated and passing locally
+            - [ ] Ran \`cargo fmt\`, \`cargo clippy --all-targets --all-features\`, and \`cargo nextest run --all-features\`
+            - [ ] Called out any breaking changes and provided migration notes
+            - [ ] Considered performance impact; added notes or benchmarks if relevant
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
   check:
     runs-on: ubuntu-latest
     steps:
