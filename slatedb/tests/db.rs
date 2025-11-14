@@ -1,6 +1,7 @@
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use backon::{ExponentialBuilder, Retryable};
+use log::warn;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use slatedb::admin;
@@ -128,6 +129,9 @@ async fn test_concurrent_writers_and_readers() {
                 .await
         })
         .retry(retry_builder)
+        .notify(|err, dur| {
+            warn!("retrying error {:?} with sleeping {:?}", err, dur);
+        })
         .await
         .expect("failed to build DB after retries"),
     );
@@ -249,6 +253,9 @@ async fn test_concurrent_writers_and_readers() {
     // Close with retries to handle transient failures on teardown.
     (|| async { db.close().await })
         .retry(retry_builder)
+        .notify(|err, dur| {
+            warn!("retrying error {:?} with sleeping {:?}", err, dur);
+        })
         .await
         .expect("failed to close DB after retries");
 }
