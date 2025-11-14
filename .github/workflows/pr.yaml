@@ -263,22 +263,22 @@ jobs:
       - name: Create docker network
         run: docker network create chaos-net
 
-      - name: Start MinIO
+      - name: Start LocalStack (S3)
         run: |
-          docker run -d --name minio --network chaos-net \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data --console-address :9001
+          docker run -d --name localstack --network chaos-net \
+            -p 4566:4566 \
+            -e SERVICES=s3 \
+            -e DEFAULT_REGION=us-east-1 \
+            localstack/localstack:latest
           # Wait for readiness
           for i in {1..60}; do
-            if curl -sf http://127.0.0.1:9000/minio/health/ready >/dev/null; then echo ready; break; fi; sleep 1; done
+            if curl -sf http://127.0.0.1:4566/health >/dev/null; then echo ready; break; fi; sleep 1; done
 
       - name: Start mikkmokk-proxy (baseline)
         run: |
           # Start with no HTTP faults; Toxiproxy handles TCP faults
           docker run -d --name mikkmokk --network chaos-net \
-            -e DESTINATION_URL=http://minio:9000 \
+            -e DESTINATION_URL=http://localstack:4566 \
             -e PROXY_BIND=0.0.0.0 \
             -e PROXY_PORT=8080 \
             -e ADMIN_BIND=0.0.0.0 \
@@ -297,14 +297,14 @@ jobs:
 
       - name: Create S3 bucket (through proxy)
         env:
-          AWS_ACCESS_KEY_ID: minioadmin
-          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
           AWS_REGION: us-east-1
         run: |
           # Create s3 toxiproxy if not exist (TCP-level path only)
           curl -sf -X POST http://127.0.0.1:8474/proxies \
             -H 'Content-Type: application/json' \
-            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"minio:9000"}' || true
+            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"localstack:4566"}' || true
           # Create bucket via the proxied endpoint
           aws --endpoint-url http://127.0.0.1:9001 s3api create-bucket --bucket slatedb-test || true
 
@@ -338,7 +338,7 @@ jobs:
       - name: Dump logs on failure
         if: failure()
         run: |
-          echo "--- MinIO logs ---"; docker logs --tail 500 minio || true
+          echo "--- LocalStack logs ---"; docker logs --tail 500 localstack || true
           echo "--- mikkmokk logs ---"; docker logs --tail 500 mikkmokk || true
           echo "--- Toxiproxy logs ---"; docker logs --tail 500 toxiproxy || true
           echo "--- Toxiproxy proxies ---"; curl -sf http://127.0.0.1:8474/proxies || true

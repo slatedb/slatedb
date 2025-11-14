@@ -6,21 +6,21 @@
 # latency, bandwidth constraints, TCP failures, and transient HTTP error responses.
 #
 # Components (pre-started by the workflow):
-# - MinIO (S3-compatible)
+# - LocalStack (S3-compatible)
 # - mikkmokk-proxy (HTTP faults): proxy on 8080, admin on 7070
 # - Toxiproxy (TCP faults): API on 8474
 #
 # Local bindings used by this script:
 # - mikkmokk-proxy S3: localhost:8080
 # - mikkmokk-proxy admin API: localhost:7070
-# - Toxiproxy S3: localhost:9001 -> MinIO:9000
+# - Toxiproxy S3: localhost:9001 -> LocalStack:4566
 # - Toxiproxy admin API: localhost:8474
 #
 # Data path:
 #   TCP-level scenarios:
-#     SlateDB -> Toxiproxy (localhost:9001) -> MinIO:9000
+#     SlateDB -> Toxiproxy (localhost:9001) -> LocalStack:4566
 #   HTTP-level scenarios (fail-before only):
-#     SlateDB -> mikkmokk-proxy (localhost:8080) -> MinIO:9000
+#     SlateDB -> mikkmokk-proxy (localhost:8080) -> LocalStack:4566
 #
 # Scenarios executed by this script:
 # - baseline: No HTTP or TCP faults (green path).
@@ -46,7 +46,7 @@ set -euo pipefail
 
 TOXIPROXY_S3=http://127.0.0.1:9001
 TOXIPROXY_API=http://127.0.0.1:8474
-MINIO_S3=http://127.0.0.1:9000
+LOCALSTACK_S3=http://127.0.0.1:4566
 MIKKMOKK_S3=http://127.0.0.1:8080
 MIKKMOKK_API=http://127.0.0.1:7070
 
@@ -110,8 +110,8 @@ run_smoke() {
   # `AWS_S3_FORCE_PATH_STYLE` is set below to avoid virtual-hosted-style Host/SigV4
   # issues when routing through localhost ports and proxies (Toxiproxy + mikkmokk).
   CLOUD_PROVIDER=aws \
-  AWS_ACCESS_KEY_ID=minioadmin \
-  AWS_SECRET_ACCESS_KEY=minioadmin \
+  AWS_ACCESS_KEY_ID=test \
+  AWS_SECRET_ACCESS_KEY=test \
   AWS_BUCKET=slatedb-test \
   AWS_REGION=us-east-1 \
   AWS_S3_FORCE_PATH_STYLE=true \
