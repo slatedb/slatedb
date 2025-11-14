@@ -182,19 +182,19 @@ timeoutish() {
 # 10% fail-before with HTTP 503 (transient server errors).
 http_503s() {
   clear_toxics s3; add_http_failure 10 503
-  AWS_HTTP_PROXY="$MIKKMOKK_S3" run_smoke http_503s "$MIKKMOKK_S3"
+  run_smoke http_503s "$MIKKMOKK_S3"
 }
 
 # 5% fail-before with HTTP 404 (transient missing paths/keys).
 http_404s() {
   clear_toxics s3; add_http_failure 5 404
-  AWS_HTTP_PROXY="$MIKKMOKK_S3" run_smoke http_404s "$MIKKMOKK_S3"
+  run_smoke http_404s "$MIKKMOKK_S3"
 }
 
 # 5% fail-before with HTTP 429 (transient throttling).
 http_429s() {
   clear_toxics s3; add_http_failure 5 429
-  AWS_HTTP_PROXY="$MIKKMOKK_S3" run_smoke http_429s "$MIKKMOKK_S3"
+  run_smoke http_429s "$MIKKMOKK_S3"
 }
 
 # Execute
