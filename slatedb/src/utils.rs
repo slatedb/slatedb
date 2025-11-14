@@ -308,12 +308,12 @@ impl<R: RngCore> IdGenerator for R {
 /// Returns:
 /// - `Ok(T)`: If the future completes within the specified duration.
 /// - `Err(SlateDBError::Timeout)`: If the future does not complete within the specified duration.
-pub async fn timeout<T>(
+pub async fn timeout<T, Err>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
-    error_fn: impl FnOnce() -> SlateDBError,
-    future: impl Future<Output = Result<T, SlateDBError>> + Send,
-) -> Result<T, SlateDBError> {
+    error_fn: impl FnOnce() -> Err,
+    future: impl Future<Output = Result<T, Err>> + Send,
+) -> Result<T, Err> {
     tokio::select! {
         biased;
         res = future => res,
