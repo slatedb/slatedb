@@ -107,14 +107,11 @@ run_smoke() {
   local name=$1
   local endpoint=$2
   log "running scenario: $name (endpoint=$endpoint)"
-  # `AWS_S3_FORCE_PATH_STYLE` is set below to avoid virtual-hosted-style Host/SigV4
-  # issues when routing through localhost ports and proxies (Toxiproxy + mikkmokk).
   CLOUD_PROVIDER=aws \
   AWS_ACCESS_KEY_ID=test \
   AWS_SECRET_ACCESS_KEY=test \
   AWS_BUCKET=slatedb-test \
   AWS_REGION=us-east-1 \
-  AWS_S3_FORCE_PATH_STYLE=true \
   AWS_ENDPOINT="$endpoint" \
   RUST_LOG=${RUST_LOG:-info} \
   cargo test --quiet -p slatedb --test db test_concurrent_writers_and_readers -- --nocapture
