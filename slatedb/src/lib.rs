@@ -108,7 +108,6 @@ mod paths;
 mod proptest_util;
 mod rand;
 mod reader;
-mod record;
 mod retention_iterator;
 mod retrying_object_store;
 mod row_codec;
@@ -121,6 +120,7 @@ mod tablestore;
 #[cfg(test)]
 mod test_utils;
 mod transaction_manager;
+mod transactional_object;
 mod types;
 mod utils;
 mod wal_buffer;
