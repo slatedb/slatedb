@@ -110,9 +110,16 @@ async fn test_concurrent_writers_and_readers() {
     let retry_builder = ExponentialBuilder::default()
         .with_total_delay(Some(Duration::from_secs(300)))
         .without_max_times();
+    // Always use a unique DB path per test run to avoid cross-run residue
+    // in remote object stores (important for chaos scenarios).
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let db = Arc::new(
         (|| async {
-            Db::builder("/tmp/test_concurrent_writers_readers", object_store.clone())
+            let db_path = format!("/tmp/test_concurrent_writers_readers_{}", ts);
+            Db::builder(db_path, object_store.clone())
                 .with_settings(config.clone())
                 .with_compaction_scheduler_supplier(supplier.clone())
                 .build()
