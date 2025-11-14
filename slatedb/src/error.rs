@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
 use crate::merge_operator::MergeOperatorError;
+use crate::transactional_object::TransactionalObjectError;
 
 #[non_exhaustive]
 #[derive(Clone, Debug, ThisError)]
@@ -32,17 +33,11 @@ pub(crate) enum SlateDBError {
     #[error("object store error")]
     ObjectStoreError(#[from] Arc<object_store::Error>),
 
-    #[error("file already exists")]
-    FileVersionExists,
-
     #[error("manifest file already exists")]
     ManifestVersionExists,
 
     #[error("failed to find manifest with id. id=`{0}`")]
     ManifestMissing(u64),
-
-    #[error("failed to find latest record")]
-    LatestRecordMissing,
 
     #[error("failed to find latest manifest")]
     LatestManifestMissing,
@@ -203,6 +198,16 @@ pub(crate) enum SlateDBError {
 
     #[error("iterator not initialized")]
     IteratorNotInitialized,
+}
+
+impl From<TransactionalObjectError> for SlateDBError {
+    #[allow(clippy::panic)]
+    fn from(_value: TransactionalObjectError) -> Self {
+        // TransactionalObjectError should never be converted directly to SlateDBError. Rather,
+        // users of transactional objects should write their own mappings to SlateDBError
+        // variants. See manifest/store.rs for an example
+        panic!("TransactionalObjectError should never be converted directly to SlateDBError.")
+    }
 }
 
 impl From<std::io::Error> for SlateDBError {
@@ -466,8 +471,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneExternalDbMissing => Error::data(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
-            SlateDBError::FileVersionExists => Error::data(msg),
-            SlateDBError::LatestRecordMissing => Error::data(msg),
 
             // Internal errors
             SlateDBError::CompactionExecutorFailed => Error::internal(msg),

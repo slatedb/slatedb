@@ -31,8 +31,8 @@ use crate::flatbuffer_types::root_generated::{
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
-use crate::record::RecordCodec;
 use crate::seq_tracker::SequenceTracker;
+use crate::transactional_object::ObjectCodec;
 use crate::utils::clamp_allocated_size_bytes;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
@@ -122,21 +122,21 @@ impl FlatBufferSsTableInfoCodec {
 
 pub(crate) struct FlatBufferManifestCodec {}
 
-impl RecordCodec<Manifest> for FlatBufferManifestCodec {
+impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
     fn encode(&self, manifest: &Manifest) -> Bytes {
         Self::create_from_manifest(manifest)
     }
 
-    fn decode(&self, bytes: &Bytes) -> Result<Manifest, SlateDBError> {
+    fn decode(&self, bytes: &Bytes) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
         if bytes.len() < 2 {
-            return Err(SlateDBError::EmptyManifest);
+            return Err(Box::new(SlateDBError::EmptyManifest));
         }
         let version = u16::from_be_bytes([bytes[0], bytes[1]]);
         if version != MANIFEST_FORMAT_VERSION {
-            return Err(SlateDBError::InvalidVersion {
+            return Err(Box::new(SlateDBError::InvalidVersion {
                 expected_version: MANIFEST_FORMAT_VERSION,
                 actual_version: version,
-            });
+            }));
         }
         let unversioned_bytes = bytes.slice(2..);
         let manifest = flatbuffers::root::<ManifestV1>(unversioned_bytes.as_ref())?;
@@ -564,7 +564,7 @@ mod tests {
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
     use crate::manifest::{ExternalDb, Manifest};
-    use crate::record::RecordCodec;
+    use crate::transactional_object::ObjectCodec;
     use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
 
@@ -754,12 +754,16 @@ mod tests {
         let invalid_bytes = bytes.freeze();
 
         match codec.decode(&invalid_bytes) {
-            Err(SlateDBError::InvalidVersion {
-                expected_version,
-                actual_version,
-            }) => {
-                assert_eq!(expected_version, MANIFEST_FORMAT_VERSION);
-                assert_eq!(actual_version, MANIFEST_FORMAT_VERSION + 1);
+            Err(err) => {
+                let Some(SlateDBError::InvalidVersion {
+                    expected_version,
+                    actual_version,
+                }) = err.downcast_ref()
+                else {
+                    panic!("Expected SlateDBError::InvalidVersion but got {:?}", err);
+                };
+                assert_eq!(*expected_version, MANIFEST_FORMAT_VERSION);
+                assert_eq!(*actual_version, MANIFEST_FORMAT_VERSION + 1);
             }
             _ => panic!("Should fail with version mismatch"),
         }
