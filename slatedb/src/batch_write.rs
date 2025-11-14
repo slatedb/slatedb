@@ -180,7 +180,7 @@ impl DbInner {
 
         // update the last_committed_seq, so the writes will be visible to the readers.
         self.oracle.last_committed_seq.store(commit_seq);
-        self.oracle.record_sequence(commit_seq);
+        self.record_memtable_sequence(commit_seq);
 
         // maybe freeze the memtable.
         {
@@ -201,6 +201,12 @@ impl DbInner {
         let memtable = guard.memtable();
         entries.into_iter().for_each(|entry| memtable.put(entry));
         memtable.table().durable_watcher()
+    }
+
+    fn record_memtable_sequence(&self, seq: u64) {
+        let ts = self.system_clock.now();
+        let guard = self.state.read();
+        guard.memtable().record_sequence(seq, ts);
     }
 }
 
