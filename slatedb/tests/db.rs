@@ -175,8 +175,7 @@ async fn test_concurrent_writers_and_readers() {
                         ).await?
                     {
                         // Convert bytes to u64 value
-                        let value_bytes: [u8; 8] =
-                            bytes.as_ref().try_into().map_err(|_| slatedb::Error::internal("invalid byte conversion".to_string()))?;
+                        let value_bytes: [u8; 8] = bytes.as_ref().try_into().expect("invalid byte conversion");
                         let current_value = u64::from_be_bytes(value_bytes);
 
                         // Check if this value is greater than the last seen value for this key
