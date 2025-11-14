@@ -159,6 +159,9 @@ pub(crate) struct ImmutableMemtable {
     table: Arc<KVTable>,
     /// This flushed watchable cell is useful for users who enable `await_durable` on the writes.
     flushed: WatchableOnceCell<Result<(), SlateDBError>>,
+    /// A snapshot of the sequence tracker taken when this immutable memtable was created.
+    /// This avoids needing to access the sequence tracker through a mutex on the underlying table.
+    sequence_tracker: SequenceTracker,
 }
 
 #[self_referencing]
@@ -212,10 +215,12 @@ impl MemTableIterator {
 
 impl ImmutableMemtable {
     pub(crate) fn new(table: WritableKVTable, recent_flushed_wal_id: u64) -> Self {
+        let sequence_tracker = table.table.sequence_tracker_snapshot();
         Self {
             table: table.table,
             recent_flushed_wal_id,
             flushed: WatchableOnceCell::new(),
+            sequence_tracker,
         }
     }
 
@@ -235,8 +240,8 @@ impl ImmutableMemtable {
         self.flushed.write(result);
     }
 
-    pub(crate) fn sequence_tracker_snapshot(&self) -> SequenceTracker {
-        self.table.sequence_tracker_snapshot()
+    pub(crate) fn sequence_tracker(&self) -> &SequenceTracker {
+        &self.sequence_tracker
     }
 }
 

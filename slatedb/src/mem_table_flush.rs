@@ -163,13 +163,13 @@ impl MemtableFlusher {
                     modifier.state.manifest.core.recent_snapshot_min_seq =
                         min_active_snapshot_seq.unwrap_or(modifier.state.manifest.core.last_l0_seq);
 
-                    let sequence_tracker_snapshot = imm_memtable.sequence_tracker_snapshot();
+                    let sequence_tracker = imm_memtable.sequence_tracker();
                     modifier
                         .state
                         .manifest
                         .core
                         .sequence_tracker
-                        .extend_from(&sequence_tracker_snapshot);
+                        .extend_from(sequence_tracker);
 
                     Ok(())
                 })?;
