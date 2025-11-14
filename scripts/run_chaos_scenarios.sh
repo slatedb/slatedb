@@ -181,7 +181,7 @@ timeoutish() {
 
 # 10% fail-before with HTTP 500 (transient server errors).
 http_500s() {
-  clear_toxics s3; add_http_failure 10 500
+  clear_toxics s3; add_http_failure 10 503
   AWS_HTTP_PROXY="$MIKKMOKK_S3" run_smoke http_500s "$MIKKMOKK_S3"
 }
 
