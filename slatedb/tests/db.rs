@@ -222,8 +222,8 @@ async fn test_concurrent_writers_and_readers() {
                         }
                     } else {
                         assert!(
-                            latest_values.get(&key).is_none(),
-                            "Expected key {} in DB, but not found",
+                            !latest_values.contains_key(&key),
+                            "No key {} in DB, but found in latest_values",
                             key,
                         );
                     }
