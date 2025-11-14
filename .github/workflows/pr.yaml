@@ -309,6 +309,7 @@ jobs:
           SLATEDB_TEST_NUM_READERS: "2"
           SLATEDB_TEST_WRITES_PER_TASK: "250"
           SLATEDB_TEST_KEY_LENGTH: "256"
+          RUST_BACKTRACE: "1"
         run: |
           chmod +x scripts/run_chaos_scenarios.sh
           if scripts/run_chaos_scenarios.sh; then
