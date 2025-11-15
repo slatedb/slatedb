@@ -4,6 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use futures::stream::BoxStream;
+use futures::{stream, StreamExt, TryStreamExt};
 use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
@@ -134,8 +135,42 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        // Delegates directly; listing returns a stream so per-page retry is out of scope here.
-        self.inner.list(prefix)
+        let inner = Arc::clone(&self.inner);
+        let prefix_owned = prefix.cloned();
+
+        // list() is a little more complex than the other functions because:
+        // 1. it's sync, not async
+        // 2. it paginates and returns a stream of results
+        //
+        // (2) is particularly challenging because it means it returns before we know the full
+        // result. This is problematic--because we can't easily retry half-way through the
+        // iteration.
+        //
+        // To get around this, we convert the entire list into a vector in a single attempt,
+        // and then return a stream of those results.
+        stream::once(async move {
+            (|| async {
+                let stream = inner.list(prefix_owned.as_ref());
+                // Any error in the stream will return an error for try_collect
+                stream.try_collect::<Vec<_>>().await
+            })
+            .retry(Self::retry_builder())
+            .notify(Self::notify)
+            .when(Self::should_retry)
+            .await
+        })
+        .map_ok(|entries| {
+            // If the list() call succeeded, we need to convert the vector back into
+            // a stream of results.
+            stream::iter(
+                entries
+                    .into_iter()
+                    .map(|meta| Ok::<ObjectMeta, object_store::Error>(meta)),
+            )
+            .boxed()
+        })
+        .try_flatten()
+        .boxed()
     }
 
     fn list_with_offset(
@@ -143,8 +178,31 @@ impl ObjectStore for RetryingObjectStore {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        // Delegates directly; listing returns a stream so per-page retry is out of scope here.
-        self.inner.list_with_offset(prefix, offset)
+        let inner = Arc::clone(&self.inner);
+        let prefix_owned = prefix.cloned();
+        let offset_owned = offset.clone();
+
+        // See the comment in list() for details on why we do this.
+        stream::once(async move {
+            (|| async {
+                let stream = inner.list_with_offset(prefix_owned.as_ref(), &offset_owned);
+                stream.try_collect::<Vec<_>>().await
+            })
+            .retry(Self::retry_builder())
+            .notify(Self::notify)
+            .when(Self::should_retry)
+            .await
+        })
+        .map_ok(|entries| {
+            stream::iter(
+                entries
+                    .into_iter()
+                    .map(|meta| Ok::<ObjectMeta, object_store::Error>(meta)),
+            )
+            .boxed()
+        })
+        .try_flatten()
+        .boxed()
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
@@ -193,6 +251,7 @@ mod tests {
     use super::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use bytes::Bytes;
+    use futures::TryStreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
@@ -295,5 +354,76 @@ mod tests {
             e => panic!("unexpected error: {e:?}"),
         }
         assert_eq!(failing.put_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_retries_transient_until_success() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let paths = [
+            Path::from("/items/a"),
+            Path::from("/items/b"),
+            Path::from("/items/c"),
+        ];
+        for (idx, path) in paths.iter().enumerate() {
+            inner
+                .put(
+                    path,
+                    PutPayload::from_bytes(Bytes::from(format!("val-{idx}").into_bytes())),
+                )
+                .await
+                .unwrap();
+        }
+
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 1));
+        let retrying = RetryingObjectStore::new(flaky.clone());
+
+        let listed: Vec<_> = retrying
+            .list(None)
+            .try_collect()
+            .await
+            .expect("list should eventually succeed");
+        assert_eq!(listed.len(), paths.len());
+        let mut names: Vec<_> = listed.into_iter().map(|m| m.location.to_string()).collect();
+        names.sort();
+        let mut expected: Vec<_> = paths.iter().map(|p| p.to_string()).collect();
+        expected.sort();
+        assert_eq!(names, expected);
+        assert_eq!(flaky.list_attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_with_offset_retries_transient_until_success() {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let paths = [
+            Path::from("/items/a"),
+            Path::from("/items/b"),
+            Path::from("/items/c"),
+        ];
+        for (idx, path) in paths.iter().enumerate() {
+            inner
+                .put(
+                    path,
+                    PutPayload::from_bytes(Bytes::from(format!("val-{idx}").into_bytes())),
+                )
+                .await
+                .unwrap();
+        }
+
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_with_offset_failures(1, 1));
+        let retrying = RetryingObjectStore::new(flaky.clone());
+        let offset = Path::from("/items/a");
+
+        let listed: Vec<_> = retrying
+            .list_with_offset(None, &offset)
+            .try_collect()
+            .await
+            .expect("list_with_offset should eventually succeed");
+
+        // Expect entries after the offset (at least b and c)
+        let mut names: Vec<_> = listed.into_iter().map(|m| m.location.to_string()).collect();
+        names.sort();
+        assert!(names.contains(&"items/b".to_string()));
+        assert!(names.contains(&"items/c".to_string()));
+        assert_eq!(flaky.list_with_offset_attempts(), 2);
     }
 }
