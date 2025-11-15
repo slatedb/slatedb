@@ -5,7 +5,7 @@ use crate::transactional_object::{
 };
 use async_trait::async_trait;
 use futures::StreamExt;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore, PutMode, PutOptions, PutPayload};
@@ -38,6 +38,9 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
         file_suffix: &'static str,
         codec: Box<dyn ObjectCodec<T>>,
     ) -> Self {
+        info!("root_path: {:?}", root_path);
+        info!("subdir: {:?}", subdir);
+        info!("prefix: {:?}", root_path.child(subdir));
         Self {
             object_store: Box::new(::object_store::prefix::PrefixStore::new(
                 object_store,
