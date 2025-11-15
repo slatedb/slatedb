@@ -133,7 +133,7 @@ async fn test_concurrent_writers_and_readers() {
             warn!("retrying error {:?} with sleeping {:?}", err, dur);
         })
         .await
-        .expect("failed to build DB after retries"),
+        .expect("Failed to build DB after retries"),
     );
     let reader_cancellation_token = CancellationToken::new();
 
@@ -145,23 +145,18 @@ async fn test_concurrent_writers_and_readers() {
                 let key = zero_pad_key(writer_id.try_into().unwrap(), key_length);
                 for i in 1..=writes_per_task {
                     // Write the incremented value
-                    let result = db
-                        .put_with_options(
-                            &key,
-                            i.to_be_bytes().as_ref(),
-                            &PutOptions::default(),
-                            &WriteOptions {
-                                await_durable: false,
-                            },
-                        )
-                        .await;
+                    db.put_with_options(
+                        &key,
+                        i.to_be_bytes().as_ref(),
+                        &PutOptions::default(),
+                        &WriteOptions {
+                            await_durable: false,
+                        },
+                    )
+                    .await
+                    .expect("Failed to write value");
 
-                    if let Err(e) = result {
-                        panic!(
-                            "Failed to write value [error={:?}, writer_id={}, write_count={}]",
-                            e, writer_id, i,
-                        );
-                    } else if i % 10 == 0 {
+                    if i % 10 == 0 {
                         log::info!("wrote values [writer_id={}, write_count={}]", writer_id, i);
                     }
                 }
@@ -262,5 +257,5 @@ async fn test_concurrent_writers_and_readers() {
             warn!("retrying error {:?} with sleeping {:?}", err, dur);
         })
         .await
-        .expect("failed to close DB after retries");
+        .expect("Failed to close DB after retries");
 }

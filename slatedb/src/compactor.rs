@@ -399,11 +399,9 @@ impl CompactorEventHandler {
     /// Handles a polling tick by refreshing the manifest and possibly scheduling compactions.
     async fn handle_ticker(&mut self) {
         if !self.is_executor_stopped() {
-            let result = self.load_manifest().await;
-            if result.is_err() {
-                error!("error loading manifest [error={:#?}]", result.unwrap_err());
-                panic!("error loading manifest");
-            }
+            self.load_manifest()
+                .await
+                .expect("fatal error loading manifest");
         }
     }
 

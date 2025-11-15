@@ -124,6 +124,17 @@ reset_bucket() {
   aws --endpoint-url "$LOCALSTACK_S3" s3 mb "s3://${bucket}" >/dev/null
 }
 
+# List all objects currently stored in the LocalStack bucket.
+list_bucket_contents() {
+  local bucket="slatedb-test"
+  log "s3: listing objects in s3://${bucket}"
+  AWS_ACCESS_KEY_ID=test \
+  AWS_SECRET_ACCESS_KEY=test \
+  AWS_REGION=us-east-1 \
+  aws --endpoint-url "$LOCALSTACK_S3" s3 ls "s3://${bucket}" --recursive || \
+    log "s3: failed to list contents of s3://${bucket}"
+}
+
 # Execute the SlateDB integration test against the configured proxies.
 # Args:
 #   $1 name : scenario label for logging
@@ -162,6 +173,10 @@ scenario() {
   else
     log "scenario '$name' FAILED"; fail=$((fail+1))
   fi
+
+  # After each scenario, print the final contents of the
+  # backing object store so chaos runs can inspect state.
+  list_bucket_contents
 }
 
 # No HTTP faults, no TCP faults (green path).
