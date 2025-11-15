@@ -7,6 +7,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::IdGenerator;
 use async_trait::async_trait;
+use fail_parallel::fail_point;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
@@ -199,6 +200,10 @@ impl MemtableFlusher {
     }
 
     async fn flush_and_record(&mut self) -> Result<(), SlateDBError> {
+        fail_point!(
+            Arc::clone(&self.db_inner.fp_registry),
+            "flush-memtable-to-l0"
+        );
         let result = self.flush_imm_memtables_to_l0().await;
         if let Err(err) = &result {
             error!("error from memtable flush [error={:?}]", err);

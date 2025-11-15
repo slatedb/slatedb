@@ -24,7 +24,7 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fail_parallel::{fail_point, FailPointRegistry};
+use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
@@ -393,7 +393,7 @@ impl DbInner {
     }
 
     pub(crate) async fn flush_memtables(&self) -> Result<(), SlateDBError> {
-        let frozen = {
+        {
             let last_flushed_wal_id = self.wal_buffer.recent_flushed_wal_id();
             let mut guard = self.state.write();
             if !guard.memtable().is_empty() {
@@ -403,12 +403,6 @@ impl DbInner {
                 false
             }
         };
-
-        // this failpoint has to be here outside of holding the guard to the state.
-        // or else it can cause deadlocks in the test that uses it
-        if frozen {
-            fail_point!(Arc::clone(&self.fp_registry), "flush-memtable-after-freeze");
-        }
 
         self.flush_immutable_memtables().await
     }
@@ -3297,7 +3291,7 @@ mod tests {
         put_with_timestamp(&db, &system_clock, 0, &write_options).await;
         put_with_timestamp(&db, &system_clock, 1, &write_options).await;
 
-        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-after-freeze", "pause").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "pause").unwrap();
 
         let flush_handle = {
             let inner = Arc::clone(&db.inner);
@@ -3320,7 +3314,7 @@ mod tests {
         put_with_timestamp(&db, &system_clock, 2, &write_options).await;
         put_with_timestamp(&db, &system_clock, 3, &write_options).await;
 
-        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-after-freeze", "off").unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "flush-memtable-to-l0", "off").unwrap();
 
         flush_handle.await.unwrap().unwrap();
 
