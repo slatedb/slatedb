@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use thiserror::Error;
+use log::error;
 
 use crate::{
     error::SlateDBError,
@@ -165,6 +166,32 @@ pub(crate) struct MergeOperatorIterator<T: KeyValueIterator> {
     now: i64,
 }
 
+#[derive(Debug, Clone)]
+struct MergeTracker {
+    max_create_ts: Option<i64>,
+    min_expire_ts: Option<i64>,
+    seq: u64,
+}
+
+impl MergeTracker {
+    fn update(&mut self, entry: &RowEntry) -> Result<(), SlateDBError> {
+        self.max_create_ts = merge_options(self.max_create_ts, entry.create_ts, i64::max);
+        self.min_expire_ts = merge_options(self.min_expire_ts, entry.expire_ts, i64::min);
+
+        // sequence numbers should be descending
+        if self.seq < entry.seq {
+            error!(
+                "Invalid sequence number ordering: {} > {}",
+                self.seq, entry.seq
+            );
+            return Err(SlateDBError::InvalidDBState);
+        }
+
+        self.seq = std::cmp::max(self.seq, entry.seq);
+        Ok(())
+    }
+}
+
 #[allow(unused)]
 impl<T: KeyValueIterator> MergeOperatorIterator<T> {
     pub(crate) fn new(
@@ -194,52 +221,24 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         entry.key == *key && (self.merge_different_expire_ts || first_expire_ts == entry.expire_ts)
     }
 
-    /// Validate sequence number ordering (must be descending)
-    fn validate_sequence_order(&self, last_seq: u64, next_seq: u64) -> Result<(), SlateDBError> {
-        if last_seq < next_seq {
-            return Err(SlateDBError::InvalidDBState);
-        }
-        Ok(())
-    }
-
-    /// Process an entry: update tracking variables and handle base values or merge operands
-    /// Returns true if we should stop (hit a base value)
-    fn process_merge_entry(
+    fn process_batch(
         &self,
-        entry: RowEntry,
-        batch: &mut Vec<(u64, Bytes)>,
-        base_value: &mut Option<Bytes>,
-        found_base_value: &mut bool,
-        max_create_ts: &mut Option<i64>,
-        min_expire_ts: &mut Option<i64>,
-        seq: &mut u64,
-    ) -> bool {
-        let entry_seq = entry.seq;
-        let entry_create_ts = entry.create_ts;
-        let entry_expire_ts = entry.expire_ts;
-        let is_expired = !is_not_expired(&entry, self.now);
-
-        *max_create_ts = merge_options(*max_create_ts, entry_create_ts, i64::max);
-        *min_expire_ts = merge_options(*min_expire_ts, entry_expire_ts, i64::min);
-        *seq = std::cmp::max(*seq, entry_seq);
-
-        match entry.value {
-            ValueDeletable::Value(bytes) => {
-                *base_value = Some(bytes);
-                *found_base_value = true;
-                true
-            }
-            ValueDeletable::Tombstone => {
-                *found_base_value = true;
-                true
-            }
-            ValueDeletable::Merge(value) => {
-                if !is_expired {
-                    batch.push((entry_seq, value));
-                }
-                false
+        key: &Bytes,
+        batch: &mut Vec<RowEntry>,
+        merge_tracker: &mut MergeTracker,
+    ) -> Result<Bytes, SlateDBError> {
+        batch.reverse();
+        let mut operands: Vec<Bytes> = Vec::with_capacity(batch.len());
+        for entry in &*batch {
+            merge_tracker.update(entry)?;
+            if let Some(v) = entry.value.as_bytes() {
+                operands.push(v);
             }
         }
+
+        let batch_result = self.merge_operator.merge_batch(key, None, &operands)?;
+        batch.clear();
+        Ok(batch_result)
     }
 
     async fn merge_with_older_entries(
@@ -249,99 +248,69 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         let key = first_entry.key.clone();
         let first_expire_ts = first_entry.expire_ts;
 
-        let mut max_create_ts = first_entry.create_ts;
-        let mut min_expire_ts = first_entry.expire_ts;
-        let mut seq = first_entry.seq;
-
-        // Check if first entry is a base value (Value or Tombstone)
-        let mut base_value: Option<Bytes> = match &first_entry.value {
-            ValueDeletable::Value(bytes) => Some(bytes.clone()),
-            _ => None,
+        let mut merge_tracker = MergeTracker {
+            max_create_ts: None,
+            min_expire_ts: None,
+            seq: first_entry.seq,
         };
-        let mut found_base_value = !matches!(first_entry.value, ValueDeletable::Merge(_));
 
-        let mut batch_results: Vec<Bytes> = Vec::new();
-
-        // Stream and process entries in batches of MERGE_BATCH_SIZE
+        let mut results = Vec::new();
         let mut batch = Vec::with_capacity(MERGE_BATCH_SIZE);
 
-        let mut done = self.process_merge_entry(
-            first_entry,
-            &mut batch,
-            &mut base_value,
-            &mut found_base_value,
-            &mut max_create_ts,
-            &mut min_expire_ts,
-            &mut seq,
-        );
+        let mut next = Some(first_entry);
 
-        while !done {
-            while batch.len() < MERGE_BATCH_SIZE && !done {
-                let Some(next_entry) = self.delegate.next_entry().await? else {
-                    done = true;
-                    break;
-                };
-
-                // Check if entry matches current key and expire_ts
-                if !self.is_matching_entry(&next_entry, &key, first_expire_ts) {
-                    self.buffered_entry = Some(next_entry);
-                    done = true;
-                    break;
+        // this loop returns the "base value" (non merge operand) if it exists
+        let base = loop {
+            if let Some(entry) = next {
+                if !self.is_matching_entry(&entry, &key, first_expire_ts) {
+                    self.buffered_entry = Some(entry);
+                    break None;
+                } else if !matches!(entry.value, ValueDeletable::Merge(_)) {
+                    // found a Value or Tombstone, this is the base value
+                    break Some(entry);
+                } else if is_not_expired(&entry, self.now) {
+                    batch.push(entry);
                 }
 
-                // Validate sequence number ordering (descending)
-                let last_seq = batch.last().map(|(s, _)| *s).unwrap_or(seq);
-                self.validate_sequence_order(last_seq, next_entry.seq)?;
+                // if the batch is full, merge it and add the result to the results vector
+                if batch.len() >= MERGE_BATCH_SIZE {
+                    results.push(self.process_batch(&key, &mut batch, &mut merge_tracker)?);
+                }
 
-                done = self.process_merge_entry(
-                    next_entry,
-                    &mut batch,
-                    &mut base_value,
-                    &mut found_base_value,
-                    &mut max_create_ts,
-                    &mut min_expire_ts,
-                    &mut seq,
-                );
+                next = self.delegate.next_entry().await?;
+            } else {
+                break None;
             }
+        };
 
-            if !batch.is_empty() {
-                batch.reverse();
-
-                let operands: Vec<Bytes> = batch.iter().map(|(_, v)| v.clone()).collect();
-
-                let batch_result = self.merge_operator.merge_batch(&key, None, &operands)?;
-                batch_results.push(batch_result);
-
-                batch.clear();
-            }
+        // handle leftovers from the last batch
+        if !batch.is_empty() {
+            results.push(self.process_batch(&key, &mut batch, &mut merge_tracker)?);
         }
 
-        batch_results.reverse();
-
-        let mut merged_value = base_value;
-        if !batch_results.is_empty() {
-            merged_value = Some(self.merge_operator.merge_batch(
-                &key,
-                merged_value,
-                &batch_results,
-            )?);
+        let found_base = base.is_some();
+        if results.is_empty() && !found_base {
+            return Ok(None);
         }
 
-        if let Some(result_value) = merged_value {
-            return Ok(Some(RowEntry::new(
-                key,
-                if found_base_value {
-                    ValueDeletable::Value(result_value)
-                } else {
-                    ValueDeletable::Merge(result_value)
-                },
-                seq,
-                max_create_ts,
-                min_expire_ts,
-            )));
-        }
+        results.reverse();
+        let final_result = self.merge_operator.merge_batch(
+            &key,
+            base.and_then(|b| b.value.as_bytes()),
+            &results,
+        )?;
 
-        Ok(None)
+        Ok(Some(RowEntry {
+            key: key.clone(),
+            value: if found_base {
+                ValueDeletable::Value(final_result)
+            } else {
+                ValueDeletable::Merge(final_result)
+            },
+            seq: merge_tracker.seq,
+            create_ts: merge_tracker.max_create_ts,
+            expire_ts: merge_tracker.min_expire_ts,
+        }))
     }
 }
 
@@ -844,5 +813,106 @@ mod tests {
             "Expected merge_batch to be called 3 times for 150 operands (2 batches + 1 final merge), but was called {} times",
             actual_calls
         );
+    }
+
+    #[tokio::test]
+    async fn test_merge_operator_filters_expired_entries() {
+        let merge_operator = Arc::new(MockMergeOperator {});
+
+        // Create entries with different expiration times
+        // now = 100, so entries with expire_ts <= 100 are expired
+        // Entries are sorted by reverse seq, so we need the first entry (highest seq) to be non-expired
+        // to properly initialize the tracker
+        let data = vec![
+            // Non-expired merge operands (expire_ts > 100) - highest seq first
+            RowEntry::new_merge(b"key1", b"4", 4).with_expire_ts(300),
+            RowEntry::new_merge(b"key1", b"2", 2).with_expire_ts(150),
+            RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(200),
+            // Expired merge operands (expire_ts <= 100) - should be filtered out
+            RowEntry::new_merge(b"key1", b"5", 5).with_expire_ts(100),
+            RowEntry::new_merge(b"key1", b"3", 3).with_expire_ts(50),
+        ];
+
+        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            100, // now = 100
+        );
+
+        // Only non-expired entries (4, 2, 1) should be merged
+        // Entries with expire_ts 50 and 100 should be filtered out
+        // Since entries are sorted by reverse seq, first entry is seq=5 (expired)
+        // Tracker initializes with seq=5, but max_create_ts and min_expire_ts are None
+        // Seq=5 is filtered out (expired), then seq=4, 2, 1 are added to batch
+        // process_batch updates tracker: min_expire_ts becomes 150 (min of 300, 150, 200)
+        // Batch is [4, 2, 1], reversed to [1, 2, 4], merged to "124"
+        // Final seq is 5 (from first entry initialization), min_expire_ts is 150
+        assert_iterator(
+            &mut iterator,
+            vec![RowEntry::new_merge(b"key1", b"124", 5).with_expire_ts(150)], // seq=5 from first entry, min_expire_ts=150 from non-expired entries
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_merge_operator_filters_expired_entries_with_base_value() {
+        let merge_operator = Arc::new(MockMergeOperator {});
+
+        // Create entries with a base value and mixed expired/non-expired merge operands
+        // Entries are sorted by reverse seq, so base value (seq=0) comes last
+        // We need non-expired merge operands with higher seq to come first
+        let data = vec![
+            // Non-expired merge operands (higher seq first)
+            RowEntry::new_merge(b"key1", b"4", 4).with_expire_ts(300),
+            RowEntry::new_merge(b"key1", b"2", 2).with_expire_ts(250),
+            RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(150),
+            // Expired merge operand - should be filtered out
+            RowEntry::new_merge(b"key1", b"3", 3).with_expire_ts(50),
+            // Base value (non-expired) - comes last due to seq=0
+            RowEntry::new_value(b"key1", b"BASE", 0).with_expire_ts(200),
+        ];
+
+        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            100, // now = 100
+        );
+
+        // Base value + non-expired entries (4, 2, 1) should be merged
+        // Entry with expire_ts 50 should be filtered out
+        // First entry is seq=4 (non-expired), tracker starts with seq=4, but max_create_ts and min_expire_ts are None
+        // Seq=4, 2, 1 are added to batch (all non-expired)
+        // process_batch updates tracker: min_expire_ts becomes 150 (min of 300, 250, 150)
+        // Batch is [4, 2, 1], reversed to [1, 2, 4], merged to "124", then merged with BASE to "BASE124"
+        // Final seq is 4 (from first entry initialization), min_expire_ts is 150
+        assert_iterator(
+            &mut iterator,
+            vec![RowEntry::new_value(b"key1", b"BASE124", 4).with_expire_ts(150)], // seq=4 from first entry, min_expire_ts=150
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_merge_operator_handles_all_expired_entries() {
+        let merge_operator = Arc::new(MockMergeOperator {});
+
+        // All merge operands are expired
+        let data = vec![
+            RowEntry::new_merge(b"key1", b"1", 1).with_expire_ts(50),
+            RowEntry::new_merge(b"key1", b"2", 2).with_expire_ts(80),
+            RowEntry::new_merge(b"key1", b"3", 3).with_expire_ts(90),
+        ];
+
+        let mut iterator = MergeOperatorIterator::<MockKeyValueIterator>::new(
+            merge_operator,
+            data.into(),
+            true,
+            100, // now = 100, all entries are expired
+        );
+
+        // All entries are expired, so nothing should be returned
+        assert_iterator(&mut iterator, vec![]).await;
     }
 }
