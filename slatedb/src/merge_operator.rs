@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use thiserror::Error;
 use log::error;
+use thiserror::Error;
 
 use crate::{
     error::SlateDBError,
