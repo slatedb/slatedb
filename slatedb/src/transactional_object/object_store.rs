@@ -133,8 +133,6 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         to: Bound<MonotonicId>,
     ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
         let base = &Path::from("/");
-        warn!("base: {}", base);
-        warn!("object_store: {}", self.object_store);
         let mut files_stream = self.object_store.list(Some(base));
         let mut items = Vec::new();
         let id_range = (from, to);

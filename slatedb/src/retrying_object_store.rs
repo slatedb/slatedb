@@ -135,7 +135,6 @@ impl ObjectStore for RetryingObjectStore {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        warn!("prefix: {:?}", prefix);
         let inner = Arc::clone(&self.inner);
         let prefix_owned = prefix.cloned();
 
