@@ -137,11 +137,11 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         warn!("object_store: {}", self.object_store);
         let mut files_stream = self.object_store.list(Some(base));
         let mut items = Vec::new();
+        let id_range = (from, to);
         while let Some(file) = match files_stream.next().await.transpose() {
             Ok(file) => file,
             Err(e) => return Err(TransactionalObjectError::from(e)),
         } {
-            let id_range = (from, to);
             match self.parse_id(&file.location) {
                 Ok(id) if id_range.contains(&id) => {
                     items.push(GenericObjectMetadata {
@@ -151,9 +151,9 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                         size: file.size as u32,
                     });
                 }
-                Err(_) => warn!(
-                    "unknown file in directory [base={}, location={}]",
-                    base, file.location,
+                Err(e) => warn!(
+                    "unknown file in directory [base={}, location={}, object_store={}, error={:?}]",
+                    base, file.location, self.object_store, e,
                 ),
                 _ => {}
             }
