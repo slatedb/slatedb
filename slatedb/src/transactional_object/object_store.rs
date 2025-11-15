@@ -5,7 +5,7 @@ use crate::transactional_object::{
 };
 use async_trait::async_trait;
 use futures::StreamExt;
-use log::{debug, info, warn};
+use log::{debug, warn};
 use object_store::path::Path;
 use object_store::Error::AlreadyExists;
 use object_store::{Error, ObjectStore, PutMode, PutOptions, PutPayload};
@@ -38,9 +38,6 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
         file_suffix: &'static str,
         codec: Box<dyn ObjectCodec<T>>,
     ) -> Self {
-        info!("root_path: {:?}", root_path);
-        info!("subdir: {:?}", subdir);
-        info!("prefix: {:?}", root_path.child(subdir));
         Self {
             object_store: Box::new(::object_store::prefix::PrefixStore::new(
                 object_store,
@@ -136,6 +133,8 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         to: Bound<MonotonicId>,
     ) -> Result<Vec<GenericObjectMetadata>, TransactionalObjectError> {
         let base = &Path::from("/");
+        warn!("base: {}", base);
+        warn!("object_store: {}", self.object_store);
         let mut files_stream = self.object_store.list(Some(base));
         let mut items = Vec::new();
         while let Some(file) = match files_stream.next().await.transpose() {
