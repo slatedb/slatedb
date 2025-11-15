@@ -477,7 +477,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let endpoint = env::var("AWS_ENDPOINT").ok();
 
     // Start building the S3 object store builder with required params.
-    let mut builder = object_store::aws::AmazonS3Builder::new()
+    let mut builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch)
         .with_bucket_name(bucket)
         .with_region(region);

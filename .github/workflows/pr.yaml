@@ -274,17 +274,16 @@ jobs:
           for i in {1..60}; do
             if curl -sf http://127.0.0.1:4566/health >/dev/null; then echo ready; break; fi; sleep 1; done
 
-      - name: Start mikkmokk-proxy (baseline)
+      - name: Start chaos-http-proxy
         run: |
-          # Start with no HTTP faults; Toxiproxy handles TCP faults
-          docker run -d --name mikkmokk --network chaos-net \
-            -e DESTINATION_URL=http://localstack:4566 \
-            -e PROXY_BIND=0.0.0.0 \
-            -e PROXY_PORT=8080 \
-            -e ADMIN_BIND=0.0.0.0 \
-            -e ADMIN_PORT=7070 \
-            -p 8080:8080 -p 7070:7070 \
-            docker.io/ivarref/mikkmokk-proxy:v0.1.63
+          docker run -d --name chaos-http-proxy --network chaos-net \
+            -p 1080:1080 \
+            bouncestorage/chaos-http-proxy \
+            --address 0.0.0.0 \
+            --port 1080
+          # Wait for API
+          for i in {1..60}; do
+            if curl -sf http://127.0.0.1:1080/chaos/api >/dev/null; then echo ready; break; fi; sleep 1; done
 
       - name: Start Toxiproxy
         run: |
@@ -334,6 +333,6 @@ jobs:
         if: failure()
         run: |
           echo "--- LocalStack logs ---"; docker logs --tail 500 localstack || true
-          echo "--- mikkmokk logs ---"; docker logs --tail 500 mikkmokk || true
+          echo "--- chaos-http-proxy logs ---"; docker logs --tail 500 chaos-http-proxy || true
           echo "--- Toxiproxy logs ---"; docker logs --tail 500 toxiproxy || true
           echo "--- Toxiproxy proxies ---"; curl -sf http://127.0.0.1:8474/proxies || true

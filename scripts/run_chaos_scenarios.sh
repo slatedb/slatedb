@@ -7,12 +7,11 @@
 #
 # Components (pre-started by the workflow):
 # - LocalStack (S3-compatible)
-# - mikkmokk-proxy (HTTP faults): proxy on 8080, admin on 7070
+# - chaos-http-proxy (HTTP faults): proxy on 1080, admin on 1080/chaos/api
 # - Toxiproxy (TCP faults): API on 8474
 #
 # Local bindings used by this script:
-# - mikkmokk-proxy S3: localhost:8080
-# - mikkmokk-proxy admin API: localhost:7070
+# - chaos-http-proxy: localhost:1080
 # - Toxiproxy S3: localhost:9001 -> LocalStack:4566
 # - Toxiproxy admin API: localhost:8474
 #
@@ -20,7 +19,7 @@
 #   TCP-level scenarios:
 #     SlateDB -> Toxiproxy (localhost:9001) -> LocalStack:4566
 #   HTTP-level scenarios (fail-before only):
-#     SlateDB -> mikkmokk-proxy (localhost:8080) -> LocalStack:4566
+#     SlateDB -> chaos-http-proxy (localhost:1080) -> LocalStack:4566
 #
 # Scenarios executed by this script:
 # - baseline: No HTTP or TCP faults (green path).
@@ -47,8 +46,8 @@ set -euo pipefail
 TOXIPROXY_S3=http://127.0.0.1:9001
 TOXIPROXY_API=http://127.0.0.1:8474
 LOCALSTACK_S3=http://127.0.0.1:4566
-MIKKMOKK_S3=http://127.0.0.1:8080
-MIKKMOKK_API=http://127.0.0.1:7070
+CHAOS_HTTP_PROXY=http://127.0.0.1:1080
+CHAOS_HTTP_API=http://127.0.0.1:1080/chaos/api
 
 # Print a prefixed message for easier scanning in CI logs.
 log() { echo "[chaos] $*"; }
@@ -86,24 +85,37 @@ add_toxic() {
     -d "{\"name\":\"$toxic_name\",\"type\":\"$type\",\"stream\":\"$stream\",\"toxicity\":$toxicity,\"attributes\":$attrs_json}"
 }
 
-# Set mikkmokk-proxy default fail-before percentage/code at runtime.
+# Configure chaos-http-proxy failure rates at runtime.
 # Args:
 #   $1 percent : 0..100 (chance to fail-before)
-#   $2 code    : HTTP status code to return (e.g., 404|429|503)
+#   $2 code    : HTTP status code to emulate (503|404|429)
 add_http_failure() {
   local percent=${1:-0}
   local code=${2:-503}
-  log "mikkmokk update: fail-before ${percent}% code=${code}"
-  curl -fsS -X POST \
-    -H "x-mikkmokk-fail-before-percentage: ${percent}" \
-    -H "x-mikkmokk-fail-before-code: ${code}" \
-    "$MIKKMOKK_API/api/v1/update" >/dev/null
+  local fail_key
+
+  case "$code" in
+    503) fail_key="com.bouncestorage.chaoshttpproxy.http_503" ;;
+    404) fail_key="com.bouncestorage.chaoshttpproxy.http_500" ;;
+    429) fail_key="com.bouncestorage.chaoshttpproxy.http_504" ;;
+    *)   fail_key="com.bouncestorage.chaoshttpproxy.http_503" ;;
+  esac
+
+  local success=$((100 - percent))
+  log "chaos-http-proxy update: ${percent}% -> code=${code} (key=${fail_key})"
+
+  cat <<EOF | curl -fsS --request POST --data-binary @- "$CHAOS_HTTP_API" >/dev/null
+$fail_key=$percent
+com.bouncestorage.chaoshttpproxy.success=$success
+EOF
 }
 
-# Restore mikkmokk-proxy runtime fault settings to startup defaults.
+# Restore chaos-http-proxy runtime fault settings to all-success.
 clear_http_failures() {
-  log "mikkmokk reset defaults"
-  curl -fsS -X POST "$MIKKMOKK_API/api/v1/reset" >/dev/null
+  log "chaos-http-proxy reset defaults"
+  cat <<EOF | curl -fsS --request POST --data-binary @- "$CHAOS_HTTP_API" >/dev/null
+com.bouncestorage.chaoshttpproxy.success=100
+EOF
 }
 
 # Drop and recreate the LocalStack S3 bucket used by tests.
@@ -137,13 +149,14 @@ list_bucket_contents() {
 
 # Execute the SlateDB integration test against the configured proxies.
 # Args:
-#   $1 name : scenario label for logging
+#   $1 name     : scenario label for logging
+#   $2 endpoint : S3 endpoint URL
 run_smoke() {
   local name=$1
   local endpoint=$2
   log "running scenario: $name (endpoint=$endpoint)"
   # `AWS_S3_FORCE_PATH_STYLE` is set below to avoid virtual-hosted-style Host/SigV4
-  # issues when routing through localhost ports and proxies (Toxiproxy + mikkmokk).
+  # issues when routing through localhost ports and proxies (Toxiproxy + chaos-http-proxy).
   CLOUD_PROVIDER=aws \
   AWS_ACCESS_KEY_ID=test \
   AWS_SECRET_ACCESS_KEY=test \
@@ -223,19 +236,19 @@ timeoutish() {
 # 10% fail-before with HTTP 503 (transient server errors).
 http_503s() {
   clear_toxics s3; add_http_failure 10 503
-  run_smoke http_503s "$MIKKMOKK_S3"
+  run_smoke http_503s "$CHAOS_HTTP_PROXY"
 }
 
 # 5% fail-before with HTTP 404 (transient missing paths/keys).
 http_404s() {
   clear_toxics s3; add_http_failure 5 404
-  run_smoke http_404s "$MIKKMOKK_S3"
+  run_smoke http_404s "$CHAOS_HTTP_PROXY"
 }
 
 # 5% fail-before with HTTP 429 (transient throttling).
 http_429s() {
   clear_toxics s3; add_http_failure 5 429
-  run_smoke http_429s "$MIKKMOKK_S3"
+  run_smoke http_429s "$CHAOS_HTTP_PROXY"
 }
 
 # Execute
