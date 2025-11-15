@@ -165,7 +165,7 @@ impl ObjectStore for RetryingObjectStore {
             stream::iter(
                 entries
                     .into_iter()
-                    .map(|meta| Ok::<ObjectMeta, object_store::Error>(meta)),
+                    .map(Ok::<ObjectMeta, object_store::Error>),
             )
             .boxed()
         })
@@ -197,7 +197,7 @@ impl ObjectStore for RetryingObjectStore {
             stream::iter(
                 entries
                     .into_iter()
-                    .map(|meta| Ok::<ObjectMeta, object_store::Error>(meta)),
+                    .map(Ok::<ObjectMeta, object_store::Error>),
             )
             .boxed()
         })
