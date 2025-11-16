@@ -37,20 +37,14 @@
 # Local usage (running the chaos services + script):
 # 1. Prerequisites:
 #    - Docker and docker compose.
-#    - Rust toolchain + cargo.
 #    - AWS CLI (`aws`) installed and on PATH.
-#    - Rust toolchain + Docker to build the lowdown image.
-# 2. From the SlateDB repo root, ensure the lowdown project is checked out at
-#      ../lowdown
-#    so that the docker compose file can build it:
-#      git clone https://github.com/your-org/lowdown ../lowdown
-# 3. Build and start the chaos services via docker compose from the SlateDB repo root:
+# 2. Build and start the chaos services via docker compose from the SlateDB repo root:
 #      docker compose -f scripts/run_chaos_scenarios.compose.yaml up -d
 #    This starts:
 #      - LocalStack S3 on localhost:4566
 #      - lowdown on localhost:1080 (proxy) and localhost:7070 (admin)
 #      - Toxiproxy on localhost:8474 (API) and localhost:9001 (S3 proxy)
-# 4. Run the chaos scenarios from the SlateDB repo root:
+# 3. Run the chaos scenarios from the SlateDB repo root:
 #      scripts/run_chaos_scenarios.sh
 #    The script will create/reset the `slatedb-test` bucket in LocalStack and
 #    run the `test_concurrent_writers_and_readers` integration test against the

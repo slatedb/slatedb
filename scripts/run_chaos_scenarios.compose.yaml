@@ -15,8 +15,7 @@ services:
       start_period: 10s
 
   lowdown:
-    build: ../../lowdown
-    image: lowdown:latest
+    image: ghcr.io/criccomini/lowdown:latest
     container_name: lowdown
     depends_on:
       - localstack
