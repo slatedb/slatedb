@@ -74,6 +74,17 @@ if ! command -v aws >/dev/null 2>&1; then
   exit 1
 fi
 
+# Ensure the Toxiproxy S3 proxy exists and listens on 9001 -> localstack:4566.
+ensure_s3_proxy() {
+  log "toxiproxy: ensuring 's3' proxy exists (listen=0.0.0.0:9001, upstream=localstack:4566)"
+  if ! curl -fsS "$TOXIPROXY_ADMIN/proxies/s3" >/dev/null 2>&1; then
+    curl -fsS -X POST "$TOXIPROXY_ADMIN/proxies" \
+      -H 'Content-Type: application/json' \
+      -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"localstack:4566"}' \
+      >/dev/null
+  fi
+}
+
 # Globally reset all toxics/proxies via Toxiproxy. Safe here (single proxy).
 clear_toxics() {
   log "toxiproxy: resetting all proxies/toxics"
@@ -257,6 +268,7 @@ http_429s() {
 }
 
 # Execute
+ensure_s3_proxy
 scenario baseline baseline
 scenario latency_jitter latency_jitter
 scenario bandwidth_cap bandwidth_cap
