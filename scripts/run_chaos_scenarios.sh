@@ -32,6 +32,34 @@
 # - http_404s: ~5% fail-before responses with HTTP 404 (transient missing paths/keys).
 # - http_429s: ~5% fail-before responses with HTTP 429 (transient throttling).
 #
+# Local usage (running the chaos services + script):
+# 1. Prerequisites:
+#    - Docker and docker compose.
+#    - Rust toolchain + cargo.
+#    - AWS CLI (`aws`) installed and on PATH.
+#    - Java + Maven to build chaos-http-proxy.
+# 2. From the SlateDB repo root, clone and build chaos-http-proxy:
+#      git clone https://github.com/bouncestorage/chaos-http-proxy
+#      cd chaos-http-proxy
+#      mvn -q -DskipTests package
+#      cd ..
+# 3. Start the chaos services via docker compose from the SlateDB repo root:
+#      docker compose -f scripts/run_chaos_scenarios.compose.yaml up -d
+#    This starts:
+#      - LocalStack S3 on localhost:4566
+#      - chaos-http-proxy on localhost:1080 (admin at /chaos/api)
+#      - Toxiproxy on localhost:8474 (API) and localhost:9001 (S3 proxy)
+# 4. Optionally verify readiness:
+#      curl -sf http://127.0.0.1:4566/health
+#      curl -sf http://127.0.0.1:1080/chaos/api
+#      curl -sf http://127.0.0.1:8474/proxies
+# 5. Run the chaos scenarios from the SlateDB repo root:
+#      chmod +x scripts/run_chaos_scenarios.sh
+#      scripts/run_chaos_scenarios.sh
+#    The script will create/reset the `slatedb-test` bucket in LocalStack and
+#    run the `test_concurrent_writers_and_readers` integration test against the
+#    configured proxies for each scenario.
+#
 # Environment variables respected:
 # - SLATEDB_TEST_NUM_WRITERS: Number of writer tasks (default: 10)
 # - SLATEDB_TEST_NUM_READERS: Number of concurrent reader tasks (default: 2)
