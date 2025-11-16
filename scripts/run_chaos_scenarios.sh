@@ -7,11 +7,12 @@
 #
 # Components (pre-started by the workflow):
 # - LocalStack (S3-compatible)
-# - chaos-http-proxy (HTTP faults): proxy on 1080, admin on 1080/chaos/api
+# - lowdown (HTTP faults): proxy on 1080, admin on 7070
 # - Toxiproxy (TCP faults): API on 8474
 #
 # Local bindings used by this script:
-# - chaos-http-proxy: localhost:1080
+# - lowdown proxy: localhost:1080
+# - lowdown admin API: localhost:7070
 # - Toxiproxy S3: localhost:9001 -> LocalStack:4566
 # - Toxiproxy admin API: localhost:8474
 #
@@ -19,7 +20,7 @@
 #   TCP-level scenarios:
 #     SlateDB -> Toxiproxy (localhost:9001) -> LocalStack:4566
 #   HTTP-level scenarios (fail-before only):
-#     SlateDB -> chaos-http-proxy (localhost:1080) -> LocalStack:4566
+#     SlateDB -> lowdown (localhost:1080) -> LocalStack:4566
 #
 # Scenarios executed by this script:
 # - baseline: No HTTP or TCP faults (green path).
@@ -37,21 +38,20 @@
 #    - Docker and docker compose.
 #    - Rust toolchain + cargo.
 #    - AWS CLI (`aws`) installed and on PATH.
-#    - Java + Maven to build chaos-http-proxy.
-# 2. From the SlateDB repo root, clone and build chaos-http-proxy:
-#      git clone https://github.com/bouncestorage/chaos-http-proxy
-#      cd chaos-http-proxy
-#      mvn -q -DskipTests package
-#      cd ..
-# 3. Start the chaos services via docker compose from the SlateDB repo root:
+#    - Rust toolchain + Docker to build the lowdown image.
+# 2. From the SlateDB repo root, ensure the lowdown project is checked out at
+#      ../lowdown
+#    so that the docker compose file can build it:
+#      git clone https://github.com/your-org/lowdown ../lowdown
+# 3. Build and start the chaos services via docker compose from the SlateDB repo root:
 #      docker compose -f scripts/run_chaos_scenarios.compose.yaml up -d
 #    This starts:
 #      - LocalStack S3 on localhost:4566
-#      - chaos-http-proxy on localhost:1080 (admin at /chaos/api)
+#      - lowdown on localhost:1080 (proxy) and localhost:7070 (admin)
 #      - Toxiproxy on localhost:8474 (API) and localhost:9001 (S3 proxy)
 # 4. Optionally verify readiness:
 #      curl -sf http://127.0.0.1:4566/health
-#      curl -sf http://127.0.0.1:1080/chaos/api
+#      curl -sf http://127.0.0.1:7070/health
 #      curl -sf http://127.0.0.1:8474/proxies
 # 5. Run the chaos scenarios from the SlateDB repo root:
 #      chmod +x scripts/run_chaos_scenarios.sh
@@ -74,8 +74,8 @@ set -euo pipefail
 TOXIPROXY_S3=http://127.0.0.1:9001
 TOXIPROXY_API=http://127.0.0.1:8474
 LOCALSTACK_S3=http://127.0.0.1:4566
-CHAOS_HTTP_PROXY=http://127.0.0.1:1080
-CHAOS_HTTP_API=http://127.0.0.1:1080/chaos/api
+LOWDOWN_PROXY=http://127.0.0.1:1080
+LOWDOWN_ADMIN=http://127.0.0.1:7070
 
 # Print a prefixed message for easier scanning in CI logs.
 log() { echo "[chaos] $*"; }
@@ -113,37 +113,26 @@ add_toxic() {
     -d "{\"name\":\"$toxic_name\",\"type\":\"$type\",\"stream\":\"$stream\",\"toxicity\":$toxicity,\"attributes\":$attrs_json}"
 }
 
-# Configure chaos-http-proxy failure rates at runtime.
+# Configure lowdown failure rates at runtime via its admin API.
 # Args:
 #   $1 percent : 0..100 (chance to fail-before)
 #   $2 code    : HTTP status code to emulate (503|404|429)
 add_http_failure() {
   local percent=${1:-0}
   local code=${2:-503}
-  local fail_key
 
-  case "$code" in
-    503) fail_key="com.bouncestorage.chaoshttpproxy.http_503" ;;
-    404) fail_key="com.bouncestorage.chaoshttpproxy.http_500" ;;
-    429) fail_key="com.bouncestorage.chaoshttpproxy.http_504" ;;
-    *)   fail_key="com.bouncestorage.chaoshttpproxy.http_503" ;;
-  esac
+  log "lowdown update: ${percent}% fail-before, code=${code}"
 
-  local success=$((100 - percent))
-  log "chaos-http-proxy update: ${percent}% -> code=${code} (key=${fail_key})"
-
-  cat <<EOF | curl -fsS --request POST --data-binary @- "$CHAOS_HTTP_API" >/dev/null
-$fail_key=$percent
-com.bouncestorage.chaoshttpproxy.success=$success
-EOF
+  curl -fsS -X POST "$LOWDOWN_ADMIN/api/v1/update" \
+    -H "x-lowdown-fail-before-percentage: ${percent}" \
+    -H "x-lowdown-fail-before-code: ${code}" \
+    >/dev/null
 }
 
-# Restore chaos-http-proxy runtime fault settings to all-success.
+# Restore lowdown runtime fault settings to defaults (no admin overrides).
 clear_http_failures() {
-  log "chaos-http-proxy reset defaults"
-  cat <<EOF | curl -fsS --request POST --data-binary @- "$CHAOS_HTTP_API" >/dev/null
-com.bouncestorage.chaoshttpproxy.success=100
-EOF
+  log "lowdown reset defaults"
+  curl -fsS -X POST "$LOWDOWN_ADMIN/api/v1/reset" >/dev/null
 }
 
 # Drop and recreate the LocalStack S3 bucket used by tests.
@@ -184,7 +173,7 @@ run_smoke() {
   local endpoint=$2
   log "running scenario: $name (endpoint=$endpoint)"
   # `AWS_S3_FORCE_PATH_STYLE` is set below to avoid virtual-hosted-style Host/SigV4
-  # issues when routing through localhost ports and proxies (Toxiproxy + chaos-http-proxy).
+  # issues when routing through localhost ports and proxies (Toxiproxy + lowdown).
   CLOUD_PROVIDER=aws \
   AWS_ACCESS_KEY_ID=test \
   AWS_SECRET_ACCESS_KEY=test \
@@ -264,19 +253,19 @@ timeoutish() {
 # 10% fail-before with HTTP 503 (transient server errors).
 http_503s() {
   clear_toxics s3; add_http_failure 10 503
-  AWS_PROXY_URL="$CHAOS_HTTP_PROXY" run_smoke http_503s "$LOCALSTACK_S3"
+  AWS_PROXY_URL="$LOWDOWN_PROXY" run_smoke http_503s "$LOCALSTACK_S3"
 }
 
 # 5% fail-before with HTTP 404 (transient missing paths/keys).
 http_404s() {
   clear_toxics s3; add_http_failure 5 404
-  AWS_PROXY_URL="$CHAOS_HTTP_PROXY" run_smoke http_404s "$LOCALSTACK_S3"
+  AWS_PROXY_URL="$LOWDOWN_PROXY" run_smoke http_404s "$LOCALSTACK_S3"
 }
 
 # 5% fail-before with HTTP 429 (transient throttling).
 http_429s() {
   clear_toxics s3; add_http_failure 5 429
-  AWS_PROXY_URL="$CHAOS_HTTP_PROXY" run_smoke http_429s "$LOCALSTACK_S3"
+  AWS_PROXY_URL="$LOWDOWN_PROXY" run_smoke http_429s "$LOCALSTACK_S3"
 }
 
 # Execute
