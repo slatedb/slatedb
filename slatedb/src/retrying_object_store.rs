@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use futures::stream::BoxStream;
 use futures::{stream, StreamExt, TryStreamExt};
-use log::{debug, info, warn};
+use log::{debug, info};
 use object_store::path::Path;
 use object_store::{
     GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
