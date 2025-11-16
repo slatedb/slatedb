@@ -132,6 +132,8 @@ trait MergeOperator {
 }
 ```
 
+**Error Handling**: The `MergeOperatorError::EmptyBatch` error is returned when `merge_batch` is called with no `existing_value` and an empty `operands` slice. This should not occur in normal operation, as SlateDB only calls `merge_batch` when there are operands to merge. If this error occurs, it indicates a bug in the merge iterator logic.
+
 Initially, the implementation is limited to a single optional merge operator per database. The user must ensure that both the compactor and writer use the same merge operator to guarantee correct results.
 
 The merge operator can be implemented to route to different merge strategies based on key prefixes. Here's an example:

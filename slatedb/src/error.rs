@@ -198,6 +198,9 @@ pub(crate) enum SlateDBError {
 
     #[error("iterator not initialized")]
     IteratorNotInitialized,
+
+    #[error("invalid sequence number ordering during merge. expected sequence numbers in descending order, but found {current_seq} followed by {next_seq}")]
+    InvalidSequenceOrder { current_seq: u64, next_seq: u64 },
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -444,6 +447,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::MergeOperatorError(err) => Error::invalid(msg).with_source(Box::new(err)),
             SlateDBError::MergeOperatorMissing => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
+            SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),

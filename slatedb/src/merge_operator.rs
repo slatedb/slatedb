@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use log::error;
 use thiserror::Error;
 
 use crate::{
@@ -112,8 +111,24 @@ pub trait MergeOperator {
 }
 
 pub(crate) type MergeOperatorType = Arc<dyn MergeOperator + Send + Sync>;
-// TODO: Make this configurable
-// we can change to better value based on the system memory
+
+/// Maximum number of merge operands to collect before calling `merge_batch`.
+///
+/// This controls the streaming batch size when merging entries with the same key.
+/// The iterator collects up to this many merge operands, then calls `merge_batch`
+/// to combine them into a single intermediate result. This process repeats until
+/// all operands are processed or a base value is found.
+///
+/// Benefits of batching:
+/// - Reduces function call overhead (N calls → N/BATCH_SIZE calls)
+/// - Enables batch-optimized merge implementations (e.g., sum all at once)
+/// - Reduces intermediate memory allocations
+///
+/// Trade-offs:
+/// - Larger batches: Better performance, higher peak memory per key
+/// - Smaller batches: Lower memory usage, more function calls
+///
+/// TODO: Make this configurable based on system memory constraints
 const MERGE_BATCH_SIZE: usize = 100;
 
 /// An iterator that ensures merge operands are not returned when no merge operator is configured.
@@ -166,25 +181,51 @@ pub(crate) struct MergeOperatorIterator<T: KeyValueIterator> {
     now: i64,
 }
 
+/// Tracks metadata across multiple entries during merge operations.
+///
+/// When merging entries for the same key, we need to aggregate metadata from all
+/// entries to produce the final merged entry. This struct accumulates:
+/// - The maximum creation timestamp (for tracking when data was first written)
+/// - The minimum expiration timestamp (most restrictive TTL)
+/// - The maximum sequence number (for ordering and validation)
 #[derive(Debug, Clone)]
 struct MergeTracker {
+    /// Maximum creation timestamp seen across all merged entries.
+    /// Used to track when the data was first created.
     max_create_ts: Option<i64>,
+
+    /// Minimum expiration timestamp seen across all merged entries.
+    /// The merged result expires at the earliest expiration time.
     min_expire_ts: Option<i64>,
+
+    /// Maximum sequence number seen across all merged entries.
+    /// Also used to validate that entries are processed in descending order.
     seq: u64,
 }
 
 impl MergeTracker {
+    /// Updates the tracker with metadata from a new entry.
+    ///
+    /// This method:
+    /// - Takes the maximum of creation timestamps (latest creation)
+    /// - Takes the minimum of expiration timestamps (earliest expiration)
+    /// - Validates that sequence numbers are in descending order
+    /// - Updates the maximum sequence number
+    ///
+    /// # Errors
+    ///
+    /// Returns `SlateDBError::InvalidSequenceOrder` if the entry's sequence number
+    /// is greater than the current maximum, indicating entries are out of order.
     fn update(&mut self, entry: &RowEntry) -> Result<(), SlateDBError> {
         self.max_create_ts = merge_options(self.max_create_ts, entry.create_ts, i64::max);
         self.min_expire_ts = merge_options(self.min_expire_ts, entry.expire_ts, i64::min);
 
         // sequence numbers should be descending
         if self.seq < entry.seq {
-            error!(
-                "Invalid sequence number ordering: {} > {}",
-                self.seq, entry.seq
-            );
-            return Err(SlateDBError::InvalidDBState);
+            return Err(SlateDBError::InvalidSequenceOrder {
+                current_seq: self.seq,
+                next_seq: entry.seq,
+            });
         }
 
         self.seq = std::cmp::max(self.seq, entry.seq);
@@ -211,7 +252,9 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
 }
 
 impl<T: KeyValueIterator> MergeOperatorIterator<T> {
-    /// Check if an entry matches the current key and expire_ts
+    /// Checks if an entry matches the current key and expiration timestamp.
+    /// Returns true if keys match and either `merge_different_expire_ts` is enabled
+    /// or the expire_ts matches.
     fn is_matching_entry(
         &self,
         entry: &RowEntry,
@@ -221,6 +264,10 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         entry.key == *key && (self.merge_different_expire_ts || first_expire_ts == entry.expire_ts)
     }
 
+    /// Processes a batch of merge operands into a single intermediate result.
+    ///
+    /// Reverses the batch (oldest to newest), extracts operand values, updates metadata
+    /// tracking, calls `merge_batch`, and clears the batch to free memory.
     fn process_batch(
         &self,
         key: &Bytes,
@@ -241,6 +288,14 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         Ok(batch_result)
     }
 
+    /// Merges a sequence of entries with the same key into a single entry.
+    ///
+    /// Collects merge operands in batches of `MERGE_BATCH_SIZE`, processes each batch
+    /// into intermediate results, and continues until a base value (Value/Tombstone) is
+    /// found. Finally combines all intermediate results with the base value.
+    ///
+    /// Returns `Some(RowEntry)` with merged value and aggregated metadata, or `None` if
+    /// only a tombstone with no operands was found.
     async fn merge_with_older_entries(
         &mut self,
         first_entry: RowEntry,
