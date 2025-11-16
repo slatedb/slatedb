@@ -343,17 +343,18 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
             results.push(self.process_batch(&key, &mut batch, &mut merge_tracker)?);
         }
 
+        let base_value = base.as_ref().and_then(|b| b.value.as_bytes());
         let found_base = base.is_some();
-        if results.is_empty() && !found_base {
+
+        // If we have no results and either no base or a tombstone base, return None
+        if results.is_empty() && base_value.is_none() {
             return Ok(None);
         }
 
         results.reverse();
-        let final_result = self.merge_operator.merge_batch(
-            &key,
-            base.and_then(|b| b.value.as_bytes()),
-            &results,
-        )?;
+        let final_result = self
+            .merge_operator
+            .merge_batch(&key, base_value, &results)?;
 
         Ok(Some(RowEntry {
             key: key.clone(),
