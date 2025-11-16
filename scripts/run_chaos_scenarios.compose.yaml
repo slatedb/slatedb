@@ -30,7 +30,7 @@ services:
       - ADMIN_BIND=0.0.0.0
       - ADMIN_PORT=7070
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:7070/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:7070/health && curl -sf http://localhost:1080/health || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -42,7 +42,7 @@ services:
     depends_on:
       - localstack
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8474/proxies || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8474/proxies >/dev/null 2>&1 && wget -qO- http://localhost:9001/health >/dev/null 2>&1 || exit 1"]
       interval: 2s
       timeout: 2s
       retries: 15

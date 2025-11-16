@@ -8,13 +8,7 @@
 # Components (pre-started by the workflow):
 # - LocalStack (S3-compatible)
 # - lowdown (HTTP faults): proxy on 1080, admin on 7070
-# - Toxiproxy (TCP faults): API on 8474
-#
-# Local bindings used by this script:
-# - lowdown proxy: localhost:1080
-# - lowdown admin API: localhost:7070
-# - Toxiproxy S3: localhost:9001 -> LocalStack:4566
-# - Toxiproxy admin API: localhost:8474
+# - Toxiproxy (TCP faults): proxy on 9001, admin on 8474
 #
 # Data path:
 #   TCP-level scenarios:
@@ -32,6 +26,13 @@
 # - http_503s: ~10% fail-before responses with HTTP 503 (transient server errors).
 # - http_404s: ~5% fail-before responses with HTTP 404 (transient missing paths/keys).
 # - http_429s: ~5% fail-before responses with HTTP 429 (transient throttling).
+#
+# Environment variables respected:
+# - SLATEDB_TEST_NUM_WRITERS: Number of writer tasks (default: 10)
+# - SLATEDB_TEST_NUM_READERS: Number of concurrent reader tasks (default: 2)
+# - SLATEDB_TEST_WRITES_PER_TASK: Writes per writer task (default: 100)
+# - SLATEDB_TEST_KEY_LENGTH: Key length in bytes for padded keys (default: 256)
+# - RUST_LOG: Optional logging level for the test (default: info)
 #
 # Local usage (running the chaos services + script):
 # 1. Prerequisites:
@@ -60,20 +61,12 @@
 #    run the `test_concurrent_writers_and_readers` integration test against the
 #    configured proxies for each scenario.
 #
-# Environment variables respected:
-# - SLATEDB_TEST_NUM_WRITERS: Number of writer tasks (default: 10)
-# - SLATEDB_TEST_NUM_READERS: Number of concurrent reader tasks (default: 2)
-# - SLATEDB_TEST_WRITES_PER_TASK: Writes per writer task (default: 100)
-# - SLATEDB_TEST_KEY_LENGTH: Key length in bytes for padded keys (default: 256)
-# - RUST_LOG: Optional logging level for the test (default: info)
-#
-# Exit behavior: prints a summary and returns non-zero if any scenario failed.
 
 set -euo pipefail
 
-TOXIPROXY_S3=http://127.0.0.1:9001
-TOXIPROXY_API=http://127.0.0.1:8474
 LOCALSTACK_S3=http://127.0.0.1:4566
+TOXIPROXY_PROXY=http://127.0.0.1:9001
+TOXIPROXY_ADMIN=http://127.0.0.1:8474
 LOWDOWN_PROXY=http://127.0.0.1:1080
 LOWDOWN_ADMIN=http://127.0.0.1:7070
 
@@ -89,7 +82,7 @@ fi
 # Globally reset all toxics/proxies via Toxiproxy. Safe here (single proxy).
 clear_toxics() {
   log "toxiproxy: resetting all proxies/toxics"
-  curl -fsS -X POST "$TOXIPROXY_API/reset" >/dev/null
+  curl -fsS -X POST "$TOXIPROXY_ADMIN/reset" >/dev/null
 }
 
 # Attach a toxic to a proxy (optionally with partial toxicity).
@@ -108,7 +101,7 @@ add_toxic() {
   local attrs_json=$1; shift
   local toxicity=${1:-1.0}
   log "adding toxic $toxic_name ($type/$stream) toxicity=$toxicity attrs=$attrs_json"
-  curl -fsS -w '\n' -X POST "$TOXIPROXY_API/proxies/$name/toxics" \
+  curl -fsS -w '\n' -X POST "$TOXIPROXY_ADMIN/proxies/$name/toxics" \
     -H 'Content-Type: application/json' \
     -d "{\"name\":\"$toxic_name\",\"type\":\"$type\",\"stream\":\"$stream\",\"toxicity\":$toxicity,\"attributes\":$attrs_json}"
 }
@@ -211,7 +204,7 @@ scenario() {
 
 # No HTTP faults, no TCP faults (green path).
 baseline() {
-  clear_toxics s3; clear_http_failures; run_smoke baseline "$TOXIPROXY_S3"
+  clear_toxics s3; clear_http_failures; run_smoke baseline "$TOXIPROXY_PROXY"
 }
 
 # Add high latency + jitter both directions; HTTP faults disabled.
@@ -219,53 +212,53 @@ latency_jitter() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_latency latency downstream '{"latency":1000,"jitter":300}' 1.0
   add_toxic s3 t_latency_up latency upstream '{"latency":600,"jitter":200}' 1.0
-  run_smoke latency_jitter "$TOXIPROXY_S3"
+  run_smoke latency_jitter "$TOXIPROXY_PROXY"
 }
 
 # Limit downstream bandwidth to 200 kbps.
 bandwidth_cap() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_bw bandwidth downstream '{"rate":200}' 1.0
-  run_smoke bandwidth_cap "$TOXIPROXY_S3"
+  run_smoke bandwidth_cap "$TOXIPROXY_PROXY"
 }
 
 # Inject intermittent TCP RST on downstream (15% of connections).
 reset_peer() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_reset reset_peer downstream '{}' 0.15
-  run_smoke reset_peer "$TOXIPROXY_S3"
+  run_smoke reset_peer "$TOXIPROXY_PROXY"
 }
 
 # Delay TCP close on downstream (30% of connections).
 slow_close() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_slow slow_close downstream '{"delay":2000}' 0.3
-  run_smoke slow_close "$TOXIPROXY_S3"
+  run_smoke slow_close "$TOXIPROXY_PROXY"
 }
 
 # Large downstream latency (3s) affecting ~35% of connections.
 timeoutish() {
   clear_toxics s3; clear_http_failures
   add_toxic s3 t_timeout latency downstream '{"latency":3000}' 0.35
-  run_smoke timeoutish "$TOXIPROXY_S3"
+  run_smoke timeoutish "$TOXIPROXY_PROXY"
 }
 
 # 10% fail-before with HTTP 503 (transient server errors).
 http_503s() {
   clear_toxics s3; add_http_failure 10 503
-  AWS_PROXY_URL="$LOWDOWN_PROXY" run_smoke http_503s "$LOCALSTACK_S3"
+  run_smoke http_503s "$LOCALSTACK_S3"
 }
 
 # 5% fail-before with HTTP 404 (transient missing paths/keys).
 http_404s() {
   clear_toxics s3; add_http_failure 5 404
-  AWS_PROXY_URL="$LOWDOWN_PROXY" run_smoke http_404s "$LOCALSTACK_S3"
+  run_smoke http_404s "$LOCALSTACK_S3"
 }
 
 # 5% fail-before with HTTP 429 (transient throttling).
 http_429s() {
   clear_toxics s3; add_http_failure 5 429
-  AWS_PROXY_URL="$LOWDOWN_PROXY" run_smoke http_429s "$LOCALSTACK_S3"
+  run_smoke http_429s "$LOCALSTACK_S3"
 }
 
 # Execute
