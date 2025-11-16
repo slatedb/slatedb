@@ -34,7 +34,7 @@
 # - SLATEDB_TEST_KEY_LENGTH: Key length in bytes for padded keys (default: 256)
 # - RUST_LOG: Optional logging level for the test (default: info)
 #
-# Local usage (running the chaos services + script):
+# Local usage:
 # 1. Prerequisites:
 #    - Docker and docker compose.
 #    - AWS CLI (`aws`) installed and on PATH.
@@ -43,7 +43,7 @@
 #    This starts:
 #      - LocalStack S3 on localhost:4566
 #      - lowdown on localhost:1080 (proxy) and localhost:7070 (admin)
-#      - Toxiproxy on localhost:8474 (API) and localhost:9001 (S3 proxy)
+#      - Toxiproxy on localhost:9001 (S3 proxy) and localhost:8474 (admin)
 # 3. Run the chaos scenarios from the SlateDB repo root:
 #      scripts/run_chaos_scenarios.sh
 #    The script will create/reset the `slatedb-test` bucket in LocalStack and
