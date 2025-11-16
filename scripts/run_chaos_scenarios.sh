@@ -50,12 +50,7 @@
 #      - LocalStack S3 on localhost:4566
 #      - lowdown on localhost:1080 (proxy) and localhost:7070 (admin)
 #      - Toxiproxy on localhost:8474 (API) and localhost:9001 (S3 proxy)
-# 4. Optionally verify readiness:
-#      curl -sf http://127.0.0.1:4566/health
-#      curl -sf http://127.0.0.1:7070/health
-#      curl -sf http://127.0.0.1:8474/proxies
-# 5. Run the chaos scenarios from the SlateDB repo root:
-#      chmod +x scripts/run_chaos_scenarios.sh
+# 4. Run the chaos scenarios from the SlateDB repo root:
 #      scripts/run_chaos_scenarios.sh
 #    The script will create/reset the `slatedb-test` bucket in LocalStack and
 #    run the `test_concurrent_writers_and_readers` integration test against the
