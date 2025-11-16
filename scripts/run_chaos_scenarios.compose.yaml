@@ -1,0 +1,33 @@
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=us-east-1
+    ports:
+      - "4566:4566"
+
+  chaos-http-proxy:
+    image: eclipse-temurin:17-jre
+    container_name: chaos-http-proxy
+    depends_on:
+      - localstack
+    command: ["bash", "-lc", "/app/chaos-http-proxy --address 0.0.0.0 --port 1080"]
+    volumes:
+      - ../chaos-http-proxy/target:/app
+    ports:
+      - "1080:1080"
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:latest
+    container_name: toxiproxy
+    depends_on:
+      - localstack
+    ports:
+      - "8474:8474"
+      - "9001:9001"
+
+networks:
+  default:
+    name: chaos-net

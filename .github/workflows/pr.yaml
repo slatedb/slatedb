@@ -260,43 +260,22 @@ jobs:
           sudo apt-get install -y jq curl maven
           sudo snap install aws-cli --classic
 
-      - name: Create docker network
-        run: docker network create chaos-net
-
       - name: Build chaos-http-proxy
         run: |
           git clone https://github.com/bouncestorage/chaos-http-proxy
           cd chaos-http-proxy
           mvn -q -DskipTests package
 
-      - name: Start LocalStack (S3)
+      - name: Start chaos services (docker compose)
         run: |
-          docker run -d --name localstack --network chaos-net \
-            -p 4566:4566 \
-            -e SERVICES=s3 \
-            -e DEFAULT_REGION=us-east-1 \
-            localstack/localstack:latest
-          # Wait for readiness
+          docker compose -f scripts/run_chaos_scenarios.compose.yaml up -d
+          # Wait for LocalStack
           for i in {1..60}; do
-            if curl -sf http://127.0.0.1:4566/health >/dev/null; then echo ready; break; fi; sleep 1; done
-
-      - name: Start chaos-http-proxy
-        run: |
-          docker run -d --name chaos-http-proxy --network chaos-net \
-            -p 1080:1080 \
-            -v "$PWD/chaos-http-proxy/target:/app" \
-            eclipse-temurin:17-jre \
-            bash -lc "/app/chaos-http-proxy --address 0.0.0.0 --port 1080"
-          # Wait for API
+            if curl -sf http://127.0.0.1:4566/health >/dev/null; then echo "LocalStack ready"; break; fi; sleep 1; done
+          # Wait for chaos-http-proxy API
           for i in {1..60}; do
-            if curl -sf http://127.0.0.1:1080/chaos/api >/dev/null; then echo ready; break; fi; sleep 1; done
-
-      - name: Start Toxiproxy
-        run: |
-          docker run -d --name toxiproxy --network chaos-net \
-            -p 8474:8474 -p 9001:9001 \
-            ghcr.io/shopify/toxiproxy:latest
-          # Wait for API
+            if curl -sf http://127.0.0.1:1080/chaos/api >/dev/null; then echo "chaos-http-proxy ready"; break; fi; sleep 1; done
+          # Wait for Toxiproxy API
           for i in {1..60}; do
             if curl -sf http://127.0.0.1:8474/proxies >/dev/null; then echo ready; break; fi; sleep 1; done
 
