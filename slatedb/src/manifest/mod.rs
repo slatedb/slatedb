@@ -17,8 +17,10 @@ pub(crate) mod store;
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
+    // todo: try to make this writable only from module
     pub(crate) external_dbs: Vec<ExternalDb>,
     pub(crate) core: CoreDbState,
+    // todo: try to make this writable only from module
     pub(crate) writer_epoch: u64,
     pub(crate) compactor_epoch: u64,
 }
