@@ -6,7 +6,8 @@ use ulid::Ulid;
 
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
-use crate::manifest::store::DirtyManifest;
+use crate::manifest::Manifest;
+use crate::transactional_object::DirtyObject;
 
 /// Identifier for a compaction input source.
 ///
@@ -202,14 +203,14 @@ impl Display for Compaction {
 /// - keep a fresh `DirtyManifest` (view of `CoreDbState`),
 /// - track in-flight compactions by id (ULID).
 pub struct CompactorState {
-    manifest: DirtyManifest,
+    manifest: DirtyObject<Manifest>,
     compactions: BTreeMap<Ulid, Compaction>,
 }
 
 impl CompactorState {
     /// Creates a new compactor state seeded with the provided dirty manifest. Compactions are
     /// initialized empty.
-    pub(crate) fn new(manifest: DirtyManifest) -> Self {
+    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
         Self {
             manifest,
             compactions: BTreeMap::new(),
@@ -218,11 +219,11 @@ impl CompactorState {
 
     /// Returns the current in-memory core DB state derived from the manifest.
     pub(crate) fn db_state(&self) -> &CoreDbState {
-        &self.manifest.core
+        &self.manifest.value.core
     }
 
     /// Returns the local dirty manifest that will be written back after compactions.
-    pub(crate) fn manifest(&self) -> &DirtyManifest {
+    pub(crate) fn manifest(&self) -> &DirtyObject<Manifest> {
         &self.manifest
     }
 
@@ -236,12 +237,12 @@ impl CompactorState {
     /// This preserves local knowledge about compactions already applied (e.g., L0 last
     /// compacted marker, existing compacted runs) while pulling in newly created L0 SSTs
     /// and other writer-updated fields.
-    pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
+    pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // the writer may have added more l0 SSTs. Add these to our l0 list.
         let my_db_state = self.db_state();
         let last_compacted_l0 = my_db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &remote_manifest.core.l0;
+        let writer_l0 = &remote_manifest.value.core.l0;
         for writer_l0_sst in writer_l0 {
             let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
@@ -259,20 +260,20 @@ impl CompactorState {
 
         // write out the merged core db state and manifest
         let merged = CoreDbState {
-            initialized: remote_manifest.core.initialized,
+            initialized: remote_manifest.value.core.initialized,
             l0_last_compacted: my_db_state.l0_last_compacted,
             l0: merged_l0s,
             compacted: my_db_state.compacted.clone(),
-            next_wal_sst_id: remote_manifest.core.next_wal_sst_id,
-            replay_after_wal_id: remote_manifest.core.replay_after_wal_id,
-            last_l0_clock_tick: remote_manifest.core.last_l0_clock_tick,
-            last_l0_seq: remote_manifest.core.last_l0_seq,
-            checkpoints: remote_manifest.core.checkpoints.clone(),
+            next_wal_sst_id: remote_manifest.value.core.next_wal_sst_id,
+            replay_after_wal_id: remote_manifest.value.core.replay_after_wal_id,
+            last_l0_clock_tick: remote_manifest.value.core.last_l0_clock_tick,
+            last_l0_seq: remote_manifest.value.core.last_l0_seq,
+            checkpoints: remote_manifest.value.core.checkpoints.clone(),
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
-            recent_snapshot_min_seq: remote_manifest.core.recent_snapshot_min_seq,
-            sequence_tracker: remote_manifest.core.sequence_tracker,
+            recent_snapshot_min_seq: remote_manifest.value.core.recent_snapshot_min_seq,
+            sequence_tracker: remote_manifest.value.core.sequence_tracker,
         };
-        remote_manifest.core = merged;
+        remote_manifest.value.core = merged;
         self.manifest = remote_manifest;
     }
 
@@ -384,7 +385,7 @@ impl CompactorState {
             }
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
-            self.manifest.core = db_state;
+            self.manifest.value.core = db_state;
             if self.compactions.remove(&compaction_id).is_none() {
                 error!(
                     "scheduled compaction not found [compaction_id={}]",
@@ -537,7 +538,7 @@ mod tests {
         wait_for_manifest_with_l0_len(&mut sm, rt.handle(), state.db_state().l0.len() + 1);
 
         // when:
-        state.merge_remote_manifest(sm.prepare_dirty());
+        state.merge_remote_manifest(sm.prepare_dirty().unwrap());
 
         // then:
         assert!(state.db_state().l0_last_compacted.is_none());
@@ -588,7 +589,7 @@ mod tests {
         let db_state_before_merge = state.db_state().clone();
 
         // when:
-        state.merge_remote_manifest(sm.prepare_dirty());
+        state.merge_remote_manifest(sm.prepare_dirty().unwrap());
 
         // then:
         let db_state = state.db_state();
@@ -658,7 +659,7 @@ mod tests {
         wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
 
         // when:
-        state.merge_remote_manifest(sm.prepare_dirty());
+        state.merge_remote_manifest(sm.prepare_dirty().unwrap());
 
         // then:
         let db_state = state.db_state();
@@ -692,7 +693,7 @@ mod tests {
             expire_time: None,
             create_time: DefaultSystemClock::default().now(),
         };
-        dirty.core.checkpoints.push(checkpoint.clone());
+        dirty.value.core.checkpoints.push(checkpoint.clone());
 
         // when:
         state.merge_remote_manifest(dirty);
@@ -873,7 +874,7 @@ mod tests {
         let stored_manifest = tokio_handle
             .block_on(StoredManifest::load(manifest_store))
             .unwrap();
-        let state = CompactorState::new(stored_manifest.prepare_dirty());
+        let state = CompactorState::new(stored_manifest.prepare_dirty().unwrap());
         (os, stored_manifest, state, system_clock, rand)
     }
 }

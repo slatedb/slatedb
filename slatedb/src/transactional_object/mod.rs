@@ -481,6 +481,18 @@ pub(crate) trait SequencedStorageProtocol<T>:
 }
 
 #[cfg(test)]
+pub(crate) mod test_utils {
+    use crate::transactional_object::DirtyObject;
+
+    pub(crate) fn new_dirty_object<T>(id: u64, value: T) -> DirtyObject<T> {
+        DirtyObject {
+            id: id.into(),
+            value,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;

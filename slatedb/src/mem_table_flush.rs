@@ -59,7 +59,7 @@ impl MemtableFlusher {
         let id = self.db_inner.rand.rng().gen_uuid();
         let checkpoint = self.manifest.new_checkpoint(id, options)?;
         let manifest_id = checkpoint.manifest_id;
-        dirty.core.checkpoints.push(checkpoint);
+        dirty.value.core.checkpoints.push(checkpoint);
         self.manifest.update_manifest(dirty).await?;
         Ok(CheckpointCreateResult { id, manifest_id })
     }
@@ -140,37 +140,38 @@ impl MemtableFlusher {
                         .pop_back()
                         .expect("expected imm memtable");
                     assert!(Arc::ptr_eq(&popped, &imm_memtable));
-                    modifier.state.manifest.core.l0.push_front(sst_handle);
-                    modifier.state.manifest.core.replay_after_wal_id =
+                    modifier.state.manifest.value.core.l0.push_front(sst_handle);
+                    modifier.state.manifest.value.core.replay_after_wal_id =
                         imm_memtable.recent_flushed_wal_id();
 
                     // ensure the persisted manifest tick never goes backwards in time
                     let memtable_tick = imm_memtable.table().last_tick();
-                    modifier.state.manifest.core.last_l0_clock_tick = cmp::max(
-                        modifier.state.manifest.core.last_l0_clock_tick,
+                    modifier.state.manifest.value.core.last_l0_clock_tick = cmp::max(
+                        modifier.state.manifest.value.core.last_l0_clock_tick,
                         memtable_tick,
                     );
-                    if modifier.state.manifest.core.last_l0_clock_tick != memtable_tick {
+                    if modifier.state.manifest.value.core.last_l0_clock_tick != memtable_tick {
                         return Err(SlateDBError::InvalidClockTick {
-                            last_tick: modifier.state.manifest.core.last_l0_clock_tick,
+                            last_tick: modifier.state.manifest.value.core.last_l0_clock_tick,
                             next_tick: memtable_tick,
                         });
                     }
 
                     // update the persisted manifest last_l0_seq as the latest seq in the imm.
-                    assert!(last_seq >= modifier.state.manifest.core.last_l0_seq);
-                    modifier.state.manifest.core.last_l0_seq = last_seq;
+                    assert!(last_seq >= modifier.state.manifest.value.core.last_l0_seq);
+                    modifier.state.manifest.value.core.last_l0_seq = last_seq;
 
                     // update the persisted manifest recent_snapshot_min_seq to inform the compactor
                     // can safely reclaim the entries with smaller seq. if there's no active snapshot,
                     // we simply use the latest l0 seq.
-                    modifier.state.manifest.core.recent_snapshot_min_seq =
+                    modifier.state.manifest.value.core.recent_snapshot_min_seq =
                         min_active_snapshot_seq.unwrap_or(last_seq);
 
                     let sequence_tracker = imm_memtable.sequence_tracker();
                     modifier
                         .state
                         .manifest
+                        .value
                         .core
                         .sequence_tracker
                         .extend_from(sequence_tracker);

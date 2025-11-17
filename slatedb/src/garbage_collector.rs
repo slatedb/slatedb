@@ -17,9 +17,11 @@ use crate::config::GarbageCollectorOptions;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
-use crate::manifest::store::{DirtyManifest, ManifestStore, StoredManifest};
+use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::manifest::Manifest;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::transactional_object::DirtyObject;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -214,10 +216,11 @@ impl GarbageCollector {
     fn filter_expired_checkpoints(
         &self,
         manifest: &StoredManifest,
-    ) -> Result<Option<DirtyManifest>, SlateDBError> {
+    ) -> Result<Option<DirtyObject<Manifest>>, SlateDBError> {
         let utc_now: DateTime<Utc> = self.system_clock.now();
-        let mut dirty = manifest.prepare_dirty();
+        let mut dirty = manifest.prepare_dirty()?;
         let retained_checkpoints: Vec<Checkpoint> = dirty
+            .value
             .core
             .checkpoints
             .iter()
@@ -228,8 +231,8 @@ impl GarbageCollector {
             .cloned()
             .collect();
 
-        let maybe_dirty = if dirty.core.checkpoints.len() != retained_checkpoints.len() {
-            dirty.core.checkpoints = retained_checkpoints;
+        let maybe_dirty = if dirty.value.core.checkpoints.len() != retained_checkpoints.len() {
+            dirty.value.core.checkpoints = retained_checkpoints;
             Some(dirty)
         } else {
             None
@@ -290,7 +293,7 @@ mod tests {
 
         // Add a second manifest
         stored_manifest
-            .update_manifest(stored_manifest.prepare_dirty())
+            .update_manifest(stored_manifest.prepare_dirty().unwrap())
             .await
             .unwrap();
 
@@ -329,7 +332,7 @@ mod tests {
 
         // Add a second manifest
         stored_manifest
-            .update_manifest(stored_manifest.prepare_dirty())
+            .update_manifest(stored_manifest.prepare_dirty().unwrap())
             .await
             .unwrap();
 
@@ -362,10 +365,10 @@ mod tests {
         stored_manifest: &mut StoredManifest,
         expire_time: Option<DateTime<Utc>>,
     ) -> Result<Uuid, SlateDBError> {
-        let mut dirty = stored_manifest.prepare_dirty();
+        let mut dirty = stored_manifest.prepare_dirty()?;
         let checkpoint = new_checkpoint(stored_manifest.id(), expire_time);
         let checkpoint_id = checkpoint.id;
-        dirty.core.checkpoints.push(checkpoint);
+        dirty.value.core.checkpoints.push(checkpoint);
         stored_manifest.update_manifest(dirty).await?;
         Ok(checkpoint_id)
     }
@@ -374,15 +377,16 @@ mod tests {
         checkpoint_id: Uuid,
         stored_manifest: &mut StoredManifest,
     ) -> Result<(), SlateDBError> {
-        let mut dirty = stored_manifest.prepare_dirty();
+        let mut dirty = stored_manifest.prepare_dirty()?;
         let updated_checkpoints = dirty
+            .value
             .core
             .checkpoints
             .iter()
             .filter(|checkpoint| checkpoint.id != checkpoint_id)
             .cloned()
             .collect();
-        dirty.core.checkpoints = updated_checkpoints;
+        dirty.value.core.checkpoints = updated_checkpoints;
         stored_manifest.update_manifest(dirty).await?;
         Ok(())
     }
@@ -516,7 +520,7 @@ mod tests {
 
         // Add a second manifest
         stored_manifest
-            .update_manifest(stored_manifest.prepare_dirty())
+            .update_manifest(stored_manifest.prepare_dirty().unwrap())
             .await
             .unwrap();
 
@@ -634,10 +638,10 @@ mod tests {
         assert_eq!(1, stored_manifest.id());
 
         // Manifest 2 with checkpoint referencing Manifest 1
-        let mut dirty = stored_manifest.prepare_dirty();
-        dirty.core.replay_after_wal_id = 3;
-        dirty.core.next_wal_sst_id = 4;
-        dirty.core.checkpoints.push(new_checkpoint(1, None));
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.replay_after_wal_id = 3;
+        dirty.value.core.next_wal_sst_id = 4;
+        dirty.value.core.checkpoints.push(new_checkpoint(1, None));
         stored_manifest.update_manifest(dirty).await.unwrap();
         assert_eq!(2, stored_manifest.id());
 
@@ -894,9 +898,9 @@ mod tests {
             .unwrap();
 
         // Now drop the active tables from the checkpoint
-        let mut dirty = stored_manifest.prepare_dirty();
-        dirty.core.l0.truncate(1);
-        dirty.core.compacted.truncate(1);
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.l0.truncate(1);
+        dirty.value.core.compacted.truncate(1);
         stored_manifest.update_manifest(dirty).await.unwrap();
 
         // Start the garbage collector
@@ -1077,7 +1081,7 @@ mod tests {
                 .await
                 .unwrap();
         stored_manifest
-            .update_manifest(stored_manifest.prepare_dirty())
+            .update_manifest(stored_manifest.prepare_dirty().unwrap())
             .await
             .unwrap();
 

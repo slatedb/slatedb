@@ -67,8 +67,8 @@ pub(crate) async fn create_clone<P: Into<Path>>(
         )
         .await?;
 
-        let mut dirty = clone_manifest.prepare_dirty();
-        dirty.core.initialized = true;
+        let mut dirty = clone_manifest.prepare_dirty()?;
+        dirty.value.core.initialized = true;
         clone_manifest.update_manifest(dirty).await?;
     }
 

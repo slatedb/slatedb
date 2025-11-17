@@ -8,7 +8,7 @@ use crate::error::SlateDBError::{
     ManifestVersionExists,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::{ExternalDb, Manifest};
+use crate::manifest::Manifest;
 use crate::rand::DbRand;
 use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
 use crate::transactional_object::{
@@ -26,44 +26,6 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
-
-/// Represents a local view of the manifest that is in the process of being updated
-#[derive(Clone, Debug)]
-pub(crate) struct DirtyManifest {
-    id: u64,
-    external_dbs: Vec<ExternalDb>,
-    pub(crate) core: CoreDbState,
-    writer_epoch: u64,
-    compactor_epoch: u64,
-}
-
-impl From<DirtyManifest> for Manifest {
-    fn from(manifest: DirtyManifest) -> Manifest {
-        Manifest {
-            external_dbs: manifest.external_dbs,
-            core: manifest.core,
-            writer_epoch: manifest.writer_epoch,
-            compactor_epoch: manifest.compactor_epoch,
-        }
-    }
-}
-
-impl DirtyManifest {
-    pub(crate) fn new(id: u64, manifest: Manifest) -> Self {
-        Self {
-            id,
-            external_dbs: manifest.external_dbs,
-            core: manifest.core,
-            writer_epoch: manifest.writer_epoch,
-            compactor_epoch: manifest.compactor_epoch,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn id(&self) -> u64 {
-        self.id
-    }
-}
 
 pub(crate) struct FenceableManifest {
     clock: Arc<dyn SystemClock>,
@@ -115,20 +77,14 @@ impl FenceableManifest {
         self.inner.refresh().await.map_err(into_slatedb_error)
     }
 
-    pub(crate) fn prepare_dirty(&self) -> Result<DirtyManifest, SlateDBError> {
-        let dirty = self.inner.prepare_dirty().map_err(into_slatedb_error)?;
-        Ok(DirtyManifest::new(dirty.id().into(), dirty.into_value()))
+    pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<Manifest>, SlateDBError> {
+        self.inner.prepare_dirty().map_err(into_slatedb_error)
     }
 
     pub(crate) async fn update_manifest(
         &mut self,
-        manifest: DirtyManifest,
+        dirty: DirtyObject<Manifest>,
     ) -> Result<(), SlateDBError> {
-        let mut dirty = self.inner.prepare_dirty().map_err(into_slatedb_error)?;
-        if dirty.id().id() != manifest.id() {
-            return Err(SlateDBError::ManifestVersionExists);
-        }
-        dirty.value = Manifest::from(manifest);
         self.inner.update(dirty).await.map_err(into_slatedb_error)
     }
 
@@ -169,7 +125,7 @@ impl FenceableManifest {
         self.maybe_apply_manifest_update(|fm| {
             let checkpoint = fm.new_checkpoint(checkpoint_id, options)?;
             let mut dirty = fm.prepare_dirty()?;
-            dirty.core.checkpoints.push(checkpoint);
+            dirty.value.core.checkpoints.push(checkpoint);
             Ok(Some(dirty))
         })
         .await?;
@@ -188,14 +144,14 @@ impl FenceableManifest {
         mutator: F,
     ) -> Result<(), SlateDBError>
     where
-        F: Fn(&FenceableManifest) -> Result<Option<DirtyManifest>, SlateDBError>,
+        F: Fn(&FenceableManifest) -> Result<Option<DirtyObject<Manifest>>, SlateDBError>,
     {
         loop {
             let Some(dirty) = mutator(self)? else {
                 return Ok(());
             };
             match self.update_manifest(dirty).await {
-                Err(SlateDBError::ManifestVersionExists) => {
+                Err(ManifestVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -298,8 +254,8 @@ impl StoredManifest {
         self.inner.object()
     }
 
-    pub(crate) fn prepare_dirty(&self) -> DirtyManifest {
-        DirtyManifest::new(self.id(), self.manifest().clone())
+    pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<Manifest>, SlateDBError> {
+        self.inner.prepare_dirty().map_err(into_slatedb_error)
     }
 
     pub(crate) fn db_state(&self) -> &CoreDbState {
@@ -471,14 +427,8 @@ impl StoredManifest {
 
     pub(crate) async fn update_manifest(
         &mut self,
-        manifest: DirtyManifest,
+        dirty: DirtyObject<Manifest>,
     ) -> Result<(), SlateDBError> {
-        if manifest.id() != self.id() {
-            return Err(ManifestVersionExists);
-        }
-        let manifest = manifest.into();
-        let mut dirty = self.inner.prepare_dirty().map_err(into_slatedb_error)?;
-        dirty.value = manifest;
         self.inner.update(dirty).await.map_err(into_slatedb_error)
     }
 
@@ -493,7 +443,7 @@ impl StoredManifest {
         mutator: F,
     ) -> Result<(), SlateDBError>
     where
-        F: Fn(&StoredManifest) -> Result<Option<DirtyManifest>, SlateDBError>,
+        F: Fn(&StoredManifest) -> Result<Option<DirtyObject<Manifest>>, SlateDBError>,
     {
         loop {
             let Some(dirty) = mutator(self)? else {
@@ -501,7 +451,7 @@ impl StoredManifest {
             };
 
             return match self.update_manifest(dirty).await {
-                Err(SlateDBError::ManifestVersionExists) => {
+                Err(ManifestVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -670,8 +620,8 @@ fn into_slatedb_error(error: TransactionalObjectError) -> SlateDBError {
     match error {
         TransactionalObjectError::IoError(e) => SlateDBError::from(e),
         TransactionalObjectError::ObjectStoreError(e) => SlateDBError::from(e),
-        TransactionalObjectError::LatestRecordMissing => SlateDBError::LatestManifestMissing,
-        TransactionalObjectError::ObjectVersionExists => SlateDBError::ManifestVersionExists,
+        TransactionalObjectError::LatestRecordMissing => LatestManifestMissing,
+        TransactionalObjectError::ObjectVersionExists => ManifestVersionExists,
         TransactionalObjectError::Fenced => SlateDBError::Fenced,
         TransactionalObjectError::CallbackError(err) => {
             let Ok(err) = err.downcast::<SlateDBError>() else {
@@ -689,11 +639,12 @@ fn into_slatedb_error(error: TransactionalObjectError) -> SlateDBError {
 #[cfg(test)]
 pub(crate) mod test_utils {
     use crate::db_state::CoreDbState;
-    use crate::manifest::store::DirtyManifest;
     use crate::manifest::Manifest;
+    use crate::transactional_object::test_utils::new_dirty_object;
+    use crate::transactional_object::DirtyObject;
 
-    pub(crate) fn new_dirty_manifest() -> DirtyManifest {
-        DirtyManifest::new(1u64, Manifest::initial(CoreDbState::new()))
+    pub(crate) fn new_dirty_manifest() -> DirtyObject<Manifest> {
+        new_dirty_object(1u64, Manifest::initial(CoreDbState::new()))
     }
 }
 
@@ -725,9 +676,11 @@ mod tests {
             .await
             .unwrap();
         let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
-        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty().unwrap())
+            .await
+            .unwrap();
 
-        let result = sm2.update_manifest(sm2.prepare_dirty()).await;
+        let result = sm2.update_manifest(sm2.prepare_dirty().unwrap()).await;
 
         assert!(matches!(
             result.unwrap_err(),
@@ -742,7 +695,9 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty().unwrap())
+            .await
+            .unwrap();
 
         let (version, _) = ms.read_latest_manifest().await.unwrap();
 
@@ -755,8 +710,8 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), CoreDbState::new())
             .await
             .unwrap();
-        let mut dirty = sm.prepare_dirty();
-        dirty.core.next_wal_sst_id = 123;
+        let mut dirty = sm.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id = 123;
         sm.update_manifest(dirty).await.unwrap();
 
         assert_eq!(sm.db_state().next_wal_sst_id, 123);
@@ -769,8 +724,8 @@ mod tests {
             .await
             .unwrap();
         let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
-        let mut dirty = sm.prepare_dirty();
-        dirty.core.next_wal_sst_id = 123;
+        let mut dirty = sm.prepare_dirty().unwrap();
+        dirty.value.core.next_wal_sst_id = 123;
         sm.update_manifest(dirty).await.unwrap();
 
         let refreshed = sm2.refresh().await.unwrap();
@@ -866,8 +821,10 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        let stale = sm.prepare_dirty();
-        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
+        let stale = sm.prepare_dirty().unwrap();
+        sm.update_manifest(sm.prepare_dirty().unwrap())
+            .await
+            .unwrap();
 
         let result = sm.update_manifest(stale).await;
 
@@ -919,7 +876,7 @@ mod tests {
         let result = fm1
             .maybe_apply_manifest_update(|fm| {
                 let mut dirty = fm.prepare_dirty()?;
-                dirty.core.last_l0_seq += 1;
+                dirty.value.core.last_l0_seq += 1;
                 Ok(Some(dirty))
             })
             .await;
@@ -949,8 +906,9 @@ mod tests {
             .await
             .unwrap();
 
-        let mut dirty = sm.prepare_dirty();
+        let mut dirty = sm.prepare_dirty().unwrap();
         dirty
+            .value
             .core
             .checkpoints
             .push(new_checkpoint(sm.inner.id().into()));
@@ -994,7 +952,9 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty().unwrap())
+            .await
+            .unwrap();
 
         // Check unbounded
         let manifests = ms.list_manifests(..).await.unwrap();
@@ -1025,7 +985,9 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty().unwrap())
+            .await
+            .unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
@@ -1044,7 +1006,9 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_manifest(sm.prepare_dirty()).await.unwrap();
+        sm.update_manifest(sm.prepare_dirty().unwrap())
+            .await
+            .unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
@@ -1094,8 +1058,9 @@ mod tests {
         );
 
         // Add a checkpoint referencing the latest manifest
-        let mut dirty = sm.prepare_dirty();
+        let mut dirty = sm.prepare_dirty().unwrap();
         dirty
+            .value
             .core
             .checkpoints
             .push(new_checkpoint(sm.inner.id().into()));
@@ -1112,8 +1077,8 @@ mod tests {
         );
 
         // Remove the checkpoint and verify that only the latest manifest is active
-        let mut dirty = sm.prepare_dirty();
-        dirty.core.checkpoints.clear();
+        let mut dirty = sm.prepare_dirty().unwrap();
+        dirty.value.core.checkpoints.clear();
         sm.update_manifest(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(1, active_manifests.len());
@@ -1135,7 +1100,7 @@ mod tests {
         sm.maybe_apply_manifest_update(|_| Ok(None)).await.unwrap();
         assert_eq!(initial_id, sm.inner.id());
 
-        sm.maybe_apply_manifest_update(|sm| Ok(Some(sm.prepare_dirty())))
+        sm.maybe_apply_manifest_update(|sm| Ok(Some(sm.prepare_dirty().unwrap())))
             .await
             .unwrap();
         assert_eq!(initial_id + 1, sm.inner.id().id());

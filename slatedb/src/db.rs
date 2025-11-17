@@ -54,7 +54,7 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::manifest::store::{DirtyManifest, FenceableManifest};
+use crate::manifest::store::FenceableManifest;
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
 use crate::oracle::{DbOracle, Oracle};
@@ -71,6 +71,8 @@ use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use log::{info, trace, warn};
 
 pub mod builder;
+use crate::manifest::Manifest;
+use crate::transactional_object::DirtyObject;
 pub use builder::DbBuilder;
 
 pub(crate) struct DbInner {
@@ -106,7 +108,7 @@ impl DbInner {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
-        manifest: DirtyManifest,
+        manifest: DirtyObject<Manifest>,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMessage>,
         stat_registry: Arc<StatRegistry>,
@@ -114,7 +116,7 @@ impl DbInner {
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
-        let last_l0_seq = manifest.core.last_l0_seq;
+        let last_l0_seq = manifest.value.core.last_l0_seq;
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
@@ -126,7 +128,7 @@ impl DbInner {
 
         let mono_clock = Arc::new(MonotonicClock::new(
             logical_clock,
-            manifest.core.last_l0_clock_tick,
+            manifest.value.core.last_l0_clock_tick,
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
@@ -462,9 +464,10 @@ impl DbInner {
         {
             Some(PreloadLevel::AllSst) => {
                 // Preload both L0 and compacted SSTs
-                let l0_count = current_state.manifest.core.l0.len();
+                let l0_count = current_state.manifest.value.core.l0.len();
                 let compacted_count: usize = current_state
                     .manifest
+                    .value
                     .core
                     .compacted
                     .iter()
@@ -479,6 +482,7 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
+                        .value
                         .core
                         .l0
                         .iter()
@@ -489,6 +493,7 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
+                        .value
                         .core
                         .compacted
                         .iter()
@@ -509,6 +514,7 @@ impl DbInner {
                 // Preload only L0 SSTs
                 let l0_sst_paths: Vec<object_store::path::Path> = current_state
                     .manifest
+                    .value
                     .core
                     .l0
                     .iter()
@@ -1806,8 +1812,8 @@ mod tests {
         db.flush().await.unwrap();
 
         let state = db.inner.state.read().view();
-        assert_eq!(1, state.state.manifest.core.l0.len());
-        let sst = state.state.manifest.core.l0.front().unwrap();
+        assert_eq!(1, state.state.manifest.value.core.l0.len());
+        let sst = state.state.manifest.value.core.l0.front().unwrap();
         let index = db.inner.table_store.read_index(sst).await.unwrap();
         assert!(index.borrow().block_meta().len() >= 3);
         assert_eq!(
@@ -3328,7 +3334,7 @@ mod tests {
 
         let manifest_state = {
             let guard = db.inner.state.read();
-            guard.state().manifest.core.clone()
+            guard.state().manifest.value.core.clone()
         };
         let last_l0_seq = manifest_state.last_l0_seq;
         assert!(
