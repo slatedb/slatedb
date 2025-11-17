@@ -245,20 +245,20 @@ timeoutish() {
 
 # 10% fail-before with HTTP 503 (transient server errors).
 http_503s() {
-  clear_toxics s3; add_http_failure 10 503
-  run_smoke http_503s "$LOCALSTACK_S3"
+  clear_toxics s3; add_http_failure 75 503
+  run_smoke http_503s "$LOWDOWN_PROXY"
 }
 
 # 5% fail-before with HTTP 404 (transient missing paths/keys).
 http_404s() {
-  clear_toxics s3; add_http_failure 5 404
-  run_smoke http_404s "$LOCALSTACK_S3"
+  clear_toxics s3; add_http_failure 75 404
+  run_smoke http_404s "$LOWDOWN_PROXY"
 }
 
 # 5% fail-before with HTTP 429 (transient throttling).
 http_429s() {
-  clear_toxics s3; add_http_failure 5 429
-  run_smoke http_429s "$LOCALSTACK_S3"
+  clear_toxics s3; add_http_failure 75 429
+  run_smoke http_429s "$LOWDOWN_PROXY"
 }
 
 # Execute
