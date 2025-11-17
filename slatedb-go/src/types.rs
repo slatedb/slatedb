@@ -89,7 +89,7 @@ pub struct CSdbReadOptions {
     /// Whether to include dirty/uncommitted data
     pub dirty: bool,
     /// Whether to cache fetched blocks
-    pub cache_blocks: bool, 
+    pub cache_blocks: bool,
 }
 
 // Scan options for controlling scan behavior
