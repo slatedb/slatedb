@@ -131,7 +131,7 @@ impl FenceableManifest {
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
         let clock = self.clock.clone();
-        self.maybe_apply_manifest_update(|fm| {
+        self.maybe_apply_update(|fm| {
             let checkpoint = Self::make_new_checkpoint(clock.clone(), fm, checkpoint_id, options)?;
             let mut dirty = fm.prepare_dirty()?;
             dirty.value.core.checkpoints.push(checkpoint);
@@ -148,7 +148,7 @@ impl FenceableManifest {
         Ok(checkpoint)
     }
 
-    pub(crate) async fn maybe_apply_manifest_update<F>(
+    pub(crate) async fn maybe_apply_update<F>(
         &mut self,
         mutator: F,
     ) -> Result<(), SlateDBError>
@@ -870,7 +870,7 @@ mod tests {
                 .unwrap();
 
         let result = fm1
-            .maybe_apply_manifest_update(|fm| {
+            .maybe_apply_update(|fm| {
                 let mut dirty = fm.prepare_dirty()?;
                 dirty.value.core.last_l0_seq += 1;
                 Ok(Some(dirty))
