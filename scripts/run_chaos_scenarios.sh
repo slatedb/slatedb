@@ -19,7 +19,7 @@
 # Scenarios executed by this script:
 # - baseline: No HTTP or TCP faults (green path).
 # - latency_jitter: Add latency with jitter both ways.
-# - bandwidth_cap: Cap downstream bandwidth to ~200 kbps.
+# - bandwidth_cap: Cap downstream bandwidth to ~1 kbps.
 # - reset_peer: ~15% intermittent downstream TCP resets.
 # - slow_close: ~30% downstream TCP close delay by ~2000ms.
 # - timeoutish: ~35% downstream latency (~3000ms).
@@ -91,7 +91,7 @@ clear_toxics() {
 #   $2 toxic_name  : label/id for the toxic
 #   $3 type        : latency|bandwidth|reset_peer|slow_close|timeout|...
 #   $4 stream      : downstream|upstream
-#   $5 attrs_json  : JSON object of attributes (e.g., '{"latency":1000,"jitter":300}')
+#   $5 attrs_json  : JSON object of attributes (e.g., '{"latency":1000,"jitter":999}')
 #   $6 toxicity    : optional 0.0..1.0, default 1.0
 add_toxic() {
   local name=$1; shift
@@ -210,15 +210,15 @@ baseline() {
 # Add high latency + jitter both directions; HTTP faults disabled.
 latency_jitter() {
   clear_toxics s3; clear_http_failures
-  add_toxic s3 t_latency latency downstream '{"latency":1000,"jitter":300}' 1.0
-  add_toxic s3 t_latency_up latency upstream '{"latency":600,"jitter":200}' 1.0
+  add_toxic s3 t_latency latency downstream '{"latency":1000,"jitter":999}' 1.0
+  add_toxic s3 t_latency_up latency upstream '{"latency":600,"jitter":599}' 1.0
   run_smoke latency_jitter "$TOXIPROXY_PROXY"
 }
 
-# Limit downstream bandwidth to 200 kbps.
+# Limit downstream bandwidth to 1 kbps.
 bandwidth_cap() {
   clear_toxics s3; clear_http_failures
-  add_toxic s3 t_bw bandwidth downstream '{"rate":200}' 1.0
+  add_toxic s3 t_bw bandwidth downstream '{"rate":1}' 1.0
   run_smoke bandwidth_cap "$TOXIPROXY_PROXY"
 }
 
