@@ -57,7 +57,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
-use crate::oracle::Oracle;
+use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
@@ -88,7 +88,7 @@ pub(crate) struct DbInner {
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) system_clock: Arc<dyn SystemClock>,
     pub(crate) rand: Arc<DbRand>,
-    pub(crate) oracle: Arc<Oracle>,
+    pub(crate) oracle: Arc<DbOracle>,
     pub(crate) reader: Reader,
     /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
     /// of the WAL buffer to the remote storage.
@@ -118,11 +118,11 @@ impl DbInner {
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
-        let oracle = Arc::new(
-            Oracle::new(last_committed_seq)
-                .with_last_seq(last_seq)
-                .with_last_remote_persisted_seq(last_remote_persisted_seq),
-        );
+        let oracle = Arc::new(DbOracle::new(
+            last_seq,
+            last_committed_seq,
+            last_remote_persisted_seq,
+        ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
             logical_clock,
@@ -436,7 +436,7 @@ impl DbInner {
         // the last_committed_seq is considered same as the last_remote_persisted_seq.
         self.oracle
             .last_remote_persisted_seq
-            .store(self.oracle.last_committed_seq.load());
+            .store(self.oracle.last_committed_seq());
         Ok(())
     }
 
@@ -713,7 +713,7 @@ impl Db {
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.check_closed()?;
-        let seq = self.inner.oracle.last_committed_seq.load();
+        let seq = self.inner.oracle.last_committed_seq();
         let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
         Ok(snapshot)
     }
@@ -1351,7 +1351,7 @@ impl Db {
         isolation_level: IsolationLevel,
     ) -> Result<DBTransaction, crate::Error> {
         self.inner.check_closed()?;
-        let seq = self.inner.oracle.last_committed_seq.load();
+        let seq = self.inner.oracle.last_committed_seq();
         let txn = DBTransaction::new(
             self.inner.clone(),
             self.inner.txn_manager.clone(),
@@ -5021,7 +5021,7 @@ mod tests {
 
         // Test 2: With active snapshots
         let _snapshot = db.snapshot().await.unwrap();
-        let snapshot_seq = db.inner.oracle.last_committed_seq.load();
+        let snapshot_seq = db.inner.oracle.last_committed_seq();
 
         // Write more data and force flush
         db.put(b"key2", b"value2").await.unwrap();
