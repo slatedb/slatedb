@@ -240,50 +240,26 @@ jobs:
           echo "Completed $completed iteration(s) in ${SECONDS}s without failures"
 
   chaos:
-    name: Chaos tests
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq curl
+          sudo apt-get install -y jq curl maven
           sudo snap install aws-cli --classic
 
-      - name: Create docker network
-        run: docker network create chaos-net
-
-      - name: Start LocalStack (S3)
+      - name: Build chaos-http-proxy
         run: |
-          docker run -d --name localstack --network chaos-net \
-            -p 4566:4566 \
-            -e SERVICES=s3 \
-            -e DEFAULT_REGION=us-east-1 \
-            -e S3_SKIP_SIGNATURE_VALIDATION=0 \
-            localstack/localstack:latest
-          # Wait for readiness
-          for i in {1..60}; do
-            if curl -sf http://127.0.0.1:4566/health >/dev/null; then echo ready; break; fi; sleep 1; done
+          git clone https://github.com/bouncestorage/chaos-http-proxy
+          cd chaos-http-proxy
+          mvn -q -DskipTests package
 
-      - name: Start chaos-http-proxy (baseline)
+      - name: Start chaos services (docker compose)
         run: |
-          # Start with no HTTP faults; Toxiproxy handles TCP faults
-          docker run -d --name chaos-http-proxy --network chaos-net \
-            -p 1080:1080 \
-            -v "$PWD/chaos-http-proxy/target:/app" \
-            eclipse-temurin:17-jre \
-            bash -lc "/app/chaos-http-proxy --address 0.0.0.0 --port 1080"
-
-      - name: Start Toxiproxy
-        run: |
-          docker run -d --name toxiproxy --network chaos-net \
-            -p 8474:8474 -p 9001:9001 \
-            ghcr.io/shopify/toxiproxy:latest
-          # Wait for API
-          for i in {1..60}; do
-            if curl -sf http://127.0.0.1:8474/proxies >/dev/null; then echo ready; break; fi; sleep 1; done
+          docker compose -f scripts/run_chaos_scenarios.compose.yaml up -d
 
       - name: Configure S3 toxiproxy proxy
         run: |
@@ -299,6 +275,7 @@ jobs:
           SLATEDB_TEST_NUM_READERS: "2"
           SLATEDB_TEST_WRITES_PER_TASK: "250"
           SLATEDB_TEST_KEY_LENGTH: "256"
+          RUST_BACKTRACE: "1"
         run: |
           chmod +x scripts/run_chaos_scenarios.sh
           if scripts/run_chaos_scenarios.sh; then
