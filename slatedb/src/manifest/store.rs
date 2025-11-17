@@ -93,8 +93,16 @@ impl FenceableManifest {
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let clock = self.clock.clone();
-        let db_state = &self.inner.object().core;
+        Self::make_new_checkpoint(self.clock.clone(), &self.inner, checkpoint_id, options)
+    }
+
+    fn make_new_checkpoint(
+        clock: Arc<dyn SystemClock>,
+        inner: &FenceableTransactionalObject<Manifest>,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<Checkpoint, SlateDBError> {
+        let db_state = &inner.object().core;
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
                 let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
@@ -106,7 +114,7 @@ impl FenceableManifest {
                 if !db_state.initialized {
                     return Err(InvalidDBState);
                 }
-                self.inner.id().next().into()
+                inner.id().next().into()
             }
         };
         Ok(Checkpoint {
@@ -123,8 +131,9 @@ impl FenceableManifest {
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
+        let clock = self.clock.clone();
         self.maybe_apply_manifest_update(|fm| {
-            let checkpoint = fm.new_checkpoint(checkpoint_id, options)?;
+            let checkpoint = Self::make_new_checkpoint(clock.clone(), fm, checkpoint_id, options)?;
             let mut dirty = fm.prepare_dirty()?;
             dirty.value.core.checkpoints.push(checkpoint);
             Ok(Some(dirty))
@@ -145,21 +154,9 @@ impl FenceableManifest {
         mutator: F,
     ) -> Result<(), SlateDBError>
     where
-        F: Fn(&FenceableManifest) -> Result<Option<DirtyObject<Manifest>>, SlateDBError>,
+        F: Fn(&FenceableTransactionalObject<Manifest>) -> Result<Option<DirtyObject<Manifest>>, SlateDBError> + Send + Sync,
     {
-        loop {
-            let Some(dirty) = mutator(self)? else {
-                return Ok(());
-            };
-            match self.update_manifest(dirty).await {
-                Err(ManifestVersionExists) => {
-                    self.refresh().await?;
-                    continue;
-                }
-                Err(e) => return Err(e),
-                Ok(()) => return Ok(()),
-            }
-        }
+        self.inner.maybe_apply_update(mutator).await.map_err(into_slatedb_error)
     }
 }
 
@@ -264,8 +261,7 @@ impl StoredManifest {
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
-        self.inner.refresh().await.map_err(into_slatedb_error)?;
-        Ok(self.manifest())
+        self.inner.refresh().await.map_err(into_slatedb_error)
     }
 
     fn new_checkpoint(
