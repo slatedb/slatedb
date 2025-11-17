@@ -261,7 +261,7 @@ impl Reader {
     /// - `key`: The user key to read. Any type that can be viewed as a byte
     ///   slice is accepted.
     /// - `options`: Options for the read, including durability constraint or
-    ///   dirty read.
+    ///   dirty read or cache blocks.
     /// - `db_state`: Read-only view over in-memory state (memtables) and on-disk
     ///   states (level-0 SSTs and compacted sorted runs).
     /// - `write_batch`: Optional `WriteBatch` to consult first. It's only used when
@@ -285,7 +285,7 @@ impl Reader {
         let range = BytesRange::from_slice(key_slice..=key_slice);
 
         let sst_iter_options = SstIteratorOptions {
-            cache_blocks: true,
+            cache_blocks: options.cache_blocks,
             eager_spawn: true,
             ..SstIteratorOptions::default()
         };
