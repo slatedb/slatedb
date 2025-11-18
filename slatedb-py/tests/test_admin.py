@@ -3,8 +3,8 @@ import pytest
 from slatedb import InvalidError, SlateDB, SlateDBAdmin, SlateDBReader
 
 
-def test_admin_create_checkpoint(db_path, env_file):
-    """Admin can create a detached checkpoint and return id + manifest_id."""
+def test_admin_create_checkpoint_without_name(db_path, env_file):
+    """Admin can create a detached checkpoint without a name and return id + manifest_id."""
     # Create a simple database first
     db = SlateDB(db_path, env_file=env_file)
     db.put(b"test", b"value")
@@ -16,6 +16,15 @@ def test_admin_create_checkpoint(db_path, env_file):
     assert isinstance(result["id"], str) and len(result["id"]) > 0
     assert isinstance(result["manifest_id"], int)
 
+def test_admin_create_checkpoint_with_name(db_path, env_file):
+    """Admin can create a detached checkpoint with a name and return id + manifest_id."""
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"test", b"value")
+    db.close()
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    result = admin.create_checkpoint(name="my_checkpoint")
+    assert result is not None
+    assert isinstance(result["id"], str) and len(result["id"]) > 0
 
 def test_admin_list_checkpoints(db_path, env_file):
     """Admin can list checkpoints, and list includes newly created ones."""
@@ -31,6 +40,25 @@ def test_admin_list_checkpoints(db_path, env_file):
     cps = admin.list_checkpoints()
     # Expect at least one checkpoint and that the created id is present
     assert any(c["id"] == created["id"] for c in cps)
+
+def test_admin_list_checkpoints_with_name(db_path, env_file):
+    """Admin can list checkpoints, and list includes newly created ones."""
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"k", b"v")
+    db.close()
+
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    before = admin.list_checkpoints()
+    assert isinstance(before, list)
+
+    created = admin.create_checkpoint(name="my_checkpoint")
+    cps = admin.list_checkpoints(name="my_checkpoint")
+    # Expect at least one checkpoint and that the created id is present
+    assert any(c["id"] == created["id"] for c in cps)
+
+    cps = admin.list_checkpoints(name="my_checkpoint_2")
+    # Expect no checkpoints with name "my_checkpoint_2"
+    assert len(cps) == 0
 
 
 def test_admin_read_checkpoint_isolation(db_path, env_file):

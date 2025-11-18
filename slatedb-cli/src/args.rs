@@ -65,6 +65,12 @@ pub(crate) enum CliCommands {
         #[arg(short, long)]
         #[clap(value_parser = uuid::Uuid::parse_str)]
         source: Option<Uuid>,
+
+        /// Optionally specify a name for the checkpoint. The name can be used to list the checkpoints.
+        /// Note that name may not be unique and the list operation can return multiple checkpoints with
+        /// the same name.
+        #[arg(short, long)]
+        name: Option<String>,
     },
 
     /// Refresh an existing checkpoint's expiry time. This command will look for an existing
