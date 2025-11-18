@@ -103,29 +103,42 @@ impl GcTask for CompactedGcTask {
     /// older than the minimum age specified in the options and are not active in the manifest.
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
         let active_ssts = self.list_active_l0_and_compacted_ssts().await?;
-        let maybe_compaction_low_watermark_dt = self.compaction_low_watermark_dt();
-        let min_age = self.compacted_sst_min_age();
+        // Don't delete any SSTs that are newer than the configured minimum age.
+        let configured_min_age_dt = utc_now - self.compacted_sst_min_age();
+        // Don't delete SSTs that are newer than this SST since they're probably an L0 that hasn't yet
+        // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
+        // manifest to object storage).
+        let most_recent_sst_dt = active_ssts
+            .iter()
+            .max_by_key(|id| DateTime::<Utc>::from(id.unwrap_compacted_id().datetime()))
+            .map(|id| DateTime::<Utc>::from(id.unwrap_compacted_id().datetime()))
+            // If there are no SSTs in the database at all, it's unsafe to delete any SSTs since
+            // we have no point of reference for where new L0 SSTs (that aren't yet in the
+            // manifest) might start.
+            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+        // Don't delete any SSTs that are more recent than the oldest actively running compaction job
+        // since they might be an output SST from a compaction that hasn't yet been added to the
+        // manifest (we write the sorted run SSTs, _then_ add them to the manifest and write the
+        // manifest to object storage).
+        let compaction_low_watermark_dt = self
+            .compaction_low_watermark_dt()
+            .unwrap_or(configured_min_age_dt);
+        // Take the minimum of the configured min age, the compaction low watermark, and the most
+        // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
+        let cutoff_dt = configured_min_age_dt
+            .min(compaction_low_watermark_dt)
+            .min(most_recent_sst_dt);
         let sst_ids_to_delete = self
             .table_store
             // List all SSTs in the table store
             .list_compacted_ssts(..)
             .await?
             .into_iter()
-            // Filter out the ones that are too young to be collected
-            .filter(|sst| utc_now.signed_duration_since(sst.last_modified) > min_age)
             .map(|sst| sst.id)
-            // Filter out the ones that are active in the manifest
+            // Filter out SSTs that were more recently created than the cutoff_dt
+            .filter(|id| DateTime::<Utc>::from(id.unwrap_compacted_id().datetime()) < cutoff_dt)
+            // Filter out SSTs that are active in the manifest (including actively checkpointed SSTs)
             .filter(|id| !active_ssts.contains(id))
-            // Filter out the ones that may be part of a running compaction (See #604 for details)
-            .filter(|id| match (maybe_compaction_low_watermark_dt, id) {
-                (Some(compaction_low_watermark_dt), SsTableId::Compacted(ulid)) => {
-                    let ulid_dt = DateTime::<Utc>::from(ulid.datetime());
-                    ulid_dt < compaction_low_watermark_dt
-                }
-                // Keep all compacted SSTs if there is no compaction low watermark
-                (None, SsTableId::Compacted(_)) => true,
-                _ => unreachable!("non-compacted SSTs should not be in list_compacted_ssts"),
-            })
             .collect::<Vec<_>>();
 
         for id in sst_ids_to_delete {
