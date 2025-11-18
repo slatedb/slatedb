@@ -1511,6 +1511,7 @@ mod tests {
                                     &ReadOptions {
                                         durability_filter: Memory,
                                         dirty: false,
+                                        cache_blocks: true,
                                     }
                                 )
                                 .await

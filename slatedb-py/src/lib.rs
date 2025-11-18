@@ -299,6 +299,7 @@ fn build_scan_options(
 fn build_read_options(
     durability_filter: Option<String>,
     dirty: Option<bool>,
+    cache_blocks: Option<bool>,
 ) -> PyResult<ReadOptions> {
     let mut opts = ReadOptions::default();
     if let Some(df) = durability_filter {
@@ -314,6 +315,9 @@ fn build_read_options(
     }
     if let Some(d) = dirty {
         opts.dirty = d;
+    }
+    if let Some(cb) = cache_blocks {
+        opts.cache_blocks = cb;
     }
     Ok(opts)
 }
@@ -531,19 +535,20 @@ impl PySlateDB {
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]
     fn get_with_options<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        cache_blocks: Option<bool>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, cache_blocks)?;
         let rt = get_runtime();
         let res: Option<Vec<u8>> = py.allow_threads(|| {
             rt.block_on(async {
@@ -798,19 +803,20 @@ impl PySlateDB {
         })
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]
     fn get_with_options_async<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        cache_blocks: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let db = self.inner.clone();
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, cache_blocks)?;
         future_into_py(py, async move {
             match db.get_with_options(&key, &opts).await {
                 Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
@@ -1391,19 +1397,20 @@ impl PySlateDBTransaction {
         future_into_py(py, async move { Ok(res) })
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]
     fn get_with_options<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        cache_blocks: Option<bool>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let txn = self.inner_ref()?;
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, cache_blocks)?;
         let rt = get_runtime();
         let res: Option<Vec<u8>> = py.allow_threads(|| {
             rt.block_on(async {
@@ -1417,19 +1424,20 @@ impl PySlateDBTransaction {
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]
     fn get_with_options_async<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        cache_blocks: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let txn = self.inner_ref()?;
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, cache_blocks)?;
         let rt = get_runtime();
         let res: Option<Vec<u8>> = py.allow_threads(|| {
             rt.block_on(async {
@@ -1765,19 +1773,20 @@ impl PySlateDBReader {
         })
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]
     fn get_with_options<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        cache_blocks: Option<bool>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let reader = self.inner.clone();
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, cache_blocks)?;
         let rt = get_runtime();
         let res: Option<Vec<u8>> = py.allow_threads(|| {
             rt.block_on(async {
@@ -1791,19 +1800,20 @@ impl PySlateDBReader {
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
-    #[pyo3(signature = (key, *, durability_filter = None, dirty = None))]
+    #[pyo3(signature = (key, *, durability_filter = None, dirty = None, cache_blocks = None))]
     fn get_with_options_async<'py>(
         &self,
         py: Python<'py>,
         key: Vec<u8>,
         durability_filter: Option<String>,
         dirty: Option<bool>,
+        cache_blocks: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if key.is_empty() {
             return Err(InvalidError::new_err("key cannot be empty"));
         }
         let reader = self.inner.clone();
-        let opts = build_read_options(durability_filter, dirty)?;
+        let opts = build_read_options(durability_filter, dirty, cache_blocks)?;
         future_into_py(py, async move {
             match reader.get_with_options(&key, &opts).await {
                 Ok(Some(bytes)) => Ok(Some(bytes.as_ref().to_vec())),
