@@ -392,7 +392,7 @@ impl CompactorEventHandler {
     }
 
     /// Emits the current compaction state and per-job progress.
-    fn handle_log_ticker(&mut self) {
+    fn handle_log_ticker(&self) {
         self.log_compaction_state();
 
         let current_time_ms = self.system_clock.now().timestamp_millis() as u64;
@@ -611,8 +611,7 @@ impl CompactorEventHandler {
         let total_bytes = job_args.estimated_source_bytes();
         let start_time_ms = self.system_clock.now().timestamp_millis() as u64;
 
-        let compaction_id = compaction.id();
-        self.state.update_compaction(&compaction_id, |c| {
+        self.state.update_compaction(&compaction.id(), |c| {
             c.set_total_bytes_and_start_time(total_bytes, start_time_ms);
         });
 
@@ -1856,7 +1855,6 @@ mod tests {
             .lookup(TOTAL_THROUGHPUT_BYTES_PER_SEC)
             .unwrap()
             .get();
-
         assert!(
             throughput > 0,
             "Expected throughput > 0, got {}",
