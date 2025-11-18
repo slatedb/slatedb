@@ -115,8 +115,24 @@ trait MergeOperator {
         existing_value: Option<Bytes>,
         value: Bytes
     ) -> Result<Bytes, MergeOperatorError>;
+
+    pub fn merge_batch(
+        &self,
+        key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<Bytes, MergeOperatorError> {
+        // Default implementation: pairwise merging (backward compatible)
+        let mut result = existing_value;
+        for operand in operands {
+            result = Some(self.merge(key, result, operand.clone())?);
+        }
+        result.ok_or(MergeOperatorError::EmptyBatch)
+    }
 }
 ```
+
+**Error Handling**: The `MergeOperatorError::EmptyBatch` error is returned by the default `merge_batch` implementation when called with no `existing_value` and an empty `operands` slice. SlateDB's merge iterator prevents this by returning early when both conditions are met (no base value or tombstone with no operands). However, custom implementations of `merge_batch` should handle this edge case if they don't follow the default pairwise merging pattern.
 
 Initially, the implementation is limited to a single optional merge operator per database. The user must ensure that both the compactor and writer use the same merge operator to guarantee correct results.
 
@@ -143,20 +159,51 @@ impl MergeOperator for MyMergeOperator {
                 }
                 None => Ok(value)
             }
-        } else if key.starts_with(b"min:") {
-            // calculate min
-            match existing_value {
-                Some(existing) => Ok(...), // min logic here
-                None => Ok(value)
-            }
+        } else if key.starts_with(b"counter:") {
+            // add values
+            let existing_num = existing_value
+                .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
+                .unwrap_or(0);
+            let new_num = u64::from_le_bytes(value.as_ref().try_into().unwrap());
+            Ok(Bytes::copy_from_slice(&(existing_num + new_num).to_le_bytes()))
         } else {
             Err(...)
+        }
+    }
+
+    // Optional: Override merge_batch for better performance
+    fn merge_batch(
+        &self,
+        key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<Bytes, MergeOperatorError> {
+        if key.starts_with(b"counter:") {
+            // For counters, we can sum all operands at once (O(1) instead of O(N))
+            let sum = existing_value
+                .map(|v| u64::from_le_bytes(v.as_ref().try_into().unwrap()))
+                .unwrap_or(0)
+                + operands.iter()
+                    .map(|b| u64::from_le_bytes(b.as_ref().try_into().unwrap()))
+                    .sum::<u64>();
+            Ok(Bytes::copy_from_slice(&sum.to_le_bytes()))
+        } else {
+            // For other prefixes, use default pairwise merging
+            let mut result = existing_value;
+            for operand in operands {
+                result = Some(self.merge(key, result, operand.clone())?);
+            }
+            result.ok_or(MergeOperatorError::EmptyBatch)
         }
     }
 }
 ```
 
 It's **user's responsibility to ensure** that the merge operator is correctly implemented and **the same instance of the operator is used across all components** (compactor, writer, garbage collector).
+
+#### Performance Optimization: Overriding `merge_batch`
+
+While the default `merge_batch` implementation provides backward compatibility by calling `merge` pairwise, users may optionally override `merge_batch` to improve performance and reduce intermediate memory allocations. For example, a counter merge operator can sum all operands in a single pass instead of performing N-1 merge operations, avoiding the creation of N-1 intermediate `Bytes` objects. This optimization is particularly beneficial when processing large batches of operands, as it can reduce both function call overhead and memory allocations for certain use cases.
 
 ### Merge Operator Configuration
 
