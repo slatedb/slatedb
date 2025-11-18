@@ -5350,9 +5350,11 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(
-            !ssts.is_empty(),
-            "expected L0 SST to be written before manifest update"
+        assert_eq!(
+            ssts.len(),
+            1,
+            "expected exactly one L0 SST after GC, but found {:?}",
+            ssts.iter().map(|sst| sst.id).collect::<Vec<_>>()
         );
 
         // Run a manual GC with aggressive settings to delete the L0 SST while
@@ -5360,15 +5362,15 @@ mod tests {
         let gc_options = GarbageCollectorOptions {
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
-                min_age: Duration::from_millis(100),
+                min_age: Duration::from_millis(0),
             }),
             manifest_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
-                min_age: Duration::from_millis(100),
+                min_age: Duration::from_millis(0),
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
-                min_age: Duration::from_millis(100),
+                min_age: Duration::from_millis(0),
             }),
         };
 
@@ -5378,10 +5380,8 @@ mod tests {
             .with_system_clock(db.inner.system_clock.clone())
             .build();
 
-        // Run the GC until the L0 SST is deleted. Since there's a 100ms min_age, we need to try
-        // a few times to ensure the GC has a chance to run.
-        let mut ssts = vec![];
-        for _ in 0..200 {
+        // Run the GC until the L0 SST is deleted. Try a few times to make sure we pass min_age.
+        for _ in 0..5 {
             gc.run_gc_once().await;
             ssts = db
                 .inner
@@ -5394,9 +5394,11 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(
-            ssts.is_empty(),
-            "expected GC to delete L0 SST before manifest update"
+        assert_eq!(
+            ssts.len(),
+            1,
+            "expected exactly one L0 SST after GC, but found {:?}",
+            ssts.iter().map(|sst| sst.id).collect::<Vec<_>>()
         );
 
         // Now allow the memtable flush to resume and persist the manifest referencing the deleted SST.
@@ -5424,6 +5426,11 @@ mod tests {
             "expected exactly one L0 SST in manifest"
         );
         let l0_id = manifest.core.l0[0].id;
+        assert_eq!(
+            l0_id, ssts[0].id,
+            "expected SST {:?} but found SST {:?}",
+            ssts[0].id, l0_id,
+        );
 
         // Build a read-only TableStore sharing the same underlying object store
         // and assert that the referenced L0 SST still exists. This assertion
