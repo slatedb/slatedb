@@ -371,8 +371,8 @@ mod tests {
         ));
         let mut stored_manifest =
             StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
-            .await
-            .unwrap();
+                .await
+                .unwrap();
 
         // Two SSTs with distinct ULID timestamps
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0)); // job 1
