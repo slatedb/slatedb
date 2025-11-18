@@ -1427,8 +1427,8 @@ mod tests {
     use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, DurabilityLevel, ObjectStoreCacheOptions, Settings,
-        SizeTieredCompactionSchedulerOptions, Ttl,
+        CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
+        Ttl,
     };
     use crate::db_state::CoreDbState;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -5096,24 +5096,12 @@ mod tests {
 
         // check that read with durability level remote returns value
         let v = db
-            .get_with_options(
-                &b"foo",
-                &ReadOptions {
-                    durability_filter: DurabilityLevel::Memory,
-                    dirty: false,
-                },
-            )
+            .get_with_options(&b"foo", &ReadOptions::new().with_durability_filter(Memory))
             .await
             .unwrap();
         assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
         let v = db
-            .get_with_options(
-                &b"foo",
-                &ReadOptions {
-                    durability_filter: DurabilityLevel::Remote,
-                    dirty: false,
-                },
-            )
+            .get_with_options(&b"foo", &ReadOptions::new().with_durability_filter(Remote))
             .await
             .unwrap();
         assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
