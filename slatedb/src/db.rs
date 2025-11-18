@@ -1427,7 +1427,8 @@ mod tests {
     use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, DurabilityLevel, ObjectStoreCacheOptions, Settings,
+        CompactorOptions, DurabilityLevel, GarbageCollectorDirectoryOptions,
+        GarbageCollectorOptions, ObjectStoreCacheOptions, Settings,
         SizeTieredCompactionSchedulerOptions, Ttl,
     };
     use crate::db_state::CoreDbState;
@@ -5277,5 +5278,161 @@ mod tests {
         db_reopened.merge(b"key1", b"c").await.unwrap();
         let result = db_reopened.get(b"key1").await.unwrap();
         assert_eq!(result, Some(Bytes::from("abc")));
+    }
+
+    /// Reproduces a race where GC can delete an L0 SST before the manifest
+    /// is updated to reference it at the DB level:
+    /// 1. New L0 is written during memtable flush.
+    /// 2. Time passes so the L0 becomes older than GC `min_age`.
+    /// 3. GC lists compacted SSTs and sees the L0 SST.
+    /// 4. GC deletes the L0 SST (it's > `min_age` and not in any manifests).
+    /// 5. The memtable flush resumes and writes a manifest that references
+    ///    the now-deleted L0 SST.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_gc_race_deletes_l0_before_manifest_update() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_gc_race_deletes_l0_before_manifest_update");
+
+        // Use explicit settings with aggressive GC for compacted SSTs and
+        // manual flush control.
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+        settings.garbage_collector_options = Some(GarbageCollectorOptions {
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                interval: Some(Duration::from_millis(100)),
+                min_age: Duration::from_millis(100),
+            }),
+            manifest_options: Some(GarbageCollectorDirectoryOptions {
+                interval: Some(Duration::from_millis(100)),
+                min_age: Duration::from_millis(100),
+            }),
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
+                interval: Some(Duration::from_millis(100)),
+                min_age: Duration::from_millis(100),
+            }),
+        });
+
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(settings)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .expect("failed to build DB");
+        let db = Arc::new(db);
+
+        // Pause after the L0 SST is written but before the manifest is updated.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-flush-imm-to-l0-before-manifest",
+            "pause",
+        )
+        .expect("failed to set failpoint");
+
+        // Write some data so we have an immutable memtable to flush to L0.
+        db.put_with_options(
+            b"key1",
+            b"value1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("failed to put");
+
+        // Trigger a memtable flush in the background; it will block at the failpoint.
+        let this_db = db.clone();
+        let flush_handle = tokio::spawn(async move { this_db.flush().await });
+
+        // Wait for the L0 SST to appear in the table store, indicating it has been written.
+        let mut l0_ids = Vec::new();
+        for _ in 0..200 {
+            let ssts = db
+                .inner
+                .table_store
+                .list_compacted_ssts(..)
+                .await
+                .expect("failed to list compacted ssts");
+            if !ssts.is_empty() {
+                l0_ids = ssts.iter().map(|m| m.id).collect();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !l0_ids.is_empty(),
+            "expected L0 SST to be written before manifest update"
+        );
+
+        // Wait for background GC (configured with min_age/interval 100ms) to
+        // delete the L0 SST while the manifest is still not updated.
+        let target_l0_id = l0_ids[0];
+        let mut gc_deleted = false;
+        for _ in 0..100 {
+            let ssts = db
+                .inner
+                .table_store
+                .list_compacted_ssts(..)
+                .await
+                .expect("failed to list compacted ssts");
+            if !ssts.iter().any(|m| m.id == target_l0_id) {
+                gc_deleted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            gc_deleted,
+            "expected GC to delete L0 SST before manifest update"
+        );
+
+        // Now allow the memtable flush to resume and persist the manifest referencing the deleted SST.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-flush-imm-to-l0-before-manifest",
+            "off",
+        )
+        .expect("failed to set failpoint");
+        flush_handle
+            .await
+            .expect("failed to join flush handle")
+            .expect("flush failed");
+
+        // Read the latest manifest and verify it references the L0 SST.
+        let manifest_store =
+            ManifestStore::new(&path, object_store.clone(), db.inner.system_clock.clone());
+        let (_, manifest) = manifest_store
+            .read_latest_manifest()
+            .await
+            .expect("failed to read latest manifest");
+        assert_eq!(
+            manifest.core.l0.len(),
+            1,
+            "expected exactly one L0 SST in manifest"
+        );
+        let l0_id = manifest.core.l0[0].id;
+
+        // Build a read-only TableStore sharing the same underlying object store
+        // and assert that the referenced L0 SST still exists. This assertion
+        // currently fails due to the race described above.
+        let table_store = TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat::default(),
+            path.clone(),
+            None,
+        );
+        let compacted_ssts = table_store
+            .list_compacted_ssts(..)
+            .await
+            .expect("failed to list compacted ssts");
+        let still_exists = compacted_ssts.iter().any(|m| m.id == l0_id);
+        assert!(
+            still_exists,
+            "manifest references L0 SST {:?} that GC has already deleted",
+            l0_id
+        );
+
+        db.close().await.expect("failed to close DB");
     }
 }
