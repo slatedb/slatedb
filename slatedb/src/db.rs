@@ -434,6 +434,9 @@ impl DbInner {
 
         // last_committed_seq is updated as WAL is replayed. after replay,
         // the last_committed_seq is considered same as the last_remote_persisted_seq.
+        assert!(
+            self.oracle.last_remote_persisted_seq.load() <= self.oracle.last_committed_seq.load()
+        );
         self.oracle
             .last_remote_persisted_seq
             .store(self.oracle.last_committed_seq.load());
@@ -1424,8 +1427,8 @@ mod tests {
     use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
-        Ttl,
+        CompactorOptions, DurabilityLevel, ObjectStoreCacheOptions, Settings,
+        SizeTieredCompactionSchedulerOptions, Ttl,
     };
     use crate::db_state::CoreDbState;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -5064,6 +5067,56 @@ mod tests {
             );
             assert!(recent_min_seq > snapshot_seq);
         }
+    }
+
+    #[tokio::test]
+    async fn test_memtable_flush_updates_last_remote_persisted_seq() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test";
+        let mut opts = test_db_options(0, 256, None);
+        opts.flush_interval = Some(Duration::MAX);
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(opts)
+            .build()
+            .await
+            .unwrap();
+
+        // do a write and flush memtable only (not wal)
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+        db.put_with_options(&b"foo", &b"bar", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // check that read with durability level remote returns value
+        let v = db
+            .get_with_options(
+                &b"foo",
+                &ReadOptions {
+                    durability_filter: DurabilityLevel::Memory,
+                    dirty: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
+        let v = db
+            .get_with_options(
+                &b"foo",
+                &ReadOptions {
+                    durability_filter: DurabilityLevel::Remote,
+                    dirty: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
     }
 
     // Merge operator test helpers
