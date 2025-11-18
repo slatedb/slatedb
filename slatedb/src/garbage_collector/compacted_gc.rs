@@ -141,6 +141,14 @@ impl GcTask for CompactedGcTask {
             .filter(|id| !active_ssts.contains(id))
             .collect::<Vec<_>>();
 
+        log::debug!("deleting eligible compacted SSTs [active_ssts={:?}, ssts_to_delete={:?}, cutoff_dt={:?}, compaction_low_watermark_dt={:?}, most_recent_sst_dt={:?}]",
+            active_ssts,
+            sst_ids_to_delete,
+            cutoff_dt,
+            compaction_low_watermark_dt,
+            most_recent_sst_dt,
+        );
+
         for id in sst_ids_to_delete {
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("error deleting SST [id={:?}, error={}]", id, e);

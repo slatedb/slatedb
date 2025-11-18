@@ -334,7 +334,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                     .await
                     .expect("fatal error finishing compaction"),
                 Err(err) => {
-                    error!("error executing compaction [error={:#?}]", err);
+                    error!("error executing compaction [error={:?}]", err);
                     self.finish_failed_compaction(id);
                 }
             },
@@ -578,6 +578,17 @@ impl CompactorEventHandler {
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
         };
+
+        log::debug!("submitting compaction job [job_id={:?}, compaction_id={:?}, destination={:?}, ssts={:?}, sorted_runs={:?}, compaction_logical_clock_tick={:?}, retention_min_seq={:?}, is_dest_last_run={:?}]",
+            job_id,
+            compaction.id(),
+            spec.destination(),
+            job_args.ssts.iter().map(|sst| sst.id).collect::<Vec<_>>(),
+            job_args.sorted_runs.iter().flat_map(|sr| sr.ssts.iter().map(|sst| sst.id)).collect::<Vec<_>>(),
+            db_state.last_l0_clock_tick,
+            db_state.recent_snapshot_min_seq,
+            is_dest_last_run,
+        );
 
         // TODO(sujeetsawala): Add job attempt to compaction
         let this_executor = self.executor.clone();

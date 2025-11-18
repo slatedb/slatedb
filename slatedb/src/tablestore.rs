@@ -195,6 +195,10 @@ impl TableStore {
             |_| Result::Err(slatedb_io_error())
         );
 
+        if let SsTableId::Compacted(id) = id {
+            log::info!("writing compacted SST [id={}]", id);
+        }
+
         let object_store = self.object_stores.store_for(id);
         let data = encoded_sst.remaining_as_bytes();
         let path = self.path(id);
