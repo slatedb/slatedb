@@ -5283,12 +5283,13 @@ mod tests {
 
     /// Reproduces a race where GC can delete an L0 SST before the manifest
     /// is updated to reference it at the DB level:
-    /// 1. New L0 is written during memtable flush.
-    /// 2. Time passes so the L0 becomes older than GC `min_age`.
-    /// 3. GC lists compacted SSTs and sees the L0 SST.
-    /// 4. GC deletes the L0 SST (it's > `min_age` and not in any manifests).
-    /// 5. The memtable flush resumes and writes a manifest that references
-    ///    the now-deleted L0 SST.
+    /// 1. New L0 is written
+    /// 2. 100ms passes
+    /// 3. GC lists SSTs
+    /// 4. GC sees L0 SST from (1)
+    /// 5. GC deletes L0 SST from (1) (it is > min_age=100ms old and is not in any manifests)
+    /// 6. L0 is added to in-memory manifest
+    /// 7. Manifest is written to object storage
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_gc_race_deletes_l0_before_manifest_update() {
         let fp_registry = Arc::new(FailPointRegistry::new());
