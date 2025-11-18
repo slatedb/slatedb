@@ -1431,6 +1431,7 @@ mod tests {
         GarbageCollectorOptions, ObjectStoreCacheOptions, Settings,
         SizeTieredCompactionSchedulerOptions, Ttl,
     };
+    use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_state::CoreDbState;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::iter::KeyValueIterator;
@@ -5294,24 +5295,8 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_gc_race_deletes_l0_before_manifest_update");
 
-        // Use explicit settings with aggressive GC for compacted SSTs and
-        // manual flush control.
         let mut settings = test_db_options(0, 1024, None);
         settings.flush_interval = None;
-        settings.garbage_collector_options = Some(GarbageCollectorOptions {
-            wal_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(Duration::from_millis(100)),
-                min_age: Duration::from_millis(100),
-            }),
-            manifest_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(Duration::from_millis(100)),
-                min_age: Duration::from_millis(100),
-            }),
-            compacted_options: Some(GarbageCollectorDirectoryOptions {
-                interval: Some(Duration::from_millis(100)),
-                min_age: Duration::from_millis(100),
-            }),
-        });
 
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(settings)
@@ -5343,47 +5328,74 @@ mod tests {
 
         // Trigger a memtable flush in the background; it will block at the failpoint.
         let this_db = db.clone();
-        let flush_handle = tokio::spawn(async move { this_db.flush().await });
+        let flush_handle = tokio::spawn(async move {
+            this_db
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+        });
 
         // Wait for the L0 SST to appear in the table store, indicating it has been written.
-        let mut l0_ids = Vec::new();
+        let mut ssts = Vec::new();
         for _ in 0..200 {
-            let ssts = db
+            ssts = db
                 .inner
                 .table_store
                 .list_compacted_ssts(..)
                 .await
                 .expect("failed to list compacted ssts");
             if !ssts.is_empty() {
-                l0_ids = ssts.iter().map(|m| m.id).collect();
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
-            !l0_ids.is_empty(),
+            !ssts.is_empty(),
             "expected L0 SST to be written before manifest update"
         );
 
-        // Wait for background GC (configured with min_age/interval 100ms) to
-        // delete the L0 SST while the manifest is still not updated.
-        let target_l0_id = l0_ids[0];
-        let mut gc_deleted = false;
-        for _ in 0..100 {
-            let ssts = db
+        // Run a manual GC with aggressive settings to delete the L0 SST while
+        // the manifest is still not updated.
+        let gc_options = GarbageCollectorOptions {
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age: Duration::from_millis(100),
+            }),
+            manifest_options: Some(GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age: Duration::from_millis(100),
+            }),
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age: Duration::from_millis(100),
+            }),
+        };
+
+        let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())
+            .with_options(gc_options)
+            .with_stat_registry(db.metrics())
+            .with_system_clock(db.inner.system_clock.clone())
+            .build();
+
+        // Run the GC until the L0 SST is deleted. Since there's a 100ms min_age, we need to try
+        // a few times to ensure the GC has a chance to run.
+        let mut ssts = vec![];
+        for _ in 0..200 {
+            gc.run_gc_once().await;
+            ssts = db
                 .inner
                 .table_store
                 .list_compacted_ssts(..)
                 .await
-                .expect("failed to list compacted ssts");
-            if !ssts.iter().any(|m| m.id == target_l0_id) {
-                gc_deleted = true;
+                .expect("failed to list compacted ssts after manual GC");
+            if ssts.is_empty() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
-            gc_deleted,
+            ssts.is_empty(),
             "expected GC to delete L0 SST before manifest update"
         );
 
