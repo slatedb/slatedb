@@ -163,13 +163,192 @@ mod tests {
 
     use super::*;
     use crate::clock::DefaultSystemClock;
-    use crate::db_state::{CoreDbState, SsTableId};
+    use crate::db_state::{CoreDbState, SortedRun, SsTableId};
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::stats::Gauge;
     use crate::test_utils::build_test_sst;
     use object_store::{memory::InMemory, path::Path};
+
+    #[tokio::test]
+    async fn test_compacted_gc_respects_min_age_cutoff() {
+        // Object stores and table store
+        let main_store = Arc::new(InMemory::new());
+        let object_stores = ObjectStores::new(main_store.clone(), None);
+        let format = SsTableFormat::default();
+        let table_store = Arc::new(TableStore::new(
+            object_stores,
+            format.clone(),
+            Path::from("/root"),
+            None,
+        ));
+
+        // Manifest store and initial manifest
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from("/root"),
+            main_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
+        let mut stored_manifest =
+            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
+                .await
+                .unwrap();
+
+        // Three SSTs with distinct ULID timestamps
+        let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
+        let id_within_min_age = SsTableId::Compacted(ulid::Ulid::from_parts(7_000, 0));
+        let id_active_recent = SsTableId::Compacted(ulid::Ulid::from_parts(8_000, 0));
+
+        let sst_to_delete = build_test_sst(&format, 1);
+        let sst_within_min_age = build_test_sst(&format, 1);
+        let sst_active_recent = build_test_sst(&format, 1);
+
+        table_store
+            .write_sst(&id_to_delete, sst_to_delete, false)
+            .await
+            .unwrap();
+        table_store
+            .write_sst(&id_within_min_age, sst_within_min_age, false)
+            .await
+            .unwrap();
+        let active_handle = table_store
+            .write_sst(&id_active_recent, sst_active_recent, false)
+            .await
+            .unwrap();
+
+        // Mark one SST as active in the manifest so that most_recent_sst_dt
+        // is newer than the configured minimum-age cutoff.
+        let mut dirty = stored_manifest.prepare_dirty();
+        dirty.core.compacted.push(SortedRun {
+            id: 0,
+            ssts: vec![active_handle],
+        });
+        stored_manifest.update_manifest(dirty).await.unwrap();
+
+        // No running compactions, so the compaction barrier falls back to the
+        // configured minimum-age cutoff.
+        let stat_registry = Arc::new(StatRegistry::new());
+
+        // GC task with min_age = 5 seconds. Using utc_now at 10 seconds after the epoch
+        // yields a configured_min_age_dt of 5 seconds.
+        let opts = Some(GarbageCollectorDirectoryOptions {
+            interval: None,
+            min_age: Duration::from_secs(5),
+        });
+        let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        let task = CompactedGcTask::new(
+            manifest_store.clone(),
+            table_store.clone(),
+            stats,
+            opts,
+            stat_registry.clone(),
+        );
+
+        let utc_now = DateTime::<Utc>::from_timestamp_millis(10_000).unwrap();
+
+        // Run GC and verify only the old, inactive SST is collected
+        task.collect(utc_now).await.unwrap();
+        let remaining: Vec<_> = table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+
+        assert_eq!(remaining, vec![id_within_min_age, id_active_recent]);
+    }
+
+    #[tokio::test]
+    async fn test_compacted_gc_respects_manifest_most_recent_sst() {
+        // Object stores and table store
+        let main_store = Arc::new(InMemory::new());
+        let object_stores = ObjectStores::new(main_store.clone(), None);
+        let format = SsTableFormat::default();
+        let table_store = Arc::new(TableStore::new(
+            object_stores,
+            format.clone(),
+            Path::from("/root"),
+            None,
+        ));
+
+        // Manifest store and initial manifest
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from("/root"),
+            main_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        ));
+        let mut stored_manifest =
+            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
+                .await
+                .unwrap();
+
+        // Three SSTs with distinct ULID timestamps
+        let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
+        let id_manifest = SsTableId::Compacted(ulid::Ulid::from_parts(3_000, 0));
+        let id_newer = SsTableId::Compacted(ulid::Ulid::from_parts(4_000, 0));
+
+        let sst_to_delete = build_test_sst(&format, 1);
+        let sst_manifest = build_test_sst(&format, 1);
+        let sst_newer = build_test_sst(&format, 1);
+
+        table_store
+            .write_sst(&id_to_delete, sst_to_delete, false)
+            .await
+            .unwrap();
+        let manifest_handle = table_store
+            .write_sst(&id_manifest, sst_manifest, false)
+            .await
+            .unwrap();
+        table_store
+            .write_sst(&id_newer, sst_newer, false)
+            .await
+            .unwrap();
+
+        // Mark id_manifest as the only active SST in the manifest so that
+        // most_recent_sst_dt is 3_000ms, which becomes the cutoff.
+        let mut dirty = stored_manifest.prepare_dirty();
+        dirty.core.compacted.push(SortedRun {
+            id: 0,
+            ssts: vec![manifest_handle],
+        });
+        stored_manifest.update_manifest(dirty).await.unwrap();
+
+        // No running compactions; compaction barrier falls back to configured_min_age_dt.
+        let stat_registry = Arc::new(StatRegistry::new());
+
+        // min_age = 0, so configured_min_age_dt == utc_now (10 seconds after epoch).
+        // The manifest's most recent SST (3 seconds) is the smallest cutoff, so only
+        // SSTs older than that should be deleted.
+        let opts = Some(GarbageCollectorDirectoryOptions {
+            interval: None,
+            min_age: Duration::from_secs(0),
+        });
+        let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        let task = CompactedGcTask::new(
+            manifest_store.clone(),
+            table_store.clone(),
+            stats,
+            opts,
+            stat_registry.clone(),
+        );
+
+        let utc_now = DateTime::<Utc>::from_timestamp_millis(10_000).unwrap();
+
+        task.collect(utc_now).await.unwrap();
+        let remaining: Vec<_> = table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+
+        // Only the manifest SST and newer SST should remain; the older,
+        // inactive SST should be collected.
+        assert_eq!(remaining, vec![id_manifest, id_newer]);
+    }
 
     #[tokio::test]
     async fn test_compacted_gc_respects_compaction_barrier() {
@@ -190,7 +369,8 @@ mod tests {
             main_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let _sm = StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
+        let mut stored_manifest =
+            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
             .await
             .unwrap();
 
@@ -209,10 +389,20 @@ mod tests {
             .write_sst(&id_barrier, sst_barrier, false)
             .await
             .unwrap();
-        table_store
+        let active_handle = table_store
             .write_sst(&id_to_newer, sst_to_newer, false)
             .await
             .unwrap();
+
+        // Mark the newest SST as active in the manifest so that the
+        // most_recent_sst_dt boundary is 3_000ms and the compaction
+        // low watermark (2_000ms) becomes the effective cutoff.
+        let mut dirty = stored_manifest.prepare_dirty();
+        dirty.core.compacted.push(SortedRun {
+            id: 0,
+            ssts: vec![active_handle],
+        });
+        stored_manifest.update_manifest(dirty).await.unwrap();
 
         // Register barrier metrics
         let stat_registry = Arc::new(StatRegistry::new());
@@ -237,8 +427,10 @@ mod tests {
             stat_registry.clone(),
         );
 
-        // Run GC and verify only old is collected
-        task.collect(Utc::now()).await.unwrap();
+        // Run GC at a fixed time and verify only the SST strictly
+        // older than the compaction barrier is collected.
+        let utc_now = DateTime::<Utc>::from_timestamp_millis(10_000).unwrap();
+        task.collect(utc_now).await.unwrap();
         let remaining: Vec<_> = table_store
             .list_compacted_ssts(..)
             .await
