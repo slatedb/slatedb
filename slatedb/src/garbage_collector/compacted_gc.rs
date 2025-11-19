@@ -6,8 +6,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use log::error;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::{collections::HashSet, time::SystemTime};
 
 use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
 use crate::compactor::stats::COMPACTION_LOW_WATERMARK_TS;
@@ -84,14 +84,14 @@ impl CompactedGcTask {
                 .core
                 .l0
                 .iter()
-                .map(|sst| sst.id.unwrap_compacted_id().datetime())
+                .map(|sst| DateTime::<Utc>::from(sst.id.unwrap_compacted_id().datetime()))
                 .collect::<Vec<_>>()
         } else if let Some(l0_last_compacted) = manifest.core.l0_last_compacted {
             // Else fall back to the last compacted L0, which can serve as a conservative barrier
-            vec![l0_last_compacted.datetime()]
+            vec![DateTime::<Utc>::from(l0_last_compacted.datetime())]
         } else {
             // If there has never been an L0, don't allow garbage collection to delete anything
-            vec![SystemTime::UNIX_EPOCH]
+            vec![DateTime::<Utc>::UNIX_EPOCH]
         };
         let max_l0_ts = l0_timestamps
             .into_iter()
@@ -193,7 +193,7 @@ mod tests {
     use super::*;
     use crate::clock::DefaultSystemClock;
     use crate::compactor_stats::RUNNING_COMPACTIONS;
-    use crate::db_state::{CoreDbState, SortedRun, SsTableId};
+    use crate::db_state::{CoreDbState, SsTableId};
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
@@ -250,15 +250,17 @@ mod tests {
         // Mark one SST as active in the manifest so that most_recent_sst_dt
         // is newer than the configured minimum-age cutoff.
         let mut dirty = stored_manifest.prepare_dirty();
-        dirty.core.compacted.push(SortedRun {
-            id: 0,
-            ssts: vec![active_handle],
-        });
+        dirty.core.l0.push_back(active_handle);
         stored_manifest.update_manifest(dirty).await.unwrap();
 
-        // No running compactions, so the compaction barrier falls back to the
-        // configured minimum-age cutoff.
+        // Register barrier metrics to be more recent than id_active_recent so it doesn't get in the way
         let stat_registry = Arc::new(StatRegistry::new());
+        let running = Arc::new(Gauge::<i64>::default());
+        running.set(1);
+        stat_registry.register(RUNNING_COMPACTIONS, running);
+        let barrier = Arc::new(Gauge::<u64>::default());
+        barrier.set(10_000);
+        stat_registry.register(COMPACTION_LOW_WATERMARK_TS, barrier);
 
         // GC task with min_age = 5 seconds. Using utc_now at 10 seconds after the epoch
         // yields a configured_min_age_dt of 5 seconds.
@@ -339,14 +341,17 @@ mod tests {
         // Mark id_manifest as the only active SST in the manifest so that
         // most_recent_sst_dt is 3_000ms, which becomes the cutoff.
         let mut dirty = stored_manifest.prepare_dirty();
-        dirty.core.compacted.push(SortedRun {
-            id: 0,
-            ssts: vec![manifest_handle],
-        });
+        dirty.core.l0.push_back(manifest_handle);
         stored_manifest.update_manifest(dirty).await.unwrap();
 
-        // No running compactions; compaction barrier falls back to configured_min_age_dt.
+        // Register barrier metric to be more recent than id_newer so it doesn't get in the way
         let stat_registry = Arc::new(StatRegistry::new());
+        let running = Arc::new(Gauge::<i64>::default());
+        running.set(1);
+        stat_registry.register(RUNNING_COMPACTIONS, running);
+        let barrier = Arc::new(Gauge::<u64>::default());
+        barrier.set(10_000);
+        stat_registry.register(COMPACTION_LOW_WATERMARK_TS, barrier);
 
         // min_age = 0, so configured_min_age_dt == utc_now (10 seconds after epoch).
         // The manifest's most recent SST (3 seconds) is the smallest cutoff, so only
