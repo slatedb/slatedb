@@ -55,6 +55,7 @@
 //! manifest semantics live in `manifest/store.rs` and use these primitives by delegation.
 
 pub(crate) mod object_store;
+pub(crate) mod view;
 
 use crate::clock::SystemClock;
 use crate::transactional_object::TransactionalObjectError::CallbackError;

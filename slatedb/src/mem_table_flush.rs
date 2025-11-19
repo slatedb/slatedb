@@ -1,7 +1,7 @@
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::{SsTableHandle, SsTableId};
+use crate::db_state::{CoreDbState, SsTableHandle, SsTableId};
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
@@ -20,7 +20,8 @@ use tracing::instrument;
 use crate::manifest::Manifest;
 use crate::manifest;
 use crate::mem_table::ImmutableMemtable;
-use crate::transactional_object::{DirtyObject, TransactionalObject};
+use crate::transactional_object::{DirtyObject, MonotonicId, TransactionalObject};
+use crate::transactional_object::view::{DirtyView, DirtyViewManager};
 
 pub(crate) const MEMTABLE_FLUSHER_TASK_NAME: &str = "memtable_writer";
 
@@ -36,9 +37,11 @@ pub(crate) enum MemtableFlushMsg {
     PollManifest,
 }
 
+type ManifestViewManager = DirtyViewManager<>
+
 pub(crate) struct MemtableFlusher {
     db_inner: Arc<DbInner>,
-    manifest: FenceableManifest,
+    manifest: DirtyViewManager<>
 }
 
 impl MemtableFlusher {
@@ -324,5 +327,103 @@ impl ManifestUpdater {
 
     fn finish(self) -> DirtyObject<Manifest> {
         self.manifest
+    }
+}
+
+struct ManifestView {
+    manifest: DirtyObject<Manifest>
+}
+
+impl DirtyView<Manifest> for ManifestView {
+    fn merge(&mut self, mut remote_manifest: DirtyObject<Manifest, MonotonicId>) {
+        // The compactor removes tables from l0_last_compacted, so we
+        // only want to keep the tables up to there.
+        let l0_last_compacted = &remote_manifest.value.core.l0_last_compacted;
+        let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
+            self.manifest
+                .value
+                .core
+                .l0
+                .iter()
+                .cloned()
+                .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
+                .collect()
+        } else {
+            self.manifest.value.core.l0.iter().cloned().collect()
+        };
+
+        let my_db_state = &self.manifest.value.core;
+        remote_manifest.value.core = CoreDbState {
+            initialized: my_db_state.initialized,
+            l0_last_compacted: remote_manifest.value.core.l0_last_compacted,
+            l0: new_l0,
+            compacted: remote_manifest.value.core.compacted,
+            next_wal_sst_id: my_db_state.next_wal_sst_id,
+            replay_after_wal_id: my_db_state.replay_after_wal_id,
+            last_l0_clock_tick: my_db_state.last_l0_clock_tick,
+            last_l0_seq: my_db_state.last_l0_seq,
+            recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
+            sequence_tracker: remote_manifest.value.core.sequence_tracker,
+            checkpoints: remote_manifest.value.core.checkpoints,
+            wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
+        };
+        self.manifest = remote_manifest;
+    }
+
+    fn value(&self) -> DirtyObject<Manifest, MonotonicId> {
+        self.manifest.clone()
+    }
+}
+
+impl ManifestView {
+    fn update(&mut self, next_wal_id: Option<u64>, min_active_snapshot_seq: Option<u64>) {
+        if let Some(next_wal_id) = next_wal_id {
+            self.manifest.value.core.next_wal_sst_id = next_wal_id;
+        }
+        // update the persisted manifest recent_snapshot_min_seq to inform the compactor
+        // can safely reclaim the entries with smaller seq. if there's no active snapshot,
+        // we simply use the latest l0 seq.
+        self.manifest.value.core.recent_snapshot_min_seq =
+            min_active_snapshot_seq.unwrap_or(self.manifest.value.core.last_l0_seq);
+    }
+
+    fn add_new_l0(
+        &mut self,
+        imm_memtable: Arc<ImmutableMemtable>,
+        sst_handle: SsTableHandle
+    ) -> Result<(), SlateDBError> {
+        let last_seq = imm_memtable
+            .table()
+            .last_seq()
+            .expect("flush of l0 with no entries");
+        self.manifest.value.core.l0.push_front(sst_handle);
+        self.manifest.value.core.replay_after_wal_id = imm_memtable.recent_flushed_wal_id();
+
+        // ensure the persisted manifest tick never goes backwards in time
+        let memtable_tick = imm_memtable.table().last_tick();
+        self.manifest.value.core.last_l0_clock_tick = cmp::max(
+            self.manifest.value.core.last_l0_clock_tick,
+            memtable_tick,
+        );
+        if self.manifest.value.core.last_l0_clock_tick != memtable_tick {
+            return Err(SlateDBError::InvalidClockTick {
+                last_tick: self.manifest.value.core.last_l0_clock_tick,
+                next_tick: memtable_tick,
+            });
+        }
+
+        // update the persisted manifest last_l0_seq as the latest seq in the imm.
+        assert!(last_seq >= self.manifest.value.core.last_l0_seq);
+        self.manifest.value.core.last_l0_seq = last_seq;
+
+        let sequence_tracker = imm_memtable.sequence_tracker();
+        self
+            .manifest
+            .value
+            .core
+            .sequence_tracker
+            .extend_from(sequence_tracker);
+
+        Ok(())
     }
 }
