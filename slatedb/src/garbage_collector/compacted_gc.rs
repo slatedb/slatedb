@@ -1,9 +1,11 @@
+use crate::manifest::Manifest;
 use crate::{
     config::GarbageCollectorDirectoryOptions, db_state::SsTableId, error::SlateDBError,
     manifest::store::ManifestStore, stats::StatRegistry, tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
 use log::error;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{collections::HashSet, time::SystemTime};
 
@@ -50,8 +52,10 @@ impl CompactedGcTask {
         chrono::Duration::from_std(min_age).expect("invalid duration")
     }
 
-    async fn list_active_l0_and_compacted_ssts(&self) -> Result<HashSet<SsTableId>, SlateDBError> {
-        let active_manifests = self.manifest_store.read_active_manifests().await?;
+    async fn list_active_l0_and_compacted_ssts(
+        &self,
+        active_manifests: &BTreeMap<u64, Manifest>,
+    ) -> Result<HashSet<SsTableId>, SlateDBError> {
         let mut active_ssts = HashSet::new();
         for manifest in active_manifests.values() {
             for sr in manifest.core.compacted.iter() {
@@ -66,8 +70,14 @@ impl CompactedGcTask {
         Ok(active_ssts)
     }
 
-    async fn newest_l0_dt(&self) -> Result<DateTime<Utc>, SlateDBError> {
-        let manifest = self.manifest_store.read_latest_manifest().await?.1;
+    async fn newest_l0_dt(
+        &self,
+        active_manifests: &BTreeMap<u64, Manifest>,
+    ) -> Result<DateTime<Utc>, SlateDBError> {
+        let manifest = active_manifests
+            .values()
+            .last()
+            .expect("expected at least one manifest");
         let l0_timestamps = if !manifest.core.l0.is_empty() {
             // Use active L0's if some exist
             manifest
@@ -120,18 +130,21 @@ impl GcTask for CompactedGcTask {
     /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
     /// older than the minimum age specified in the options and are not active in the manifest.
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+        let active_manifests = self.manifest_store.read_active_manifests().await?;
         // Don't delete any SSTs that are more recent than the oldest actively running compaction job
         // since they might be an output SST from a compaction that hasn't yet been added to the
         // manifest (we write the sorted run SSTs, _then_ add them to the manifest and write the
         // manifest to object storage).
         let compaction_low_watermark_dt = self.compaction_low_watermark_dt();
-        let active_ssts = self.list_active_l0_and_compacted_ssts().await?;
+        let active_ssts = self
+            .list_active_l0_and_compacted_ssts(&active_manifests)
+            .await?;
         // Don't delete any SSTs that are newer than the configured minimum age.
         let configured_min_age_dt = utc_now - self.compacted_sst_min_age();
         // Don't delete SSTs that are newer than this SST since they're probably an L0 that hasn't yet
         // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
         // manifest to object storage).
-        let most_recent_sst_dt = self.newest_l0_dt().await?;
+        let most_recent_sst_dt = self.newest_l0_dt(&active_manifests).await?;
         // Take the minimum of the configured min age, the compaction low watermark, and the most
         // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
         let cutoff_dt = configured_min_age_dt
