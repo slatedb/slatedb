@@ -97,7 +97,7 @@ impl CompactedGcTask {
             .into_iter()
             .max()
             .expect("expected at least unix epoch");
-        Ok(DateTime::<Utc>::from(max_l0_ts))
+        Ok(max_l0_ts)
     }
 
     /// Returns a `DateTime<Utc>` barrier based on the compactor's oldest running compaction start.
