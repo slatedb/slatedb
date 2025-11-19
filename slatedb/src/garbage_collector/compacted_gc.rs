@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
-use crate::compactor::stats::{COMPACTION_LOW_WATERMARK_TS, RUNNING_COMPACTIONS};
+use crate::compactor::stats::COMPACTION_LOW_WATERMARK_TS;
 
 pub(crate) struct CompactedGcTask {
     manifest_store: Arc<ManifestStore>,
@@ -66,6 +66,24 @@ impl CompactedGcTask {
         Ok(active_ssts)
     }
 
+    async fn newest_l0_dt(&self) -> Result<DateTime<Utc>, SlateDBError> {
+        let newest_l0_dt = self
+            .manifest_store
+            .read_latest_manifest()
+            .await?
+            .1
+            .core
+            .l0
+            .iter()
+            .max_by_key(|sst| sst.id.unwrap_compacted_id().datetime())
+            .map(|sst| DateTime::<Utc>::from(sst.id.unwrap_compacted_id().datetime()))
+            // If there are no SSTs in the database at all, it's unsafe to delete any SSTs since
+            // we have no point of reference for where new L0 SSTs (that aren't yet in the
+            // manifest) might start.
+            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+        Ok(newest_l0_dt)
+    }
+
     /// Returns a `DateTime<Utc>` barrier based on the compactor's oldest running compaction start.
     ///
     /// When compactions are active (compactor/running_compactions > 0), we read
@@ -77,24 +95,18 @@ impl CompactedGcTask {
     /// and garbage collector run in the same process and share the same StatRegistry. It's
     /// a hack until we have proper compactor persistence (so GC can retrieve the compactor
     /// state from the object store). See #604 for details.
-    fn compaction_low_watermark_dt(&self) -> Option<DateTime<Utc>> {
-        let running = self
-            .stat_registry
-            .lookup(RUNNING_COMPACTIONS)
-            .map(|s| s.get())
-            .unwrap_or(0);
-        if running <= 0 {
-            return None;
-        }
-        let start_ts_ms = self
+    fn compaction_low_watermark_dt(&self) -> DateTime<Utc> {
+        let low_watermark_ts = self
             .stat_registry
             .lookup(COMPACTION_LOW_WATERMARK_TS)
+            // Convert s.get() from u64 ro DateTime::<Utc>
             .map(|s| s.get())
+            // If no compaction has ever run since the start of this process, then set
+            // `compaction_low_watermark_ts` to 0 (UNIX_EPOCH) to prevent the GC from deleting
+            // _anything_. Once a job kicks in, the low watermark will always be set, and will
+            // only increase as new jobs start and old ones finish.
             .unwrap_or(0);
-        if start_ts_ms <= 0 {
-            return None;
-        }
-        DateTime::<Utc>::from_timestamp_millis(start_ts_ms)
+        DateTime::<Utc>::from_timestamp_millis(low_watermark_ts).expect("out of bounds timestamp")
     }
 }
 
@@ -102,32 +114,30 @@ impl GcTask for CompactedGcTask {
     /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
     /// older than the minimum age specified in the options and are not active in the manifest.
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+        // Don't delete any SSTs that are more recent than the oldest actively running compaction job
+        // since they might be an output SST from a compaction that hasn't yet been added to the
+        // manifest (we write the sorted run SSTs, _then_ add them to the manifest and write the
+        // manifest to object storage).
+        let compaction_low_watermark_dt = self.compaction_low_watermark_dt();
         let active_ssts = self.list_active_l0_and_compacted_ssts().await?;
         // Don't delete any SSTs that are newer than the configured minimum age.
         let configured_min_age_dt = utc_now - self.compacted_sst_min_age();
         // Don't delete SSTs that are newer than this SST since they're probably an L0 that hasn't yet
         // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
         // manifest to object storage).
-        let most_recent_sst_dt = active_ssts
-            .iter()
-            .max_by_key(|id| DateTime::<Utc>::from(id.unwrap_compacted_id().datetime()))
-            .map(|id| DateTime::<Utc>::from(id.unwrap_compacted_id().datetime()))
-            // If there are no SSTs in the database at all, it's unsafe to delete any SSTs since
-            // we have no point of reference for where new L0 SSTs (that aren't yet in the
-            // manifest) might start.
-            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
-        // Don't delete any SSTs that are more recent than the oldest actively running compaction job
-        // since they might be an output SST from a compaction that hasn't yet been added to the
-        // manifest (we write the sorted run SSTs, _then_ add them to the manifest and write the
-        // manifest to object storage).
-        let compaction_low_watermark_dt = self
-            .compaction_low_watermark_dt()
-            .unwrap_or(configured_min_age_dt);
+        let most_recent_sst_dt = self.newest_l0_dt().await?;
         // Take the minimum of the configured min age, the compaction low watermark, and the most
         // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
         let cutoff_dt = configured_min_age_dt
             .min(compaction_low_watermark_dt)
             .min(most_recent_sst_dt);
+        log::debug!(
+            "calculated compacted SST GC cutoff [cutoff_dt={:?}, configured_min_age_dt={:?}, compaction_low_watermark_dt={:?}, most_recent_sst_dt={:?}]",
+            cutoff_dt,
+            configured_min_age_dt,
+            compaction_low_watermark_dt,
+            most_recent_sst_dt,
+        );
         let sst_ids_to_delete = self
             .table_store
             // List all SSTs in the table store
@@ -163,6 +173,7 @@ mod tests {
 
     use super::*;
     use crate::clock::DefaultSystemClock;
+    use crate::compactor_stats::RUNNING_COMPACTIONS;
     use crate::db_state::{CoreDbState, SortedRun, SsTableId};
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
