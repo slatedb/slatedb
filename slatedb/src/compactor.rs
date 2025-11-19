@@ -696,7 +696,8 @@ impl CompactorEventHandler {
     }
 
     /// Updates the [`stats::COMPACTION_LOW_WATERMARK_TS`] gauge with the earliest
-    /// (oldest) ULID timestamp among active compactions.
+    /// (oldest) running compaction job ULID's timestamp. This acts as a start time for the
+    /// job. If no compactions are running, leave the gauge unchanged.
     ///
     /// This serves as a GC safety barrier: the GC should not delete any compacted SST
     /// whose ULID timestamp is greater than or equal to this value.
@@ -706,7 +707,7 @@ impl CompactorEventHandler {
     /// a hack until we have proper compactor persistence (so GC can retrieve the compactor
     /// state from the object store). See #604 for details.
     fn update_compaction_low_watermark(&self) {
-        let mut min_ts = u64::MAX;
+        let mut min_ts: Option<u64> = None;
         for compaction in self.state.compactions() {
             let ts = compaction
                 .id()
@@ -714,9 +715,11 @@ impl CompactorEventHandler {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .expect("invalid duration");
-            min_ts = min_ts.min(ts);
+            min_ts = Some(min_ts.unwrap_or(ts).min(ts));
         }
-        self.stats.compaction_low_watermark_ts.set(min_ts);
+        if let Some(min_ts) = min_ts {
+            self.stats.compaction_low_watermark_ts.set(min_ts);
+        }
     }
 }
 
@@ -733,8 +736,8 @@ pub mod stats {
     pub const BYTES_COMPACTED: &str = compactor_stat_name!("bytes_compacted");
     pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
     pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
-    /// The earliest (oldest) ULID timestamp among active compactions. See
-    /// [super::CompactorEventHandler::update_longest_running_start_metric] for details.
+    /// The earliest (oldest) ULID timestamp among active compaction job IDs. See
+    /// [super::CompactorEventHandler::update_compaction_low_watermark] for details.
     pub const COMPACTION_LOW_WATERMARK_TS: &str =
         compactor_stat_name!("compaction_low_watermark_ts");
 

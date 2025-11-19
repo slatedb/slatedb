@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
-use crate::compactor::stats::{COMPACTION_LOW_WATERMARK_TS, RUNNING_COMPACTIONS};
+use crate::compactor::stats::COMPACTION_LOW_WATERMARK_TS;
 
 pub(crate) struct CompactedGcTask {
     manifest_store: Arc<ManifestStore>,
@@ -77,24 +77,19 @@ impl CompactedGcTask {
     /// and garbage collector run in the same process and share the same StatRegistry. It's
     /// a hack until we have proper compactor persistence (so GC can retrieve the compactor
     /// state from the object store). See #604 for details.
-    fn compaction_low_watermark_dt(&self) -> Option<DateTime<Utc>> {
-        let running = self
-            .stat_registry
-            .lookup(RUNNING_COMPACTIONS)
-            .map(|s| s.get())
-            .unwrap_or(0);
-        if running <= 0 {
-            return None;
-        }
-        let start_ts_ms = self
+    fn compaction_low_watermark_dt(&self) -> DateTime<Utc> {
+        let low_watermark_ts = self
             .stat_registry
             .lookup(COMPACTION_LOW_WATERMARK_TS)
+            // Convert s.get() from u64 ro DateTime::<Utc>
             .map(|s| s.get())
+            // If no compaction has ever run since the start of this process, then set
+            // `compaction_low_watermark_ts` to 0 (UNIX_EPOCH) to prevent the GC from deleting
+            // _anything_. Once a job kicks in, the low watermark will always be set, and will
+            // only increase as new jobs start and old ones finish.
             .unwrap_or(0);
-        if start_ts_ms <= 0 {
-            return None;
-        }
-        DateTime::<Utc>::from_timestamp_millis(start_ts_ms)
+        DateTime::<Utc>::from_timestamp_millis(low_watermark_ts)
+            .expect("unexpected negative timestamp")
     }
 }
 
@@ -116,13 +111,11 @@ impl GcTask for CompactedGcTask {
             // we have no point of reference for where new L0 SSTs (that aren't yet in the
             // manifest) might start.
             .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
-        // Don't delete any SSTs that are more recent than the oldest actively running compaction job
-        // since they might be an output SST from a compaction that hasn't yet been added to the
-        // manifest (we write the sorted run SSTs, _then_ add them to the manifest and write the
-        // manifest to object storage).
-        let compaction_low_watermark_dt = self
-            .compaction_low_watermark_dt()
-            .unwrap_or(configured_min_age_dt);
+        // Don't delete any SSTs that are more recent than the oldest actively running compaction
+        // job since they might be an output SST from a compaction that hasn't yet been added to
+        // the manifest (we write the sorted run SSTs, _then_ add them to the manifest and write
+        // the manifest to object storage).
+        let compaction_low_watermark_dt = self.compaction_low_watermark_dt();
         // Take the minimum of the configured min age, the compaction low watermark, and the most
         // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
         let cutoff_dt = configured_min_age_dt
@@ -171,6 +164,7 @@ mod tests {
 
     use super::*;
     use crate::clock::DefaultSystemClock;
+    use crate::compactor_stats::RUNNING_COMPACTIONS;
     use crate::db_state::{CoreDbState, SortedRun, SsTableId};
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
