@@ -262,11 +262,13 @@ mod tests {
 
     use crate::checkpoint::Checkpoint;
     use crate::clock::DefaultSystemClock;
+    use crate::compactor_stats::COMPACTION_LOW_WATERMARK_TS;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
+    use crate::stats::Gauge;
     use crate::types::RowEntry;
 
     use crate::utils::WatchableOnceCell;
@@ -309,7 +311,7 @@ mod tests {
         assert_eq!(manifests[0].last_modified, now_minus_24h);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
 
         // Verify that the first manifest was deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -340,7 +342,7 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
 
         // Verify that no manifests were deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -427,7 +429,7 @@ mod tests {
         }
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
 
         // The GC should create a new manifest version 4 with the expired
         // checkpoint removed.
@@ -486,7 +488,7 @@ mod tests {
         assert_eq!(manifests.len(), 4);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
 
         // Verify that the latest manifest version is still 4 with the active checkpoint
         let (latest_manifest_id, latest_manifest) =
@@ -541,7 +543,7 @@ mod tests {
         assert_eq!(manifests[1].last_modified, now_minus_24h_2);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
 
         // Verify that the first manifest was deleted, but the second is still safe
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -601,7 +603,7 @@ mod tests {
         );
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
 
         // Verify that the first WAL was deleted and the second is kept
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -651,7 +653,7 @@ mod tests {
         }
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
 
         // Only the first table is deleted. The second is eligible,
         // but the reference in the checkpoint is still active.
@@ -715,7 +717,7 @@ mod tests {
         );
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
 
         // Verify that the first WAL was deleted and the second is kept even though it's expired
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -836,8 +838,16 @@ mod tests {
         assert_eq!(current_manifest.core.compacted.len(), 1);
         assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
 
-        // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        // Start the garbage collector, explicitly setting the compaction low
+        // watermark so that it does not further restrict the cutoff (simulating
+        // no active compactions).
+        let barrier_ts = (now + TimeDelta::hours(1)).timestamp_millis() as u64;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            Some(barrier_ts),
+        )
+        .await;
 
         // Verify that only inactive, expired SSTs were deleted.
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
@@ -936,8 +946,16 @@ mod tests {
         dirty.core.compacted.truncate(1);
         stored_manifest.update_manifest(dirty).await.unwrap();
 
-        // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        // Start the garbage collector, explicitly setting the compaction low
+        // watermark so that it does not further restrict the cutoff (simulating
+        // no active compactions).
+        let barrier_ts = (now + TimeDelta::hours(1)).timestamp_millis() as u64;
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            Some(barrier_ts),
+        )
+        .await;
 
         // Only the first table is deleted. The second is eligible,
         // but the reference in the checkpoint is still active.
@@ -956,8 +974,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone()).await;
+        // Run GC again with the same compaction barrier.
+        run_gc_once(
+            manifest_store.clone(),
+            table_store.clone(),
+            Some(barrier_ts),
+        )
+        .await;
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         // After dropping the checkpoint, the inactive L0 and SST that were only
         // kept alive by the checkpoint can be collected. SSTs that are newer
@@ -1077,9 +1100,22 @@ mod tests {
         }
     }
 
-    async fn run_gc_once(manifest_store: Arc<ManifestStore>, table_store: Arc<TableStore>) {
+    async fn run_gc_once(
+        manifest_store: Arc<ManifestStore>,
+        table_store: Arc<TableStore>,
+        compaction_low_watermark_ts: Option<u64>,
+    ) {
         // Start the garbage collector
         let stats = Arc::new(StatRegistry::new());
+
+        // Tests can optionally simulate a compactor low watermark by
+        // pre-populating the corresponding metric. When unset, the GC
+        // behaves as if no compaction jobs have ever run.
+        if let Some(ts) = compaction_low_watermark_ts {
+            let barrier = Arc::new(Gauge::<u64>::default());
+            barrier.set(ts);
+            stats.register(COMPACTION_LOW_WATERMARK_TS, barrier);
+        }
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {

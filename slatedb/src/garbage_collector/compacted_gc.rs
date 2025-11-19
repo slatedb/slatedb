@@ -231,6 +231,12 @@ mod tests {
             min_age: Duration::from_secs(5),
         });
         let stats = Arc::new(GcStats::new(stat_registry.clone()));
+        // Simulate a prior compaction having set the low-watermark at the
+        // configured minimum-age cutoff (10_000ms). This allows the test to ignore
+        // the compaction low watermark cutoff.
+        let barrier = Arc::new(Gauge::<u64>::default());
+        barrier.set(10_000);
+        stat_registry.register(COMPACTION_LOW_WATERMARK_TS, barrier);
         let task = CompactedGcTask::new(
             manifest_store.clone(),
             table_store.clone(),
@@ -309,8 +315,13 @@ mod tests {
         });
         stored_manifest.update_manifest(dirty).await.unwrap();
 
-        // No running compactions; compaction barrier falls back to configured_min_age_dt.
         let stat_registry = Arc::new(StatRegistry::new());
+        // Simulate a prior compaction having set the low-watermark at the
+        // configured minimum-age cutoff (5_000ms). This allows the test to ignore
+        // the compaction low watermark cutoff.
+        let barrier = Arc::new(Gauge::<u64>::default());
+        barrier.set(5_000);
+        stat_registry.register(COMPACTION_LOW_WATERMARK_TS, barrier);
 
         // min_age = 0, so configured_min_age_dt == utc_now (10 seconds after epoch).
         // The manifest's most recent SST (3 seconds) is the smallest cutoff, so only
