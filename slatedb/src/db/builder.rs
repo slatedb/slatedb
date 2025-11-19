@@ -567,6 +567,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 rand.clone(),
                 stats.clone(),
                 system_clock.clone(),
+                self.fp_registry.clone(),
             )
             .await
             .expect("failed to create compactor");
@@ -771,6 +772,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     system_clock: Arc<dyn SystemClock>,
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     merge_operator: Option<MergeOperatorType>,
+    fp_registry: Arc<FailPointRegistry>,
 }
 
 #[allow(unused)]
@@ -787,6 +789,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             system_clock: Arc::new(DefaultSystemClock::default()),
             closed_result: WatchableOnceCell::new(),
             merge_operator: None,
+            fp_registry: Arc::new(FailPointRegistry::new()),
         }
     }
 
@@ -837,6 +840,12 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the fail point registry to use for the compactor.
+    pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
+        self.fp_registry = fp_registry;
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
@@ -868,6 +877,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.system_clock,
             self.closed_result,
             self.merge_operator,
+            self.fp_registry,
         )
     }
 }

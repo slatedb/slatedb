@@ -178,7 +178,6 @@ impl DbInner {
         };
         Ok(db_inner)
     }
-
     /// Get the value for a given key.
     pub async fn get_with_options<K: AsRef<[u8]>>(
         &self,
@@ -1413,6 +1412,7 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -5452,6 +5452,263 @@ mod tests {
             "manifest references L0 SST {:?} that GC has already deleted",
             l0_id
         );
+
+        db.close().await.expect("failed to close DB");
+    }
+
+    /// Reproduces a race where GC deletes compaction outputs before they're referenced
+    /// in the manifest:
+    /// 1. Flush two immutables so compaction has inputs
+    /// 2. Trigger compaction and pause after output SSTs are written but before manifest update
+    /// 3. Run an aggressive GC that deletes the newly written SSTs
+    /// 4. Resume compaction and verify the manifest references SSTs that no longer exist
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_gc_race_deletes_compaction_output_before_manifest_update() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_gc_race_deletes_compaction_output_before_manifest_update");
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let scheduler_flag = should_compact.clone();
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| scheduler_flag.swap(false, Ordering::SeqCst),
+        )));
+
+        let mut settings = test_db_options(
+            0,
+            1024,
+            Some(CompactorOptions {
+                poll_interval: Duration::from_millis(1),
+                manifest_update_timeout: Duration::from_secs(300),
+                max_sst_size: 512,
+                max_concurrent_compactions: 1,
+            }),
+        );
+        settings.flush_interval = None;
+
+        // Disable compaction manifest updates
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-compaction-output-before-manifest",
+            "pause",
+        )
+        .expect("failed to set compaction failpoint");
+
+        let db = Arc::new(
+            Db::builder(path.clone(), object_store.clone())
+                .with_settings(settings)
+                .with_compaction_scheduler_supplier(compaction_scheduler)
+                .with_fp_registry(fp_registry.clone())
+                .build()
+                .await
+                .expect("failed to build DB"),
+        );
+
+        // Put two SSTs into the DB (via two flushed memtables)
+        db.put_with_options(
+            b"a",
+            b"v1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("failed to put a");
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .expect("failed to flush first memtable");
+        db.put_with_options(
+            b"b",
+            b"v2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("failed to put b");
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .expect("failed to flush second memtable");
+
+        // Verify we've got two SSTs in object storage.
+        let baseline_ssts = db
+            .inner
+            .table_store
+            .list_compacted_ssts(..)
+            .await
+            .expect("failed to list SSTs after flushes");
+        assert!(
+            baseline_ssts.len() >= 2,
+            "expected at least two L0 SSTs before compaction"
+        );
+        let existing_ids: HashSet<_> = baseline_ssts.iter().map(|sst| sst.id).collect();
+        log::info!("created two L0 SSTs: {:?}", existing_ids);
+
+        // Allow compaction to run with SST output but not manifest update
+        should_compact.store(true, Ordering::SeqCst);
+
+        // Verify the compaction ran and output a new SST.
+        let mut compaction_output_ids = Vec::new();
+        for _ in 0..200 {
+            let ssts = db
+                .inner
+                .table_store
+                .list_compacted_ssts(..)
+                .await
+                .expect("failed to list SSTs during compaction");
+            compaction_output_ids = ssts
+                .iter()
+                .filter(|sst| !existing_ids.contains(&sst.id))
+                .map(|sst| sst.id)
+                .collect::<Vec<_>>();
+            if !compaction_output_ids.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !compaction_output_ids.is_empty(),
+            "expected compaction outputs before manifest update"
+        );
+        log::info!(
+            "created compaction output SSTs: {:?}",
+            compaction_output_ids
+        );
+
+        // Now write a more recent compaction so that the GC cutoff is after
+        // the compaction job output SST. This is to circumvent the
+        // `most_recent_sst_dt` check in `GarbageCollector::run_once`, so the
+        // compaction SST isn't the most recent SST (and is thus eligible for
+        // GC for that check).
+        db.put_with_options(
+            b"c",
+            b"v3",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("failed to put a");
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .expect("failed to flush first memtable");
+
+        let gc_options = GarbageCollectorOptions {
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                interval: Some(Duration::from_millis(0)),
+                min_age: Duration::from_millis(0),
+            }),
+            manifest_options: Some(GarbageCollectorDirectoryOptions {
+                interval: Some(Duration::from_millis(0)),
+                min_age: Duration::from_millis(0),
+            }),
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
+                interval: Some(Duration::from_millis(0)),
+                min_age: Duration::from_millis(0),
+            }),
+        };
+        let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())
+            .with_options(gc_options)
+            .with_stat_registry(db.metrics())
+            .with_system_clock(db.inner.system_clock.clone())
+            .build();
+
+        // Now run a GC while there's an SST that's not in the manifest and
+        // there are no running compactions (the fail_point above is _after_
+        // the compaction job has been marked as done). Run a few times just
+        // to be paranoid.
+        for _ in 0..20 {
+            gc.run_gc_once().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Verify that the compaction output SSTs still exist after GC runs
+        let remaining = db
+            .inner
+            .table_store
+            .list_compacted_ssts(..)
+            .await
+            .expect("failed to list SSTs after GC");
+        let outputs_still_exist = compaction_output_ids
+            .iter()
+            .all(|id| remaining.iter().any(|sst| sst.id == *id));
+        assert!(
+            outputs_still_exist,
+            "expected compaction outputs to still exist"
+        );
+        log::info!(
+            "All SSTs in object storage after GC: {:?}",
+            remaining.iter().map(|sst| sst.id).collect::<Vec<_>>()
+        );
+
+        // Now allow the manifest update after the GC has seen the compaction output SST
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "after-compaction-output-before-manifest",
+            "off",
+        )
+        .expect("failed to disable compaction failpoint");
+
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            object_store.clone(),
+            db.inner.system_clock.clone(),
+        ));
+        let mut stored_manifest = StoredManifest::load(manifest_store.clone())
+            .await
+            .expect("missing manifest");
+        let manifest_state = wait_for_manifest_condition(
+            &mut stored_manifest,
+            |state| !state.compacted.is_empty(),
+            Duration::from_secs(5),
+        )
+        .await;
+        log::info!("Manifest after compaction: {:#?}", manifest_state);
+
+        // Verify that the compaction output SSTs are in the manifest
+        let compacted_run = manifest_state
+            .compacted
+            .first()
+            .expect("expected compaction output in manifest");
+        let manifest_sst_ids = compacted_run
+            .ssts
+            .iter()
+            .map(|sst| sst.id)
+            .collect::<Vec<_>>();
+        for id in &compaction_output_ids {
+            assert!(
+                manifest_sst_ids.contains(id),
+                "manifest missing compaction output SST {:?}",
+                id
+            );
+        }
+
+        // Verify that the compaction output SSTs are still in object storage
+        let read_only_table_store = TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat::default(),
+            path.clone(),
+            None,
+        );
+        let compacted_ssts = read_only_table_store
+            .list_compacted_ssts(..)
+            .await
+            .expect("failed to list SSTs after manifest update");
+        for id in manifest_sst_ids {
+            assert!(
+                compacted_ssts.iter().any(|sst| sst.id == id),
+                "manifest references compaction output SST {:?} that GC has already deleted",
+                id
+            );
+        }
 
         db.close().await.expect("failed to close DB");
     }

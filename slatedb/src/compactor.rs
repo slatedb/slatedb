@@ -81,6 +81,7 @@ pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{IdGenerator, WatchableOnceCell};
+use fail_parallel::{fail_point, FailPointRegistry};
 
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
 
@@ -204,6 +205,7 @@ pub(crate) struct Compactor {
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
     merge_operator: Option<MergeOperatorType>,
+    fp_registry: Arc<FailPointRegistry>,
 }
 
 impl Compactor {
@@ -218,6 +220,7 @@ impl Compactor {
         system_clock: Arc<dyn SystemClock>,
         closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
         merge_operator: Option<MergeOperatorType>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
@@ -235,6 +238,7 @@ impl Compactor {
             stats,
             system_clock,
             merge_operator,
+            fp_registry,
         }
     }
 
@@ -269,6 +273,7 @@ impl Compactor {
             self.rand.clone(),
             self.stats.clone(),
             self.system_clock.clone(),
+            self.fp_registry.clone(),
         )
         .await?;
         self.task_executor
@@ -307,6 +312,7 @@ pub(crate) struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    fp_registry: Arc<FailPointRegistry>,
 }
 
 #[async_trait]
@@ -370,6 +376,7 @@ impl CompactorEventHandler {
         rand: Arc<DbRand>,
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
+        fp_registry: Arc<FailPointRegistry>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
         let manifest = FenceableManifest::init_compactor(
@@ -388,6 +395,7 @@ impl CompactorEventHandler {
             rand,
             stats,
             system_clock,
+            fp_registry,
         })
     }
 
@@ -632,6 +640,10 @@ impl CompactorEventHandler {
     ) -> Result<(), SlateDBError> {
         self.state.finish_compaction(id, output_sr);
         self.log_compaction_state();
+        fail_point!(
+            Arc::clone(&self.fp_registry),
+            "after-compaction-output-before-manifest"
+        );
         self.write_manifest_safely().await?;
         self.maybe_schedule_compactions().await?;
         self.stats
@@ -1791,6 +1803,7 @@ mod tests {
             let rand = Arc::new(DbRand::default());
             let stats_registry = Arc::new(StatRegistry::new());
             let compactor_stats = Arc::new(CompactionStats::new(stats_registry.clone()));
+            let fp_registry = Arc::new(FailPointRegistry::new());
             let real_executor = Arc::new(TokioCompactionExecutor::new(
                 Handle::current(),
                 compactor_options.clone(),
@@ -1810,6 +1823,7 @@ mod tests {
                 rand.clone(),
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
+                fp_registry,
             )
             .await
             .unwrap();
