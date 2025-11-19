@@ -1,51 +1,72 @@
-use std::sync::Arc;
-
 use crate::utils::MonotonicSeq;
 
-/// Oracle is a struct that centralizes the generation & maintenance of various
+/// Oracle is a trait that centralizes the generation & maintenance of various
 /// sequence numbers. These sequence numbers are mostly related to the lifecycle
 /// of a transaction commit.
-pub(crate) struct Oracle {
-    /// is assigned immediately when a write begins, it's possible that the write
-    /// has not been committed or finally failed.
-    pub(crate) last_seq: Arc<MonotonicSeq>,
+pub(crate) trait Oracle: Send + Sync + 'static {
     /// The sequence number of the most recent write that has been fully committed.
     /// For reads with dirty=false, the maximum visible sequence number is capped
     /// at last_committed_seq.
-    pub(crate) last_committed_seq: Arc<MonotonicSeq>,
+    fn last_committed_seq(&self) -> u64;
+
     /// The sequence number of the most recent write that has been fully durable
     /// flushed to the remote storage.
-    pub(crate) last_remote_persisted_seq: Arc<MonotonicSeq>,
+    fn last_remote_persisted_seq(&self) -> u64;
 }
 
-impl Oracle {
-    /// Create a new Oracle with the last committed sequence number. for the read only
-    /// db instance (DbReader), only the last committed sequence number is needed to be
-    /// tracked, and last_seq and last_remote_persisted_seq are considered to be
-    /// the same as last_committed_seq.
-    pub(crate) fn new(last_committed_seq: MonotonicSeq) -> Self {
-        let last_committed_seq = Arc::new(last_committed_seq);
-        Self {
-            last_seq: last_committed_seq.clone(),
-            last_committed_seq: last_committed_seq.clone(),
-            last_remote_persisted_seq: last_committed_seq,
-        }
-    }
+pub(crate) struct DbOracle {
+    pub(crate) last_seq: MonotonicSeq,
 
-    pub(crate) fn with_last_seq(self, last_seq: MonotonicSeq) -> Self {
-        Self {
-            last_seq: Arc::new(last_seq),
-            ..self
-        }
-    }
+    pub(crate) last_committed_seq: MonotonicSeq,
 
-    pub(crate) fn with_last_remote_persisted_seq(
-        self,
+    pub(crate) last_remote_persisted_seq: MonotonicSeq,
+}
+
+impl DbOracle {
+    pub(crate) fn new(
+        last_seq: MonotonicSeq,
+        last_committed_seq: MonotonicSeq,
         last_remote_persisted_seq: MonotonicSeq,
     ) -> Self {
         Self {
-            last_remote_persisted_seq: Arc::new(last_remote_persisted_seq),
-            ..self
+            last_seq,
+            last_committed_seq,
+            last_remote_persisted_seq,
         }
+    }
+}
+
+impl Oracle for DbOracle {
+    fn last_committed_seq(&self) -> u64 {
+        self.last_committed_seq.load()
+    }
+
+    fn last_remote_persisted_seq(&self) -> u64 {
+        self.last_remote_persisted_seq.load()
+    }
+}
+
+pub(crate) struct DbReaderOracle {
+    pub(crate) last_remote_persisted_seq: MonotonicSeq,
+}
+
+impl DbReaderOracle {
+    /// for the read-only db instance (DbReader), only the last remote persisted sequence number
+    /// is needed to be tracked, and last_seq and last_remote_persisted_seq are considered to be
+    /// the same as last_committed_seq.
+    pub(crate) fn new(last_remote_persisted_seq: MonotonicSeq) -> Self {
+        Self {
+            last_remote_persisted_seq,
+        }
+    }
+}
+
+impl Oracle for DbReaderOracle {
+    fn last_committed_seq(&self) -> u64 {
+        self.last_remote_persisted_seq.load()
+    }
+
+    fn last_remote_persisted_seq(&self) -> u64 {
+        self.last_remote_persisted_seq.load()
     }
 }

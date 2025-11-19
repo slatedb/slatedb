@@ -14,6 +14,7 @@ use tokio::{
 };
 use tracing::instrument;
 
+use crate::oracle::Oracle;
 use crate::{
     clock::MonotonicClock,
     db_state::{DbState, SsTableId},
@@ -22,7 +23,7 @@ use crate::{
     error::SlateDBError,
     iter::KeyValueIterator,
     mem_table::KVTable,
-    oracle::Oracle,
+    oracle::DbOracle,
     tablestore::TableStore,
     types::RowEntry,
     utils::SendSafely,
@@ -80,7 +81,7 @@ struct WalBufferManagerInner {
     /// The flusher will update the recent_flushed_wal_id and last_flushed_seq when the flush is done.
     recent_flushed_wal_id: u64,
     /// The oracle to track the last flushed sequence number.
-    oracle: Arc<Oracle>,
+    oracle: Arc<DbOracle>,
 }
 
 impl WalBufferManager {
@@ -89,7 +90,7 @@ impl WalBufferManager {
         db_state: Arc<RwLock<DbState>>,
         db_stats: DbStats,
         recent_flushed_wal_id: u64,
-        oracle: Arc<Oracle>,
+        oracle: Arc<DbOracle>,
         table_store: Arc<TableStore>,
         mono_clock: Arc<MonotonicClock>,
         max_wal_bytes_size: usize,
@@ -385,7 +386,7 @@ impl WalBufferManager {
             None => return,
         };
 
-        let last_flushed_seq = inner.oracle.last_remote_persisted_seq.load();
+        let last_flushed_seq = inner.oracle.last_remote_persisted_seq();
 
         let mut releaseable_count = 0;
         for (_, wal) in inner.immutable_wals.iter() {
@@ -531,7 +532,11 @@ mod tests {
         let test_clock = Arc::new(TestClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());
-        let oracle = Arc::new(Oracle::new(MonotonicSeq::new(0)));
+        let oracle = Arc::new(DbOracle::new(
+            MonotonicSeq::new(0),
+            MonotonicSeq::new(0),
+            MonotonicSeq::new(0),
+        ));
         let db_state = Arc::new(RwLock::new(DbState::new(DirtyManifest::new(
             0,
             Manifest::initial(CoreDbState::new()),
