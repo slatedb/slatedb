@@ -88,6 +88,14 @@ impl FenceableManifest {
         Ok(Self { inner: fr, clock })
     }
 
+    pub(crate) fn manifest(&self) -> &Manifest {
+        self.inner.object()
+    }
+
+    pub(crate) fn core(&self) -> &CoreDbState {
+        &self.inner.object().core
+    }
+
     pub(crate) async fn init_compactor(
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
@@ -588,8 +596,8 @@ pub(crate) mod test_utils {
     use crate::transactional_object::test_utils::new_dirty_object;
     use crate::transactional_object::DirtyObject;
 
-    pub(crate) fn new_dirty_manifest() -> DirtyObject<Manifest> {
-        new_dirty_object(1u64, Manifest::initial(CoreDbState::new()))
+    pub(crate) fn new_manifest() -> DirtyObject<Manifest> {
+        new_dirty_object(0, Manifest::initial(CoreDbState::new()))
     }
 }
 

@@ -428,7 +428,7 @@ mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
-    use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::store::test_utils::new_manifest;
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
     use crate::utils::IdGenerator;
@@ -848,7 +848,7 @@ mod tests {
     }
 
     fn create_compactor_state(db_state: CoreDbState) -> CompactorState {
-        let mut dirty = new_dirty_manifest();
+        let mut dirty = new_manifest();
         dirty.value.core = db_state;
         CompactorState::new(dirty)
     }

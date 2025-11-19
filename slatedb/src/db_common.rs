@@ -58,9 +58,6 @@ impl DbInner {
         };
         self.freeze_memtable(&mut guard, recent_flushed_wal_id)?;
 
-        let last_wal = replayed_memtable.last_wal_id;
-        guard.modify(|modifier| modifier.state.manifest.value.core.next_wal_sst_id = last_wal + 1);
-
         // update seqs and clock
         // we know these won't move backwards (even though the replayed wal files might contain some
         // older rows) because the wal replay iterator ignores any entries with seq num lower than

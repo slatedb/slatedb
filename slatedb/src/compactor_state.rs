@@ -420,7 +420,7 @@ mod tests {
     use crate::config::Settings;
     use crate::db::Db;
     use crate::db_state::SsTableId;
-    use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::store::test_utils::new_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::transactional_object::TransactionalObject;
     use crate::utils::IdGenerator;
@@ -685,9 +685,9 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut state = CompactorState::new(new_dirty_manifest());
+        let mut state = CompactorState::new(new_manifest());
         // mimic an externally added checkpoint
-        let mut dirty = new_dirty_manifest();
+        let mut dirty = new_manifest();
         let checkpoint = Checkpoint {
             id: uuid::Uuid::new_v4(),
             manifest_id: 1,

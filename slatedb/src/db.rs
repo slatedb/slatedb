@@ -108,7 +108,7 @@ impl DbInner {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
-        manifest: DirtyObject<Manifest>,
+        manifest: Manifest,
         memtable_flush_notifier: UnboundedSender<MemtableFlushMsg>,
         write_notifier: UnboundedSender<WriteBatchMessage>,
         stat_registry: Arc<StatRegistry>,
@@ -116,7 +116,7 @@ impl DbInner {
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
-        let last_l0_seq = manifest.core().last_l0_seq;
+        let last_l0_seq = manifest.core.last_l0_seq;
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
@@ -128,7 +128,7 @@ impl DbInner {
 
         let mono_clock = Arc::new(MonotonicClock::new(
             logical_clock,
-            manifest.core().last_l0_clock_tick,
+            manifest.core.last_l0_clock_tick,
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
@@ -147,7 +147,6 @@ impl DbInner {
 
         let recent_flushed_wal_id = state.read().state().core().replay_after_wal_id;
         let wal_buffer = Arc::new(WalBufferManager::new(
-            state.clone(),
             state.clone(),
             db_stats.clone(),
             recent_flushed_wal_id,
@@ -230,11 +229,14 @@ impl DbInner {
                 Ok(_) => {
                     return Ok(());
                 }
+                // SlateDBError::Fenced here doesn't necessarily mean that the db is fenced. It
+                // just means that the db conflicted writing a fencing WAL. It's possible the
+                // conflict was with an older writer that hasn't yet detected it is fenced. So
+                // when we get SlateDBError::Fenced we then refresh the manifest to check if
+                // we are indeed actually fenced.
                 Err(SlateDBError::Fenced) => {
+                    // refresh will fail with SlateDBError::Fenced if the db is actually fenced
                     manifest.refresh().await?;
-                    self.state
-                        .write()
-                        .merge_remote_manifest(manifest.prepare_dirty()?);
                     empty_wal_id += 1;
                 }
                 Err(e) => {
@@ -409,7 +411,7 @@ impl DbInner {
         self.flush_immutable_memtables().await
     }
 
-    async fn replay_wal(&self) -> Result<(), SlateDBError> {
+    async fn replay_wal(&self) -> Result<u64, SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 1,
             blocks_to_fetch: 256,
@@ -425,12 +427,14 @@ impl DbInner {
         };
 
         let db_state = self.state.read().state().core().clone();
+        let mut last_wal_id = db_state.replay_after_wal_id;
         let mut replay_iter =
             WalReplayIterator::new(&db_state, replay_options, Arc::clone(&self.table_store))
                 .await?;
 
         while let Some(replayed_table) = replay_iter.next().await? {
             self.maybe_apply_backpressure().await?;
+            last_wal_id = replayed_table.last_wal_id;
             self.replay_memtable(replayed_table)?;
         }
 
@@ -442,7 +446,7 @@ impl DbInner {
         self.oracle
             .last_remote_persisted_seq
             .store(self.oracle.last_committed_seq());
-        Ok(())
+        Ok(last_wal_id)
     }
 
     async fn preload_cache(
@@ -464,10 +468,10 @@ impl DbInner {
         {
             Some(PreloadLevel::AllSst) => {
                 // Preload both L0 and compacted SSTs
-                let l0_count = current_state.manifest.core().l0.len();
+                let l0_count = current_state.manifest.core.l0.len();
                 let compacted_count: usize = current_state
                     .manifest
-                    .core()
+                    .core
                     .compacted
                     .iter()
                     .map(|level| level.ssts.len())
@@ -481,7 +485,7 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
-                        .core()
+                        .core
                         .l0
                         .iter()
                         .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
@@ -491,7 +495,7 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
-                        .core()
+                        .core
                         .compacted
                         .iter()
                         .flat_map(|level| &level.ssts)
@@ -511,7 +515,7 @@ impl DbInner {
                 // Preload only L0 SSTs
                 let l0_sst_paths: Vec<object_store::path::Path> = current_state
                     .manifest
-                    .core()
+                    .core
                     .l0
                     .iter()
                     .map(|sst_handle| path_resolver.table_path(&sst_handle.id))
@@ -1808,8 +1812,8 @@ mod tests {
         db.flush().await.unwrap();
 
         let state = db.inner.state.read().view();
-        assert_eq!(1, state.state.manifest.core().l0.len());
-        let sst = state.state.manifest.core().l0.front().unwrap();
+        assert_eq!(1, state.state.manifest.core.l0.len());
+        let sst = state.state.manifest.core.l0.front().unwrap();
         let index = db.inner.table_store.read_index(sst).await.unwrap();
         assert!(index.borrow().block_meta().len() >= 3);
         assert_eq!(
@@ -3330,7 +3334,7 @@ mod tests {
 
         let manifest_state = {
             let guard = db.inner.state.read();
-            guard.state().manifest.core().clone()
+            guard.state().manifest.core.clone()
         };
         let last_l0_seq = manifest_state.last_l0_seq;
         assert!(
@@ -4098,7 +4102,7 @@ mod tests {
                 .recent_flushed_wal_id(),
             2
         );
-        assert_eq!(db_state.state.core().next_wal_sst_id, next_wal_id);
+        assert_eq!(reader.inner.wal_buffer.current_wal_id(), Some(next_wal_id));
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -4181,7 +4185,7 @@ mod tests {
         );
         assert!(db_state.state.imm_memtable.get(1).is_none());
 
-        assert_eq!(db_state.state.core().next_wal_sst_id, 4);
+        assert_eq!(db.inner.wal_buffer.current_wal_id(), Some(4));
         assert_eq!(
             db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -4399,7 +4403,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
+        assert_eq!(db.inner.wal_buffer.current_wal_id(), Some(2));
         db.put(b"1", b"1").await.unwrap();
         // assert that second open writes another empty wal.
         let db = Db::builder(path, object_store.clone())
@@ -4407,7 +4411,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 4);
+        assert_eq!(db.inner.wal_buffer.current_wal_id(), Some(4));
     }
 
     #[tokio::test]
@@ -4447,7 +4451,9 @@ mod tests {
         assert_eq!(err.to_string(), "Closed error: detected newer DB client");
 
         do_put(&db2, b"2", b"2").await.unwrap();
-        assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
+        assert_eq!(db2.inner.wal_buffer.current_wal_id(), Some(5));
+        let state = db2.inner.state.clone();
+        wait_for_condition(|| state.read().state().core().next_wal_sst_id == 5, Duration::from_secs(30)).await;
     }
 
     #[tokio::test]
@@ -4899,6 +4905,17 @@ mod tests {
         assert_eq!(v.as_ref(), b"v1");
 
         db.close().await.expect("failed to close db");
+    }
+
+    async fn wait_for_condition(cond: impl Fn() -> bool, timeout: Duration) {
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < timeout {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition took longer than timeout");
     }
 
     async fn wait_for_manifest_condition(

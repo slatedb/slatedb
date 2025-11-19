@@ -482,7 +482,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
-                manifest.prepare_dirty().map_err(SlateDBError::from)?,
+                manifest.manifest().clone(),
                 memtable_flush_tx,
                 write_tx,
                 stat_registry,
@@ -504,7 +504,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             system_clock.clone(),
         ));
         if inner.wal_enabled {
-            inner.wal_buffer.init(task_executor.clone()).await?;
+            inner.wal_buffer.start_flush_task(task_executor.clone()).await?;
         };
         task_executor
             .add_handler(
@@ -603,7 +603,8 @@ impl<P: Into<Path>> DbBuilder<P> {
         task_executor.monitor_on(&tokio_handle)?;
 
         // Replay WAL
-        inner.replay_wal().await?;
+        let last_wal_id = inner.replay_wal().await?;
+        inner.wal_buffer.init(last_wal_id);
 
         // Preload cache if enabled
         if let Some(cached_obj_store) = cached_object_store {

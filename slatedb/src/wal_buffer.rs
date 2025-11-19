@@ -57,7 +57,6 @@ pub(crate) const WAL_BUFFER_TASK_NAME: &str = "wal_writer";
 ///   operations. The manager becomes unusable after encountering a fatal error.
 pub(crate) struct WalBufferManager {
     inner: Arc<parking_lot::RwLock<WalBufferManagerInner>>,
-    wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
     db_state: Arc<RwLock<DbState>>,
     db_stats: DbStats,
     mono_clock: Arc<MonotonicClock>,
@@ -67,6 +66,7 @@ pub(crate) struct WalBufferManager {
 }
 
 struct WalBufferManagerInner {
+    current_wal_id: Option<u64>,
     current_wal: Arc<KVTable>,
     /// When the current WAL is ready to be flushed, it'll be moved to the `immutable_wals`.
     /// The flusher will try flush all the immutable wals to remote storage.
@@ -86,7 +86,6 @@ struct WalBufferManagerInner {
 
 impl WalBufferManager {
     pub fn new(
-        wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         db_state: Arc<RwLock<DbState>>,
         db_stats: DbStats,
         recent_flushed_wal_id: u64,
@@ -99,6 +98,7 @@ impl WalBufferManager {
         let current_wal = Arc::new(KVTable::new());
         let immutable_wals = VecDeque::new();
         let inner = WalBufferManagerInner {
+            current_wal_id: None,
             current_wal,
             immutable_wals,
             last_applied_seq: None,
@@ -109,7 +109,6 @@ impl WalBufferManager {
         };
         Self {
             inner: Arc::new(parking_lot::RwLock::new(inner)),
-            wal_id_incrementor,
             db_state,
             db_stats,
             table_store,
@@ -119,7 +118,7 @@ impl WalBufferManager {
         }
     }
 
-    pub async fn init(
+    pub async fn start_flush_task(
         self: &Arc<Self>,
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Result<(), SlateDBError> {
@@ -145,6 +144,11 @@ impl WalBufferManager {
         result
     }
 
+    pub fn init(&self, last_wal_id: u64) {
+        let mut inner = self.inner.write();
+        inner.current_wal_id = Some(last_wal_id + 1);
+    }
+
     #[cfg(test)]
     pub fn buffered_wal_entries_count(&self) -> usize {
         let guard = self.inner.read();
@@ -157,6 +161,13 @@ impl WalBufferManager {
         current_wal_entries_count + flushing_wal_entries_count
     }
 
+    /// Returns the ID of the current active WAL. Returns None if the WAL buffer is not yet
+    /// initialized, which is possible if this called while the WAL is still being replayed
+    pub(crate) fn current_wal_id(&self) -> Option<u64> {
+        self.inner.read().current_wal_id
+    }
+
+    /// Returns the ID of the last WAL that was flushed to L0
     pub fn recent_flushed_wal_id(&self) -> u64 {
         let inner = self.inner.read();
         inner.recent_flushed_wal_id
@@ -358,10 +369,11 @@ impl WalBufferManager {
             return Ok(());
         }
 
-        let next_wal_id = self.wal_id_incrementor.next_wal_id();
         let mut inner = self.inner.write();
+        let frozen_wal_id = inner.current_wal_id.expect("wal buffer not initialized");
+        inner.current_wal_id = Some(frozen_wal_id + 1);
         let current_wal = std::mem::replace(&mut inner.current_wal, Arc::new(KVTable::new()));
-        inner.immutable_wals.push_back((next_wal_id, current_wal));
+        inner.immutable_wals.push_back((frozen_wal_id, current_wal));
         Ok(())
     }
 
@@ -491,7 +503,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 mod tests {
     use super::*;
     use crate::clock::{DefaultSystemClock, MonotonicClock};
-    use crate::manifest::store::test_utils::new_dirty_manifest;
+    use crate::manifest::store::test_utils::new_manifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -505,6 +517,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+    use crate::db_state::CoreDbState;
+    use crate::manifest::Manifest;
 
     struct MockWalIdStore {
         next_id: AtomicU64,
@@ -517,9 +531,6 @@ mod tests {
     }
 
     async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<TestClock>) {
-        let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
-            next_id: AtomicU64::new(1),
-        });
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(object_store, None),
@@ -534,10 +545,9 @@ mod tests {
             MonotonicSeq::new(0),
             MonotonicSeq::new(0),
             MonotonicSeq::new(0),
-        ));
-        let db_state = Arc::new(RwLock::new(DbState::new(new_dirty_manifest())));
+        )); 
+        let db_state = Arc::new(RwLock::new(DbState::new(Manifest::initial(CoreDbState::new()))));
         let wal_buffer = Arc::new(WalBufferManager::new(
-            wal_id_store,
             db_state.clone(),
             DbStats::new(&StatRegistry::new()),
             0, // recent_flushed_wal_id
@@ -551,7 +561,8 @@ mod tests {
             db_state.read().closed_result(),
             system_clock.clone(),
         ));
-        wal_buffer.init(task_executor.clone()).await.unwrap();
+        wal_buffer.start_flush_task(task_executor.clone()).await.unwrap();
+        wal_buffer.init(0);
         task_executor
             .monitor_on(&Handle::current())
             .expect("failed to monitor executor");
