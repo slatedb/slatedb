@@ -385,7 +385,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        // Two SSTs with distinct ULID timestamps
+        // Three SSTs with distinct ULID timestamps
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0)); // job 1
         let id_barrier = SsTableId::Compacted(ulid::Ulid::from_parts(2_000, 0)); // job 2
         let id_to_newer = SsTableId::Compacted(ulid::Ulid::from_parts(3_000, 0)); // job 2, too
@@ -405,14 +405,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Mark the newest SST as active in the manifest so that the
+        // Mark the newest SST active in the manifest so that the
         // most_recent_sst_dt boundary is 3_000ms and the compaction
-        // low watermark (2_000ms) becomes the effective cutoff.
+        // low watermark (2_000ms) becomes the effective cutoff (see below).
         let mut dirty = stored_manifest.prepare_dirty();
-        dirty.core.compacted.push(SortedRun {
-            id: 0,
-            ssts: vec![active_handle],
-        });
+        dirty.core.l0.push_back(active_handle);
         stored_manifest.update_manifest(dirty).await.unwrap();
 
         // Register barrier metrics
