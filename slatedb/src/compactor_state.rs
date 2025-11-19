@@ -106,16 +106,6 @@ impl Display for CompactionSpec {
     }
 }
 
-/// Status of a compaction job to be shown to the customer
-#[derive(Debug, Clone, PartialEq, Copy)]
-pub enum CompactionStatus {
-    Submitted,  // Waiting to be scheduled
-    InProgress, // Currently executing
-    Completed,  // Successfully finished but the manifest has not been updated yet
-    Persisted,  // Successfully finished and the manifest has been updated
-    Failed,     // Failed with error
-}
-
 /// Canonical, internal record of a compaction.
 ///
 /// A compaction is the unit tracked by the compactor: it has a stable `id` (ULID) and a `spec`
@@ -128,8 +118,6 @@ pub(crate) struct Compaction {
     spec: CompactionSpec,
     /// Total number of bytes processed so far for this compaction.
     bytes_processed: u64,
-    /// Status of the compaction
-    status: CompactionStatus,
 }
 
 impl Compaction {
@@ -138,7 +126,6 @@ impl Compaction {
             id,
             spec,
             bytes_processed: 0,
-            status: CompactionStatus::Submitted,
         }
     }
 
@@ -187,19 +174,9 @@ impl Compaction {
         &self.spec
     }
 
-    /// Returns the status of this compaction.
-    pub(crate) fn status(&self) -> CompactionStatus {
-        self.status
-    }
-
     /// Sets bytes processed so far for this compaction.
     pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
         self.bytes_processed = bytes;
-    }
-
-    /// Sets the status of this compaction.
-    pub(crate) fn set_status(&mut self, status: CompactionStatus) {
-        self.status = status;
     }
 }
 
@@ -334,6 +311,11 @@ impl CompactorState {
         Ok(())
     }
 
+    /// Removes a compaction from the in-flight map (called after completion or failure).
+    pub(crate) fn remove_compaction(&mut self, compaction_id: &Ulid) {
+        self.compactions.remove(compaction_id);
+    }
+
     /// Mutates a running compaction in place if it exists.
     pub(crate) fn update_compaction<F>(&mut self, compaction_id: &Ulid, f: F)
     where
@@ -342,22 +324,6 @@ impl CompactorState {
         if let Some(compaction) = self.compactions.get_mut(compaction_id) {
             f(compaction);
         }
-        self.cull_compactions();
-    }
-
-    // Removes sucessfully completed compactions that:
-    // - have persisted their effects to the manifest
-    // - have failed
-    fn cull_compactions(&mut self) {
-        self.compactions
-            .retain(|_, compaction| match compaction.status() {
-                CompactionStatus::Persisted | CompactionStatus::Failed => {
-                    log::debug!("culling compaction [compaction={:?}]", compaction);
-                    false
-                }
-                _ => true,
-            });
-        log::warn!("in-flight compactions: {:?}", self.compactions);
     }
 
     /// Applies the effects of a finished compaction to the in-memory manifest.
@@ -365,8 +331,7 @@ impl CompactorState {
     /// This removes compacted L0 SSTs and source SRs, inserts the output SR in id-descending
     /// order, updates `l0_last_compacted`, and removes the compaction from the in-flight map.
     pub(crate) fn finish_compaction(&mut self, compaction_id: Ulid, output_sr: SortedRun) {
-        let mut db_state = self.db_state().clone();
-        if let Some(compaction) = self.compactions.get_mut(&compaction_id) {
+        if let Some(compaction) = self.compactions.get(&compaction_id) {
             let spec = compaction.spec();
             info!("finished compaction [spec={}]", spec);
             // reconstruct l0
@@ -381,6 +346,7 @@ impl CompactorState {
                 .chain(std::iter::once(&SourceId::SortedRun(spec.destination())))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
+            let mut db_state = self.db_state().clone();
             let new_l0: VecDeque<SsTableHandle> = db_state
                 .l0
                 .iter()
@@ -419,7 +385,12 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.core = db_state;
-            compaction.set_status(CompactionStatus::Completed);
+            if self.compactions.remove(&compaction_id).is_none() {
+                error!(
+                    "scheduled compaction not found [compaction_id={}]",
+                    compaction_id
+                );
+            }
         } else {
             error!("compaction not found [compaction_id={}]", compaction_id);
         }

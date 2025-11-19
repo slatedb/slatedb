@@ -69,9 +69,7 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
 };
-use crate::compactor_state::{
-    Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,
-};
+use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -344,10 +342,8 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 id,
                 bytes_processed,
             } => {
-                self.state.update_compaction(&id, |c| {
-                    c.set_status(CompactionStatus::InProgress);
-                    c.set_bytes_processed(bytes_processed);
-                });
+                self.state
+                    .update_compaction(&id, |c| c.set_bytes_processed(bytes_processed));
             }
         }
         Ok(())
@@ -499,7 +495,6 @@ impl CompactorEventHandler {
     ///
     /// - Compaction has sources
     /// - Compactions with only L0 sources must have a destination > highest existing SR ID
-    /// - Compactions should never share any inputs
     fn validate_compaction(&self, compaction: &CompactionSpec) -> Result<(), SlateDBError> {
         // Validate compaction sources exist
         if compaction.sources().is_empty() {
@@ -507,13 +502,13 @@ impl CompactorEventHandler {
             return Err(SlateDBError::InvalidCompaction);
         }
 
-        // L0-only: must create new SR with id > highest_existing
         let has_only_l0 = compaction
             .sources()
             .iter()
             .all(|s| matches!(s, SourceId::Sst(_)));
 
         if has_only_l0 {
+            // L0-only: must create new SR with id > highest_existing
             let highest_id = self
                 .state
                 .db_state()
@@ -523,19 +518,6 @@ impl CompactorEventHandler {
             if compaction.destination() < highest_id {
                 warn!("compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
                 compaction.destination(), highest_id);
-                return Err(SlateDBError::InvalidCompaction);
-            }
-        }
-
-        // Compactions should never share any inputs
-        let sources = compaction.sources();
-        for compaction in self.state.compactions() {
-            let other_sources = compaction.spec().sources();
-            if sources.iter().any(|s| other_sources.contains(s)) {
-                warn!(
-                    "compaction sources overlap with existing compaction: {:?} {:?}",
-                    sources, other_sources
-                );
                 return Err(SlateDBError::InvalidCompaction);
             }
         }
@@ -625,9 +607,7 @@ impl CompactorEventHandler {
 
     /// Records a failed compaction attempt.
     fn finish_failed_compaction(&mut self, id: Ulid) {
-        self.state.update_compaction(&id, |compaction| {
-            compaction.set_status(CompactionStatus::Failed);
-        });
+        self.state.remove_compaction(&id);
         self.update_compaction_low_watermark();
     }
 
@@ -642,13 +622,11 @@ impl CompactorEventHandler {
         self.state.finish_compaction(id, output_sr);
         self.log_compaction_state();
         self.write_manifest_safely().await?;
-        self.state.update_compaction(&id, |compaction| {
-            compaction.set_status(CompactionStatus::Persisted);
-        });
         self.maybe_schedule_compactions().await?;
         self.stats
             .last_compaction_ts
             .set(self.system_clock.now().timestamp() as u64);
+        self.update_compaction_low_watermark();
         Ok(())
     }
 
@@ -699,7 +677,8 @@ impl CompactorEventHandler {
     }
 
     /// Updates the [`stats::COMPACTION_LOW_WATERMARK_TS`] gauge with the earliest
-    /// (oldest) ULID timestamp among active compactions.
+    /// (oldest) ULID timestamp among active compactions. If there are no active compactions,
+    /// the gauge is left unchanged.
     ///
     /// This serves as a GC safety barrier: the GC should not delete any compacted SST
     /// whose ULID timestamp is greater than or equal to this value.

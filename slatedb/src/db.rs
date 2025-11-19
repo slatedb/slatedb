@@ -5381,7 +5381,7 @@ mod tests {
             .with_system_clock(db.inner.system_clock.clone())
             .build();
 
-        // Run the GC until the L0 SST is deleted. Try a few times to make sure we pass min_age.
+        // Run the GC a few times so it sees the L0 SST (and hopefully doesn't delete it)
         for _ in 0..5 {
             gc.run_gc_once().await;
             ssts = db
@@ -5434,8 +5434,7 @@ mod tests {
         );
 
         // Build a read-only TableStore sharing the same underlying object store
-        // and assert that the referenced L0 SST still exists. This assertion
-        // currently fails due to the race described above.
+        // and assert that the referenced L0 SST still exists.
         let table_store = TableStore::new(
             ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
