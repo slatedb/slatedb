@@ -130,12 +130,12 @@ impl GcTask for CompactedGcTask {
     /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
     /// older than the minimum age specified in the options and are not active in the manifest.
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
-        let active_manifests = self.manifest_store.read_active_manifests().await?;
         // Don't delete any SSTs that are more recent than the oldest actively running compaction job
         // since they might be an output SST from a compaction that hasn't yet been added to the
         // manifest (we write the sorted run SSTs, _then_ add them to the manifest and write the
         // manifest to object storage).
         let compaction_low_watermark_dt = self.compaction_low_watermark_dt();
+        let active_manifests = self.manifest_store.read_active_manifests().await?;
         let active_ssts = self
             .list_active_l0_and_compacted_ssts(&active_manifests)
             .await?;
