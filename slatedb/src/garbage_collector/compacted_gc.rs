@@ -4,8 +4,8 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use log::error;
-use std::collections::HashSet;
 use std::sync::Arc;
+use std::{collections::HashSet, time::SystemTime};
 
 use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
 use crate::compactor::stats::COMPACTION_LOW_WATERMARK_TS;
@@ -67,21 +67,27 @@ impl CompactedGcTask {
     }
 
     async fn newest_l0_dt(&self) -> Result<DateTime<Utc>, SlateDBError> {
-        let newest_l0_dt = self
-            .manifest_store
-            .read_latest_manifest()
-            .await?
-            .1
-            .core
-            .l0
-            .iter()
-            .max_by_key(|sst| sst.id.unwrap_compacted_id().datetime())
-            .map(|sst| DateTime::<Utc>::from(sst.id.unwrap_compacted_id().datetime()))
-            // If there are no SSTs in the database at all, it's unsafe to delete any SSTs since
-            // we have no point of reference for where new L0 SSTs (that aren't yet in the
-            // manifest) might start.
-            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
-        Ok(newest_l0_dt)
+        let manifest = self.manifest_store.read_latest_manifest().await?.1;
+        let l0_timestamps = if !manifest.core.l0.is_empty() {
+            // Use active L0's if some exist
+            manifest
+                .core
+                .l0
+                .iter()
+                .map(|sst| sst.id.unwrap_compacted_id().datetime())
+                .collect::<Vec<_>>()
+        } else if let Some(l0_last_compacted) = manifest.core.l0_last_compacted {
+            // Else fall back to the last compacted L0, which can serve as a conservative barrier
+            vec![l0_last_compacted.datetime()]
+        } else {
+            // If there has never been an L0, don't allow garbage collection to delete anything
+            vec![SystemTime::UNIX_EPOCH]
+        };
+        let max_l0_ts = l0_timestamps
+            .into_iter()
+            .max()
+            .expect("expected at least unix epoch");
+        Ok(DateTime::<Utc>::from(max_l0_ts))
     }
 
     /// Returns a `DateTime<Utc>` barrier based on the compactor's oldest running compaction start.
