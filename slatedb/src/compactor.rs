@@ -312,6 +312,7 @@ pub(crate) struct CompactorEventHandler {
     rand: Arc<DbRand>,
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
+    #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
 }
 
