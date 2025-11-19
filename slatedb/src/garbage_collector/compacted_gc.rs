@@ -66,12 +66,11 @@ impl CompactedGcTask {
         Ok(active_ssts)
     }
 
-    /// Returns a `DateTime<Utc>` barrier based on the compactor's oldest running compaction start.
+    /// Returns a `DateTime<Utc>` barrier based on the compactor's oldest active compaction,
+    /// including both running jobs and finished jobs pending manifest persistence.
     ///
-    /// When compactions are active (compactor/running_compactions > 0), we read
-    /// compactor/compaction_low_watermark_ts and convert it into a
-    /// `DateTime<Utc>` value. GC should not delete any compacted SST whose ULID timestamp
-    /// is greater than or equal to this barrier time.
+    /// GC should not delete any compacted SST whose ULID timestamp is greater than or
+    /// equal to this barrier time. Returns UNIX_EPOCH if no compactions have run.
     ///
     /// This is a process-local coordination mechanism that only works when the compactor
     /// and garbage collector run in the same process and share the same StatRegistry. It's
@@ -97,6 +96,8 @@ impl GcTask for CompactedGcTask {
     /// Collect garbage from the compacted SSTs. This will delete any compacted SSTs that are
     /// older than the minimum age specified in the options and are not active in the manifest.
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+        // Read watermark before manifest to prevent race with compaction finishing.
+        let compaction_low_watermark_dt = self.compaction_low_watermark_dt();
         let active_ssts = self.list_active_l0_and_compacted_ssts().await?;
         // Don't delete any SSTs that are newer than the configured minimum age.
         let configured_min_age_dt = utc_now - self.compacted_sst_min_age();
@@ -111,11 +112,6 @@ impl GcTask for CompactedGcTask {
             // we have no point of reference for where new L0 SSTs (that aren't yet in the
             // manifest) might start.
             .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
-        // Don't delete any SSTs that are more recent than the oldest actively running compaction
-        // job since they might be an output SST from a compaction that hasn't yet been added to
-        // the manifest (we write the sorted run SSTs, _then_ add them to the manifest and write
-        // the manifest to object storage).
-        let compaction_low_watermark_dt = self.compaction_low_watermark_dt();
         // Take the minimum of the configured min age, the compaction low watermark, and the most
         // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
         let cutoff_dt = configured_min_age_dt

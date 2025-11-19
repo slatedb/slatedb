@@ -635,6 +635,8 @@ impl CompactorEventHandler {
             "after-compaction-output-before-manifest"
         );
         self.write_manifest_safely().await?;
+        // Now that manifest is persisted, remove from finished_pending_manifest
+        self.state.complete_compaction(&id);
         self.maybe_schedule_compactions().await?;
         self.stats
             .last_compaction_ts
@@ -686,8 +688,9 @@ impl CompactorEventHandler {
     }
 
     /// Updates the [`stats::COMPACTION_LOW_WATERMARK_TS`] gauge with the earliest
-    /// (oldest) running compaction job ULID's timestamp. This acts as a start time for the
-    /// job. If no compactions are running, leave the gauge unchanged.
+    /// (oldest) compaction job ULID's timestamp, including both actively running jobs
+    /// and finished jobs whose output SSTs are not yet persisted in the manifest.
+    /// If no compactions are active or pending manifest, leave the gauge unchanged.
     ///
     /// This serves as a GC safety barrier: the GC should not delete any compacted SST
     /// whose ULID timestamp is greater than or equal to this value.

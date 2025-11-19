@@ -204,6 +204,10 @@ impl Display for Compaction {
 pub struct CompactorState {
     manifest: DirtyManifest,
     compactions: BTreeMap<Ulid, Compaction>,
+    /// Compactions that have finished executing but whose output SSTs are not yet
+    /// persisted in the manifest. These must be included in the compaction low watermark
+    /// to prevent GC from deleting their output SSTs before the manifest update completes.
+    finished_pending_manifest: BTreeMap<Ulid, Compaction>,
 }
 
 impl CompactorState {
@@ -213,6 +217,7 @@ impl CompactorState {
         Self {
             manifest,
             compactions: BTreeMap::new(),
+            finished_pending_manifest: BTreeMap::new(),
         }
     }
 
@@ -226,9 +231,12 @@ impl CompactorState {
         &self.manifest
     }
 
-    /// Returns an iterator over all in-flight compactions.
+    /// Returns an iterator over all in-flight compactions, including those that have
+    /// finished executing but are pending manifest persistence.
     pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
-        self.compactions.values()
+        self.compactions
+            .values()
+            .chain(self.finished_pending_manifest.values())
     }
 
     /// Merges the remote (writer) manifest view into the compactor's local state.
@@ -314,6 +322,7 @@ impl CompactorState {
     /// Removes a compaction from the in-flight map (called after completion or failure).
     pub(crate) fn remove_compaction(&mut self, compaction_id: &Ulid) {
         self.compactions.remove(compaction_id);
+        self.finished_pending_manifest.remove(compaction_id);
     }
 
     /// Mutates a running compaction in place if it exists.
@@ -329,7 +338,8 @@ impl CompactorState {
     /// Applies the effects of a finished compaction to the in-memory manifest.
     ///
     /// This removes compacted L0 SSTs and source SRs, inserts the output SR in id-descending
-    /// order, updates `l0_last_compacted`, and removes the compaction from the in-flight map.
+    /// order, updates `l0_last_compacted`, and moves the compaction to finished_pending_manifest
+    /// (to keep it in the watermark calculation until the manifest is persisted).
     pub(crate) fn finish_compaction(&mut self, compaction_id: Ulid, output_sr: SortedRun) {
         if let Some(compaction) = self.compactions.get(&compaction_id) {
             let spec = compaction.spec();
@@ -385,7 +395,12 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.core = db_state;
-            if self.compactions.remove(&compaction_id).is_none() {
+            // Move the compaction to finished_pending_manifest instead of removing it.
+            // This keeps it in the watermark calculation until the manifest is persisted.
+            if let Some(compaction) = self.compactions.remove(&compaction_id) {
+                self.finished_pending_manifest
+                    .insert(compaction_id, compaction);
+            } else {
                 error!(
                     "scheduled compaction not found [compaction_id={}]",
                     compaction_id
@@ -393,6 +408,21 @@ impl CompactorState {
             }
         } else {
             error!("compaction not found [compaction_id={}]", compaction_id);
+        }
+    }
+
+    /// Completes a compaction by removing it from the finished_pending_manifest map.
+    /// This should be called after the manifest has been successfully persisted.
+    pub(crate) fn complete_compaction(&mut self, compaction_id: &Ulid) {
+        if self
+            .finished_pending_manifest
+            .remove(compaction_id)
+            .is_none()
+        {
+            error!(
+                "finished compaction not found in pending manifest list [compaction_id={}]",
+                compaction_id
+            );
         }
     }
 
@@ -513,7 +543,7 @@ mod tests {
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
 
-        // when:
+        // when: finish_compaction moves it to finished_pending_manifest
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
         let sr = SortedRun {
             id: 0,
@@ -521,7 +551,13 @@ mod tests {
         };
         state.finish_compaction(compaction_id, sr.clone());
 
-        // then:
+        // then: compaction is still in the list (moved to finished_pending_manifest)
+        assert_eq!(state.compactions().count(), 1);
+
+        // when: complete_compaction removes it from finished_pending_manifest
+        state.complete_compaction(&compaction_id);
+
+        // then: compaction is fully removed
         assert_eq!(state.compactions().count(), 0)
     }
 
