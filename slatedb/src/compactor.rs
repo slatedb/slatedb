@@ -622,11 +622,11 @@ impl CompactorEventHandler {
         self.state.finish_compaction(id, output_sr);
         self.log_compaction_state();
         self.write_manifest_safely().await?;
+        self.update_compaction_low_watermark();
         self.maybe_schedule_compactions().await?;
         self.stats
             .last_compaction_ts
             .set(self.system_clock.now().timestamp() as u64);
-        self.update_compaction_low_watermark();
         Ok(())
     }
 
@@ -644,7 +644,6 @@ impl CompactorEventHandler {
         }
 
         self.state.add_compaction(compaction.clone())?;
-        self.update_compaction_low_watermark();
         // Compactions and jobs are 1:1 right now.
         let job_id = compaction.id();
         tracing::Span::current().record("id", tracing::field::display(&job_id));
