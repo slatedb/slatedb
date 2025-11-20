@@ -47,15 +47,15 @@
 //!
 //! ```
 //! use slatedb::{Db, Error};
+//! use slatedb::db_cache::foyer::FoyerCache;
 //! use slatedb::object_store::memory::InMemory;
-//! use slatedb::db_cache::moka::MokaCache;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_memory_cache(Arc::new(MokaCache::new()))
+//!         .with_memory_cache(Arc::new(FoyerCache::new()))
 //!         .build()
 //!         .await?;
 //!     Ok(())
