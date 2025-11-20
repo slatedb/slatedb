@@ -234,7 +234,7 @@ pub enum DurabilityLevel {
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -243,6 +243,18 @@ pub struct ReadOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
+    /// Whether or not fetched blocks should be cached
+    pub cache_blocks: bool,
+}
+
+impl Default for ReadOptions {
+    fn default() -> Self {
+        Self {
+            durability_filter: DurabilityLevel::default(),
+            dirty: false,
+            cache_blocks: true,
+        }
+    }
 }
 
 impl ReadOptions {
@@ -257,6 +269,13 @@ impl ReadOptions {
     pub fn with_durability_filter(self, durability_filter: DurabilityLevel) -> Self {
         Self {
             durability_filter,
+            ..self
+        }
+    }
+
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
+        Self {
+            cache_blocks,
             ..self
         }
     }
@@ -1288,6 +1307,7 @@ object_store_cache_options:
         let options = ReadOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
+        assert!(options.cache_blocks);
 
         let options = ScanOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
