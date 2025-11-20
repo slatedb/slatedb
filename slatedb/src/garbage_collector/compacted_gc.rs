@@ -115,7 +115,6 @@ impl CompactedGcTask {
         let low_watermark_ts = self
             .stat_registry
             .lookup(COMPACTION_LOW_WATERMARK_TS)
-            // Convert s.get() from u64 ro DateTime::<Utc>
             .map(|s| s.get())
             // If no compaction has ever run since the start of this process, then set
             // `compaction_low_watermark_ts` to 0 (UNIX_EPOCH) to prevent the GC from deleting
@@ -134,6 +133,12 @@ impl GcTask for CompactedGcTask {
         // since they might be an output SST from a compaction that hasn't yet been added to the
         // manifest (we write the sorted run SSTs, _then_ add them to the manifest and write the
         // manifest to object storage).
+        //
+        // WARN: This must happen **before** the active manifests are read. Otherwise, we could see
+        // the manifest before a compaction job finishes (none of its output SSTs are in the
+        // manifest) and the compaction low watermark _after_ the SSTs are added to the manifest.
+        // This would allow the GC to delete the latest compaction job output SST since they would
+        // not be active, and would be older than the low watermark.
         let compaction_low_watermark_dt = self.compaction_low_watermark_dt();
         let active_manifests = self.manifest_store.read_active_manifests().await?;
         let active_ssts = self
