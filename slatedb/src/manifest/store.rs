@@ -88,7 +88,7 @@ impl FenceableManifest {
         Ok(self.inner.prepare_dirty()?)
     }
 
-    pub(crate) async fn update_manifest(
+    pub(crate) async fn update(
         &mut self,
         dirty: DirtyObject<Manifest>,
     ) -> Result<(), SlateDBError> {

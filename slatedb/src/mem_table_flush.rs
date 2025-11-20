@@ -60,7 +60,7 @@ impl MemtableFlusher {
         let checkpoint = self.manifest.new_checkpoint(id, options)?;
         let manifest_id = checkpoint.manifest_id;
         dirty.value.core.checkpoints.push(checkpoint);
-        self.manifest.update_manifest(dirty).await?;
+        self.manifest.update(dirty).await?;
         Ok(CheckpointCreateResult { id, manifest_id })
     }
 
@@ -69,7 +69,7 @@ impl MemtableFlusher {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().manifest.clone()
         };
-        self.manifest.update_manifest(dirty).await
+        self.manifest.update(dirty).await
     }
 
     pub(crate) async fn write_checkpoint_safely(

@@ -472,7 +472,7 @@ impl CompactorEventHandler {
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
         let dirty = self.state.manifest().clone();
-        self.manifest.update_manifest(dirty).await
+        self.manifest.update(dirty).await
     }
 
     /// Writes the manifest, retrying on version conflicts by reloading and retrying.
