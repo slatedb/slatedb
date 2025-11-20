@@ -1,3 +1,4 @@
+from os import name
 import pytest
 
 from slatedb import InvalidError, SlateDB, SlateDBAdmin, SlateDBReader
@@ -33,11 +34,11 @@ def test_admin_list_checkpoints(db_path, env_file):
     db.close()
 
     admin = SlateDBAdmin(db_path, env_file=env_file)
-    before = admin.list_checkpoints()
+    before = admin.list_checkpoints(name=None)
     assert isinstance(before, list)
 
     created = admin.create_checkpoint()
-    cps = admin.list_checkpoints()
+    cps = admin.list_checkpoints(name=None)
     # Expect at least one checkpoint and that the created id is present
     assert any(c["id"] == created["id"] for c in cps)
 
@@ -48,7 +49,7 @@ def test_admin_list_checkpoints_with_name(db_path, env_file):
     db.close()
 
     admin = SlateDBAdmin(db_path, env_file=env_file)
-    before = admin.list_checkpoints()
+    before = admin.list_checkpoints(name=None)
     assert isinstance(before, list)
 
     created = admin.create_checkpoint(name="my_checkpoint")
@@ -133,7 +134,7 @@ async def test_admin_manifest_read_and_list_async(db_path, env_file):
     assert isinstance(listing, str)
 
 @pytest.mark.asyncio
-async def test_admin_create_checkpoint_and_list_async(db_path, env_file):
+async def test_admin_create_checkpoint_and_list_async_with_no_name(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
     db.put(b"ck", b"v")
     db.close()
@@ -141,7 +142,19 @@ async def test_admin_create_checkpoint_and_list_async(db_path, env_file):
     admin = SlateDBAdmin(db_path, env_file=env_file)
     res = await admin.create_checkpoint_async()
     assert isinstance(res["id"], str)
-    cps = await admin.list_checkpoints_async()
+    cps = await admin.list_checkpoints_async(name=None)
+    assert any(c["id"] == res["id"] for c in cps)
+
+@pytest.mark.asyncio
+async def test_admin_create_checkpoint_and_list_async_with_name(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"cka", b"v")
+    db.close()
+
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    res = await admin.create_checkpoint_async(name="my_checkpoint")
+    assert isinstance(res["id"], str)
+    cps = await admin.list_checkpoints_async(name="my_checkpoint")
     assert any(c["id"] == res["id"] for c in cps)
 
 def test_admin_refresh_and_delete_checkpoint(db_path, env_file):
