@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter};
 use log::{error, info};
 use ulid::Ulid;
 
-use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
+use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest::store::DirtyManifest;
 
@@ -118,14 +118,20 @@ pub(crate) struct Compaction {
     spec: CompactionSpec,
     /// Total number of bytes processed so far for this compaction.
     bytes_processed: u64,
+    /// Minimum timestamp (in milliseconds since UNIX epoch) among all input SSTs.
+    /// This is used as a GC safety barrier to prevent deletion of SSTs being read
+    /// by this compaction. Pre-computed when the compaction is created to avoid
+    /// races with manifest updates.
+    min_input_sst_ts: u64,
 }
 
 impl Compaction {
-    pub(crate) fn new(id: Ulid, spec: CompactionSpec) -> Self {
+    pub(crate) fn new(id: Ulid, spec: CompactionSpec, min_input_sst_ts: u64) -> Self {
         Self {
             id,
             spec,
             bytes_processed: 0,
+            min_input_sst_ts,
         }
     }
 
@@ -174,9 +180,53 @@ impl Compaction {
         &self.spec
     }
 
+    /// Returns the minimum timestamp (in ms since UNIX epoch) among all input SSTs.
+    pub(crate) fn min_input_sst_ts(&self) -> u64 {
+        self.min_input_sst_ts
+    }
+
     /// Sets bytes processed so far for this compaction.
     pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
         self.bytes_processed = bytes;
+    }
+
+    /// Computes the minimum ULID timestamp among all input SSTs (L0 and sorted runs).
+    /// Falls back to `fallback_ts` if no input SSTs are found.
+    pub(crate) fn compute_min_input_sst_ts(
+        spec: &CompactionSpec,
+        db_state: &CoreDbState,
+        fallback_ts: u64,
+    ) -> u64 {
+        let mut min_ts: Option<u64> = None;
+
+        for source in spec.sources() {
+            match source {
+                SourceId::Sst(ulid) => {
+                    let ts = ulid
+                        .datetime()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("invalid duration")
+                        .as_millis() as u64;
+                    min_ts = Some(min_ts.map_or(ts, |current: u64| current.min(ts)));
+                }
+                SourceId::SortedRun(sr_id) => {
+                    if let Some(sorted_run) = db_state.compacted.iter().find(|sr| sr.id == *sr_id) {
+                        for sst in &sorted_run.ssts {
+                            if let SsTableId::Compacted(ulid) = sst.id {
+                                let ts = ulid
+                                    .datetime()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .expect("invalid duration")
+                                    .as_millis() as u64;
+                                min_ts = Some(min_ts.map_or(ts, |current: u64| current.min(ts)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        min_ts.unwrap_or(fallback_ts)
     }
 }
 
@@ -439,14 +489,21 @@ mod tests {
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = build_l0_compaction(&state.db_state().l0, 0);
         // when:
-        let compaction = Compaction::new(compaction_id, spec.clone());
+        let fallback_ts = compaction_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&spec, state.db_state(), fallback_ts);
+        let compaction = Compaction::new(compaction_id, spec.clone(), min_input_sst_ts);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
 
         // then:
         let mut compactions = state.compactions();
-        let expected = Compaction::new(compaction_id, spec.clone());
+        let expected = Compaction::new(compaction_id, spec.clone(), min_input_sst_ts);
         assert_eq!(compactions.next().expect("compaction not found"), &expected);
         assert!(compactions.next().is_none());
     }
@@ -459,7 +516,14 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = build_l0_compaction(&before_compaction.l0, 0);
-        let compaction = Compaction::new(compaction_id, spec);
+        let fallback_ts = compaction_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&spec, state.db_state(), fallback_ts);
+        let compaction = Compaction::new(compaction_id, spec, min_input_sst_ts);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
@@ -508,7 +572,14 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = build_l0_compaction(&before_compaction.l0, 0);
-        let compaction = Compaction::new(compaction_id, spec);
+        let fallback_ts = compaction_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&spec, state.db_state(), fallback_ts);
+        let compaction = Compaction::new(compaction_id, spec, min_input_sst_ts);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
@@ -569,7 +640,14 @@ mod tests {
             vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
             0,
         );
-        let compaction = Compaction::new(compaction_id, spec);
+        let fallback_ts = compaction_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&spec, state.db_state(), fallback_ts);
+        let compaction = Compaction::new(compaction_id, spec, min_input_sst_ts);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
@@ -639,7 +717,14 @@ mod tests {
                 .collect(),
             0,
         );
-        let compaction = Compaction::new(compaction_id, spec);
+        let fallback_ts = compaction_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&spec, state.db_state(), fallback_ts);
+        let compaction = Compaction::new(compaction_id, spec, min_input_sst_ts);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
@@ -718,7 +803,14 @@ mod tests {
                 .collect::<Vec<SourceId>>(),
             0,
         );
-        let compaction = Compaction::new(compaction_id, spec);
+        let fallback_ts = compaction_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&spec, state.db_state(), fallback_ts);
+        let compaction = Compaction::new(compaction_id, spec, min_input_sst_ts);
         let result = state.add_compaction(compaction.clone());
 
         // then:
@@ -749,7 +841,14 @@ mod tests {
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(sources, 0);
-        let compaction = Compaction::new(compaction_id, spec);
+        let fallback_ts = compaction_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&spec, state.db_state(), fallback_ts);
+        let compaction = Compaction::new(compaction_id, spec, min_input_sst_ts);
         let result = state.add_compaction(compaction.clone());
 
         // or simply:

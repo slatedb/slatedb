@@ -543,7 +543,14 @@ impl CompactorEventHandler {
                 break;
             }
             let compaction_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let compaction = Compaction::new(compaction_id, spec);
+            let fallback_ts = compaction_id
+                .datetime()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("invalid duration")
+                .as_millis() as u64;
+            let min_input_sst_ts =
+                Compaction::compute_min_input_sst_ts(&spec, self.state.db_state(), fallback_ts);
+            let compaction = Compaction::new(compaction_id, spec, min_input_sst_ts);
             self.submit_compaction(compaction).await?;
         }
         Ok(())
@@ -677,28 +684,23 @@ impl CompactorEventHandler {
     }
 
     /// Updates the [`stats::COMPACTION_LOW_WATERMARK_TS`] gauge with the earliest
-    /// (oldest) ULID timestamp among active compactions. If there are no active compactions,
-    /// the gauge is left unchanged.
+    /// (oldest) input SST timestamp among active compactions. If there are no active
+    /// compactions, the gauge is left unchanged.
     ///
     /// This serves as a GC safety barrier: the GC should not delete any compacted SST
     /// whose ULID timestamp is greater than or equal to this value.
+    ///
+    /// The watermark tracks the minimum timestamp of **input SSTs** rather than compaction
+    /// start times, because compactions read SSTs that were created before the compaction
+    /// started. This prevents the GC from deleting SSTs that are currently being read by
+    /// active compactions.
     ///
     /// This is a process-local coordination mechanism that only works when the compactor
     /// and garbage collector run in the same process and share the same StatRegistry. It's
     /// a hack until we have proper compactor persistence (so GC can retrieve the compactor
     /// state from the object store). See #604 for details.
     fn update_compaction_low_watermark(&self) {
-        let min_ts = self
-            .state
-            .compactions()
-            .map(|c| {
-                c.id()
-                    .datetime()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("invalid duration")
-                    .as_millis() as u64
-            })
-            .min();
+        let min_ts = self.state.compactions().map(|c| c.min_input_sst_ts()).min();
         if let Some(min_ts) = min_ts {
             self.stats.compaction_low_watermark_ts.set(min_ts);
         }
@@ -1731,10 +1733,12 @@ mod tests {
         let compaction_old = Compaction::new(
             Ulid::from_parts(older_ts_ms, 0),
             CompactionSpec::new(vec![], 10),
+            older_ts_ms,
         );
         let compaction_new = Compaction::new(
             Ulid::from_parts(newer_ts_ms, 0),
             CompactionSpec::new(vec![], 11),
+            newer_ts_ms,
         );
 
         fixture

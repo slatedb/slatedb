@@ -561,7 +561,14 @@ mod tests {
 
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![3, 2, 1, 0]);
-        let compactor_job = Compaction::new(job_id, request);
+        let fallback_ts = job_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&request, state.db_state(), fallback_ts);
+        let compactor_job = Compaction::new(job_id, request, min_input_sst_ts);
 
         state
             .add_compaction(compactor_job.clone())
@@ -647,7 +654,14 @@ mod tests {
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
-        let compactor_job = Compaction::new(compaction_id, request);
+        let fallback_ts = compaction_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&request, state.db_state(), fallback_ts);
+        let compactor_job = Compaction::new(compaction_id, request, min_input_sst_ts);
         state
             .add_compaction(compactor_job.clone())
             .expect("failed to add job");
@@ -681,10 +695,15 @@ mod tests {
         let system_clock = Arc::new(DefaultSystemClock::new());
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compactor_job = Compaction::new(
-            compaction_id,
-            create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
-        );
+        let request = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
+        let fallback_ts = compaction_id
+            .datetime()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("invalid duration")
+            .as_millis() as u64;
+        let min_input_sst_ts =
+            Compaction::compute_min_input_sst_ts(&request, state.db_state(), fallback_ts);
+        let compactor_job = Compaction::new(compaction_id, request, min_input_sst_ts);
         state
             .add_compaction(compactor_job.clone())
             .expect("failed to add job");
