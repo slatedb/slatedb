@@ -26,6 +26,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+impl DirtyObject<Manifest> {
+    pub(crate) fn manifest(&self) -> &Manifest {
+        &self.value
+    }
+
+    pub(crate) fn core(&self) -> &CoreDbState {
+        &self.value.core
+    }
+}
+
 pub(crate) struct FenceableManifest {
     clock: Arc<dyn SystemClock>,
     inner: FenceableTransactionalObject<Manifest>,

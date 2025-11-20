@@ -315,7 +315,7 @@ pub(crate) struct COWDbState {
 
 impl COWDbState {
     pub(crate) fn core(&self) -> &CoreDbState {
-        &self.manifest.value.core
+        self.manifest.core()
     }
 }
 
@@ -520,19 +520,18 @@ impl<'a> StateModifier<'a> {
     pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
-        let l0_last_compacted = &remote_manifest.value.core.l0_last_compacted;
+        let l0_last_compacted = &remote_manifest.core().l0_last_compacted;
         let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
             self.state
                 .manifest
-                .value
-                .core
+                .core()
                 .l0
                 .iter()
                 .cloned()
                 .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
                 .collect()
         } else {
-            self.state.manifest.value.core.l0.iter().cloned().collect()
+            self.state.manifest.core().l0.iter().cloned().collect()
         };
 
         let my_db_state = self.state.core();
@@ -567,7 +566,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
         // statement -- probably some generic inference bug
         #[allow(clippy::needless_return)]
         return state.modify(|modifier| {
-            let next_wal_id = modifier.state.manifest.value.core.next_wal_sst_id;
+            let next_wal_id = modifier.state.manifest.core().next_wal_sst_id;
             modifier.state.manifest.value.core.next_wal_sst_id += 1;
             next_wal_id
         });
