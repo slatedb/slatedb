@@ -149,18 +149,18 @@ impl GcTask for CompactedGcTask {
         // Don't delete SSTs that are newer than this SST since they're probably an L0 that hasn't yet
         // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
         // manifest to object storage).
-        let most_recent_sst_dt = self.newest_l0_dt(&active_manifests).await?;
+        let newest_l0_dt = self.newest_l0_dt(&active_manifests).await?;
         // Take the minimum of the configured min age, the compaction low watermark, and the most
         // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
         let cutoff_dt = configured_min_age_dt
             .min(compaction_low_watermark_dt)
-            .min(most_recent_sst_dt);
+            .min(newest_l0_dt);
         log::debug!(
             "calculated compacted SST GC cutoff [cutoff_dt={:?}, configured_min_age_dt={:?}, compaction_low_watermark_dt={:?}, most_recent_sst_dt={:?}]",
             cutoff_dt,
             configured_min_age_dt,
             compaction_low_watermark_dt,
-            most_recent_sst_dt,
+            newest_l0_dt,
         );
         let sst_ids_to_delete = self
             .table_store
