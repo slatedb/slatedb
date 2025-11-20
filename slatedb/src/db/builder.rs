@@ -47,8 +47,8 @@
 //!
 //! ```
 //! use slatedb::{Db, Error};
-//! use slatedb::object_store::memory::InMemory;
 //! use slatedb::db_cache::foyer::FoyerCache;
+//! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]

@@ -125,6 +125,10 @@ impl MemtableFlusher {
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)
                 .await?;
+            let last_seq = imm_memtable
+                .table()
+                .last_seq()
+                .expect("flush of l0 with no entries");
             {
                 let min_active_snapshot_seq = self.db_inner.txn_manager.min_active_seq();
 
@@ -154,15 +158,14 @@ impl MemtableFlusher {
                     }
 
                     // update the persisted manifest last_l0_seq as the latest seq in the imm.
-                    if let Some(seq) = imm_memtable.table().last_seq() {
-                        modifier.state.manifest.core.last_l0_seq = seq;
-                    };
+                    assert!(last_seq >= modifier.state.manifest.core.last_l0_seq);
+                    modifier.state.manifest.core.last_l0_seq = last_seq;
 
                     // update the persisted manifest recent_snapshot_min_seq to inform the compactor
                     // can safely reclaim the entries with smaller seq. if there's no active snapshot,
                     // we simply use the latest l0 seq.
                     modifier.state.manifest.core.recent_snapshot_min_seq =
-                        min_active_snapshot_seq.unwrap_or(modifier.state.manifest.core.last_l0_seq);
+                        min_active_snapshot_seq.unwrap_or(last_seq);
 
                     let sequence_tracker = imm_memtable.sequence_tracker();
                     modifier
@@ -178,7 +181,13 @@ impl MemtableFlusher {
             imm_memtable.notify_flush_to_l0(Ok(()));
             match self.write_manifest_safely().await {
                 Ok(_) => {
+                    // at this point we know the data in the memtable is durably stored
+                    // so notify the relevant listeners
                     imm_memtable.table().notify_durable(Ok(()));
+                    self.db_inner
+                        .oracle
+                        .last_remote_persisted_seq
+                        .store_if_greater(last_seq);
                 }
                 Err(err) => {
                     if matches!(err, SlateDBError::Fenced) {

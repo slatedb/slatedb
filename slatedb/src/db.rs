@@ -57,7 +57,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
-use crate::oracle::Oracle;
+use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
@@ -88,7 +88,7 @@ pub(crate) struct DbInner {
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) system_clock: Arc<dyn SystemClock>,
     pub(crate) rand: Arc<DbRand>,
-    pub(crate) oracle: Arc<Oracle>,
+    pub(crate) oracle: Arc<DbOracle>,
     pub(crate) reader: Reader,
     /// [`wal_buffer`] manages the in-memory WAL buffer, it manages the flushing
     /// of the WAL buffer to the remote storage.
@@ -117,11 +117,11 @@ impl DbInner {
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
-        let oracle = Arc::new(
-            Oracle::new(last_committed_seq)
-                .with_last_seq(last_seq)
-                .with_last_remote_persisted_seq(last_remote_persisted_seq),
-        );
+        let oracle = Arc::new(DbOracle::new(
+            last_seq,
+            last_committed_seq,
+            last_remote_persisted_seq,
+        ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
             logical_clock,
@@ -434,9 +434,12 @@ impl DbInner {
 
         // last_committed_seq is updated as WAL is replayed. after replay,
         // the last_committed_seq is considered same as the last_remote_persisted_seq.
+        assert!(
+            self.oracle.last_remote_persisted_seq.load() <= self.oracle.last_committed_seq.load()
+        );
         self.oracle
             .last_remote_persisted_seq
-            .store(self.oracle.last_committed_seq.load());
+            .store(self.oracle.last_committed_seq());
         Ok(())
     }
 
@@ -713,7 +716,7 @@ impl Db {
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.check_closed()?;
-        let seq = self.inner.oracle.last_committed_seq.load();
+        let seq = self.inner.oracle.last_committed_seq();
         let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
         Ok(snapshot)
     }
@@ -1351,7 +1354,7 @@ impl Db {
         isolation_level: IsolationLevel,
     ) -> Result<DBTransaction, crate::Error> {
         self.inner.check_closed()?;
-        let seq = self.inner.oracle.last_committed_seq.load();
+        let seq = self.inner.oracle.last_committed_seq();
         let txn = DBTransaction::new(
             self.inner.clone(),
             self.inner.txn_manager.clone(),
@@ -1424,8 +1427,8 @@ mod tests {
     use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions,
-        Ttl,
+        CompactorOptions, DurabilityLevel, ObjectStoreCacheOptions, Settings,
+        SizeTieredCompactionSchedulerOptions, Ttl,
     };
     use crate::db_state::CoreDbState;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -5021,7 +5024,7 @@ mod tests {
 
         // Test 2: With active snapshots
         let _snapshot = db.snapshot().await.unwrap();
-        let snapshot_seq = db.inner.oracle.last_committed_seq.load();
+        let snapshot_seq = db.inner.oracle.last_committed_seq();
 
         // Write more data and force flush
         db.put(b"key2", b"value2").await.unwrap();
@@ -5063,6 +5066,56 @@ mod tests {
             );
             assert!(recent_min_seq > snapshot_seq);
         }
+    }
+
+    #[tokio::test]
+    async fn test_memtable_flush_updates_last_remote_persisted_seq() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test";
+        let mut opts = test_db_options(0, 256, None);
+        opts.flush_interval = Some(Duration::MAX);
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(opts)
+            .build()
+            .await
+            .unwrap();
+
+        // do a write and flush memtable only (not wal)
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+        db.put_with_options(&b"foo", &b"bar", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // check that read with durability level remote returns value
+        let v = db
+            .get_with_options(
+                &b"foo",
+                &ReadOptions {
+                    durability_filter: DurabilityLevel::Memory,
+                    dirty: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
+        let v = db
+            .get_with_options(
+                &b"foo",
+                &ReadOptions {
+                    durability_filter: DurabilityLevel::Remote,
+                    dirty: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
     }
 
     // Merge operator test helpers
