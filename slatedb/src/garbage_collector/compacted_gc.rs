@@ -176,6 +176,7 @@ impl GcTask for CompactedGcTask {
             .collect::<Vec<_>>();
 
         for id in sst_ids_to_delete {
+            log::info!("deleting SST [id={:?}]", id);
             if let Err(e) = self.table_store.delete_sst(&id).await {
                 error!("error deleting SST [id={:?}, error={}]", id, e);
             } else {

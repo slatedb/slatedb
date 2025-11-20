@@ -171,7 +171,7 @@ impl AsRef<SsTableHandle> for SsTableHandle {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy, Serialize)]
+#[derive(Clone, PartialEq, Hash, Eq, Copy, Serialize)]
 pub(crate) enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
@@ -191,6 +191,15 @@ impl SsTableId {
         match self {
             Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
             Compacted(ulid) => *ulid,
+        }
+    }
+}
+
+impl Debug for SsTableId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        match self {
+            Wal(id) => write!(f, "SsTableId::Wal({})", id),
+            Compacted(id) => write!(f, "SsTableId::Compacted({})", id.to_string()),
         }
     }
 }
