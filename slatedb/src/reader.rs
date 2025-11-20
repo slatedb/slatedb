@@ -36,7 +36,7 @@ pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
     pub(crate) mono_clock: Arc<MonotonicClock>,
-    pub(crate) oracle: Arc<Oracle>,
+    pub(crate) oracle: Arc<dyn Oracle>,
     pub(crate) merge_operator: Option<crate::merge_operator::MergeOperatorType>,
 }
 
@@ -61,14 +61,14 @@ impl Reader {
 
         // if it's required to only read persisted data, we can only read up to the last remote persisted seq
         if matches!(durability_filter, DurabilityLevel::Remote) {
-            max_seq = Some(self.oracle.last_remote_persisted_seq.load());
+            max_seq = Some(self.oracle.last_remote_persisted_seq());
         }
 
         // if dirty read is not allowed, we can only read up to the last committed seq
         if !dirty {
             max_seq = max_seq
-                .map(|seq| seq.min(self.oracle.last_committed_seq.load()))
-                .or(Some(self.oracle.last_committed_seq.load()));
+                .map(|seq| seq.min(self.oracle.last_committed_seq()))
+                .or(Some(self.oracle.last_committed_seq()));
         }
 
         // if user provide a max seq (mostly from a Snapshot)
@@ -402,7 +402,7 @@ mod tests {
     use crate::clock::{LogicalClock, MonotonicClock};
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::object_stores::ObjectStores;
-    use crate::oracle::Oracle;
+    use crate::oracle::DbReaderOracle;
     use crate::sst::SsTableFormat;
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
@@ -1282,9 +1282,10 @@ mod tests {
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn LogicalClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
-        let oracle = Arc::new(Oracle::new(crate::utils::MonotonicSeq::new(0)));
+        let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        oracle.last_committed_seq.store(last_committed_seq);
+        // reader oracle uses last_remote_persisted_seq for all seq nums
+        oracle.last_remote_persisted_seq.store(last_committed_seq);
 
         // Enable merge operator if the test description contains "[MERGE]"
         let merge_operator = if test_case.description.contains("[MERGE]") {
@@ -1750,9 +1751,10 @@ mod tests {
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn LogicalClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
-        let oracle = Arc::new(Oracle::new(crate::utils::MonotonicSeq::new(0)));
+        let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));
         let last_committed_seq = test_case.last_committed_seq.unwrap_or(u64::MAX);
-        oracle.last_committed_seq.store(last_committed_seq);
+        // reader oracle uses last_remote_persisted_seq for all seq nums
+        oracle.last_remote_persisted_seq.store(last_committed_seq);
 
         // Enable merge operator if the test description contains "[MERGE"
         let merge_operator = if test_case.description.contains("[MERGE") {

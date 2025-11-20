@@ -166,6 +166,7 @@ mod tests {
     use crate::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
+    use crate::oracle::Oracle;
     use crate::{Db, Error};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -654,7 +655,7 @@ mod tests {
                 .expect("Failed to create test database"),
         );
         db.put(b"key1", b"value1").await?;
-        let recent_committed_seq = db.inner.oracle.last_committed_seq.load();
+        let recent_committed_seq = db.inner.oracle.last_committed_seq();
 
         // Configure the failpoint to "pause", blocking the put after memtable write but before commit
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "pause").unwrap();
