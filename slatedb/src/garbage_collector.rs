@@ -262,7 +262,7 @@ mod tests {
 
     use crate::checkpoint::Checkpoint;
     use crate::clock::DefaultSystemClock;
-    use crate::compactor_stats::{COMPACTION_LOW_WATERMARK_TS, RUNNING_COMPACTIONS};
+    use crate::compactor_stats::COMPACTION_LOW_WATERMARK_TS;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
@@ -1026,9 +1026,6 @@ mod tests {
 
         // Pretend a compaction job has already run with the specified start time
         if let Some(compaction_low_watermark_dt) = compaction_low_watermark_dt {
-            let running = Arc::new(Gauge::<i64>::default());
-            running.set(1);
-            stats.register(RUNNING_COMPACTIONS, running);
             let barrier = Arc::new(Gauge::<u64>::default());
             barrier.set(
                 compaction_low_watermark_dt
