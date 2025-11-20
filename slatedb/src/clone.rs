@@ -274,7 +274,7 @@ async fn load_initialized_manifest(
     manifest_store: Arc<ManifestStore>,
 ) -> Result<StoredManifest, SlateDBError> {
     let Some(manifest) = StoredManifest::try_load(manifest_store.clone()).await? else {
-        return Err(SlateDBError::LatestManifestMissing);
+        return Err(SlateDBError::LatestTransactionalObjectVersionMissing);
     };
 
     if !manifest.db_state().initialized {

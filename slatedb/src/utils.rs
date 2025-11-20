@@ -925,7 +925,7 @@ mod tests {
         let timeout_future = timeout(
             clock.clone(),
             timeout_duration,
-            || SlateDBError::ManifestUpdateTimeout {
+            || SlateDBError::TransactionalObjectTimeout {
                 timeout: timeout_duration,
             },
             never_completes,
@@ -947,7 +947,7 @@ mod tests {
         done.store(true, SeqCst);
         assert!(matches!(
             result,
-            Err(SlateDBError::ManifestUpdateTimeout { .. })
+            Err(SlateDBError::TransactionalObjectTimeout { .. })
         ));
     }
 
