@@ -88,8 +88,8 @@ pub(crate) enum TransactionalObjectError {
     #[error("detected newer client")]
     Fenced,
 
-    #[error("invalid state")]
-    InvalidState,
+    #[error("object in store is in an unexpected state")]
+    InvalidObjectState,
 
     // used to pass through errors from callbacks like codecs and mutators
     #[error("callback error")]
@@ -422,7 +422,7 @@ impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalOb
 
     async fn refresh(&mut self) -> Result<&T, TransactionalObjectError> {
         let Some((id, new_val)) = self.ops.try_read_latest().await? else {
-            return Err(TransactionalObjectError::InvalidState);
+            return Err(TransactionalObjectError::InvalidObjectState);
         };
         self.id = id;
         self.object = new_val;
@@ -525,19 +525,10 @@ mod tests {
             &self,
             bytes: &Bytes,
         ) -> Result<TestVal, Box<dyn std::error::Error + Send + Sync>> {
-            let s =
-                std::str::from_utf8(bytes).map_err(|_| TransactionalObjectError::InvalidState)?;
+            let s = std::str::from_utf8(bytes).unwrap();
             let mut parts = s.split(':');
-            let epoch = parts
-                .next()
-                .ok_or(TransactionalObjectError::InvalidState)?
-                .parse()
-                .map_err(|_| TransactionalObjectError::InvalidState)?;
-            let payload = parts
-                .next()
-                .ok_or(TransactionalObjectError::InvalidState)?
-                .parse()
-                .map_err(|_| TransactionalObjectError::InvalidState)?;
+            let epoch = parts.next().unwrap().parse().unwrap();
+            let payload = parts.next().unwrap().parse().unwrap();
             Ok(TestVal { epoch, payload })
         }
     }

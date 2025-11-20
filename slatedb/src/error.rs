@@ -6,6 +6,9 @@ use thiserror::Error as ThisError;
 use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
+use crate::error::SlateDBError::{
+    LatestTransactionalObjectVersionMissing, TransactionalObjectVersionExists,
+};
 use crate::merge_operator::MergeOperatorError;
 use crate::transactional_object::TransactionalObjectError;
 
@@ -33,14 +36,20 @@ pub(crate) enum SlateDBError {
     #[error("object store error")]
     ObjectStoreError(#[from] Arc<object_store::Error>),
 
-    #[error("manifest file already exists")]
-    ManifestVersionExists,
-
     #[error("failed to find manifest with id. id=`{0}`")]
     ManifestMissing(u64),
 
-    #[error("failed to find latest manifest")]
-    LatestManifestMissing,
+    #[error("transactional object version already exists")]
+    TransactionalObjectVersionExists,
+
+    #[error("failed to find latest transactional object version")]
+    LatestTransactionalObjectVersionMissing,
+
+    #[error("generic transactional object error {0:?}")]
+    TransactionalObjectError(#[from] Arc<TransactionalObjectError>),
+
+    #[error("transactinal object op timeout after {timeout:?}")]
+    TransactionalObjectTimeout { timeout: Duration },
 
     #[error("invalid deletion")]
     InvalidDeletion,
@@ -133,9 +142,6 @@ pub(crate) enum SlateDBError {
     #[cfg(feature = "foyer")]
     FoyerError(#[from] Arc<foyer::Error>),
 
-    #[error("manifest update timeout after {timeout:?}")]
-    ManifestUpdateTimeout { timeout: Duration },
-
     #[error("cannot seek to a key outside the iterator range. key=`{key:?}`, range=`{range:?}`")]
     SeekKeyOutOfRange { key: Vec<u8>, range: BytesRange },
 
@@ -204,12 +210,29 @@ pub(crate) enum SlateDBError {
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
-    #[allow(clippy::panic)]
-    fn from(_value: TransactionalObjectError) -> Self {
-        // TransactionalObjectError should never be converted directly to SlateDBError. Rather,
-        // users of transactional objects should write their own mappings to SlateDBError
-        // variants. See manifest/store.rs for an example
-        panic!("TransactionalObjectError should never be converted directly to SlateDBError.")
+    fn from(error: TransactionalObjectError) -> Self {
+        match error {
+            TransactionalObjectError::IoError(e) => SlateDBError::from(e),
+            TransactionalObjectError::ObjectStoreError(e) => SlateDBError::from(e),
+            TransactionalObjectError::LatestRecordMissing => {
+                LatestTransactionalObjectVersionMissing
+            }
+            TransactionalObjectError::ObjectVersionExists => TransactionalObjectVersionExists,
+            TransactionalObjectError::Fenced => SlateDBError::Fenced,
+            TransactionalObjectError::CallbackError(err) => match err.downcast::<SlateDBError>() {
+                Err(err) => SlateDBError::TransactionalObjectError(Arc::new(
+                    TransactionalObjectError::CallbackError(err),
+                )),
+                Ok(err) => *err,
+            },
+            TransactionalObjectError::ObjectUpdateTimeout { timeout } => {
+                SlateDBError::TransactionalObjectTimeout { timeout }
+            }
+            // returned when the persisted state is invalid (e.g. malformed name, missing file)
+            TransactionalObjectError::InvalidObjectState => SlateDBError::TransactionalObjectError(
+                Arc::new(TransactionalObjectError::InvalidObjectState),
+            ),
+        }
     }
 }
 
@@ -420,7 +443,7 @@ impl From<SlateDBError> for Error {
             }
             #[cfg(feature = "foyer")]
             SlateDBError::FoyerError(err) => Error::unavailable(msg).with_source(Box::new(err)),
-            SlateDBError::ManifestUpdateTimeout { .. } => Error::unavailable(msg),
+            SlateDBError::TransactionalObjectTimeout { .. } => Error::unavailable(msg),
 
             // Invalid errors
             SlateDBError::InvalidCachePartSize => Error::invalid(msg),
@@ -465,8 +488,8 @@ impl From<SlateDBError> for Error {
             SlateDBError::CheckpointMissing(_) => Error::data(msg),
             SlateDBError::InvalidVersion { .. } => Error::data(msg),
             SlateDBError::ManifestMissing(_) => Error::data(msg),
-            SlateDBError::LatestManifestMissing => Error::data(msg),
-            SlateDBError::ManifestVersionExists => Error::data(msg),
+            SlateDBError::LatestTransactionalObjectVersionMissing => Error::data(msg),
+            SlateDBError::TransactionalObjectVersionExists => Error::data(msg),
             SlateDBError::EmptyManifest => Error::data(msg),
             SlateDBError::EmptyBlock => Error::data(msg),
             SlateDBError::EmptyBlockMeta => Error::data(msg),
@@ -483,6 +506,9 @@ impl From<SlateDBError> for Error {
             SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskCancelled(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskExecutorStarted => Error::internal(msg),
+            SlateDBError::TransactionalObjectError(err) => {
+                Error::internal(msg).with_source(Box::new(err))
+            }
         }
     }
 }

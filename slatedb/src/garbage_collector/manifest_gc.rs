@@ -56,7 +56,7 @@ impl GcTask for ManifestGcTask {
                 .read_manifest(manifest_metadata.id)
                 .await?
         } else {
-            return Err(SlateDBError::LatestManifestMissing);
+            return Err(SlateDBError::LatestTransactionalObjectVersionMissing);
         };
 
         // Do not delete manifests which are still referenced by active checkpoints

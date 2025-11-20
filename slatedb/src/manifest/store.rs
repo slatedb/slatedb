@@ -4,8 +4,8 @@ use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
-    CheckpointMissing, InvalidDBState, LatestManifestMissing, ManifestMissing,
-    ManifestVersionExists,
+    CheckpointMissing, InvalidDBState, LatestTransactionalObjectVersionMissing, ManifestMissing,
+    TransactionalObjectVersionExists,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::Manifest;
@@ -13,8 +13,7 @@ use crate::rand::DbRand;
 use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
 use crate::transactional_object::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalObjectError,
-    TransactionalStorageProtocol,
+    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
 };
 use chrono::Utc;
 use log::debug;
@@ -50,8 +49,7 @@ impl FenceableManifest {
             |m: &Manifest| m.writer_epoch,
             |m: &mut Manifest, e: u64| m.writer_epoch = e,
         )
-        .await
-        .map_err(into_slatedb_error)?;
+        .await?;
         Ok(Self { inner: fr, clock })
     }
 
@@ -68,24 +66,23 @@ impl FenceableManifest {
             |m: &Manifest| m.compactor_epoch,
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
         )
-        .await
-        .map_err(into_slatedb_error)?;
+        .await?;
         Ok(Self { inner: fr, clock })
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
-        self.inner.refresh().await.map_err(into_slatedb_error)
+        Ok(self.inner.refresh().await?)
     }
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<Manifest>, SlateDBError> {
-        self.inner.prepare_dirty().map_err(into_slatedb_error)
+        Ok(self.inner.prepare_dirty()?)
     }
 
     pub(crate) async fn update_manifest(
         &mut self,
         dirty: DirtyObject<Manifest>,
     ) -> Result<(), SlateDBError> {
-        self.inner.update(dirty).await.map_err(into_slatedb_error)
+        Ok(self.inner.update(dirty).await?)
     }
 
     pub(crate) fn new_checkpoint(
@@ -149,14 +146,15 @@ impl FenceableManifest {
         Ok(checkpoint)
     }
 
-    pub(crate) async fn maybe_apply_update<F>(
-        &mut self,
-        mutator: F,
-    ) -> Result<(), SlateDBError>
+    pub(crate) async fn maybe_apply_update<F>(&mut self, mutator: F) -> Result<(), SlateDBError>
     where
-        F: Fn(&FenceableTransactionalObject<Manifest>) -> Result<Option<DirtyObject<Manifest>>, SlateDBError> + Send + Sync,
+        F: Fn(
+                &FenceableTransactionalObject<Manifest>,
+            ) -> Result<Option<DirtyObject<Manifest>>, SlateDBError>
+            + Send
+            + Sync,
     {
-        self.inner.maybe_apply_update(mutator).await.map_err(into_slatedb_error)
+        Ok(self.inner.maybe_apply_update(mutator).await?)
     }
 }
 
@@ -180,8 +178,7 @@ impl StoredManifest {
                 as Arc<dyn TransactionalStorageProtocol<Manifest, MonotonicId>>,
             manifest.clone(),
         )
-        .await
-        .map_err(into_slatedb_error)?;
+        .await?;
         Ok(Self {
             inner,
             clock: Arc::clone(&store.clock),
@@ -217,8 +214,7 @@ impl StoredManifest {
     pub(crate) async fn try_load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
         let Some(inner) = SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner)
             as Arc<dyn TransactionalStorageProtocol<Manifest, MonotonicId>>)
-        .await
-        .map_err(into_slatedb_error)?
+        .await?
         else {
             return Ok(None);
         };
@@ -230,17 +226,16 @@ impl StoredManifest {
 
     /// Load the current manifest from the supplied manifest store. If successful,
     /// this method returns a [`Result`] with an instance of [`StoredManifest`].
-    /// If no manifests could be found, the error [`LatestManifestMissing`] is returned.
+    /// If no manifests could be found, the error [`LatestTransactionalObjectVersionMissing`] is returned.
     pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
         SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner)
             as Arc<dyn TransactionalStorageProtocol<Manifest, MonotonicId>>)
-        .await
-        .map_err(into_slatedb_error)?
+        .await?
         .map(|inner| Self {
             inner,
             clock: Arc::clone(&store.clock),
         })
-        .ok_or(LatestManifestMissing)
+        .ok_or(LatestTransactionalObjectVersionMissing)
     }
 
     #[allow(dead_code)]
@@ -253,7 +248,7 @@ impl StoredManifest {
     }
 
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<Manifest>, SlateDBError> {
-        self.inner.prepare_dirty().map_err(into_slatedb_error)
+        Ok(self.inner.prepare_dirty()?)
     }
 
     pub(crate) fn db_state(&self) -> &CoreDbState {
@@ -261,7 +256,7 @@ impl StoredManifest {
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
-        self.inner.refresh().await.map_err(into_slatedb_error)
+        Ok(self.inner.refresh().await?)
     }
 
     fn new_checkpoint(
@@ -312,13 +307,12 @@ impl StoredManifest {
                     options,
                 )?;
                 new_val.core.checkpoints.push(checkpoint);
-                let mut dirty = sr.prepare_dirty().map_err(into_slatedb_error)?;
+                let mut dirty = sr.prepare_dirty()?;
                 dirty.value = new_val;
                 let result: Result<Option<DirtyObject<Manifest>>, SlateDBError> = Ok(Some(dirty));
                 result
             })
-            .await
-            .map_err(into_slatedb_error)?;
+            .await?;
         Ok(self
             .db_state()
             .find_checkpoint(checkpoint_id)
@@ -330,7 +324,8 @@ impl StoredManifest {
         &mut self,
         checkpoint_id: Uuid,
     ) -> Result<(), SlateDBError> {
-        self.inner
+        Ok(self
+            .inner
             .maybe_apply_update(|sr| {
                 let mut new_val = sr.object().clone();
                 let before = new_val.core.checkpoints.len();
@@ -340,14 +335,13 @@ impl StoredManifest {
                     if new_val.core.checkpoints.len() == before {
                         Ok(None)
                     } else {
-                        let mut dirty = sr.prepare_dirty().map_err(into_slatedb_error)?;
+                        let mut dirty = sr.prepare_dirty()?;
                         dirty.value = new_val;
                         Ok(Some(dirty))
                     };
                 result
             })
-            .await
-            .map_err(into_slatedb_error)
+            .await?)
     }
 
     /// Replace an existing checkpoint with a new checkpoint. If the old checkpoint
@@ -376,13 +370,12 @@ impl StoredManifest {
                     .checkpoints
                     .retain(|cp| cp.id != old_checkpoint_id);
                 new_val.core.checkpoints.push(checkpoint);
-                let mut dirty = sr.prepare_dirty().map_err(into_slatedb_error)?;
+                let mut dirty = sr.prepare_dirty()?;
                 dirty.value = new_val;
                 let result: Result<Option<DirtyObject<Manifest>>, SlateDBError> = Ok(Some(dirty));
                 result
             })
-            .await
-            .map_err(into_slatedb_error)?;
+            .await?;
         let new_checkpoint = self
             .db_state()
             .find_checkpoint(new_checkpoint_id)
@@ -409,12 +402,11 @@ impl StoredManifest {
                     return Err(CheckpointMissing(checkpoint_id));
                 };
                 cp.expire_time = Some(clock.now() + new_lifetime);
-                let mut dirty = sr.prepare_dirty().map_err(into_slatedb_error)?;
+                let mut dirty = sr.prepare_dirty()?;
                 dirty.value = new_val;
                 Ok(Some(dirty))
             })
-            .await
-            .map_err(into_slatedb_error)?;
+            .await?;
         let checkpoint = self
             .db_state()
             .find_checkpoint(checkpoint_id)
@@ -427,7 +419,7 @@ impl StoredManifest {
         &mut self,
         dirty: DirtyObject<Manifest>,
     ) -> Result<(), SlateDBError> {
-        self.inner.update(dirty).await.map_err(into_slatedb_error)
+        Ok(self.inner.update(dirty).await?)
     }
 
     /// Apply an update to a stored manifest repeatedly retrying the update
@@ -449,7 +441,7 @@ impl StoredManifest {
             };
 
             return match self.update_manifest(dirty).await {
-                Err(ManifestVersionExists) => {
+                Err(TransactionalObjectVersionExists) => {
                     self.refresh().await?;
                     continue;
                 }
@@ -516,10 +508,7 @@ impl ManifestStore {
         }
 
         debug!("deleting manifest [id={}]", id);
-        self.inner
-            .delete(MonotonicId::new(id))
-            .await
-            .map_err(into_slatedb_error)
+        Ok(self.inner.delete(MonotonicId::new(id)).await?)
     }
 
     /// Read a manifest from the object store. The last element in an unbounded
@@ -536,8 +525,7 @@ impl ManifestStore {
                 id_range.start_bound().map(|b| (*b).into()),
                 id_range.end_bound().map(|b| (*b).into()),
             )
-            .await
-            .map_err(into_slatedb_error)?
+            .await?
             .into_iter()
             .map(|f| ManifestFileMetadata {
                 id: f.id.into(),
@@ -574,27 +562,24 @@ impl ManifestStore {
     pub(crate) async fn try_read_latest_manifest(
         &self,
     ) -> Result<Option<(u64, Manifest)>, SlateDBError> {
-        self.inner
+        Ok(self
+            .inner
             .try_read_latest()
             .await
-            .map(|opt| opt.map(|(id, manifest)| (id.into(), manifest)))
-            .map_err(into_slatedb_error)
+            .map(|opt| opt.map(|(id, manifest)| (id.into(), manifest)))?)
     }
 
     pub(crate) async fn read_latest_manifest(&self) -> Result<(u64, Manifest), SlateDBError> {
         self.try_read_latest_manifest()
             .await?
-            .ok_or(LatestManifestMissing)
+            .ok_or(LatestTransactionalObjectVersionMissing)
     }
 
     pub(crate) async fn try_read_manifest(
         &self,
         id: u64,
     ) -> Result<Option<Manifest>, SlateDBError> {
-        self.inner
-            .try_read(MonotonicId::new(id))
-            .await
-            .map_err(into_slatedb_error)
+        Ok(self.inner.try_read(MonotonicId::new(id)).await?)
     }
 
     pub(crate) async fn read_manifest(&self, id: u64) -> Result<Manifest, SlateDBError> {
@@ -611,26 +596,6 @@ impl ManifestStore {
             return Err(SlateDBError::WalStoreReconfigurationError);
         }
         Ok(())
-    }
-}
-
-fn into_slatedb_error(error: TransactionalObjectError) -> SlateDBError {
-    match error {
-        TransactionalObjectError::IoError(e) => SlateDBError::from(e),
-        TransactionalObjectError::ObjectStoreError(e) => SlateDBError::from(e),
-        TransactionalObjectError::LatestRecordMissing => LatestManifestMissing,
-        TransactionalObjectError::ObjectVersionExists => ManifestVersionExists,
-        TransactionalObjectError::Fenced => SlateDBError::Fenced,
-        TransactionalObjectError::CallbackError(err) => {
-            let Ok(err) = err.downcast::<SlateDBError>() else {
-                return SlateDBError::InvalidDBState;
-            };
-            *err
-        }
-        TransactionalObjectError::ObjectUpdateTimeout { timeout } => {
-            SlateDBError::ManifestUpdateTimeout { timeout }
-        }
-        TransactionalObjectError::InvalidState => SlateDBError::InvalidDBState,
     }
 }
 
@@ -682,7 +647,7 @@ mod tests {
 
         assert!(matches!(
             result.unwrap_err(),
-            error::SlateDBError::ManifestVersionExists
+            error::SlateDBError::TransactionalObjectVersionExists
         ));
     }
 
@@ -826,7 +791,10 @@ mod tests {
 
         let result = sm.update_manifest(stale).await;
 
-        assert!(matches!(result, Err(SlateDBError::ManifestVersionExists)));
+        assert!(matches!(
+            result,
+            Err(SlateDBError::TransactionalObjectVersionExists)
+        ));
     }
 
     #[tokio::test]
