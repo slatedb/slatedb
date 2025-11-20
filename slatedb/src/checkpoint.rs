@@ -542,6 +542,10 @@ mod tests {
         let all_checkpoints = admin.list_checkpoints(None).await.unwrap();
         assert!(all_checkpoints.len() >= 3);
 
+        // List checkpoints filtered by empty name
+        let filtered_checkpoints = admin.list_checkpoints(Some("")).await.unwrap();
+        assert_eq!(filtered_checkpoints.len(), 3);
+
         // List checkpoints filtered by name1
         let filtered_checkpoints = admin.list_checkpoints(Some(&name1)).await.unwrap();
         assert_eq!(filtered_checkpoints.len(), 1);

@@ -1,4 +1,3 @@
-from os import name
 import pytest
 
 from slatedb import InvalidError, SlateDB, SlateDBAdmin, SlateDBReader

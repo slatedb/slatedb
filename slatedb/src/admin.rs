@@ -100,15 +100,15 @@ impl Admin {
         );
         let (_, manifest) = manifest_store.read_latest_manifest().await?;
 
-        let checkpoints = if let Some(_x) = name_filter {
-            manifest
+        let checkpoints = match name_filter {
+            Some("") => manifest.core.checkpoints,
+            Some(name) => manifest
                 .core
                 .checkpoints
                 .into_iter()
-                .filter(|cp| cp.name.as_deref() == name_filter)
-                .collect()
-        } else {
-            manifest.core.checkpoints
+                .filter(|cp| cp.name.as_deref() == Some(name))
+                .collect(),
+            None => manifest.core.checkpoints,
         };
 
         Ok(checkpoints)
