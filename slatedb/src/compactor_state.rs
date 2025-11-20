@@ -219,7 +219,7 @@ impl CompactorState {
 
     /// Returns the current in-memory core DB state derived from the manifest.
     pub(crate) fn db_state(&self) -> &CoreDbState {
-        &self.manifest.value.core
+        self.manifest.core()
     }
 
     /// Returns the local dirty manifest that will be written back after compactions.
@@ -242,7 +242,7 @@ impl CompactorState {
         let my_db_state = self.db_state();
         let last_compacted_l0 = my_db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &remote_manifest.value.core.l0;
+        let writer_l0 = &remote_manifest.core().l0;
         for writer_l0_sst in writer_l0 {
             let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
