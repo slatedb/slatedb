@@ -122,7 +122,6 @@ impl FsCacheEntry {
             .await
             .map_err(wrap_io_err)?;
         file.write_all(&buf).await.map_err(wrap_io_err)?;
-        file.sync_all().await.map_err(wrap_io_err)?;
         fs::rename(tmp_path, path).await.map_err(wrap_io_err)
     }
 
