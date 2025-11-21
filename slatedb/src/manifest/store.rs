@@ -27,10 +27,6 @@ use std::time::Duration;
 use uuid::Uuid;
 
 impl DirtyObject<Manifest> {
-    pub(crate) fn manifest(&self) -> &Manifest {
-        &self.value
-    }
-
     pub(crate) fn core(&self) -> &CoreDbState {
         &self.value.core
     }
