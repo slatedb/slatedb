@@ -343,6 +343,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytesize"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00f4369ba008f82b968b1acbe31715ec37bd45236fa0726605a36cc3060ea256"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3294,6 +3300,7 @@ dependencies = [
  "bitflags 2.9.1",
  "bytemuck",
  "bytes",
+ "bytesize",
  "chrono",
  "crc32fast",
  "criterion",
