@@ -60,11 +60,11 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
                 .expect("invalid filename")
                 .split('.')
                 .next()
-                .ok_or_else(|| TransactionalObjectError::InvalidState)?
+                .ok_or_else(|| TransactionalObjectError::InvalidObjectState)?
                 .parse()
                 .map(MonotonicId::new)
-                .map_err(|_| TransactionalObjectError::InvalidState),
-            _ => Err(TransactionalObjectError::InvalidState),
+                .map_err(|_| TransactionalObjectError::InvalidObjectState),
+            _ => Err(TransactionalObjectError::InvalidObjectState),
         }
     }
 }

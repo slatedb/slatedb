@@ -849,7 +849,7 @@ mod tests {
 
     fn create_compactor_state(db_state: CoreDbState) -> CompactorState {
         let mut dirty = new_dirty_manifest();
-        dirty.core = db_state;
+        dirty.value.core = db_state;
         CompactorState::new(dirty)
     }
 

@@ -472,7 +472,7 @@ impl CompactorEventHandler {
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
         let dirty = self.state.manifest().clone();
-        self.manifest.update_manifest(dirty).await
+        self.manifest.update(dirty).await
     }
 
     /// Writes the manifest, retrying on version conflicts by reloading and retrying.
@@ -481,7 +481,7 @@ impl CompactorEventHandler {
             self.load_manifest().await?;
             match self.write_manifest().await {
                 Ok(_) => return Ok(()),
-                Err(SlateDBError::ManifestVersionExists) => {
+                Err(SlateDBError::TransactionalObjectVersionExists) => {
                     debug!("conflicting manifest version. updating and retrying write again.");
                 }
                 Err(err) => return Err(err),
