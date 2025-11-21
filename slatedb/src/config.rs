@@ -487,6 +487,9 @@ pub struct CheckpointOptions {
     /// is useful for users to establish checkpoints from existing checkpoints, but with a different
     /// lifecycle and/or metadata.
     pub source: Option<Uuid>,
+
+    /// Optionally specifies a name for the checkpoint. Can be used to list the checkpoints.
+    pub name: Option<String>,
 }
 
 /// Settings represents the configuration options that a user can tweak to customize

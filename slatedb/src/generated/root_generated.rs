@@ -2126,6 +2126,7 @@ impl<'a> Checkpoint<'a> {
   pub const VT_CHECKPOINT_CREATE_TIME_S: flatbuffers::VOffsetT = 10;
   pub const VT_METADATA_TYPE: flatbuffers::VOffsetT = 12;
   pub const VT_METADATA: flatbuffers::VOffsetT = 14;
+  pub const VT_NAME: flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -2138,6 +2139,7 @@ impl<'a> Checkpoint<'a> {
   ) -> flatbuffers::WIPOffset<Checkpoint<'bldr>> {
     let mut builder = CheckpointBuilder::new(_fbb);
     builder.add_manifest_id(args.manifest_id);
+    if let Some(x) = args.name { builder.add_name(x); }
     if let Some(x) = args.metadata { builder.add_metadata(x); }
     builder.add_checkpoint_create_time_s(args.checkpoint_create_time_s);
     builder.add_checkpoint_expire_time_s(args.checkpoint_expire_time_s);
@@ -2190,6 +2192,13 @@ impl<'a> Checkpoint<'a> {
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(Checkpoint::VT_METADATA, None)}
   }
   #[inline]
+  pub fn name(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<&str>>(Checkpoint::VT_NAME, None)}
+  }
+  #[inline]
   #[allow(non_snake_case)]
   pub fn metadata_as_writer_checkpoint(&self) -> Option<WriterCheckpoint<'a>> {
     if self.metadata_type() == CheckpointMetadata::WriterCheckpoint {
@@ -2223,6 +2232,7 @@ impl flatbuffers::Verifiable for Checkpoint<'_> {
           _ => Ok(()),
         }
      })?
+     .visit_field::<flatbuffers::ForwardsUOffset<&str>>("name", Self::VT_NAME, false)?
      .finish();
     Ok(())
   }
@@ -2234,6 +2244,7 @@ pub struct CheckpointArgs<'a> {
     pub checkpoint_create_time_s: u32,
     pub metadata_type: CheckpointMetadata,
     pub metadata: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub name: Option<flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for CheckpointArgs<'a> {
   #[inline]
@@ -2245,6 +2256,7 @@ impl<'a> Default for CheckpointArgs<'a> {
       checkpoint_create_time_s: 0,
       metadata_type: CheckpointMetadata::NONE,
       metadata: None,
+      name: None,
     }
   }
 }
@@ -2277,6 +2289,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CheckpointBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_metadata(&mut self, metadata: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Checkpoint::VT_METADATA, metadata);
+  }
+  #[inline]
+  pub fn add_name(&mut self, name: flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Checkpoint::VT_NAME, name);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CheckpointBuilder<'a, 'b, A> {
@@ -2315,6 +2331,7 @@ impl core::fmt::Debug for Checkpoint<'_> {
           ds.field("metadata", &x)
         },
       };
+      ds.field("name", &self.name());
       ds.finish()
   }
 }

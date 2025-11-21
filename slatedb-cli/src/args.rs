@@ -65,6 +65,12 @@ pub(crate) enum CliCommands {
         #[arg(short, long)]
         #[clap(value_parser = uuid::Uuid::parse_str)]
         source: Option<Uuid>,
+
+        /// Optionally specify a name for the checkpoint. The name can be used to list the checkpoints.
+        /// Note that name may not be unique and the list operation can return multiple checkpoints with
+        /// the same name.
+        #[arg(short, long)]
+        name: Option<String>,
     },
 
     /// Refresh an existing checkpoint's expiry time. This command will look for an existing
@@ -94,7 +100,13 @@ pub(crate) enum CliCommands {
     },
 
     /// List the current checkpoints of the db.
-    ListCheckpoints {},
+    ListCheckpoints {
+        /// Optionally specify the name to filter the checkpoints. Note that name may not be unique
+        /// and the list operation can return multiple checkpoints with the same name. If not specified,
+        /// all checkpoints will be returned.
+        #[arg(short, long)]
+        name: Option<String>,
+    },
 
     /// Runs a garbage collection for a specific resource type once
     RunGarbageCollection {
