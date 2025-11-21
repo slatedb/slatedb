@@ -513,6 +513,7 @@ mod tests {
         // Create checkpoints with different names
         let name1 = "checkpoint_1".to_string();
         let name2 = "checkpoint_2".to_string();
+        let name3 = "".to_string();
 
         admin
             .create_detached_checkpoint(&CheckpointOptions {
@@ -538,13 +539,24 @@ mod tests {
             .await
             .unwrap();
 
+        admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                name: Some(name3.clone()),
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
         // List all checkpoints
         let all_checkpoints = admin.list_checkpoints(None).await.unwrap();
-        assert!(all_checkpoints.len() >= 3);
+        assert!(all_checkpoints.len() >= 4);
 
         // List checkpoints filtered by empty name
         let filtered_checkpoints = admin.list_checkpoints(Some("")).await.unwrap();
-        assert_eq!(filtered_checkpoints.len(), 3);
+        assert_eq!(filtered_checkpoints.len(), 2);
+        assert!(filtered_checkpoints
+            .iter()
+            .all(|cp| cp.name.is_none() || cp.name.as_deref() == Some("")));
 
         // List checkpoints filtered by name1
         let filtered_checkpoints = admin.list_checkpoints(Some(&name1)).await.unwrap();
