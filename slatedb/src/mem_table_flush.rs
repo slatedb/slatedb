@@ -18,6 +18,7 @@ use futures::StreamExt;
 use log::{debug, error, info, warn};
 use parking_lot::RwLock;
 use std::cmp;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot::Sender;
@@ -318,21 +319,21 @@ impl LocalManifestView {
     }
 
     fn set_next_wal_id(&mut self, next_wal_id: Option<u64>) {
-        let mut dirty_manifest = self.dirty_manifest.get().clone();
+        let mut dirty_manifest = self.dirty_manifest.write();
         if let Some(next_wal_id) = next_wal_id {
             dirty_manifest.value.core.next_wal_sst_id = next_wal_id;
         }
-        self.dirty_manifest.replace(dirty_manifest);
+        dirty_manifest.commit();
     }
 
     fn set_min_active_snapshot_seq(&mut self, min_active_snapshot_seq: Option<u64>) {
-        let mut dirty_manifest = self.dirty_manifest.get().clone();
+        let mut dirty_manifest = self.dirty_manifest.write();
         // update the persisted manifest recent_snapshot_min_seq to inform the compactor
         // can safely reclaim the entries with smaller seq. if there's no active snapshot,
         // we simply use the latest l0 seq.
         dirty_manifest.value.core.recent_snapshot_min_seq =
             min_active_snapshot_seq.unwrap_or(dirty_manifest.value.core.last_l0_seq);
-        self.dirty_manifest.replace(dirty_manifest);
+        dirty_manifest.commit();
     }
 
     fn push_new_l0(
@@ -341,7 +342,7 @@ impl LocalManifestView {
         sst_handle: SsTableHandle,
         min_active_snapshot_seq: Option<u64>,
     ) -> Result<(), SlateDBError> {
-        let mut dirty_manifest = self.dirty_manifest.get().clone();
+        let mut dirty_manifest = self.dirty_manifest.write();
         let last_seq = imm_memtable
             .table()
             .last_seq()
@@ -371,9 +372,9 @@ impl LocalManifestView {
             .sequence_tracker
             .extend_from(sequence_tracker);
 
-        self.set_min_active_snapshot_seq(min_active_snapshot_seq);
+        dirty_manifest.commit();
 
-        self.dirty_manifest.replace(dirty_manifest);
+        self.set_min_active_snapshot_seq(min_active_snapshot_seq);
 
         Ok(())
     }
@@ -413,7 +414,10 @@ impl LocalView<Manifest> for LocalManifestView {
             checkpoints: remote_manifest.value.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
         };
-        self.dirty_manifest.replace(remote_manifest);
+        // TODO: this is weird
+        let mut dirty_manifest = self.dirty_manifest.write();
+        *dirty_manifest = remote_manifest;
+        dirty_manifest.commit();
     }
 
     fn value(&self) -> &DirtyObject<Manifest, MonotonicId> {
@@ -425,20 +429,53 @@ impl LocalView<Manifest> for LocalManifestView {
 /// useful for ensuring that code that mutates the value does so atomically in the sense
 /// that for a mutation that requires updating multiple fields either all updates are
 /// applied or none are applied.
-pub struct ReplaceOnly<T> {
+pub struct ReplaceOnly<T: Clone> {
     inner: T,
 }
 
-impl<T> ReplaceOnly<T> {
-    pub fn new(inner: T) -> Self {
+impl<T: Clone> ReplaceOnly<T> {
+    pub(crate) fn new(inner: T) -> Self {
         Self { inner }
     }
 
-    pub fn get(&self) -> &T {
+    pub(crate) fn get(&self) -> &T {
         &self.inner
     }
 
-    pub fn replace(&mut self, new: T) -> T {
+    pub(crate) fn replace(&mut self, new: T) -> T {
         std::mem::replace(&mut self.inner, new)
+    }
+
+    pub fn write(&mut self) -> ReplaceOnlyGuard<T> {
+        let new_value = self.inner.clone();
+        ReplaceOnlyGuard {
+            cell: self,
+            new_value
+        }
+    }
+}
+
+struct ReplaceOnlyGuard<'a, T: Clone> {
+    cell: &'a mut ReplaceOnly<T>,
+    new_value: T,
+}
+
+impl <'a, T: Clone> ReplaceOnlyGuard<'a, T> {
+    fn commit(self) {
+        self.cell.replace(self.new_value);
+    }
+}
+
+impl <'a, T: Clone> Deref for ReplaceOnlyGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.new_value
+    }
+}
+
+impl <'a, T: Clone> DerefMut for ReplaceOnlyGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+       &mut self.new_value
     }
 }
