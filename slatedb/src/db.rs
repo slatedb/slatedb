@@ -51,7 +51,7 @@ use crate::config::{
 use crate::db_iter::DbIterator;
 use crate::db_read::DbRead;
 use crate::db_snapshot::DbSnapshot;
-use crate::db_state::{DbState, SsTableId};
+use crate::db_state::{DbState, SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::{DirtyManifest, FenceableManifest};
@@ -65,7 +65,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{MonotonicSeq, SendSafely};
+use crate::utils::{build_concurrent, compute_max_parallel, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use log::{info, trace, warn};
@@ -528,6 +528,61 @@ impl DbInner {
                 // No preloading
             }
         }
+        Ok(())
+    }
+
+    async fn preload_meta_cache(&self) -> Result<(), SlateDBError> {
+        let Some(preload_level) = self.settings.meta_cache_preload else {
+            return Ok(());
+        };
+
+        if !self.table_store.has_cache() {
+            warn!("Meta cache preload was requested, but no cache is configured; skipping");
+            return Ok(());
+        }
+
+        let current_state = self.state.read().state();
+        let max_parallelism = compute_max_parallel(
+            current_state.manifest.core.l0.len(),
+            &current_state.manifest.core.compacted,
+            4,
+        );
+
+        // Load compacted SSTs first so that L0 entries are the most recently added
+        // to the cache, keeping them hotter when capacity is tight.
+        let mut handles_to_load: Vec<SsTableHandle> = Vec::new();
+        if matches!(preload_level, PreloadLevel::AllSst) {
+            handles_to_load.extend(
+                current_state
+                    .manifest
+                    .core
+                    .compacted
+                    .iter()
+                    .flat_map(|level| level.ssts.iter().cloned()),
+            );
+        }
+        handles_to_load.extend(current_state.manifest.core.l0.iter().cloned());
+
+        if handles_to_load.is_empty() {
+            return Ok(());
+        }
+
+        let table_store = self.table_store.clone();
+
+        let _results = build_concurrent(handles_to_load, max_parallelism, move |handle| {
+            let table_store = table_store.clone();
+            async move {
+                if let Err(e) = table_store.read_index(&handle).await {
+                    warn!("Failed to preload index for SST {:?}: {:?}", handle.id, e);
+                }
+                if let Err(e) = table_store.read_filter(&handle).await {
+                    warn!("Failed to preload filter for SST {:?}: {:?}", handle.id, e);
+                }
+                Ok::<Option<()>, SlateDBError>(None)
+            }
+        })
+        .await;
+
         Ok(())
     }
 
@@ -4944,6 +4999,8 @@ mod tests {
             compression_codec: None,
             merge_operator: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
+            meta_cache_preload: None,
+            meta_cache_update_on_write: false,
             garbage_collector_options: None,
             default_ttl: ttl,
         }

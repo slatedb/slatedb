@@ -105,7 +105,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fail_parallel::FailPointRegistry;
-use log::info;
+use log::{info, warn};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use tokio::runtime::Handle;
@@ -443,6 +443,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     system_clock.clone(),
                 )) as Arc<dyn DbCache>
             }),
+            self.settings.meta_cache_update_on_write,
         ));
 
         // Get next WAL ID before writing manifest
@@ -532,6 +533,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             path_resolver.clone(),
             self.fp_registry.clone(),
             None,
+            self.settings.meta_cache_update_on_write,
         ));
 
         // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
@@ -609,6 +611,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner
                 .preload_cache(&cached_obj_store, &path_resolver)
                 .await?;
+        }
+
+        // Preload meta cache (index and filter) if configured
+        if let Err(e) = inner.preload_meta_cache().await {
+            warn!("Failed to preload meta cache: {:?}", e);
         }
 
         // Create and return the Db instance

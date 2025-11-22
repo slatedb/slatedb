@@ -32,6 +32,8 @@ pub struct TableStore {
     fp_registry: Arc<FailPointRegistry>,
     /// In-memory cache for data blocks, indices, and filters
     cache: Option<Arc<dyn DbCache>>,
+    /// Whether to eagerly update the meta cache (index/filter) when SSTs are written
+    meta_cache_update_on_write: bool,
 }
 
 struct ReadOnlyObject {
@@ -80,6 +82,7 @@ impl TableStore {
             PathResolver::new(root_path),
             Arc::new(FailPointRegistry::new()),
             block_cache,
+            false,
         )
     }
 
@@ -89,6 +92,7 @@ impl TableStore {
         path_resolver: PathResolver,
         fp_registry: Arc<FailPointRegistry>,
         cache: Option<Arc<dyn DbCache>>,
+        meta_cache_update_on_write: bool,
     ) -> Self {
         Self {
             object_stores,
@@ -96,7 +100,12 @@ impl TableStore {
             path_resolver,
             fp_registry,
             cache,
+            meta_cache_update_on_write,
         }
+    }
+
+    pub(crate) fn has_cache(&self) -> bool {
+        self.cache.is_some()
     }
 
     /// Get the number of blocks for a size specified in bytes.
@@ -200,26 +209,48 @@ impl TableStore {
         let path = self.path(id);
         write_sst_in_object_store(object_store.clone(), id, &path, &data).await?;
 
+        let EncodedSsTable {
+            info,
+            index,
+            filter,
+            unconsumed_blocks,
+            ..
+        } = encoded_sst;
+
+        let mut filter_cached = false;
         if let Some(ref cache) = self.cache {
             if write_cache {
-                for block in encoded_sst.unconsumed_blocks {
+                for block in unconsumed_blocks {
                     let offset = block.offset;
                     let block = Arc::new(block.block);
                     cache
                         .insert((*id, offset).into(), CachedEntry::with_block(block))
                         .await;
                 }
+            }
+            // If configured, update meta cache (index/filter) immediately on write
+            if self.meta_cache_update_on_write {
                 cache
                     .insert(
-                        (*id, encoded_sst.info.index_offset).into(),
-                        CachedEntry::with_sst_index(Arc::new(encoded_sst.index)),
+                        (*id, info.index_offset).into(),
+                        CachedEntry::with_sst_index(Arc::new(index)),
                     )
                     .await;
+                if let Some(filter) = filter.as_ref() {
+                    cache
+                        .insert(
+                            (*id, info.filter_offset).into(),
+                            CachedEntry::with_bloom_filter(filter.clone()),
+                        )
+                        .await;
+                    filter_cached = true;
+                }
             }
         }
-        self.cache_filter(*id, encoded_sst.info.filter_offset, encoded_sst.filter)
-            .await;
-        Ok(SsTableHandle::new(*id, encoded_sst.info))
+        if !filter_cached {
+            self.cache_filter(*id, info.filter_offset, filter).await;
+        }
+        Ok(SsTableHandle::new(*id, info))
     }
 
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
@@ -549,9 +580,34 @@ impl EncodedSsTableWriter<'_> {
 
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
         self.writer.shutdown().await?;
-        self.table_store
-            .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
-            .await;
+
+        // If configured, update meta cache (index/filter) immediately on write
+        let mut filter_cached = false;
+        if let Some(ref cache) = self.table_store.cache {
+            if self.table_store.meta_cache_update_on_write {
+                cache
+                    .insert(
+                        (self.id, encoded_sst.info.index_offset).into(),
+                        CachedEntry::with_sst_index(Arc::new(encoded_sst.index)),
+                    )
+                    .await;
+                if let Some(filter) = encoded_sst.filter.as_ref() {
+                    cache
+                        .insert(
+                            (self.id, encoded_sst.info.filter_offset).into(),
+                            CachedEntry::with_bloom_filter(filter.clone()),
+                        )
+                        .await;
+                    filter_cached = true;
+                }
+            }
+        }
+
+        if !filter_cached {
+            self.table_store
+                .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
+                .await;
+        }
         Ok(SsTableHandle::new(self.id, encoded_sst.info))
     }
 
@@ -599,6 +655,7 @@ mod tests {
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
     use crate::object_stores::ObjectStores;
+    use crate::paths::PathResolver;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -610,6 +667,7 @@ mod tests {
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
+    use fail_parallel::FailPointRegistry;
 
     const ROOT: &str = "/root";
 
@@ -1033,6 +1091,83 @@ mod tests {
                 .await
                 .unwrap();
             assert!(cached_block.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_sst_should_write_meta_cache_when_update_on_write_enabled() {
+        let os = Arc::new(InMemory::new());
+        let meta_cache = Arc::new(TestCache::new());
+        let split_cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let ts = Arc::new(TableStore::new_with_fp_registry(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            PathResolver::new(Path::from(ROOT)),
+            Arc::new(FailPointRegistry::new()),
+            Some(split_cache),
+            true,
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 3);
+        let info = sst.info.clone();
+
+        ts.write_sst(&id, sst, false).await.unwrap();
+
+        // Index should be inserted into the meta cache
+        let cached_index = meta_cache
+            .get_index(&(id, info.index_offset).into())
+            .await
+            .unwrap();
+        assert!(cached_index.is_some());
+
+        if info.filter_len > 0 {
+            let cached_filter = meta_cache
+                .get_filter(&(id, info.filter_offset).into())
+                .await
+                .unwrap();
+            assert!(cached_filter.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_sst_should_not_write_meta_cache_when_update_on_write_disabled() {
+        let os = Arc::new(InMemory::new());
+        let meta_cache = Arc::new(TestCache::new());
+        let split_cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let ts = Arc::new(TableStore::new_with_fp_registry(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            PathResolver::new(Path::from(ROOT)),
+            Arc::new(FailPointRegistry::new()),
+            Some(split_cache),
+            false,
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 3);
+        let info = sst.info.clone();
+
+        ts.write_sst(&id, sst, false).await.unwrap();
+
+        let cached_index = meta_cache
+            .get_index(&(id, info.index_offset).into())
+            .await
+            .unwrap();
+        assert!(cached_index.is_none());
+
+        if info.filter_len > 0 {
+            let cached_filter = meta_cache
+                .get_filter(&(id, info.filter_offset).into())
+                .await
+                .unwrap();
+            assert!(cached_filter.is_some());
         }
     }
 

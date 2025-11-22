@@ -597,6 +597,12 @@ pub struct Settings {
     /// The object store cache options.
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
+    /// Preload index/filter metadata into the meta cache on startup. `None` disables preloading.
+    pub meta_cache_preload: Option<PreloadLevel>,
+
+    /// Eagerly populate the meta cache when SSTs are written (flush/compaction).
+    pub meta_cache_update_on_write: bool,
+
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
 
@@ -637,6 +643,11 @@ impl std::fmt::Debug for Settings {
             .field(
                 "object_store_cache_options",
                 &self.object_store_cache_options,
+            )
+            .field("meta_cache_preload", &self.meta_cache_preload)
+            .field(
+                "meta_cache_update_on_write",
+                &self.meta_cache_update_on_write,
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("filter_bits_per_key", &self.filter_bits_per_key)
@@ -805,6 +816,8 @@ impl Default for Settings {
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
+            meta_cache_preload: None,
+            meta_cache_update_on_write: false,
             garbage_collector_options: None,
             filter_bits_per_key: 10,
             default_ttl: None,
