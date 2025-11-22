@@ -99,6 +99,9 @@ type Settings struct {
 
 	WalEnabled *bool `json:"wal_enabled,omitempty"`
 
+	MetaCachePreload       *string `json:"meta_cache_preload,omitempty"`
+	MetaCacheUpdateOnWrite bool    `json:"meta_cache_update_on_write"`
+
 	CompactorOptions        *CompactorOptions        `json:"compactor_options,omitempty"`
 	ObjectStoreCacheOptions *ObjectStoreCacheOptions `json:"object_store_cache_options,omitempty"`
 	GarbageCollectorOptions *GarbageCollectorOptions `json:"garbage_collector_options,omitempty"`
@@ -289,6 +292,11 @@ func MergeSettings(base, override *Settings) *Settings {
 	if override.MaxUnflushedBytes != 0 {
 		result.MaxUnflushedBytes = override.MaxUnflushedBytes
 	}
+
+	if override.MetaCachePreload != nil {
+		result.MetaCachePreload = override.MetaCachePreload
+	}
+	result.MetaCacheUpdateOnWrite = override.MetaCacheUpdateOnWrite
 
 	if override.WalEnabled != nil {
 		result.WalEnabled = override.WalEnabled
