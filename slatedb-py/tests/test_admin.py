@@ -3,8 +3,8 @@ import pytest
 from slatedb import InvalidError, SlateDB, SlateDBAdmin, SlateDBReader
 
 
-def test_admin_create_checkpoint(db_path, env_file):
-    """Admin can create a detached checkpoint and return id + manifest_id."""
+def test_admin_create_checkpoint_without_name(db_path, env_file):
+    """Admin can create a detached checkpoint without a name and return id + manifest_id."""
     # Create a simple database first
     db = SlateDB(db_path, env_file=env_file)
     db.put(b"test", b"value")
@@ -16,6 +16,15 @@ def test_admin_create_checkpoint(db_path, env_file):
     assert isinstance(result["id"], str) and len(result["id"]) > 0
     assert isinstance(result["manifest_id"], int)
 
+def test_admin_create_checkpoint_with_name(db_path, env_file):
+    """Admin can create a detached checkpoint with a name and return id + manifest_id."""
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"test", b"value")
+    db.close()
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    result = admin.create_checkpoint(name="my_checkpoint")
+    assert result is not None
+    assert isinstance(result["id"], str) and len(result["id"]) > 0
 
 def test_admin_list_checkpoints(db_path, env_file):
     """Admin can list checkpoints, and list includes newly created ones."""
@@ -24,13 +33,32 @@ def test_admin_list_checkpoints(db_path, env_file):
     db.close()
 
     admin = SlateDBAdmin(db_path, env_file=env_file)
-    before = admin.list_checkpoints()
+    before = admin.list_checkpoints(name=None)
     assert isinstance(before, list)
 
     created = admin.create_checkpoint()
-    cps = admin.list_checkpoints()
+    cps = admin.list_checkpoints(name=None)
     # Expect at least one checkpoint and that the created id is present
     assert any(c["id"] == created["id"] for c in cps)
+
+def test_admin_list_checkpoints_with_name(db_path, env_file):
+    """Admin can list checkpoints, and list includes newly created ones."""
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"k", b"v")
+    db.close()
+
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    before = admin.list_checkpoints(name=None)
+    assert isinstance(before, list)
+
+    created = admin.create_checkpoint(name="my_checkpoint")
+    cps = admin.list_checkpoints(name="my_checkpoint")
+    # Expect at least one checkpoint and that the created id is present
+    assert any(c["id"] == created["id"] for c in cps)
+
+    cps = admin.list_checkpoints(name="my_checkpoint_2")
+    # Expect no checkpoints with name "my_checkpoint_2"
+    assert len(cps) == 0
 
 
 def test_admin_read_checkpoint_isolation(db_path, env_file):
@@ -105,7 +133,7 @@ async def test_admin_manifest_read_and_list_async(db_path, env_file):
     assert isinstance(listing, str)
 
 @pytest.mark.asyncio
-async def test_admin_create_checkpoint_and_list_async(db_path, env_file):
+async def test_admin_create_checkpoint_and_list_async_with_no_name(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
     db.put(b"ck", b"v")
     db.close()
@@ -113,7 +141,19 @@ async def test_admin_create_checkpoint_and_list_async(db_path, env_file):
     admin = SlateDBAdmin(db_path, env_file=env_file)
     res = await admin.create_checkpoint_async()
     assert isinstance(res["id"], str)
-    cps = await admin.list_checkpoints_async()
+    cps = await admin.list_checkpoints_async(name=None)
+    assert any(c["id"] == res["id"] for c in cps)
+
+@pytest.mark.asyncio
+async def test_admin_create_checkpoint_and_list_async_with_name(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"cka", b"v")
+    db.close()
+
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    res = await admin.create_checkpoint_async(name="my_checkpoint")
+    assert isinstance(res["id"], str)
+    cps = await admin.list_checkpoints_async(name="my_checkpoint")
     assert any(c["id"] == res["id"] for c in cps)
 
 def test_admin_refresh_and_delete_checkpoint(db_path, env_file):

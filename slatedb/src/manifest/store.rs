@@ -158,6 +158,7 @@ impl FenceableManifest {
             manifest_id,
             expire_time: options.lifetime.map(|l| clock.now() + l),
             create_time: clock.now(),
+            name: options.name.clone(),
         })
     }
 
@@ -338,6 +339,7 @@ impl StoredManifest {
             manifest_id,
             expire_time: options.lifetime.map(|l| clock.now() + l),
             create_time: clock.now(),
+            name: options.name.clone(),
         })
     }
 
@@ -1073,6 +1075,7 @@ mod tests {
             manifest_id,
             expire_time: None,
             create_time,
+            name: None,
         }
     }
 

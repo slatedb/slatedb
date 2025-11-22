@@ -201,6 +201,8 @@ typedef struct CSdbScanResult {
 
 #define Checkpoint_VT_METADATA 14
 
+#define Checkpoint_VT_NAME 16
+
 // Initialize logging for SlateDB Go bindings
 // This should be called once before using any other SlateDB functions
 //
