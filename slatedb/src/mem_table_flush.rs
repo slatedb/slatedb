@@ -125,6 +125,10 @@ impl MemtableFlusher {
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)
                 .await?;
+            fail_point!(
+                Arc::clone(&self.db_inner.fp_registry),
+                "after-flush-imm-to-l0-before-manifest"
+            );
             let last_seq = imm_memtable
                 .table()
                 .last_seq()

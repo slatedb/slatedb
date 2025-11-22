@@ -622,11 +622,11 @@ impl CompactorEventHandler {
         self.state.finish_compaction(id, output_sr);
         self.log_compaction_state();
         self.write_manifest_safely().await?;
+        self.update_compaction_low_watermark();
         self.maybe_schedule_compactions().await?;
         self.stats
             .last_compaction_ts
             .set(self.system_clock.now().timestamp() as u64);
-        self.update_compaction_low_watermark();
         Ok(())
     }
 
@@ -644,7 +644,6 @@ impl CompactorEventHandler {
         }
 
         self.state.add_compaction(compaction.clone())?;
-        self.update_compaction_low_watermark();
         // Compactions and jobs are 1:1 right now.
         let job_id = compaction.id();
         tracing::Span::current().record("id", tracing::field::display(&job_id));
@@ -668,12 +667,17 @@ impl CompactorEventHandler {
         self.state.db_state().log_db_runs();
         let compactions = self.state.compactions();
         for compaction in compactions {
-            info!("in-flight compaction [compaction={}]", compaction);
+            if log::log_enabled!(log::Level::Debug) {
+                debug!("in-flight compaction [compaction={:?}]", compaction);
+            } else {
+                info!("in-flight compaction [compaction={}]", compaction);
+            }
         }
     }
 
     /// Updates the [`stats::COMPACTION_LOW_WATERMARK_TS`] gauge with the earliest
-    /// (oldest) ULID timestamp among active compactions.
+    /// (oldest) ULID timestamp among active compactions. If there are no active compactions,
+    /// the gauge is left unchanged.
     ///
     /// This serves as a GC safety barrier: the GC should not delete any compacted SST
     /// whose ULID timestamp is greater than or equal to this value.
@@ -683,17 +687,20 @@ impl CompactorEventHandler {
     /// a hack until we have proper compactor persistence (so GC can retrieve the compactor
     /// state from the object store). See #604 for details.
     fn update_compaction_low_watermark(&self) {
-        let mut min_ts = u64::MAX;
-        for compaction in self.state.compactions() {
-            let ts = compaction
-                .id()
-                .datetime()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .expect("invalid duration");
-            min_ts = min_ts.min(ts);
+        let min_ts = self
+            .state
+            .compactions()
+            .map(|c| {
+                c.id()
+                    .datetime()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("invalid duration")
+                    .as_millis() as u64
+            })
+            .min();
+        if let Some(min_ts) = min_ts {
+            self.stats.compaction_low_watermark_ts.set(min_ts);
         }
-        self.stats.compaction_low_watermark_ts.set(min_ts);
     }
 }
 
