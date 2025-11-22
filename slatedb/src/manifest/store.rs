@@ -5,7 +5,6 @@ use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestTransactionalObjectVersionMissing, ManifestMissing,
-    TransactionalObjectVersionExists,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::Manifest;
@@ -260,6 +259,7 @@ impl StoredManifest {
         &self.manifest().core
     }
 
+    #[allow(unused)]
     pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
         Ok(self.inner.refresh().await?)
     }
@@ -419,7 +419,7 @@ impl StoredManifest {
         Ok(checkpoint)
     }
 
-    pub(crate) async fn update_manifest(
+    pub(crate) async fn update(
         &mut self,
         dirty: DirtyObject<Manifest>,
     ) -> Result<(), SlateDBError> {
@@ -432,27 +432,15 @@ impl StoredManifest {
     /// the mutator parameter, which is a function that takes a &StoredManifest and returns
     /// an optional [`CoreDbState`]. If the mutator returns `None`, then no update will
     /// be applied.
-    pub(crate) async fn maybe_apply_manifest_update<F>(
-        &mut self,
-        mutator: F,
-    ) -> Result<(), SlateDBError>
+    pub(crate) async fn maybe_apply_update<F>(&mut self, mutator: F) -> Result<(), SlateDBError>
     where
-        F: Fn(&StoredManifest) -> Result<Option<DirtyObject<Manifest>>, SlateDBError>,
+        F: Fn(
+                &SimpleTransactionalObject<Manifest>,
+            ) -> Result<Option<DirtyObject<Manifest>>, SlateDBError>
+            + Send
+            + Sync,
     {
-        loop {
-            let Some(dirty) = mutator(self)? else {
-                return Ok(());
-            };
-
-            return match self.update_manifest(dirty).await {
-                Err(TransactionalObjectVersionExists) => {
-                    self.refresh().await?;
-                    continue;
-                }
-                Err(e) => Err(e),
-                Ok(()) => Ok(()),
-            };
-        }
+        Ok(self.inner.maybe_apply_update(mutator).await?)
     }
 }
 
@@ -643,11 +631,9 @@ mod tests {
             .await
             .unwrap();
         let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
-        sm.update_manifest(sm.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
 
-        let result = sm2.update_manifest(sm2.prepare_dirty().unwrap()).await;
+        let result = sm2.update(sm2.prepare_dirty().unwrap()).await;
 
         assert!(matches!(
             result.unwrap_err(),
@@ -662,9 +648,7 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_manifest(sm.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
 
         let (version, _) = ms.read_latest_manifest().await.unwrap();
 
@@ -679,7 +663,7 @@ mod tests {
             .unwrap();
         let mut dirty = sm.prepare_dirty().unwrap();
         dirty.value.core.next_wal_sst_id = 123;
-        sm.update_manifest(dirty).await.unwrap();
+        sm.update(dirty).await.unwrap();
 
         assert_eq!(sm.db_state().next_wal_sst_id, 123);
     }
@@ -693,7 +677,7 @@ mod tests {
         let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
         let mut dirty = sm.prepare_dirty().unwrap();
         dirty.value.core.next_wal_sst_id = 123;
-        sm.update_manifest(dirty).await.unwrap();
+        sm.update(dirty).await.unwrap();
 
         let refreshed = sm2.refresh().await.unwrap();
 
@@ -789,11 +773,9 @@ mod tests {
             .await
             .unwrap();
         let stale = sm.prepare_dirty().unwrap();
-        sm.update_manifest(sm.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
 
-        let result = sm.update_manifest(stale).await;
+        let result = sm.update(stale).await;
 
         assert!(matches!(
             result,
@@ -882,7 +864,7 @@ mod tests {
             .core
             .checkpoints
             .push(new_checkpoint(sm.inner.id().into()));
-        sm.update_manifest(dirty).await.unwrap();
+        sm.update(dirty).await.unwrap();
 
         // When
         let manifest = ms.try_read_manifest(2).await.unwrap().unwrap();
@@ -922,9 +904,7 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_manifest(sm.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
 
         // Check unbounded
         let manifests = ms.list_manifests(..).await.unwrap();
@@ -955,9 +935,7 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_manifest(sm.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
@@ -976,9 +954,7 @@ mod tests {
         let mut sm = StoredManifest::create_new_db(ms.clone(), state.clone())
             .await
             .unwrap();
-        sm.update_manifest(sm.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
         let manifests = ms.list_manifests(..).await.unwrap();
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
@@ -1034,7 +1010,7 @@ mod tests {
             .core
             .checkpoints
             .push(new_checkpoint(sm.inner.id().into()));
-        sm.update_manifest(dirty).await.unwrap();
+        sm.update(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(2, active_manifests.len());
         assert_eq!(
@@ -1049,7 +1025,7 @@ mod tests {
         // Remove the checkpoint and verify that only the latest manifest is active
         let mut dirty = sm.prepare_dirty().unwrap();
         dirty.value.core.checkpoints.clear();
-        sm.update_manifest(dirty).await.unwrap();
+        sm.update(dirty).await.unwrap();
         let active_manifests = ms.read_active_manifests().await.unwrap();
         assert_eq!(1, active_manifests.len());
         assert_eq!(
@@ -1067,10 +1043,10 @@ mod tests {
             .unwrap();
 
         let initial_id = sm.inner.id();
-        sm.maybe_apply_manifest_update(|_| Ok(None)).await.unwrap();
+        sm.maybe_apply_update(|_| Ok(None)).await.unwrap();
         assert_eq!(initial_id, sm.inner.id());
 
-        sm.maybe_apply_manifest_update(|sm| Ok(Some(sm.prepare_dirty().unwrap())))
+        sm.maybe_apply_update(|sm| Ok(Some(sm.prepare_dirty().unwrap())))
             .await
             .unwrap();
         assert_eq!(initial_id + 1, sm.inner.id().id());

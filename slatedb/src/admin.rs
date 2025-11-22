@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
+use crate::transactional_object::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -231,7 +232,7 @@ impl Admin {
         ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
+            .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
                 let expire_time = lifetime.map(|l| self.system_clock.now() + l);
                 let Some(_) = dirty.value.core.checkpoints.iter_mut().find_map(|c| {
@@ -258,7 +259,7 @@ impl Admin {
         ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
+            .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
                 let checkpoints: Vec<Checkpoint> = dirty
                     .core()

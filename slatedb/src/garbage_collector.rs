@@ -21,7 +21,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::transactional_object::DirtyObject;
+use crate::transactional_object::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -209,13 +209,13 @@ impl GarbageCollector {
         let mut stored_manifest = StoredManifest::load(Arc::clone(&self.manifest_store)).await?;
 
         stored_manifest
-            .maybe_apply_manifest_update(|manifest| self.filter_expired_checkpoints(manifest))
+            .maybe_apply_update(|manifest| self.filter_expired_checkpoints(manifest))
             .await
     }
 
     fn filter_expired_checkpoints(
         &self,
-        manifest: &StoredManifest,
+        manifest: &SimpleTransactionalObject<Manifest>,
     ) -> Result<Option<DirtyObject<Manifest>>, SlateDBError> {
         let utc_now: DateTime<Utc> = self.system_clock.now();
         let mut dirty = manifest.prepare_dirty()?;
@@ -292,7 +292,7 @@ mod tests {
 
         // Add a second manifest
         stored_manifest
-            .update_manifest(stored_manifest.prepare_dirty().unwrap())
+            .update(stored_manifest.prepare_dirty().unwrap())
             .await
             .unwrap();
 
@@ -331,7 +331,7 @@ mod tests {
 
         // Add a second manifest
         stored_manifest
-            .update_manifest(stored_manifest.prepare_dirty().unwrap())
+            .update(stored_manifest.prepare_dirty().unwrap())
             .await
             .unwrap();
 
@@ -368,7 +368,7 @@ mod tests {
         let checkpoint = new_checkpoint(stored_manifest.id(), expire_time);
         let checkpoint_id = checkpoint.id;
         dirty.value.core.checkpoints.push(checkpoint);
-        stored_manifest.update_manifest(dirty).await?;
+        stored_manifest.update(dirty).await?;
         Ok(checkpoint_id)
     }
 
@@ -385,7 +385,7 @@ mod tests {
             .cloned()
             .collect();
         dirty.value.core.checkpoints = updated_checkpoints;
-        stored_manifest.update_manifest(dirty).await?;
+        stored_manifest.update(dirty).await?;
         Ok(())
     }
 
@@ -518,7 +518,7 @@ mod tests {
 
         // Add a second manifest
         stored_manifest
-            .update_manifest(stored_manifest.prepare_dirty().unwrap())
+            .update(stored_manifest.prepare_dirty().unwrap())
             .await
             .unwrap();
 
@@ -640,7 +640,7 @@ mod tests {
         dirty.value.core.replay_after_wal_id = 3;
         dirty.value.core.next_wal_sst_id = 4;
         dirty.value.core.checkpoints.push(new_checkpoint(1, None));
-        stored_manifest.update_manifest(dirty).await.unwrap();
+        stored_manifest.update(dirty).await.unwrap();
         assert_eq!(2, stored_manifest.id());
 
         // All tables are eligible for deletion
@@ -899,7 +899,7 @@ mod tests {
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
         dirty.value.core.l0.truncate(1);
         dirty.value.core.compacted.truncate(1);
-        stored_manifest.update_manifest(dirty).await.unwrap();
+        stored_manifest.update(dirty).await.unwrap();
 
         // Start the garbage collector
         run_gc_once(manifest_store.clone(), table_store.clone()).await;
@@ -1079,7 +1079,7 @@ mod tests {
                 .await
                 .unwrap();
         stored_manifest
-            .update_manifest(stored_manifest.prepare_dirty().unwrap())
+            .update(stored_manifest.prepare_dirty().unwrap())
             .await
             .unwrap();
 
