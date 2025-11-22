@@ -503,7 +503,9 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 mod tests {
     use super::*;
     use crate::clock::{DefaultSystemClock, MonotonicClock};
+    use crate::db_state::CoreDbState;
     use crate::manifest::store::test_utils::new_manifest;
+    use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -517,8 +519,6 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
-    use crate::db_state::CoreDbState;
-    use crate::manifest::Manifest;
 
     struct MockWalIdStore {
         next_id: AtomicU64,
@@ -545,8 +545,10 @@ mod tests {
             MonotonicSeq::new(0),
             MonotonicSeq::new(0),
             MonotonicSeq::new(0),
-        )); 
-        let db_state = Arc::new(RwLock::new(DbState::new(Manifest::initial(CoreDbState::new()))));
+        ));
+        let db_state = Arc::new(RwLock::new(DbState::new(Manifest::initial(
+            CoreDbState::new(),
+        ))));
         let wal_buffer = Arc::new(WalBufferManager::new(
             db_state.clone(),
             DbStats::new(&StatRegistry::new()),
@@ -561,7 +563,10 @@ mod tests {
             db_state.read().closed_result(),
             system_clock.clone(),
         ));
-        wal_buffer.start_flush_task(task_executor.clone()).await.unwrap();
+        wal_buffer
+            .start_flush_task(task_executor.clone())
+            .await
+            .unwrap();
         wal_buffer.init(0);
         task_executor
             .monitor_on(&Handle::current())

@@ -1,15 +1,15 @@
+use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
+use crate::error::SlateDBError::{CheckpointMissing, InvalidDBState};
+use crate::manifest::Manifest;
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::transactional_object::MonotonicId;
 use crate::utils::SendSafely;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
-use crate::clock::SystemClock;
-use crate::error::SlateDBError::{CheckpointMissing, InvalidDBState};
-use crate::manifest::Manifest;
-use crate::transactional_object::MonotonicId;
 
 #[non_exhaustive]
 #[derive(Clone, PartialEq, Serialize, Debug)]

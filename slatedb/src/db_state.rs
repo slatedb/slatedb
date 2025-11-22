@@ -312,7 +312,7 @@ pub(crate) struct COWDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     // TODO: we can just switch this to CoreDbState. Only the memtable flush thread needs to see
     //       the manifest
-    pub(crate) manifest: Arc<Manifest>
+    pub(crate) manifest: Arc<Manifest>,
 }
 
 impl COWDbState {
@@ -493,13 +493,24 @@ impl DbState {
     }
 
     pub(crate) fn update_manifest(&mut self, manifest: Arc<Manifest>) {
-        self.modify(|m| m.state.manifest = manifest);
+        self.modify(|m| {
+            if let Some(oldest_imm_memtable) = m.state.imm_memtable.back() {
+                assert!(
+                    oldest_imm_memtable
+                        .table()
+                        .last_seq()
+                        .expect("empty imm memtable")
+                        > manifest.core.last_l0_seq
+                );
+            }
+            m.state.manifest = manifest
+        });
     }
 
     pub(crate) fn replace_oldest_imm_with_new_l0(
         &mut self,
         imm_memtable: &Arc<ImmutableMemtable>,
-        manifest: Arc<Manifest>
+        manifest: Arc<Manifest>,
     ) {
         self.modify(|m| {
             let popped = m.state.imm_memtable.pop_back().expect("");
@@ -563,8 +574,7 @@ mod tests {
             db_state.modify(|modifier| {
                 let mut manifest = modifier.state.manifest.as_ref().clone();
                 manifest.core.l0.push_front(handle);
-                manifest.core.replay_after_wal_id =
-                    imm.recent_flushed_wal_id();
+                manifest.core.replay_after_wal_id = imm.recent_flushed_wal_id();
                 modifier.state.manifest = Arc::new(manifest);
             });
         }

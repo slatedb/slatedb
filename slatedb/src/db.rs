@@ -4453,7 +4453,11 @@ mod tests {
         do_put(&db2, b"2", b"2").await.unwrap();
         assert_eq!(db2.inner.wal_buffer.current_wal_id(), Some(5));
         let state = db2.inner.state.clone();
-        wait_for_condition(|| state.read().state().core().next_wal_sst_id == 5, Duration::from_secs(30)).await;
+        wait_for_condition(
+            || state.read().state().core().next_wal_sst_id == 5,
+            Duration::from_secs(30),
+        )
+        .await;
     }
 
     #[tokio::test]
