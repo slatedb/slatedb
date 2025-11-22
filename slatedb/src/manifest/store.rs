@@ -4,7 +4,7 @@ use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
-    CheckpointMissing, InvalidDBState, LatestTransactionalObjectVersionMissing, ManifestMissing,
+    CheckpointMissing, LatestTransactionalObjectVersionMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::Manifest;
@@ -92,10 +92,6 @@ impl FenceableManifest {
         self.inner.object()
     }
 
-    pub(crate) fn core(&self) -> &CoreDbState {
-        &self.inner.object().core
-    }
-
     pub(crate) async fn init_compactor(
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
@@ -113,43 +109,6 @@ impl FenceableManifest {
         Ok(Self { inner: fr, clock })
     }
 
-    pub(crate) fn new_checkpoint(
-        &self,
-        checkpoint_id: Uuid,
-        options: &CheckpointOptions,
-    ) -> Result<Checkpoint, SlateDBError> {
-        self.make_new_checkpoint(self.clock.clone(), checkpoint_id, options)
-    }
-
-    fn make_new_checkpoint(
-        &self,
-        clock: Arc<dyn SystemClock>,
-        checkpoint_id: Uuid,
-        options: &CheckpointOptions,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let db_state = &self.object().core;
-        let manifest_id = match options.source {
-            Some(source_checkpoint_id) => {
-                let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
-                    return Err(CheckpointMissing(source_checkpoint_id));
-                };
-                source_checkpoint.manifest_id
-            }
-            None => {
-                if !db_state.initialized {
-                    return Err(InvalidDBState);
-                }
-                self.id().next().into()
-            }
-        };
-        Ok(Checkpoint {
-            id: checkpoint_id,
-            manifest_id,
-            expire_time: options.lifetime.map(|l| clock.now() + l),
-            create_time: clock.now(),
-        })
-    }
-
     pub(crate) async fn write_checkpoint(
         &mut self,
         checkpoint_id: Uuid,
@@ -157,7 +116,13 @@ impl FenceableManifest {
     ) -> Result<Checkpoint, SlateDBError> {
         let clock = self.clock.clone();
         self.maybe_apply_update(|fm| {
-            let checkpoint = fm.make_new_checkpoint(clock.clone(), checkpoint_id, options)?;
+            let checkpoint = Checkpoint::new_for_manifest(
+                fm.id(),
+                fm.manifest(),
+                clock.as_ref(),
+                checkpoint_id,
+                options
+            )?;
             let mut dirty = fm.prepare_dirty()?;
             dirty.value.core.checkpoints.push(checkpoint);
             Ok::<Option<DirtyObject<Manifest>>, SlateDBError>(Some(dirty))

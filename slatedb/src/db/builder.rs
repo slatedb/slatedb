@@ -153,7 +153,6 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::transactional_object::TransactionalObject;
 use crate::utils::WatchableOnceCell;
 
 /// A builder for creating a new Db instance.

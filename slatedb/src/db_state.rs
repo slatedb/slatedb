@@ -6,9 +6,7 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::seq_tracker::SequenceTracker;
-use crate::transactional_object::DirtyObject;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
-use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;
 use serde::Serialize;
@@ -549,9 +547,7 @@ impl<'a> StateModifier<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::checkpoint::Checkpoint;
-    use crate::clock::{DefaultSystemClock, SystemClock};
-    use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::proptest_util::arbitrary;
     use crate::test_utils;
     use bytes::Bytes;
@@ -560,25 +556,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;
-    use std::sync::Arc;
-
-    fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
-        let dummy_info = create_sst_info(None);
-        for i in 0..n {
-            db_state
-                .freeze_memtable(i as u64)
-                .expect("db in error state");
-            let imm = db_state.state.imm_memtable.back().unwrap().clone();
-            let handle =
-                SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), dummy_info.clone());
-            db_state.modify(|modifier| {
-                let mut manifest = modifier.state.manifest.as_ref().clone();
-                manifest.core.l0.push_front(handle);
-                manifest.core.replay_after_wal_id = imm.recent_flushed_wal_id();
-                modifier.state.manifest = Arc::new(manifest);
-            });
-        }
-    }
 
     #[test]
     fn test_sorted_run_collect_tables_in_range() {

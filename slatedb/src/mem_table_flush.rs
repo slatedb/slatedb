@@ -10,7 +10,7 @@ use crate::mem_table::ImmutableMemtable;
 use crate::transactional_object::view::{LocalView, LocalViewManager};
 use crate::transactional_object::{DirtyObject, MonotonicId, TransactionalObject};
 use crate::utils::IdGenerator;
-use crate::{manifest, Checkpoint};
+use crate::Checkpoint;
 use async_trait::async_trait;
 use fail_parallel::fail_point;
 use futures::stream::BoxStream;
@@ -125,7 +125,7 @@ impl MemtableFlusher {
         let manifest = view.manifest().clone();
         db_state
             .write()
-            .replace_oldest_imm_with_new_l0(&imm_memtable, Arc::new(manifest.clone()));
+            .replace_oldest_imm_with_new_l0(imm_memtable, Arc::new(manifest.clone()));
         Ok(())
     }
 

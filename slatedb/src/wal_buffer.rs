@@ -27,7 +27,6 @@ use crate::{
     tablestore::TableStore,
     types::RowEntry,
     utils::SendSafely,
-    wal_id::WalIdStore,
 };
 
 pub(crate) const WAL_BUFFER_TASK_NAME: &str = "wal_writer";
@@ -504,7 +503,6 @@ mod tests {
     use super::*;
     use crate::clock::{DefaultSystemClock, MonotonicClock};
     use crate::db_state::CoreDbState;
-    use crate::manifest::store::test_utils::new_manifest;
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
@@ -516,19 +514,8 @@ mod tests {
     use crate::utils::MonotonicSeq;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
-
-    struct MockWalIdStore {
-        next_id: AtomicU64,
-    }
-
-    impl WalIdStore for MockWalIdStore {
-        fn next_wal_id(&self) -> u64 {
-            self.next_id.fetch_add(1, Ordering::SeqCst)
-        }
-    }
 
     async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<TestClock>) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());

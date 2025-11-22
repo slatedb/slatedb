@@ -72,7 +72,7 @@ use log::{info, trace, warn};
 
 pub mod builder;
 use crate::manifest::Manifest;
-use crate::transactional_object::{DirtyObject, TransactionalObject};
+use crate::transactional_object::TransactionalObject;
 pub use builder::DbBuilder;
 
 pub(crate) struct DbInner {

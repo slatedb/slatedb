@@ -124,5 +124,4 @@ mod transactional_object;
 mod types;
 mod utils;
 mod wal_buffer;
-mod wal_id;
 mod wal_replay;
