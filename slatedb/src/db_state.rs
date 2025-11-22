@@ -310,6 +310,8 @@ pub(crate) struct DbState {
 #[derive(Clone)]
 pub(crate) struct COWDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
+    // TODO: we can just switch this to CoreDbState. Only the memtable flush thread needs to see
+    //       the manifest
     pub(crate) manifest: Arc<Manifest>
 }
 
@@ -490,7 +492,23 @@ impl DbState {
         Ok(())
     }
 
-    pub fn modify<F, R>(&mut self, fun: F) -> R
+    pub(crate) fn update_manifest(&mut self, manifest: Arc<Manifest>) {
+        self.modify(|m| m.state.manifest = manifest);
+    }
+
+    pub(crate) fn replace_oldest_imm_with_new_l0(
+        &mut self,
+        imm_memtable: &Arc<ImmutableMemtable>,
+        manifest: Arc<Manifest>
+    ) {
+        self.modify(|m| {
+            let popped = m.state.imm_memtable.pop_back().expect("");
+            assert!(Arc::ptr_eq(imm_memtable, &popped));
+            m.state.manifest = manifest;
+        })
+    }
+
+    fn modify<F, R>(&mut self, fun: F) -> R
     where
         F: FnOnce(&mut StateModifier<'_>) -> R,
     {

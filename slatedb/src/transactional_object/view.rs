@@ -1,18 +1,17 @@
 use std::error::Error;
-use crate::error::SlateDBError;
 use crate::transactional_object::{DirtyObject, MonotonicId, TransactionalObject, TransactionalObjectError};
 
-pub(crate) trait DirtyView<T, Id: Copy = MonotonicId> {
+pub(crate) trait LocalView<T, Id: Copy = MonotonicId> {
     fn merge(&mut self, other: DirtyObject<T, Id>);
 
     fn value(&self) -> DirtyObject<T, Id>;
 }
 
-pub(crate) struct DirtyViewManager<T, V, O, Id = MonotonicId>
+pub(crate) struct LocalViewManager<T, V, O, Id = MonotonicId>
 where
     T: Clone,
     Id: Copy,
-    V: DirtyView<T, Id>,
+    V: LocalView<T, Id>,
     O: TransactionalObject<T, Id>,
 {
     view: V,
@@ -20,7 +19,7 @@ where
     _marker: std::marker::PhantomData<(T, Id)>,
 }
 
-impl <T: Clone, V: DirtyView<T, Id>, O: TransactionalObject<T, Id>, Id: Copy> DirtyViewManager<T, V, O, Id> {
+impl <T: Clone, V: LocalView<T, Id>, O: TransactionalObject<T, Id>, Id: Copy> LocalViewManager<T, V, O, Id> {
     pub(crate) fn new(view: V, object: O) -> Self {
         Self {
             view,
