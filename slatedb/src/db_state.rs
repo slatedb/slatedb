@@ -608,6 +608,7 @@ mod tests {
             manifest_id: 1,
             expire_time: None,
             create_time: DefaultSystemClock::default().now(),
+            name: None,
         };
         updated_state.core.checkpoints.push(checkpoint.clone());
 

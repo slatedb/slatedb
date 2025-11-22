@@ -699,6 +699,7 @@ class SlateDB:
         *,
         lifetime: int | None = None,
         source: str | None = None,
+        name: str | None = None,
     ) -> CheckpointCreateResult:
         """
         Create a writer checkpoint that includes data per the requested scope.
@@ -707,12 +708,13 @@ class SlateDB:
             scope: "all" to include recent writes, "durable" to include only durable data.
             lifetime: Optional lifetime in milliseconds.
             source: Optional existing checkpoint UUID to base from.
+            name: Optional checkpoint name.
 
         Returns:
             Dict with ``id`` (UUID string) and ``manifest_id`` (int).
 
         Examples:
-            >>> db.create_checkpoint()
+            >>> db.create_checkpoint(name="my_checkpoint")
             {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
         """
         ...
@@ -723,6 +725,7 @@ class SlateDB:
         *,
         lifetime: int | None = None,
         source: str | None = None,
+        name: str | None = None,
     ) -> CheckpointCreateResult:
         """
         Async variant of ``create_checkpoint``.
@@ -731,12 +734,13 @@ class SlateDB:
             scope: "all" or "durable".
             lifetime: Optional lifetime in milliseconds.
             source: Optional checkpoint id to base from.
+            name: Optional checkpoint name.
 
         Returns:
             A mapping with ``id`` and ``manifest_id``.
 
         Examples:
-            >>> await db.create_checkpoint_async()
+            >>> await db.create_checkpoint_async(name="my_checkpoint")
             {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
         """
         ...
@@ -1798,6 +1802,7 @@ class SlateDBAdmin:
         *,
         lifetime: int | None = None,
         source: str | None = None,
+        name: str | None = None,
     ) -> CheckpointCreateResult:
         """
         Create a detached checkpoint.
@@ -1805,13 +1810,14 @@ class SlateDBAdmin:
         Args:
             lifetime: Optional checkpoint lifetime in milliseconds.
             source: Optional source checkpoint UUID string to extend/refresh.
+            name: Optional checkpoint name.
 
         Returns:
             Dict with ``id`` (UUID string) and ``manifest_id`` (int).
 
         Example:
             >>> admin = SlateDBAdmin("/tmp/mydb", env_file=".env")
-            >>> admin.create_checkpoint()
+            >>> admin.create_checkpoint(name="my_checkpoint")
             {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
         """
         ...
@@ -1821,6 +1827,7 @@ class SlateDBAdmin:
         *,
         lifetime: int | None = None,
         source: str | None = None,
+        name: str | None = None,
     ) -> CheckpointCreateResult:
         """
         Async variant of ``create_checkpoint``.
@@ -1828,12 +1835,13 @@ class SlateDBAdmin:
         Args:
             lifetime: Optional checkpoint lifetime in milliseconds.
             source: Optional source checkpoint UUID string to extend/refresh.
+            name: Optional checkpoint name.
 
         Returns:
             Dict with ``id`` (UUID string) and ``manifest_id`` (int).
 
         Examples:
-            >>> await admin.create_checkpoint_async()
+            >>> await admin.create_checkpoint_async(name="my_checkpoint")
             {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
         """
         ...

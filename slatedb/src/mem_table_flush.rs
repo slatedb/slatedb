@@ -183,6 +183,7 @@ impl MemtableFlusher {
                 })?;
             }
             imm_memtable.notify_flush_to_l0(Ok(()));
+            self.db_inner.db_stats.immutable_memtable_flushes.inc();
             match self.write_manifest_safely().await {
                 Ok(_) => {
                     // at this point we know the data in the memtable is durably stored
@@ -220,8 +221,6 @@ impl MemtableFlusher {
         let result = self.flush_imm_memtables_to_l0().await;
         if let Err(err) = &result {
             error!("error from memtable flush [error={:?}]", err);
-        } else {
-            self.db_inner.db_stats.immutable_memtable_flushes.inc();
         }
         result
     }

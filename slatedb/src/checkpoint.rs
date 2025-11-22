@@ -14,6 +14,7 @@ pub struct Checkpoint {
     pub manifest_id: u64,
     pub expire_time: Option<DateTime<Utc>>,
     pub create_time: DateTime<Utc>,
+    pub name: Option<String>,
 }
 
 #[non_exhaustive]
@@ -424,5 +425,151 @@ mod tests {
 
         let sst_entry = sst_iter.next().await.unwrap().unwrap();
         assert_eq!(*kv.1, sst_entry.value)
+    }
+
+    #[tokio::test]
+    async fn test_should_create_checkpoint_with_name() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
+        db.close().await.unwrap();
+        let manifest_store = ManifestStore::new(
+            &path,
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        );
+
+        let checkpoint_name = "my_checkpoint".to_string();
+        let CheckpointCreateResult {
+            id: checkpoint_id,
+            manifest_id: _,
+        } = admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                name: Some(checkpoint_name.clone()),
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let checkpoint = manifest
+            .core
+            .checkpoints
+            .iter()
+            .find(|c| c.id == checkpoint_id)
+            .unwrap();
+        assert_eq!(checkpoint.name, Some(checkpoint_name));
+    }
+
+    #[tokio::test]
+    async fn test_should_allow_multiple_checkpoints_with_no_name() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
+        db.close().await.unwrap();
+        let manifest_store = ManifestStore::new(
+            &path,
+            object_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        );
+
+        // Create multiple checkpoints without names
+        admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                name: None,
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
+        admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                name: None,
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let unnamed_checkpoints: Vec<_> = manifest
+            .core
+            .checkpoints
+            .iter()
+            .filter(|c| c.name.is_none())
+            .collect();
+        assert!(unnamed_checkpoints.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_should_list_checkpoints_filtered_by_name() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
+        db.close().await.unwrap();
+
+        // Create checkpoints with different names
+        let name1 = "checkpoint_1".to_string();
+        let name2 = "checkpoint_2".to_string();
+        let name3 = "".to_string();
+
+        admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                name: Some(name1.clone()),
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
+        admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                name: Some(name2.clone()),
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
+        admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                name: None,
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
+        admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                name: Some(name3.clone()),
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
+        // List all checkpoints
+        let all_checkpoints = admin.list_checkpoints(None).await.unwrap();
+        assert!(all_checkpoints.len() >= 4);
+
+        // List checkpoints filtered by empty name
+        let filtered_checkpoints = admin.list_checkpoints(Some("")).await.unwrap();
+        assert_eq!(filtered_checkpoints.len(), 2);
+        assert!(filtered_checkpoints
+            .iter()
+            .all(|cp| cp.name.is_none() || cp.name.as_deref() == Some("")));
+
+        // List checkpoints filtered by name1
+        let filtered_checkpoints = admin.list_checkpoints(Some(&name1)).await.unwrap();
+        assert_eq!(filtered_checkpoints.len(), 1);
+        assert_eq!(filtered_checkpoints[0].name, Some(name1.clone()));
+
+        // List checkpoints filtered by name2
+        let filtered_checkpoints = admin.list_checkpoints(Some(&name2)).await.unwrap();
+        assert_eq!(filtered_checkpoints.len(), 1);
+        assert_eq!(filtered_checkpoints[0].name, Some(name2.clone()));
+
+        // List checkpoints filtered by non-existent name
+        let filtered_checkpoints = admin.list_checkpoints(Some("non_existent")).await.unwrap();
+        assert_eq!(filtered_checkpoints.len(), 0);
     }
 }

@@ -357,6 +357,7 @@ mod tests {
             manifest_id,
             expire_time,
             create_time: DefaultSystemClock::default().now(),
+            name: None,
         }
     }
 
