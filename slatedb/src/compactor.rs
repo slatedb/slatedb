@@ -80,6 +80,7 @@ use crate::rand::DbRand;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::transactional_object::TransactionalObject;
 use crate::utils::{IdGenerator, WatchableOnceCell};
 
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
@@ -472,7 +473,7 @@ impl CompactorEventHandler {
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
         let dirty = self.state.manifest().clone();
-        self.manifest.update(dirty).await
+        Ok(self.manifest.update(dirty).await?)
     }
 
     /// Writes the manifest, retrying on version conflicts by reloading and retrying.

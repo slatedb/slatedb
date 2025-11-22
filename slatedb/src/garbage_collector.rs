@@ -21,7 +21,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::transactional_object::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
+use crate::transactional_object::{DirtyObject, TransactionalObject};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -208,14 +208,14 @@ impl GarbageCollector {
     async fn remove_expired_checkpoints(&self) -> Result<(), SlateDBError> {
         let mut stored_manifest = StoredManifest::load(Arc::clone(&self.manifest_store)).await?;
 
-        stored_manifest
+        Ok(stored_manifest
             .maybe_apply_update(|manifest| self.filter_expired_checkpoints(manifest))
-            .await
+            .await?)
     }
 
     fn filter_expired_checkpoints(
         &self,
-        manifest: &SimpleTransactionalObject<Manifest>,
+        manifest: &StoredManifest,
     ) -> Result<Option<DirtyObject<Manifest>>, SlateDBError> {
         let utc_now: DateTime<Utc> = self.system_clock.now();
         let mut dirty = manifest.prepare_dirty()?;
@@ -365,7 +365,7 @@ mod tests {
         expire_time: Option<DateTime<Utc>>,
     ) -> Result<Uuid, SlateDBError> {
         let mut dirty = stored_manifest.prepare_dirty()?;
-        let checkpoint = new_checkpoint(stored_manifest.id(), expire_time);
+        let checkpoint = new_checkpoint(stored_manifest.id().id(), expire_time);
         let checkpoint_id = checkpoint.id;
         dirty.value.core.checkpoints.push(checkpoint);
         stored_manifest.update(dirty).await?;

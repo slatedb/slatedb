@@ -153,6 +153,7 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::sst::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
+use crate::transactional_object::TransactionalObject;
 use crate::utils::WatchableOnceCell;
 
 /// A builder for creating a new Db instance.
@@ -481,7 +482,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),
-                manifest.prepare_dirty()?,
+                manifest.prepare_dirty().map_err(SlateDBError::from)?,
                 memtable_flush_tx,
                 write_tx,
                 stat_registry,

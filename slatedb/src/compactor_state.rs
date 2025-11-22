@@ -422,6 +422,7 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::transactional_object::TransactionalObject;
     use crate::utils::IdGenerator;
     use crate::DbRand;
     use object_store::memory::InMemory;

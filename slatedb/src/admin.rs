@@ -26,7 +26,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
-use crate::transactional_object::TransactionalObject;
+use crate::manifest::Manifest;
+use crate::transactional_object::{DirtyObject, TransactionalObject};
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -247,6 +248,7 @@ impl Admin {
                 Ok(Some(dirty))
             })
             .await
+            .map_err(Into::<SlateDBError>::into)
             .map_err(Into::into)
     }
 
@@ -269,9 +271,10 @@ impl Admin {
                     .cloned()
                     .collect();
                 dirty.value.core.checkpoints = checkpoints;
-                Ok(Some(dirty))
+                Ok::<Option<DirtyObject<Manifest>>, SlateDBError>(Some(dirty))
             })
             .await
+            .map_err(Into::<SlateDBError>::into)
             .map_err(Into::into)
     }
 

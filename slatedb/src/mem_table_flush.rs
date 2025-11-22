@@ -5,6 +5,7 @@ use crate::db_state::SsTableId;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::transactional_object::TransactionalObject;
 use crate::utils::IdGenerator;
 use async_trait::async_trait;
 use fail_parallel::fail_point;
@@ -69,7 +70,7 @@ impl MemtableFlusher {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().manifest.clone()
         };
-        self.manifest.update(dirty).await
+        Ok(self.manifest.update(dirty).await?)
     }
 
     pub(crate) async fn write_checkpoint_safely(

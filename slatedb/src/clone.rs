@@ -7,6 +7,7 @@ use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
+use crate::transactional_object::TransactionalObject;
 use crate::utils::IdGenerator;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
