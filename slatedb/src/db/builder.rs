@@ -505,22 +505,18 @@ impl<P: Into<Path>> DbBuilder<P> {
         if inner.wal_enabled {
             inner.wal_buffer.init(task_executor.clone()).await?;
         };
-        task_executor
-            .add_handler(
-                MEMTABLE_FLUSHER_TASK_NAME.to_string(),
-                Box::new(MemtableFlusher::new(inner.clone(), manifest)),
-                memtable_flush_rx,
-                &tokio_handle,
-            )
-            .expect("failed to spawn memtable flusher task");
-        task_executor
-            .add_handler(
-                WRITE_BATCH_TASK_NAME.to_string(),
-                Box::new(WriteBatchEventHandler::new(inner.clone())),
-                write_rx,
-                &tokio_handle,
-            )
-            .expect("failed to spawn write batch event handler task");
+        task_executor.add_handler(
+            MEMTABLE_FLUSHER_TASK_NAME.to_string(),
+            Box::new(MemtableFlusher::new(inner.clone(), manifest)),
+            memtable_flush_rx,
+            &tokio_handle,
+        )?;
+        task_executor.add_handler(
+            WRITE_BATCH_TASK_NAME.to_string(),
+            Box::new(WriteBatchEventHandler::new(inner.clone())),
+            write_rx,
+            &tokio_handle,
+        )?;
 
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -568,16 +564,13 @@ impl<P: Into<Path>> DbBuilder<P> {
                 stats.clone(),
                 system_clock.clone(),
             )
-            .await
-            .expect("failed to create compactor");
-            task_executor
-                .add_handler(
-                    COMPACTOR_TASK_NAME.to_string(),
-                    Box::new(handler),
-                    rx,
-                    &tokio_handle,
-                )
-                .expect("failed to spawn compactor task");
+            .await?;
+            task_executor.add_handler(
+                COMPACTOR_TASK_NAME.to_string(),
+                Box::new(handler),
+                rx,
+                &tokio_handle,
+            )?;
         }
 
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
@@ -593,9 +586,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = mpsc::unbounded_channel();
-            task_executor
-                .add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)
-                .expect("failed to spawn garbage collector task");
+            task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)?;
         }
 
         // Monitor background tasks
