@@ -290,36 +290,6 @@ impl StoredManifest {
         &self.manifest().core
     }
 
-    fn new_checkpoint(
-        manifest: &Manifest,
-        current_id: u64,
-        clock: &dyn SystemClock,
-        checkpoint_id: Uuid,
-        options: &CheckpointOptions,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let manifest_id = match options.source {
-            Some(source_checkpoint_id) => {
-                let Some(source_checkpoint) = manifest.core.find_checkpoint(source_checkpoint_id)
-                else {
-                    return Err(CheckpointMissing(source_checkpoint_id));
-                };
-                source_checkpoint.manifest_id
-            }
-            None => {
-                if !manifest.core.initialized {
-                    return Err(InvalidDBState);
-                }
-                current_id + 1
-            }
-        };
-        Ok(Checkpoint {
-            id: checkpoint_id,
-            manifest_id,
-            expire_time: options.lifetime.map(|l| clock.now() + l),
-            create_time: clock.now(),
-        })
-    }
-
     pub(crate) async fn write_checkpoint(
         &mut self,
         checkpoint_id: Uuid,
@@ -328,9 +298,9 @@ impl StoredManifest {
         let clock = Arc::clone(&self.clock);
         self.maybe_apply_update(|sr| {
             let mut new_val = sr.object().clone();
-            let checkpoint = Self::new_checkpoint(
+            let checkpoint = Checkpoint::new_for_manifest(
+                sr.id(),
                 &new_val,
-                sr.id().into(),
                 clock.as_ref(),
                 checkpoint_id,
                 options,
@@ -385,9 +355,9 @@ impl StoredManifest {
         self.maybe_apply_update(|sr| {
             let mut new_val = sr.object().clone();
             // compute new checkpoint
-            let checkpoint = Self::new_checkpoint(
+            let checkpoint = Checkpoint::new_for_manifest(
+                sr.id(),
                 &new_val,
-                sr.id().into(),
                 clock.as_ref(),
                 new_checkpoint_id,
                 new_checkpoint_options,

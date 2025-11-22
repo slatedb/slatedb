@@ -6,6 +6,10 @@ use crate::utils::SendSafely;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
+use crate::clock::SystemClock;
+use crate::error::SlateDBError::{CheckpointMissing, InvalidDBState};
+use crate::manifest::Manifest;
+use crate::transactional_object::MonotonicId;
 
 #[non_exhaustive]
 #[derive(Clone, PartialEq, Serialize, Debug)]
@@ -14,6 +18,38 @@ pub struct Checkpoint {
     pub manifest_id: u64,
     pub expire_time: Option<DateTime<Utc>>,
     pub create_time: DateTime<Utc>,
+}
+
+impl Checkpoint {
+    pub(crate) fn new_for_manifest(
+        current_manifest_id: MonotonicId,
+        manifest: &Manifest,
+        clock: &dyn SystemClock,
+        checkpoint_id: Uuid,
+        options: &CheckpointOptions,
+    ) -> Result<Self, SlateDBError> {
+        let manifest_id = match options.source {
+            Some(source_checkpoint_id) => {
+                let Some(source_checkpoint) = manifest.core.find_checkpoint(source_checkpoint_id)
+                else {
+                    return Err(CheckpointMissing(source_checkpoint_id));
+                };
+                source_checkpoint.manifest_id
+            }
+            None => {
+                if !manifest.core.initialized {
+                    return Err(InvalidDBState);
+                }
+                current_manifest_id.next().id()
+            }
+        };
+        Ok(Checkpoint {
+            id: checkpoint_id,
+            manifest_id,
+            expire_time: options.lifetime.map(|l| clock.now() + l),
+            create_time: clock.now(),
+        })
+    }
 }
 
 #[non_exhaustive]

@@ -5,7 +5,6 @@ use crate::db_state::{CoreDbState, SsTableHandle, SsTableId};
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
-use crate::transactional_object::TransactionalObject;
 use crate::utils::IdGenerator;
 use async_trait::async_trait;
 use fail_parallel::fail_point;
@@ -17,8 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot::Sender;
 use tracing::instrument;
+use uuid::Uuid;
 use crate::manifest::Manifest;
-use crate::manifest;
+use crate::{manifest, Checkpoint};
+use crate::clock::SystemClock;
 use crate::mem_table::ImmutableMemtable;
 use crate::transactional_object::{DirtyObject, MonotonicId, TransactionalObject};
 use crate::transactional_object::view::{DirtyView, DirtyViewManager};
@@ -37,22 +38,29 @@ pub(crate) enum MemtableFlushMsg {
     PollManifest,
 }
 
-type ManifestViewManager = DirtyViewManager<>
+// TODO: maybe swap names with manifest view
+// TODO: maybe change the name "view"
+type ManifestViewManager = DirtyViewManager<Manifest, ManifestView, FenceableManifest>;
 
 pub(crate) struct MemtableFlusher {
     db_inner: Arc<DbInner>,
-    manifest: DirtyViewManager<>
+    manifest: ManifestViewManager,
 }
 
 impl MemtableFlusher {
-    pub(crate) fn new(db_inner: Arc<DbInner>, manifest: FenceableManifest) -> Self {
-        Self { db_inner, manifest }
+    pub(crate) fn new(db_inner: Arc<DbInner>, manifest: FenceableManifest) -> Result<Self, SlateDBError> {
+        let manifest = ManifestViewManager::new(
+            ManifestView::new(manifest.prepare_dirty()?),
+            manifest
+        );
+        Ok(Self { db_inner, manifest })
     }
 
     pub(crate) async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
-        let manifest =  self.manifest.refresh().await?;
+        self.manifest.refresh().await?;
         self.db_inner.state.write().modify(
-            |m| m.state.manifest = Arc::new(manifest.clone())
+            // todo: clean me up (too many fn calls, add a setter fn to db_state)
+            |m| m.state.manifest = Arc::new(self.manifest.view().value().value.clone())
         );
         Ok(())
     }
@@ -62,22 +70,36 @@ impl MemtableFlusher {
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         let id = self.db_inner.rand.rng().gen_uuid();
-        let checkpoint = self.manifest.write_checkpoint(id, options).await?;
-        let manifest_id = checkpoint.manifest_id;
+        self.manifest.maybe_apply_update_to_view(
+            |mut dirty| {
+                let checkpoint = Checkpoint::new_for_manifest(
+                    dirty.id(),
+                    &dirty.value,
+                    self.db_inner.system_clock.as_ref(),
+                    id,
+                    options
+                )?;
+                dirty.value.core.checkpoints.push(checkpoint);
+                Ok::<DirtyObject<Manifest>, SlateDBError>(dirty)
+            }
+        ).await?;
+        let manifest_id = self.manifest.view().manifest.core().checkpoints.iter()
+            .find(|c| c.id == id)
+            .expect("checkpoint written but could not find id")
+            .manifest_id;
         Ok(CheckpointCreateResult { id, manifest_id })
     }
 
     async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
-        let wal_buffer = self.db_inner.wal_buffer.clone();
-        let txn_manager = self.db_inner.txn_manager.clone();
-        Ok(self.manifest.maybe_apply_update(
-            |m| Ok(Some(
-                ManifestUpdater::new(m.prepare_dirty().map_err(manifest::store::into_slatedb_error)?)
-                    .with_next_wal_id(wal_buffer.current_wal_id())
-                    .with_min_active_snapshot_seq(txn_manager.min_active_seq())
-                    .finish()
-            ))
-        ).await?)
+        let view = self.manifest.view_mut();
+        view.set_next_wal_id(self.db_inner.wal_buffer.current_wal_id());
+        view.set_min_active_snapshot_seq(self.db_inner.txn_manager.min_active_seq());
+        self.manifest.sync().await?;
+        self.db_inner.state.write().modify(
+            // todo: clean me up (too many fn calls, add a setter fn to db_state)
+            |m| m.state.manifest = Arc::new(self.manifest.view().value().value.clone())
+        );
+        Ok(())
     }
 
     #[instrument(level = "trace", skip_all)]
@@ -108,42 +130,42 @@ impl MemtableFlusher {
                 .await?;
             let txn_manager = self.db_inner.txn_manager.clone();
             let wal_buffer = self.db_inner.wal_buffer.clone();
-            // TODO: what if we get an error where we don't know if the update was
-            //       successful or not?
-            //       probably the safer thing to do is to maintain an in-memory view of the manifest
-            //       and then push that into db_state
-            let result = self.manifest.maybe_apply_update(
-                |m| Ok(Some(
-                    ManifestUpdater::new(m.prepare_dirty().map_err(manifest::store::into_slatedb_error)?)
-                        .with_next_wal_id(wal_buffer.current_wal_id())
-                        .with_new_l0(imm_memtable.clone(), sst_handle.clone())?
-                        // its kind of annoying that this needs to be after the above to be set right
-                        .with_min_active_snapshot_seq(txn_manager.min_active_seq())
-                        .finish()
-                ))
-            ).await;
+            let view = self.manifest.view_mut();
+            view.set_next_wal_id(wal_buffer.current_wal_id());
+            view.push_new_l0(imm_memtable.clone(), sst_handle.clone(), txn_manager.min_active_seq())?;
+            let result = self.manifest
+                .sync()
+                .await
+                .map_err(SlateDBError::from);
+            let manifest = self.manifest.view().manifest.value.clone();
+            let last_l0_seq = manifest.core.last_l0_seq;
+            {
+                // Commit the manifest view into db state even if the manifest write failed
+                // The sst will be protected from gc because it won't delete any SSTs newer than
+                // the last l0 in the latest durable manifest, and the view still represents a
+                // correct db. Currently this isn't providing much benefit since we will fail the
+                // flush task on any errors. But if we add retry logic this lets us drop the
+                // imm memtables from memory sooner
+                let mut guard = self.db_inner.state.write();
+                guard.modify(
+                    |m| {
+                        // todo: do something nicer here. one option is to have core db state pop based on
+                        let popped = m.state.imm_memtable.pop_back().expect("");
+                        assert!(Arc::ptr_eq(&imm_memtable, &popped));
+                        m.state.manifest = Arc::new(manifest);
+                    }
+                )
+            }
             match result {
                 Ok(_) => {
                     // at this point we know the data in the memtable is durably stored
                     // so notify the relevant listeners
                     imm_memtable.notify_flush_to_l0(Ok(()));
                     imm_memtable.table().notify_durable(Ok(()));
-                    let manifest = self.manifest.manifest();
                     self.db_inner
                         .oracle
                         .last_remote_persisted_seq
-                        .store_if_greater(manifest.core.last_l0_seq);
-                    {
-                        let mut guard = self.db_inner.state.write();
-                        guard.modify(
-                            |m| {
-                                // todo: do something nicer here
-                                let popped = m.state.imm_memtable.pop_back().expect("");
-                                assert!(Arc::ptr_eq(&imm_memtable, &popped));
-                                m.state.manifest = Arc::new(manifest.clone());
-                            }
-                        )
-                    }
+                        .store_if_greater(last_l0_seq);
                 }
                 Err(err) => {
                     if matches!(err, SlateDBError::Fenced) {
@@ -153,8 +175,11 @@ impl MemtableFlusher {
                                 id, delete_err
                             );
                         }
-                        // refresh manifest and state so that local state reflects remote
-                        self.load_manifest().await?;
+                        // refresh manifest and state so that local state reflects remote//
+                        // ignore the error to preserve the fencing error
+                        if let Err(load_err) = self.load_manifest().await {
+                            warn!("failed to load manifest after being fenced: {:?}", load_err);
+                        }
                     }
                     imm_memtable.table().notify_durable(Err(err.clone()));
                     return Err(err);
@@ -260,36 +285,38 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
     }
 }
 
-struct ManifestUpdater {
-    manifest: DirtyObject<Manifest>,
+// TODO: rename to ManifestUpdater
+struct ManifestView {
+    manifest: DirtyObject<Manifest>
 }
 
-impl ManifestUpdater {
+impl ManifestView {
     fn new(manifest: DirtyObject<Manifest>) -> Self {
         Self { manifest }
     }
+}
 
-    fn with_next_wal_id(mut self, next_wal_id: Option<u64>) -> Self {
+impl ManifestView {
+    fn set_next_wal_id(&mut self, next_wal_id: Option<u64>) {
         if let Some(next_wal_id) = next_wal_id {
             self.manifest.value.core.next_wal_sst_id = next_wal_id;
         }
-        self
     }
 
-    fn with_min_active_snapshot_seq(mut self, min_active_snapshot_seq: Option<u64>) -> Self {
+    fn set_min_active_snapshot_seq(&mut self, min_active_snapshot_seq: Option<u64>) {
         // update the persisted manifest recent_snapshot_min_seq to inform the compactor
         // can safely reclaim the entries with smaller seq. if there's no active snapshot,
         // we simply use the latest l0 seq.
         self.manifest.value.core.recent_snapshot_min_seq =
             min_active_snapshot_seq.unwrap_or(self.manifest.value.core.last_l0_seq);
-        self
     }
 
-    fn with_new_l0(
-        mut self,
+    fn push_new_l0(
+        &mut self,
         imm_memtable: Arc<ImmutableMemtable>,
         sst_handle: SsTableHandle,
-    ) -> Result<Self, SlateDBError> {
+        min_active_snapshot_seq: Option<u64>
+    ) -> Result<(), SlateDBError> {
         let last_seq = imm_memtable
             .table()
             .last_seq()
@@ -322,16 +349,10 @@ impl ManifestUpdater {
             .sequence_tracker
             .extend_from(sequence_tracker);
 
-        Ok(self)
-    }
+        self.set_min_active_snapshot_seq(min_active_snapshot_seq);
 
-    fn finish(self) -> DirtyObject<Manifest> {
-        self.manifest
+        Ok(())
     }
-}
-
-struct ManifestView {
-    manifest: DirtyObject<Manifest>
 }
 
 impl DirtyView<Manifest> for ManifestView {
