@@ -69,7 +69,7 @@ pub(crate) async fn create_clone<P: Into<Path>>(
 
         let mut dirty = clone_manifest.prepare_dirty()?;
         dirty.value.core.initialized = true;
-        clone_manifest.update_manifest(dirty).await?;
+        clone_manifest.update(dirty).await?;
     }
 
     Ok(())
