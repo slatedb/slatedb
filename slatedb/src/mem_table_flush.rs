@@ -38,8 +38,6 @@ pub(crate) enum MemtableFlushMsg {
     PollManifest,
 }
 
-// TODO: maybe swap names with manifest view
-// TODO: maybe change the name "view"
 type ManifestViewManager = LocalViewManager<Manifest, LocalManifestView, FenceableManifest>;
 
 pub(crate) struct MemtableFlusher {
@@ -446,7 +444,7 @@ impl<T: Clone> ReplaceOnly<T> {
         std::mem::replace(&mut self.inner, new)
     }
 
-    pub fn write(&mut self) -> ReplaceOnlyGuard<T> {
+    pub(crate) fn write(&mut self) -> ReplaceOnlyGuard<T> {
         let new_value = self.inner.clone();
         ReplaceOnlyGuard {
             cell: self,
@@ -455,13 +453,13 @@ impl<T: Clone> ReplaceOnly<T> {
     }
 }
 
-struct ReplaceOnlyGuard<'a, T: Clone> {
+pub(crate) struct ReplaceOnlyGuard<'a, T: Clone> {
     cell: &'a mut ReplaceOnly<T>,
     new_value: T,
 }
 
 impl <'a, T: Clone> ReplaceOnlyGuard<'a, T> {
-    fn commit(self) {
+    pub(crate) fn commit(self) {
         self.cell.replace(self.new_value);
     }
 }

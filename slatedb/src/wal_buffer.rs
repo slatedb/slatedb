@@ -160,8 +160,8 @@ impl WalBufferManager {
         current_wal_entries_count + flushing_wal_entries_count
     }
 
-    /// Returns the ID of the current active WAL. Returns None if the WAL buffer is not yet
-    /// initialized, which is possible if this called while the WAL is still being replayed
+    /// Returns the ID of the current active in-memory WAL. Returns None if the WAL buffer is not
+    /// yet initialized, which is possible if this called while the WAL is still being replayed
     pub(crate) fn current_wal_id(&self) -> Option<u64> {
         self.inner.read().current_wal_id
     }
