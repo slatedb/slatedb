@@ -513,6 +513,8 @@ impl DbState {
         self.modify(|m| {
             let popped = m.state.imm_memtable.pop_back().expect("");
             assert!(Arc::ptr_eq(imm_memtable, &popped));
+            let expected_last_l0_seq = popped.table().last_seq().expect("empty imm memtable");
+            assert_eq!(expected_last_l0_seq, manifest.core.last_l0_seq);
             m.state.manifest = manifest;
         })
     }
