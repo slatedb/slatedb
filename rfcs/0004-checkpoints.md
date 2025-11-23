@@ -148,6 +148,11 @@ table Checkpoint {
    // Optional metadata associated with the checkpoint. For example, the writer can use this to
    // clean up checkpoints from older writers.
    metadata: CheckpointMetadata;
+
+   // Optional name associated with the checkpoint. The name can be used to list the checkpoints.
+   // Note that name may not be unique and the list operation can return multiple checkpoints with
+   // the same name.
+   name: string;
 }
 ```
 
@@ -179,6 +184,9 @@ struct CheckpointOptions {
     /// useful for users to establish checkpoints from existing checkpoints, but with a different lifecycle
     /// and/or metadata.
     source: Option<Uuid>
+
+    /// Optionally specifies a name for the checkpoint. Can be used to list the checkpoints.
+    pub name: Option<String>,
 }
 
 #[derive(Debug)]
@@ -322,9 +330,13 @@ Options:
     The checkpoint's expiry time will be set to the current wallclock time plus the specified
     lifetime. If the lifetime is not specified, then the checkpoint is set with no expiry and
     must be explicitly removed
-  -s, --source <UUID> Optionally specify an existing checkpoint to use as the base for the newly
-    created checkpoint. If not provided then the checkpoint will be taken against the latest
-    manifest.
+
+  -s, --source <UUID>       Optionally specify an existing checkpoint to use as the base for the newly
+    created checkpoint. If not provided then the checkpoint will be taken against the latest manifest.
+
+  -n, --name <NAME>         Optionally specify a name for the checkpoint. The name can be used to list
+    the checkpoints. Note that name may not be unique and the list operation can return multiple
+    checkpoints with the same name
 
 $ slatedb refresh-checkpoint --help
 Refresh an existing checkpoint's expiry time. This command will look for an existing checkpoint
@@ -349,10 +361,14 @@ Options:
   -i, --id <ID>  The UUID of the checkpoint (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3)
 
 $ slatedb list-checkpoints --help
-List the current checkpoints of the db.
+List the current checkpoints of the db
 
-Usage: slatedb --path <PATH> list-checkpoints
+Usage: slatedb --path <PATH> list-checkpoints [OPTIONS]
 
+Options:
+  -n, --name <NAME>  Optionally specify the name to filter the checkpoints. Note that name may not
+    be unique and the list operation can return multiple checkpoints with the same name. If not
+    specified, all checkpoints will be returned.
 
 ```
 

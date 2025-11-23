@@ -83,15 +83,40 @@ impl Admin {
         Ok(serde_json::to_string(&manifests)?)
     }
 
-    /// List checkpoints
-    pub async fn list_checkpoints(&self) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
+    /// List checkpoints, optionally filtering by name. When name is provided, only checkpoints
+    /// with this exact name will be returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `name_filter`: Name that will be used to filter checkpoints.
+    pub async fn list_checkpoints(
+        &self,
+        name_filter: Option<&str>,
+    ) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
             self.system_clock.clone(),
         );
         let (_, manifest) = manifest_store.read_latest_manifest().await?;
-        Ok(manifest.core.checkpoints)
+
+        let checkpoints = match name_filter {
+            Some("") => manifest
+                .core
+                .checkpoints
+                .into_iter()
+                .filter(|cp| cp.name.as_deref() == Some("") || cp.name.is_none())
+                .collect(),
+            Some(name) => manifest
+                .core
+                .checkpoints
+                .into_iter()
+                .filter(|cp| cp.name.as_deref() == Some(name))
+                .collect(),
+            None => manifest.core.checkpoints,
+        };
+
+        Ok(checkpoints)
     }
 
     /// Run the garbage collector once in the foreground.
