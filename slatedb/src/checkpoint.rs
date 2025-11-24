@@ -237,7 +237,7 @@ mod tests {
 
         assert_eq!(
             result.to_string(),
-            "Data error: failed to find latest transactional object version"
+            "Data error: failed to find latest transactional object (e.g. manifest) version"
         );
     }
 

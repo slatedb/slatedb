@@ -39,17 +39,20 @@ pub(crate) enum SlateDBError {
     #[error("failed to find manifest with id. id=`{0}`")]
     ManifestMissing(u64),
 
-    #[error("transactional object version already exists")]
+    #[error("transactional object (e.g. manifest) version already exists")]
     TransactionalObjectVersionExists,
 
-    #[error("failed to find latest transactional object version")]
+    #[error("failed to find latest transactional object (e.g. manifest) version")]
     LatestTransactionalObjectVersionMissing,
 
-    #[error("generic transactional object error {0:?}")]
+    #[error("generic transactional object (e.g. manifest) error {0:?}")]
     TransactionalObjectError(#[from] Arc<TransactionalObjectError>),
 
-    #[error("transactinal object op timeout after {timeout:?}")]
+    #[error("transactional object (e.g. manifest) op timeout after {timeout:?}")]
     TransactionalObjectTimeout { timeout: Duration },
+
+    #[error("transactional object (e.g. manifest) is in an invalid state")]
+    InvalidTransactionalObjectState,
 
     #[error("invalid deletion")]
     InvalidDeletion,
@@ -229,9 +232,9 @@ impl From<TransactionalObjectError> for SlateDBError {
                 SlateDBError::TransactionalObjectTimeout { timeout }
             }
             // returned when the persisted state is invalid (e.g. malformed name, missing file)
-            TransactionalObjectError::InvalidObjectState => SlateDBError::TransactionalObjectError(
-                Arc::new(TransactionalObjectError::InvalidObjectState),
-            ),
+            TransactionalObjectError::InvalidObjectState => {
+                SlateDBError::InvalidTransactionalObjectState
+            }
         }
     }
 }
@@ -490,6 +493,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::ManifestMissing(_) => Error::data(msg),
             SlateDBError::LatestTransactionalObjectVersionMissing => Error::data(msg),
             SlateDBError::TransactionalObjectVersionExists => Error::data(msg),
+            SlateDBError::InvalidTransactionalObjectState => Error::data(msg),
             SlateDBError::EmptyManifest => Error::data(msg),
             SlateDBError::EmptyBlock => Error::data(msg),
             SlateDBError::EmptyBlockMeta => Error::data(msg),
