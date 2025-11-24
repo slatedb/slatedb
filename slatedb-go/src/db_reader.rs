@@ -197,6 +197,8 @@ pub unsafe extern "C" fn slatedb_reader_get_with_options(
     }
 
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
+
+    // Convert C read options to Rust ReadOptions
     let rust_read_opts = convert_read_options(read_options);
 
     let inner = handle.as_inner();
@@ -213,18 +215,13 @@ pub unsafe extern "C" fn slatedb_reader_get_with_options(
             }
             create_success_result()
         }
-        Ok(None) => {
-            unsafe {
-                *value_out = CSdbValue {
-                    data: ptr::null_mut(),
-                    len: 0,
-                };
-            }
-            create_success_result()
-        }
+        Ok(None) => create_error_result(CSdbError::NotFound, "Key not found"),
         Err(e) => {
             let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Get operation failed: {}", e))
+            create_error_result(
+                error_code,
+                &format!("Get with options operation failed: {}", e),
+            )
         }
     }
 }
