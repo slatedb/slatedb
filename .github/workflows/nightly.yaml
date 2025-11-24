@@ -251,12 +251,6 @@ jobs:
           sudo apt-get install -y jq curl maven
           sudo snap install aws-cli --classic
 
-      - name: Build chaos-http-proxy
-        run: |
-          git clone https://github.com/bouncestorage/chaos-http-proxy
-          cd chaos-http-proxy
-          mvn -q -DskipTests package
-
       - name: Start chaos services (docker compose)
         run: |
           docker compose -f scripts/run_chaos_scenarios.compose.yaml up -d
@@ -300,6 +294,6 @@ jobs:
         if: failure()
         run: |
           echo "--- LocalStack logs ---"; docker logs --tail 500 localstack || true
-          echo "--- chaos-http-proxy logs ---"; docker logs --tail 500 chaos-http-proxy || true
+          echo "--- lowdown logs ---"; docker logs --tail 500 lowdown || true
           echo "--- Toxiproxy logs ---"; docker logs --tail 500 toxiproxy || true
           echo "--- Toxiproxy proxies ---"; curl -sf http://127.0.0.1:8474/proxies || true
