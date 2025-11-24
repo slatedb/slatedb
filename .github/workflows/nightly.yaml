@@ -193,7 +193,7 @@ jobs:
 
   deterministic-simulation-test:
     runs-on: warp-ubuntu-latest-x64-16x
-    timeout-minutes: 60
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -238,3 +238,68 @@ jobs:
           done
           completed=$((iteration - 1))
           echo "Completed $completed iteration(s) in ${SECONDS}s without failures"
+
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl maven
+          sudo snap install aws-cli --classic
+
+      - name: Build chaos-http-proxy
+        run: |
+          git clone https://github.com/bouncestorage/chaos-http-proxy
+          cd chaos-http-proxy
+          mvn -q -DskipTests package
+
+      - name: Start chaos services (docker compose)
+        run: |
+          docker compose -f scripts/run_chaos_scenarios.compose.yaml up -d
+
+      - name: Configure S3 toxiproxy proxy
+        run: |
+          # Create s3 toxiproxy if not exist (TCP-level path only)
+          curl -sf -X POST http://127.0.0.1:8474/proxies \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"s3","listen":"0.0.0.0:9001","upstream":"localstack:4566"}' || true
+
+      - name: Run chaos scenarios
+        id: chaos
+        env:
+          SLATEDB_TEST_NUM_WRITERS: "2"
+          SLATEDB_TEST_NUM_READERS: "2"
+          SLATEDB_TEST_WRITES_PER_TASK: "250"
+          SLATEDB_TEST_KEY_LENGTH: "256"
+          RUST_BACKTRACE: "1"
+        run: |
+          chmod +x scripts/run_chaos_scenarios.sh
+          if scripts/run_chaos_scenarios.sh; then
+            echo "ok=true" >> $GITHUB_OUTPUT
+          else
+            echo "ok=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Summarize results
+        if: always()
+        run: |
+          echo "## 🌪️ SlateDB Toxiproxy Chaos" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.chaos.outputs.ok }}" = "true" ]; then
+            echo "All scenarios passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "One or more scenarios failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "--- LocalStack logs ---"; docker logs --tail 500 localstack || true
+          echo "--- chaos-http-proxy logs ---"; docker logs --tail 500 chaos-http-proxy || true
+          echo "--- Toxiproxy logs ---"; docker logs --tail 500 toxiproxy || true
+          echo "--- Toxiproxy proxies ---"; curl -sf http://127.0.0.1:8474/proxies || true
