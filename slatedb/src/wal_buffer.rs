@@ -491,9 +491,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 mod tests {
     use super::*;
     use crate::clock::{DefaultSystemClock, MonotonicClock};
-    use crate::db_state::CoreDbState;
-    use crate::manifest::store::DirtyManifest;
-    use crate::manifest::Manifest;
+    use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -537,10 +535,7 @@ mod tests {
             MonotonicSeq::new(0),
             MonotonicSeq::new(0),
         ));
-        let db_state = Arc::new(RwLock::new(DbState::new(DirtyManifest::new(
-            0,
-            Manifest::initial(CoreDbState::new()),
-        ))));
+        let db_state = Arc::new(RwLock::new(DbState::new(new_dirty_manifest())));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
             db_state.clone(),
