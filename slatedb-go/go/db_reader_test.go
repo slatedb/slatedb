@@ -10,18 +10,27 @@ import (
 
 var _ = Describe("DbReader", func() {
 	var (
+		config   = &slatedb.StoreConfig{Provider: slatedb.ProviderLocal}
+		db       *slatedb.DB
 		dbReader *slatedb.DbReader
 		tmpDir   string
 	)
 
-	BeforeEach(func() {
+	BeforeAll(func() {
 		var err error
 		tmpDir, err = os.MkdirTemp("", "slatedb_db_test_*")
 		Expect(err).NotTo(HaveOccurred())
 
-		config := &slatedb.StoreConfig{Provider: slatedb.ProviderLocal}
+		db, err := slatedb.Open(tmpDir, config)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db).NotTo(BeNil())
 
-		dbReader, err = slatedb.OpenReader(tmpDir, config, nil, nil)
+		Expect(db.Put([]byte("test_key"), []byte("test_value"))).NotTo(HaveOccurred())
+		Expect(db.Flush()).NotTo(HaveOccurred())
+	})
+
+	BeforeEach(func() {
+		dbReader, err := slatedb.OpenReader(tmpDir, config, nil, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(dbReader).NotTo(BeNil())
 	})
@@ -30,6 +39,12 @@ var _ = Describe("DbReader", func() {
 		if dbReader != nil {
 			err := dbReader.Close()
 			Expect(err).NotTo(HaveOccurred())
+		}
+	})
+
+	AfterAll(func() {
+		if db != nil {
+			Expect(db.Close()).NotTo(HaveOccurred())
 		}
 		Expect(os.RemoveAll(tmpDir)).NotTo(HaveOccurred())
 	})
