@@ -874,7 +874,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Now drop the active tables from the checkpoint 
+        // Now drop the active tables from the checkpoint
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
         dirty.value.core.l0.truncate(1);
         dirty.value.core.compacted.truncate(1);
