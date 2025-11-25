@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::db_reader::CSdbReaderOptions;
 use crate::error::safe_str_from_ptr;
+use crate::object_store::create_local_file_system;
 use crate::types::{CSdbPutOptions, CSdbReadOptions, CSdbScanOptions, CSdbWriteOptions};
 use serde::Deserialize;
 use slatedb::bytes::Bytes;
@@ -12,7 +13,6 @@ use slatedb::config::{
 };
 use slatedb::object_store::ObjectStore;
 use std::ops::Bound;
-use crate::object_store::create_local_file_system;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfigJson {
@@ -103,10 +103,10 @@ pub fn create_object_store(
     match config.provider.as_str() {
         "local" => {
             if let Some(local_cfg) = &config.local_config {
-                return create_local_file_system(local_cfg)
+                return create_local_file_system(local_cfg);
             }
             create_inmemory_store()
-        },
+        }
         "aws" => {
             if let Some(aws_cfg) = &config.aws_config {
                 create_aws_store(aws_cfg)

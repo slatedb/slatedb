@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
-use slatedb::object_store::{memory::InMemory, ObjectStore, local::LocalFileSystem};
+use slatedb::object_store::{local::LocalFileSystem, memory::InMemory, ObjectStore};
 
 use object_store::client::ClientOptions;
 
@@ -10,7 +10,9 @@ use crate::config::{AwsConfigJson, LocalConfigJson};
 use crate::error::{create_error_result, CSdbError, CSdbResult};
 
 // Helper function to create local file system object store
-pub fn create_local_file_system(local_cfg: &LocalConfigJson) -> Result<Arc<dyn ObjectStore>, CSdbResult> {
+pub fn create_local_file_system(
+    local_cfg: &LocalConfigJson,
+) -> Result<Arc<dyn ObjectStore>, CSdbResult> {
     let local_path = if let Some(path) = local_cfg.path.clone() {
         path
     } else if let Ok(path) = std::env::var("LOCAL_PATH") {
