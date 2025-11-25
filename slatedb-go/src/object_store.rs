@@ -2,12 +2,33 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
-use slatedb::object_store::{memory::InMemory, ObjectStore};
+use slatedb::object_store::{memory::InMemory, ObjectStore, local::LocalFileSystem};
 
 use object_store::client::ClientOptions;
 
-use crate::config::AwsConfigJson;
+use crate::config::{AwsConfigJson, LocalConfigJson};
 use crate::error::{create_error_result, CSdbError, CSdbResult};
+
+// Helper function to create local file system object store
+pub fn create_local_file_system(local_cfg: &LocalConfigJson) -> Result<Arc<dyn ObjectStore>, CSdbResult> {
+    let local_path = if let Some(path) = local_cfg.path.clone() {
+        path
+    } else if let Ok(path) = std::env::var("LOCAL_PATH") {
+        path
+    } else {
+        return Err(create_error_result(
+            CSdbError::InvalidArgument,
+            "Path must be specified in config or LOCAL_PATH environment variable",
+        ));
+    };
+    match LocalFileSystem::new_with_prefix(local_path) {
+        Ok(store) => Ok(Arc::new(store)),
+        Err(e) => {
+            let error_msg = format!("Failed to create Local Filesystem object store: {}", e);
+            Err(create_error_result(CSdbError::InternalError, &error_msg))
+        }
+    }
+}
 
 // Helper function to create in-memory object store
 pub fn create_inmemory_store() -> Result<Arc<dyn ObjectStore>, CSdbResult> {

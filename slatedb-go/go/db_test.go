@@ -23,6 +23,7 @@ var _ = Describe("DB", func() {
 
 		db, err = slatedb.Open(tmpDir, &slatedb.StoreConfig{
 			Provider: slatedb.ProviderLocal,
+			Local:    &slatedb.LocalConfig{Path: tmpDir},
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db).NotTo(BeNil())
@@ -33,7 +34,7 @@ var _ = Describe("DB", func() {
 			err := db.Close()
 			Expect(err).NotTo(HaveOccurred())
 		}
-		os.RemoveAll(tmpDir)
+		Expect(os.RemoveAll(tmpDir)).NotTo(HaveOccurred())
 	})
 
 	Describe("Core Operations", func() {
@@ -218,7 +219,7 @@ var _ = Describe("DB Builder", func() {
 	})
 
 	AfterEach(func() {
-		os.RemoveAll(tmpDir)
+		Expect(os.RemoveAll(tmpDir)).NotTo(HaveOccurred())
 	})
 
 	Describe("NewBuilder", func() {

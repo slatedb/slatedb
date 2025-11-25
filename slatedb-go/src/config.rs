@@ -12,6 +12,7 @@ use slatedb::config::{
 };
 use slatedb::object_store::ObjectStore;
 use std::ops::Bound;
+use crate::object_store::create_local_file_system;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsConfigJson {
@@ -22,9 +23,15 @@ pub struct AwsConfigJson {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct LocalConfigJson {
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct StoreConfigJson {
     pub provider: String, // "local", "aws"
     pub aws: Option<AwsConfigJson>,
+    pub local: Option<LocalConfigJson>,
 }
 
 // Parsed configuration types
@@ -33,6 +40,7 @@ pub struct StoreConfigJson {
 pub struct ParsedStoreConfig {
     pub provider: String,
     pub aws_config: Option<AwsConfigJson>,
+    pub local_config: Option<LocalConfigJson>,
 }
 
 // Configuration parsing errors
@@ -80,6 +88,7 @@ pub fn parse_store_config(json_str: &str) -> Result<ParsedStoreConfig, ConfigErr
     Ok(ParsedStoreConfig {
         provider: config.provider,
         aws_config: config.aws,
+        local_config: config.local,
     })
 }
 
@@ -92,7 +101,12 @@ pub fn create_object_store(
     use crate::object_store::{create_aws_store, create_inmemory_store};
 
     match config.provider.as_str() {
-        "local" => create_inmemory_store(),
+        "local" => {
+            if let Some(local_cfg) = &config.local_config {
+                return create_local_file_system(local_cfg)
+            }
+            create_inmemory_store()
+        },
         "aws" => {
             if let Some(aws_cfg) = &config.aws_config {
                 create_aws_store(aws_cfg)

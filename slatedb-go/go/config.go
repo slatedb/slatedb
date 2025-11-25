@@ -23,7 +23,7 @@ import (
 type Provider string
 
 const (
-	ProviderLocal Provider = "local"
+	ProviderLocal Provider = "local" // if path is not given local means in memory
 	ProviderAWS   Provider = "aws"
 )
 
@@ -35,10 +35,15 @@ type AWSConfig struct {
 	RequestTimeout time.Duration `json:"request_timeout,omitempty"` // HTTP timeout for S3 requests
 }
 
+type LocalConfig struct {
+	Path string `json:"path,omitempty"` // optional, fallback to LOCAL_PATH env var
+}
+
 // StoreConfig contains object storage provider configuration
 type StoreConfig struct {
-	Provider Provider   `json:"provider"`
-	AWS      *AWSConfig `json:"aws,omitempty"`
+	Provider Provider     `json:"provider"`
+	AWS      *AWSConfig   `json:"aws,omitempty"`
+	Local    *LocalConfig `json:"local,omitempty"`
 }
 
 // DurabilityLevel represents the durability filter for scans
