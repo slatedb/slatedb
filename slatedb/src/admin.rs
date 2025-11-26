@@ -408,6 +408,89 @@ impl Admin {
         Ok(())
     }
 
+    /// Cleans up resources associated with a clone database.
+    ///
+    /// This is a convenience method that streamlines the cleanup process for clones by deleting
+    /// the checkpoint referenced by the clone from the parent database. This is useful when the
+    /// checkpoint was created specifically for the clone and is no longer needed.
+    ///
+    /// **Note**: This method only deletes the checkpoint from the parent database. To completely
+    /// remove the clone, you should also manually delete the clone's directory/path in the object
+    /// store after calling this method.
+    ///
+    /// **Warning**: If the checkpoint is being used by other clones or for other purposes,
+    /// deleting it may cause issues. Only call this method if you're certain the checkpoint
+    /// is no longer needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `clone_path` - Path to the clone database
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slatedb::admin::{Admin, AdminBuilder};
+    /// use slatedb::Db;
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::error::Error;
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn Error>> {
+    ///    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///    let db = Db::open("parent_path", Arc::clone(&object_store)).await?;
+    ///    db.put(b"key", b"value").await?;
+    ///    db.close().await?;
+    ///
+    ///    let admin = AdminBuilder::new("clone_path", Arc::clone(&object_store)).build();
+    ///    admin.create_clone("parent_path", None).await?;
+    ///
+    ///    // Later, cleanup the clone's checkpoint
+    ///    admin.cleanup_clone("clone_path").await?;
+    ///    // Then manually delete the clone directory if needed
+    ///
+    ///    Ok(())
+    /// }
+    /// ```
+    pub async fn cleanup_clone<P: Into<Path>>(
+        &self,
+        clone_path: P,
+    ) -> Result<(), Box<dyn Error>> {
+        let clone_path = clone_path.into();
+        let clone_manifest_store = Arc::new(ManifestStore::new(
+            &clone_path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.system_clock.clone(),
+        ));
+
+        // Load the clone's manifest to get parent information
+        let clone_manifest = match StoredManifest::try_load(clone_manifest_store).await? {
+            Some(manifest) => manifest,
+            None => return Err("Clone manifest not found".into()),
+        };
+
+        // Extract parent checkpoint information
+        let external_db = clone_manifest
+            .manifest()
+            .external_dbs
+            .first()
+            .ok_or("Clone has no external database reference")?;
+
+        let parent_path = external_db.path.clone();
+        let checkpoint_id = external_db.source_checkpoint_id;
+
+        // Delete the checkpoint from the parent
+        let parent_admin = Admin {
+            path: parent_path.into(),
+            object_stores: self.object_stores.clone(),
+            system_clock: self.system_clock.clone(),
+            rand: self.rand.clone(),
+        };
+        parent_admin.delete_checkpoint(checkpoint_id).await?;
+
+        Ok(())
+    }
+
     /// Creates a new builder for an admin client at the given path.
     ///
     /// ## Arguments
