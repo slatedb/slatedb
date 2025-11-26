@@ -79,19 +79,21 @@ func resultToError(result C.struct_CSdbResult) error {
 
 // Open opens a SlateDB database with default settings
 // For more advanced configuration, use NewBuilder() instead
-func Open(path string, storeConfig *StoreConfig) (*DB, error) {
+func Open(path, url, envFile string) (*DB, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	// Convert Go structs to JSON strings
-	storeConfigJSON, storeConfigPtr := convertStoreConfigToJSON(storeConfig)
-	defer func() {
-		if storeConfigPtr != nil {
-			C.free(storeConfigPtr)
-		}
-	}()
+	var cURL, cEnvFile *C.char
+	if url != "" {
+		cURL = C.CString(url)
+		defer C.free(unsafe.Pointer(cURL))
+	}
+	if envFile != "" {
+		cEnvFile = C.CString(envFile)
+		defer C.free(unsafe.Pointer(cEnvFile))
+	}
 
-	handle := C.slatedb_open(cPath, storeConfigJSON)
+	handle := C.slatedb_open(cPath, cURL, cEnvFile)
 
 	// Check if handle is null (indicates error)
 	if handle._0 == nil {
@@ -447,20 +449,19 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 // Builder represents a database builder that mirrors Rust's DbBuilder
 type Builder struct {
 	path         string
+	url          string
+	envFile      string
 	storeConfig  *StoreConfig
 	settings     *Settings
 	sstBlockSize *SstBlockSize
 }
 
 // NewBuilder creates a new database builder
-func NewBuilder(path string, storeConfig *StoreConfig) (*Builder, error) {
-	if storeConfig == nil {
-		return nil, errors.New("storeConfig cannot be nil")
-	}
-
+func NewBuilder(path, url, envFile string) (*Builder, error) {
 	return &Builder{
-		path:        path,
-		storeConfig: storeConfig,
+		path:    path,
+		url:     url,
+		envFile: envFile,
 	}, nil
 }
 
@@ -478,20 +479,21 @@ func (b *Builder) WithSstBlockSize(size SstBlockSize) *Builder {
 
 // Build creates the database using the configured options
 func (b *Builder) Build() (*DB, error) {
-	// Convert StoreConfig to JSON
-	storeConfigJSON, err := json.Marshal(b.storeConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal store config: %w", err)
-	}
-
 	// Create builder via FFI
 	cPath := C.CString(b.path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	cStoreConfigJSON := C.CString(string(storeConfigJSON))
-	defer C.free(unsafe.Pointer(cStoreConfigJSON))
+	var cURL, cEnvFile *C.char
+	if b.url != "" {
+		cURL = C.CString(b.url)
+		defer C.free(unsafe.Pointer(cURL))
+	}
+	if b.envFile != "" {
+		cEnvFile = C.CString(b.envFile)
+		defer C.free(unsafe.Pointer(cEnvFile))
+	}
 
-	builderPtr := C.slatedb_builder_new(cPath, cStoreConfigJSON)
+	builderPtr := C.slatedb_builder_new(cPath, cURL, cEnvFile)
 	if builderPtr == nil {
 		return nil, errors.New("failed to create database builder")
 	}

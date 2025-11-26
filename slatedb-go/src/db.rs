@@ -1,12 +1,11 @@
 use serde_json;
-use slatedb::admin::load_object_store_from_env;
 use slatedb::Db;
 use std::os::raw::c_char;
 use tokio::runtime::Builder;
 
 use crate::config::{
     convert_put_options, convert_range_bounds, convert_read_options, convert_scan_options,
-    convert_write_options, create_object_store, parse_store_config,
+    convert_write_options, create_object_store,
 };
 use crate::error::{
     create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
@@ -25,7 +24,8 @@ use slatedb::config::{Settings, SstBlockSize};
 #[no_mangle]
 pub extern "C" fn slatedb_open(
     path: *const c_char,
-    store_config_json: *const c_char,
+    url: *const c_char,
+    env_file: *const c_char,
 ) -> CSdbHandle {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s,
@@ -38,27 +38,25 @@ pub extern "C" fn slatedb_open(
         Err(_) => return CSdbHandle::null(),
     };
 
-    // Create object store: try config first, fall back to environment on any failure
-    let object_store = {
-        // Try to parse store config from JSON
-        let store_result = safe_str_from_ptr(store_config_json)
-            .and_then(|json_str| {
-                parse_store_config(json_str).map_err(|_| CSdbError::InvalidArgument)
-            })
-            .and_then(|config| {
-                create_object_store(&config).map_err(|_| CSdbError::InvalidArgument)
-            });
-
-        match store_result {
-            Ok(store) => store,
-            Err(_) => {
-                // Config failed, try environment fallback
-                match load_object_store_from_env(None) {
-                    Ok(store) => store,
-                    Err(_) => return CSdbHandle::null(),
-                }
-            }
+    let url_str: Option<&str> = if url.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(url) {
+            Ok(s) => Some(s),
+            Err(_) => return CSdbHandle::null(),
         }
+    };
+    let env_file_str = if env_file.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(env_file) {
+            Ok(s) => Some(s.to_string()),
+            Err(_) => return CSdbHandle::null(),
+        }
+    };
+    let object_store = match create_object_store(url_str, env_file_str) {
+        Ok(store) => store,
+        Err(_) => return CSdbHandle::null(),
     };
 
     match rt.block_on(async {
@@ -316,34 +314,33 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
 #[no_mangle]
 pub extern "C" fn slatedb_builder_new(
     path: *const c_char,
-    store_config_json: *const c_char,
+    url: *const c_char,
+    env_file: *const c_char,
 ) -> *mut slatedb::DbBuilder<String> {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s.to_string(),
         Err(_) => return std::ptr::null_mut(),
     };
 
-    // Create object store from config, fall back to environment on failure
-    let object_store = {
-        // Try to parse store config from JSON and create object store
-        let store_result = safe_str_from_ptr(store_config_json)
-            .and_then(|json_str| {
-                parse_store_config(json_str).map_err(|_| CSdbError::InvalidArgument)
-            })
-            .and_then(|config| {
-                create_object_store(&config).map_err(|_| CSdbError::InvalidArgument)
-            });
-
-        match store_result {
-            Ok(store) => store,
-            Err(_) => {
-                // Config failed, try environment fallback
-                match load_object_store_from_env(None) {
-                    Ok(store) => store,
-                    Err(_) => return std::ptr::null_mut(),
-                }
-            }
+    let url_str: Option<&str> = if url.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(url) {
+            Ok(s) => Some(s),
+            Err(_) => return std::ptr::null_mut(),
         }
+    };
+    let env_file_str = if env_file.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(env_file) {
+            Ok(s) => Some(s.to_string()),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    };
+    let object_store = match create_object_store(url_str, env_file_str) {
+        Ok(store) => store,
+        Err(_) => return std::ptr::null_mut(),
     };
 
     let builder = Db::builder(path_str, object_store);

@@ -1,7 +1,6 @@
 // Import our modules
 mod config;
 mod error;
-mod object_store;
 mod types;
 
 // FFI function modules

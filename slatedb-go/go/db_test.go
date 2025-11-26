@@ -21,10 +21,10 @@ var _ = Describe("DB", func() {
 		tmpDir, err = os.MkdirTemp("", "slatedb_db_test_*")
 		Expect(err).NotTo(HaveOccurred())
 
-		db, err = slatedb.Open(tmpDir, &slatedb.StoreConfig{
-			Provider: slatedb.ProviderLocal,
-			Local:    &slatedb.LocalConfig{Path: tmpDir},
-		})
+		envFile, err := createEnvFile(tmpDir)
+		Expect(err).NotTo(HaveOccurred())
+
+		db, err = slatedb.Open(tmpDir, "", envFile)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db).NotTo(BeNil())
 	})
@@ -210,11 +210,16 @@ var _ = Describe("DB", func() {
 })
 
 var _ = Describe("DB Builder", func() {
-	var tmpDir string
+	var (
+		tmpDir  string
+		envFile string
+	)
 
 	BeforeEach(func() {
 		var err error
 		tmpDir, err = os.MkdirTemp("", "slatedb_builder_test_*")
+		Expect(err).NotTo(HaveOccurred())
+		envFile, err = createEnvFile(tmpDir)
 		Expect(err).NotTo(HaveOccurred())
 	})
 
@@ -224,17 +229,9 @@ var _ = Describe("DB Builder", func() {
 
 	Describe("NewBuilder", func() {
 		It("should create a new builder successfully", func() {
-			builder, err := slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err := slatedb.NewBuilder(tmpDir, "", envFile)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(builder).NotTo(BeNil())
-		})
-
-		It("should fail with invalid store config", func() {
-			builder, err := slatedb.NewBuilder(tmpDir, nil)
-			Expect(err).To(HaveOccurred())
-			Expect(builder).To(BeNil())
 		})
 	})
 
@@ -243,9 +240,7 @@ var _ = Describe("DB Builder", func() {
 
 		BeforeEach(func() {
 			var err error
-			builder, err = slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err = slatedb.NewBuilder(tmpDir, "", "")
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -306,9 +301,7 @@ var _ = Describe("DB Builder", func() {
 
 		BeforeEach(func() {
 			var err error
-			builder, err = slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err = slatedb.NewBuilder(tmpDir, "", "")
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -327,9 +320,7 @@ var _ = Describe("DB Builder", func() {
 
 	Describe("Method Chaining", func() {
 		It("should support method chaining", func() {
-			builder, err := slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err := slatedb.NewBuilder(tmpDir, "", "")
 			Expect(err).NotTo(HaveOccurred())
 
 			db, err := builder.
@@ -355,9 +346,7 @@ var _ = Describe("DB Builder", func() {
 			customSettings.FlushInterval = "150ms"
 			customSettings.L0SstSizeBytes = 32 * 1024 * 1024 // 32MB
 
-			builder, err := slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err := slatedb.NewBuilder(tmpDir, "", "")
 			Expect(err).NotTo(HaveOccurred())
 
 			db, err := builder.
@@ -380,13 +369,4 @@ var _ = Describe("DB Builder", func() {
 		})
 
 	})
-
-	Describe("Error Handling", func() {
-		It("should handle invalid store config", func() {
-			_, err := slatedb.NewBuilder(tmpDir, nil)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("storeConfig cannot be nil"))
-		})
-	})
-
 })

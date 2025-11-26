@@ -43,17 +43,19 @@ type DbReader struct {
 //	reader, err := slatedb.OpenReader("/tmp/mydb", &slatedb.StoreConfig{
 //	    Provider: slatedb.ProviderLocal,
 //	}, nil, nil)
-func OpenReader(path string, storeConfig *StoreConfig, checkpointId *string, opts *DbReaderOptions) (*DbReader, error) {
+func OpenReader(path, url, envFile string, checkpointId *string, opts *DbReaderOptions) (*DbReader, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	// Convert Go structs to JSON strings (reuse existing functions)
-	storeConfigJSON, storeConfigPtr := convertStoreConfigToJSON(storeConfig)
-	defer func() {
-		if storeConfigPtr != nil {
-			C.free(storeConfigPtr)
-		}
-	}()
+	var cURL, cEnvFile *C.char
+	if url != "" {
+		cURL = C.CString(url)
+		defer C.free(unsafe.Pointer(cURL))
+	}
+	if envFile != "" {
+		cEnvFile = C.CString(envFile)
+		defer C.free(unsafe.Pointer(cEnvFile))
+	}
 
 	// Convert checkpoint ID
 	var cCheckpointId *C.char
@@ -64,7 +66,7 @@ func OpenReader(path string, storeConfig *StoreConfig, checkpointId *string, opt
 
 	cOpts := convertToCReaderOptions(opts)
 
-	handle := C.slatedb_reader_open(cPath, storeConfigJSON, cCheckpointId, cOpts)
+	handle := C.slatedb_reader_open(cPath, cURL, cEnvFile, cCheckpointId, cOpts)
 
 	// Check if handle is null (indicates error)
 	if unsafe.Pointer(handle._0) == unsafe.Pointer(uintptr(0)) {
