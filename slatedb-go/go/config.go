@@ -11,40 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 	"unsafe"
 )
 
 // ============================================================================
 // TYPE DEFINITIONS
 // ============================================================================
-
-// Provider types
-type Provider string
-
-const (
-	ProviderLocal Provider = "local" // if path is not given local means in memory
-	ProviderAWS   Provider = "aws"
-)
-
-// AWSConfig contains AWS S3 specific configuration
-type AWSConfig struct {
-	Bucket         string        `json:"bucket,omitempty"`          // optional, fallback to AWS_BUCKET env var
-	Region         string        `json:"region,omitempty"`          // optional, fallback to AWS_REGION env var
-	Endpoint       string        `json:"endpoint,omitempty"`        // for S3-compatible storage
-	RequestTimeout time.Duration `json:"request_timeout,omitempty"` // HTTP timeout for S3 requests
-}
-
-type LocalConfig struct {
-	Path string `json:"path,omitempty"` // optional, fallback to LOCAL_PATH env var
-}
-
-// StoreConfig contains object storage provider configuration
-type StoreConfig struct {
-	Provider Provider     `json:"provider"`
-	AWS      *AWSConfig   `json:"aws,omitempty"`
-	Local    *LocalConfig `json:"local,omitempty"`
-}
 
 // DurabilityLevel represents the durability filter for scans
 type DurabilityLevel int
@@ -462,22 +434,4 @@ func convertToCReaderOptions(opts *DbReaderOptions) *C.CSdbReaderOptions {
 		checkpoint_lifetime_ms:    C.uint64_t(opts.CheckpointLifetime),
 		max_memtable_bytes:        C.uint64_t(opts.MaxMemtableBytes),
 	}
-}
-
-// JSON serialization functions
-
-// convertStoreConfigToJSON converts Go StoreConfig to JSON string
-// Returns C string and pointer to free. Caller must free the returned pointer.
-func convertStoreConfigToJSON(config *StoreConfig) (*C.char, unsafe.Pointer) {
-	if config == nil {
-		return nil, nil
-	}
-
-	jsonBytes, err := json.Marshal(config)
-	if err != nil {
-		return nil, nil // Return null on error
-	}
-
-	cStr := C.CString(string(jsonBytes))
-	return cStr, unsafe.Pointer(cStr)
 }

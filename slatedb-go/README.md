@@ -22,15 +22,14 @@ slatedb-go/
 ├── build.rs            # Build script for header generation
 ├── src/
 │   ├── lib.rs          # Module coordination and re-exports
+│   ├── batch.rs        # WriteBatch FFI functions
+│   ├── config.rs       # helpers to convert types
 │   ├── db.rs           # Main database FFI functions
 │   ├── db_reader.rs    # DbReader FFI implementation
-│   ├── iterator.rs     # Scan and iterator FFI functions  
-│   ├── batch.rs        # WriteBatch FFI functions
-│   ├── config.rs       # JSON configuration parsing
 │   ├── error.rs        # Error handling and conversion
-│   ├── types.rs        # FFI type definitions
-│   ├── object_store.rs # Object store creation
-│   └── memory.rs       # Memory management utilities
+│   ├── iterator.rs     # Scan and iterator FFI functions
+│   ├── memory.rs       # Memory management utilities
+│   └── types.rs        # FFI type definitions
 ├── go/
 │   ├── go.mod          # Go module
 │   ├── config.go       # Configuration structs and options
@@ -93,24 +92,16 @@ import (
     "slatedb.io/slatedb-go"
 )
 
-// Local storage (development)
-db, _ := slatedb.Open("/tmp/cache", &slatedb.StoreConfig{
-    Provider: slatedb.ProviderLocal,
-})
+// In memory object storage (development)
+db, _ := slatedb.Open("/tmp/cache", "", "")
 defer db.Close()
 
 // S3 (production)
-db, _ := slatedb.Open("/tmp/cache", &slatedb.StoreConfig{
-    Provider: slatedb.ProviderAWS,
-    AWS: &slatedb.AWSConfig{
-        Bucket: "bucket",
-        Region: "us-west-2",
-    },
-})
+db, _ := slatedb.Open("/tmp/cache", "s3://bucket/", "")
 defer db.Close()
 
 // Environment variables (automatic fallback)
-db, _ := slatedb.Open("/tmp/cache", nil) // nil = use environment
+db, _ := slatedb.Open("/tmp/cache", "", "") // "" = use environment
 defer db.Close()
 
 // Basic operations
@@ -147,13 +138,7 @@ SlateDB uses a builder pattern with `Settings` for configuration:
 
 ```go
 // Using builder pattern with custom settings
-builder, _ := slatedb.NewBuilder("/tmp/cache", &slatedb.StoreConfig{
-    Provider: slatedb.ProviderAWS,
-    AWS: &slatedb.AWSConfig{
-        Bucket: "bucket",
-        Region: "us-west-2",
-    },
-})
+builder, _ := slatedb.NewBuilder("/tmp/cache", "", "")
 
 settings := &slatedb.Settings{
     FlushInterval:    "50ms",        // Default: 100ms
@@ -185,19 +170,19 @@ db, _ := builder.WithSettings(settings).Build()
 ```go
 // 1. Use defaults
 settings, _ := slatedb.SettingsDefault()
-db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(settings).Build()
+db, _ := slatedb.NewBuilder(path, "", "").WithSettings(settings).Build()
 
 // 2. Load from file
 settings, _ := slatedb.SettingsFromFile("slatedb.toml")
-db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(settings).Build()
+db, _ := slatedb.NewBuilder(path, "", "").WithSettings(settings).Build()
 
 // 3. Load from environment with prefix
 settings, _ := slatedb.SettingsFromEnv("SLATEDB_")
-db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(settings).Build()
+db, _ := slatedb.NewBuilder(path, "", "").WithSettings(settings).Build()
 
 // 4. Auto-detect (file, env, then defaults)
 settings, _ := slatedb.SettingsLoad()
-db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(settings).Build()
+db, _ := slatedb.NewBuilder(path, "", "").WithSettings(settings).Build()
 
 // 5. Merge settings (base + overrides)
 base, _ := slatedb.SettingsFromFile("base.toml")
@@ -205,7 +190,7 @@ overrides := &slatedb.Settings{
     FlushInterval: "50ms", // Override just this field
 }
 merged := slatedb.MergeSettings(base, overrides)
-db, _ := slatedb.NewBuilder(path, storeConfig).WithSettings(merged).Build()
+db, _ := slatedb.NewBuilder(path, "", "").WithSettings(merged).Build()
 
 // 6. Garbage collection configuration
 settings := &slatedb.Settings{
@@ -254,9 +239,7 @@ db.WriteWithOptions(batch, opts)
 
 ```go
 // DbReader provides concurrent read-only access
-reader, _ := slatedb.OpenReader("/tmp/cache", &slatedb.StoreConfig{
-    Provider: slatedb.ProviderLocal,
-}, nil, nil)
+reader, _ := slatedb.OpenReader("/tmp/cache", ""file:///path/to/directory"", "", nil, nil)
 defer reader.Close()
 
 // All read operations available
@@ -285,7 +268,7 @@ for {
 }
 
 // Reading from specific checkpoint
-checkpointReader, _ := slatedb.OpenReader("/tmp/cache", storeConfig, 
+checkpointReader, _ := slatedb.OpenReader("/tmp/cache", "file:///path/to/directory", "", 
     &checkpointId, &slatedb.DbReaderOptions{
         ManifestPollInterval: 5000,     // 5 seconds
         CheckpointLifetime:   300000,   // 5 minutes  
@@ -320,7 +303,7 @@ SlateDB Go bindings provide a clean, structured API organized into the following
 - `Iterator.Close() error` - Close iterator
 
 ### Database Management
-- `NewBuilder(path string, storeConfig *StoreConfig) (*Builder, error)` - Create database builder
+- `NewBuilder(path, url, envFile string) (*Builder, error)` - Create database builder
 - `Builder.WithSettings(settings *Settings) *Builder` - Configure with settings
 - `Builder.Build() (*DB, error)` - Build and open database
 - `Close() error` - Close database connection
@@ -334,7 +317,7 @@ SlateDB Go bindings provide a clean, structured API organized into the following
 - `MergeSettings(base, override *Settings) *Settings` - Merge settings objects
 
 ### Read-Only Access (DbReader)
-- `OpenReader(path string, storeConfig *StoreConfig, checkpointId *string, opts *DbReaderOptions) (*DbReader, error)`
+- `OpenReader(path, url, envFile string, checkpointId *string, opts *DbReaderOptions) (*DbReader, error)`
 - All read operations: `Get()`, `GetWithOptions()`, `Scan()`, `ScanWithOptions()`
 - Same iterator API as main database
 
@@ -379,18 +362,6 @@ type GarbageCollectorDirectoryOptions struct {
     MinAge   string // Default: "86400s" (24 hours)
 }
 
-type StoreConfig struct {
-    Provider Provider   // ProviderLocal, ProviderAWS
-    AWS      *AWSConfig // AWS S3 configuration
-}
-
-type AWSConfig struct {
-    Bucket         string        // S3 bucket name
-    Region         string        // AWS region
-    Endpoint       string        // Custom S3 endpoint (optional)
-    RequestTimeout time.Duration // HTTP timeout (optional)
-}
-
 type DbReaderOptions struct {
     ManifestPollInterval uint64 // How often to poll for updates (ms)
     CheckpointLifetime   uint64 // How long checkpoints live (ms)
@@ -410,7 +381,7 @@ type ScanOptions struct {
 
 ## Environment Variables
 
-Automatic object store configuration via environment variables (fallback when `storeConfig` is `nil`):
+Automatic object store configuration via environment variables (fallback when `url` or `envFile` is `""`):
 
 ```bash
 # AWS
