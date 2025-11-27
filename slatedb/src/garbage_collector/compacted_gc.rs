@@ -255,9 +255,9 @@ mod tests {
 
         // Mark one SST as active in the manifest so that most_recent_sst_dt
         // is newer than the configured minimum-age cutoff.
-        let mut dirty = stored_manifest.prepare_dirty();
-        dirty.core.l0.push_back(active_handle);
-        stored_manifest.update_manifest(dirty).await.unwrap();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.l0.push_back(active_handle);
+        stored_manifest.update(dirty).await.unwrap();
 
         // Register barrier metrics to be more recent than id_active_recent so it doesn't get in the way
         let stat_registry = Arc::new(StatRegistry::new());
@@ -346,9 +346,9 @@ mod tests {
 
         // Mark id_manifest as the only active SST in the manifest so that
         // most_recent_sst_dt is 3_000ms, which becomes the cutoff.
-        let mut dirty = stored_manifest.prepare_dirty();
-        dirty.core.l0.push_back(manifest_handle);
-        stored_manifest.update_manifest(dirty).await.unwrap();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.l0.push_back(manifest_handle);
+        stored_manifest.update(dirty).await.unwrap();
 
         // Register barrier metric to be more recent than id_newer so it doesn't get in the way
         let stat_registry = Arc::new(StatRegistry::new());
@@ -438,9 +438,9 @@ mod tests {
         // Mark the newest SST active in the manifest so that the
         // most_recent_sst_dt boundary is 3_000ms and the compaction
         // low watermark (2_000ms) becomes the effective cutoff (see below).
-        let mut dirty = stored_manifest.prepare_dirty();
-        dirty.core.l0.push_back(active_handle);
-        stored_manifest.update_manifest(dirty).await.unwrap();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.l0.push_back(active_handle);
+        stored_manifest.update(dirty).await.unwrap();
 
         // Register barrier metrics
         let stat_registry = Arc::new(StatRegistry::new());
