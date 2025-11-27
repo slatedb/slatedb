@@ -394,28 +394,38 @@ impl CompactorEventHandler {
     /// Emits the current compaction state and per-job progress.
     fn handle_log_ticker(&self) {
         self.log_compaction_state();
+        self.log_compaction_throughput();
+    }
 
-        let current_time_ms = self.system_clock.now().timestamp_millis() as u64;
+    /// Logs per-job compaction progress and updates aggregate throughput metrics.
+    fn log_compaction_throughput(&self) {
+        let current_time = self.system_clock.now();
+        let current_time_ms = current_time.timestamp_millis() as u64;
         let mut total_bytes = 0u64;
         let mut total_throughput = 0.0;
 
         for compaction in self.state.compactions() {
-            total_bytes += compaction.total_bytes();
-
-            let throughput = compaction.get_throughput(current_time_ms);
+            let throughput = compaction.get_throughput(current_time);
             total_throughput += throughput;
+            total_bytes += compaction.estimated_source_bytes();
 
-            let percentage = if compaction.total_bytes() > 0 {
-                (compaction.bytes_processed() * 100 / compaction.total_bytes()) as u32
+            let percentage = if compaction.estimated_source_bytes() > 0 {
+                (compaction.bytes_processed() * 100 / compaction.estimated_source_bytes()) as u32
             } else {
                 0
             };
+            let elapsed_secs = if compaction.start_time_ms() > 0 {
+                ((current_time_ms - compaction.start_time_ms()) as f64) / 1000.0
+            } else {
+                0.0
+            };
             debug!(
-                "compaction progress [id={}, current_percentage={}%, processed_bytes={}, estimated_total_bytes={}, throughput={:.2} bytes/sec]",
+                "compaction progress [id={}, progress={}%, processed_bytes={}, estimated_source_bytes={}, elapsed={:.2}s, throughput={:.2} bytes/sec]",
                 compaction.id(),
                 percentage,
                 compaction.bytes_processed(),
-                compaction.total_bytes(),
+                compaction.estimated_source_bytes(),
+                elapsed_secs,
                 throughput,
             );
         }
@@ -607,12 +617,12 @@ impl CompactorEventHandler {
             is_dest_last_run,
         };
 
-        // Set total bytes and start time for metrics tracking
-        let total_bytes = job_args.estimated_source_bytes();
+        // Set estimated source bytes and start time for metrics tracking
+        let estimated_source_bytes = job_args.estimated_source_bytes();
         let start_time_ms = self.system_clock.now().timestamp_millis() as u64;
 
         self.state.update_compaction(&compaction.id(), |c| {
-            c.set_total_bytes_and_start_time(total_bytes, start_time_ms);
+            c.set_estimated_source_bytes_and_start_time(estimated_source_bytes, start_time_ms);
         });
 
         // TODO(sujeetsawala): Add job attempt to compaction
@@ -1827,14 +1837,14 @@ mod tests {
             Ulid::from_parts(start_time_1, 0),
             CompactionSpec::new(vec![], 10),
         );
-        compaction_1.set_total_bytes_and_start_time(total_bytes_1, start_time_1);
+        compaction_1.set_estimated_source_bytes_and_start_time(total_bytes_1, start_time_1);
         compaction_1.set_bytes_processed(500);
 
         let mut compaction_2 = Compaction::new(
             Ulid::from_parts(start_time_2, 0),
             CompactionSpec::new(vec![], 11),
         );
-        compaction_2.set_total_bytes_and_start_time(total_bytes_2, start_time_2);
+        compaction_2.set_estimated_source_bytes_and_start_time(total_bytes_2, start_time_2);
         compaction_2.set_bytes_processed(1000);
 
         fixture
@@ -1871,21 +1881,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_track_per_job_throughput() {
-        let start_time = 1000u64;
-        let current_time = 3000u64;
+        use chrono::DateTime;
+
+        let start_time_ms = 1000u64;
+        let current_time_ms = 3000u64;
         let total_bytes = 2000u64;
         let processed_bytes = 1000u64;
 
         let mut compaction = Compaction::new(
-            Ulid::from_parts(start_time, 0),
+            Ulid::from_parts(start_time_ms, 0),
             CompactionSpec::new(vec![], 10),
         );
-        compaction.set_total_bytes_and_start_time(total_bytes, start_time);
+        compaction.set_estimated_source_bytes_and_start_time(total_bytes, start_time_ms);
         compaction.set_bytes_processed(processed_bytes);
 
+        let current_time = DateTime::from_timestamp_millis(current_time_ms as i64).unwrap();
         let throughput = compaction.get_throughput(current_time);
         assert_eq!(throughput, 500.0);
 
+        let start_time = DateTime::from_timestamp_millis(start_time_ms as i64).unwrap();
         let throughput_zero = compaction.get_throughput(start_time);
         assert_eq!(throughput_zero, 0.0);
     }

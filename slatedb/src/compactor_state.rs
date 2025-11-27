@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
+use chrono::{DateTime, Utc};
 use log::{error, info};
 use ulid::Ulid;
 
@@ -119,8 +120,8 @@ pub(crate) struct Compaction {
     spec: CompactionSpec,
     /// Total number of bytes processed so far for this compaction.
     bytes_processed: u64,
-    /// Total number of bytes to be processed for this compaction (estimate).
-    total_bytes: u64,
+    /// Estimated total number of source bytes to be processed for this compaction.
+    estimated_source_bytes: u64,
     /// Start time of the compaction in milliseconds since epoch.
     start_time_ms: u64,
 }
@@ -131,14 +132,18 @@ impl Compaction {
             id,
             spec,
             bytes_processed: 0,
-            total_bytes: 0,
+            estimated_source_bytes: 0,
             start_time_ms: 0,
         }
     }
 
-    /// Sets the total bytes and start time for this compaction.
-    pub(crate) fn set_total_bytes_and_start_time(&mut self, total_bytes: u64, start_time_ms: u64) {
-        self.total_bytes = total_bytes;
+    /// Sets the estimated source bytes and start time for this compaction.
+    pub(crate) fn set_estimated_source_bytes_and_start_time(
+        &mut self,
+        estimated_source_bytes: u64,
+        start_time_ms: u64,
+    ) {
+        self.estimated_source_bytes = estimated_source_bytes;
         self.start_time_ms = start_time_ms;
     }
 
@@ -193,10 +198,11 @@ impl Compaction {
     }
 
     /// Gets the throughput for this compaction in bytes per second.
-    pub(crate) fn get_throughput(&self, current_time_ms: u64) -> f64 {
+    pub(crate) fn get_throughput(&self, current_time: DateTime<Utc>) -> f64 {
         if self.start_time_ms == 0 {
             return 0.0;
         }
+        let current_time_ms = current_time.timestamp_millis() as u64;
         let elapsed_secs = ((current_time_ms - self.start_time_ms) as f64) / 1000.0;
         if elapsed_secs > 0.0 {
             (self.bytes_processed as f64) / elapsed_secs
@@ -205,14 +211,19 @@ impl Compaction {
         }
     }
 
-    /// Gets the total bytes for this compaction.
-    pub(crate) fn total_bytes(&self) -> u64 {
-        self.total_bytes
+    /// Gets the estimated total source bytes for this compaction.
+    pub(crate) fn estimated_source_bytes(&self) -> u64 {
+        self.estimated_source_bytes
     }
 
     /// Gets the bytes processed so far.
     pub(crate) fn bytes_processed(&self) -> u64 {
         self.bytes_processed
+    }
+
+    /// Gets the start time in milliseconds since epoch.
+    pub(crate) fn start_time_ms(&self) -> u64 {
+        self.start_time_ms
     }
 }
 
