@@ -1429,9 +1429,8 @@ mod tests {
     use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, GarbageCollectorDirectoryOptions,
-        GarbageCollectorOptions, ObjectStoreCacheOptions, Settings,
-        SizeTieredCompactionSchedulerOptions, Ttl,
+        CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+        ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_state::CoreDbState;
