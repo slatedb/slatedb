@@ -833,7 +833,6 @@ impl KeyValueIterator for SstIterator<'_> {
 mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
-    use crate::db_cache::DbCache;
     use crate::db_state::SsTableId;
     use crate::db_stats::DbStats;
     use crate::filter;
@@ -1324,6 +1323,7 @@ mod tests {
     #[cfg(feature = "moka")]
     async fn test_sst_iter_cache_blocks() {
         use crate::db_cache::moka::MokaCache;
+        use crate::db_cache::DbCache;
         use crate::db_cache::SplitCache;
 
         let root_path = Path::from("");
