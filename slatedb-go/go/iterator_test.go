@@ -25,7 +25,7 @@ var _ = Describe("Iterator", func() {
 		envFile, err := createEnvFile(tmpDir)
 		Expect(err).NotTo(HaveOccurred())
 
-		db, err = slatedb.Open(tmpDir, "", envFile)
+		db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db).NotTo(BeNil())
 

@@ -24,7 +24,7 @@ var _ = Describe("DB", func() {
 		envFile, err := createEnvFile(tmpDir)
 		Expect(err).NotTo(HaveOccurred())
 
-		db, err = slatedb.Open(tmpDir, "", envFile)
+		db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db).NotTo(BeNil())
 	})
@@ -229,7 +229,8 @@ var _ = Describe("DB Builder", func() {
 
 	Describe("NewBuilder", func() {
 		It("should create a new builder successfully", func() {
-			builder, err := slatedb.NewBuilder(tmpDir, "", envFile)
+			builder, err := slatedb.NewBuilder(tmpDir)
+			builder.WithEnvFile(envFile)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(builder).NotTo(BeNil())
 		})
@@ -240,7 +241,7 @@ var _ = Describe("DB Builder", func() {
 
 		BeforeEach(func() {
 			var err error
-			builder, err = slatedb.NewBuilder(tmpDir, "", "")
+			builder, err = slatedb.NewBuilder(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -301,7 +302,7 @@ var _ = Describe("DB Builder", func() {
 
 		BeforeEach(func() {
 			var err error
-			builder, err = slatedb.NewBuilder(tmpDir, "", "")
+			builder, err = slatedb.NewBuilder(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -320,7 +321,7 @@ var _ = Describe("DB Builder", func() {
 
 	Describe("Method Chaining", func() {
 		It("should support method chaining", func() {
-			builder, err := slatedb.NewBuilder(tmpDir, "", "")
+			builder, err := slatedb.NewBuilder(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 
 			db, err := builder.
@@ -346,7 +347,7 @@ var _ = Describe("DB Builder", func() {
 			customSettings.FlushInterval = "150ms"
 			customSettings.L0SstSizeBytes = 32 * 1024 * 1024 // 32MB
 
-			builder, err := slatedb.NewBuilder(tmpDir, "", "")
+			builder, err := slatedb.NewBuilder(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 
 			db, err := builder.
@@ -367,6 +368,5 @@ var _ = Describe("DB Builder", func() {
 			err = db.Close()
 			Expect(err).NotTo(HaveOccurred())
 		})
-
 	})
 })

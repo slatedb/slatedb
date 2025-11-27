@@ -94,15 +94,15 @@ import (
 )
 
 // In memory object storage (development)
-db, _ := slatedb.Open("/tmp/cache", "", "")
+db, _ := slatedb.Open("/tmp/cache")
 defer db.Close()
 
 // S3 (production)
-db, _ := slatedb.Open("/tmp/cache", "s3://bucket/", "")
+db, _ := slatedb.Open("/tmp/cache", slatedb.WithUrl[slatedb.DbConfig]("s3://bucket/"))
 defer db.Close()
 
 // Environment variables (automatic fallback)
-db, _ := slatedb.Open("/tmp/cache", "", "") // "" = in memory object storage
+db, _ := slatedb.Open("/tmp/cache", slatedb.WithEnvFile[slatedb.DbConfig]("/path/to/env"))
 defer db.Close()
 
 // Basic operations
@@ -139,7 +139,7 @@ SlateDB uses a builder pattern with `Settings` for configuration:
 
 ```go
 // Using builder pattern with custom settings
-builder, _ := slatedb.NewBuilder("/tmp/cache", "", "")
+builder, _ := slatedb.NewBuilder("/tmp/cache")
 
 settings := &slatedb.Settings{
     FlushInterval:    "50ms",        // Default: 100ms
@@ -171,19 +171,19 @@ db, _ := builder.WithSettings(settings).Build()
 ```go
 // 1. Use defaults
 settings, _ := slatedb.SettingsDefault()
-db, _ := slatedb.NewBuilder(path, "", "").WithSettings(settings).Build()
+db, _ := slatedb.NewBuilder(path).WithSettings(settings).Build()
 
 // 2. Load from file
 settings, _ := slatedb.SettingsFromFile("slatedb.toml")
-db, _ := slatedb.NewBuilder(path, "", "").WithSettings(settings).Build()
+db, _ := slatedb.NewBuilder(path).WithSettings(settings).Build()
 
 // 3. Load from environment with prefix
 settings, _ := slatedb.SettingsFromEnv("SLATEDB_")
-db, _ := slatedb.NewBuilder(path, "", "").WithSettings(settings).Build()
+db, _ := slatedb.NewBuilder(path).WithSettings(settings).Build()
 
 // 4. Auto-detect (file, env, then defaults)
 settings, _ := slatedb.SettingsLoad()
-db, _ := slatedb.NewBuilder(path, "", "").WithSettings(settings).Build()
+db, _ := slatedb.NewBuilder(path).WithSettings(settings).Build()
 
 // 5. Merge settings (base + overrides)
 base, _ := slatedb.SettingsFromFile("base.toml")
@@ -191,7 +191,7 @@ overrides := &slatedb.Settings{
     FlushInterval: "50ms", // Override just this field
 }
 merged := slatedb.MergeSettings(base, overrides)
-db, _ := slatedb.NewBuilder(path, "", "").WithSettings(merged).Build()
+db, _ := slatedb.NewBuilder(path).WithSettings(merged).Build()
 
 // 6. Garbage collection configuration
 settings := &slatedb.Settings{
@@ -240,7 +240,7 @@ db.WriteWithOptions(batch, opts)
 
 ```go
 // DbReader provides concurrent read-only access
-reader, _ := slatedb.OpenReader("/tmp/cache", ""file:///path/to/directory"", "", nil, nil)
+reader, _ := slatedb.OpenReader("/tmp/cache", slatedb.WithUrl[slatedb.DbReaderConfig]("file:///path/to/directory"))
 defer reader.Close()
 
 // All read operations available
@@ -269,12 +269,16 @@ for {
 }
 
 // Reading from specific checkpoint
-checkpointReader, _ := slatedb.OpenReader("/tmp/cache", "file:///path/to/directory", "", 
-    &checkpointId, &slatedb.DbReaderOptions{
+checkpointReader, _ := slatedb.OpenReader(
+    "/tmp/cache",
+    slatedb.WithUrl[slatedb.DbReaderConfig]("file:///path/to/directory"),
+    slatedb.WithCheckpointId(checkpointId),
+    slttedb.WithDbReaderOptions(slatedb.DbReaderOptions{
         ManifestPollInterval: 5000,     // 5 seconds
         CheckpointLifetime:   300000,   // 5 minutes  
         MaxMemtableBytes:     67108864, // 64MB
-    })
+    }),
+)
 ```
 
 ## API Reference
@@ -304,7 +308,9 @@ SlateDB Go bindings provide a clean, structured API organized into the following
 - `Iterator.Close() error` - Close iterator
 
 ### Database Management
-- `NewBuilder(path, url, envFile string) (*Builder, error)` - Create database builder
+- `NewBuilder(path string) (*Builder, error)` - Create database builder
+- `Builder.WithUrl(url string) *Builder` - Configure with object store URL (e.g. `s3://bucket/`)
+- `Builder.WithEnvFile(path string) *Builder` - Configure with environment file (e.g. `/path/to/env`)
 - `Builder.WithSettings(settings *Settings) *Builder` - Configure with settings
 - `Builder.Build() (*DB, error)` - Build and open database
 - `Close() error` - Close database connection
@@ -318,7 +324,7 @@ SlateDB Go bindings provide a clean, structured API organized into the following
 - `MergeSettings(base, override *Settings) *Settings` - Merge settings objects
 
 ### Read-Only Access (DbReader)
-- `OpenReader(path, url, envFile string, checkpointId *string, opts *DbReaderOptions) (*DbReader, error)`
+- `OpenReader(path string, opts ...Option[slatedb.DbReaderConfig]) (*DbReader, error)`
 - All read operations: `Get()`, `GetWithOptions()`, `Scan()`, `ScanWithOptions()`
 - Same iterator API as main database
 
@@ -382,7 +388,7 @@ type ScanOptions struct {
 
 ## Environment Variables
 
-Automatic object store configuration via environment variables (when `url` is `""` and `envFile` is not `""`):
+Automatic object store configuration via environment variables (when `envFile` is given and `url` is not):
 
 ```bash
 # AWS

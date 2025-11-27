@@ -20,7 +20,10 @@ var _ = Describe("WriteBatch", func() {
 		tmpDir, err = os.MkdirTemp("", "slatedb_batch_test_*")
 		Expect(err).NotTo(HaveOccurred())
 
-		db, err = slatedb.Open(tmpDir, "", "")
+		envFile, err := createEnvFile(tmpDir)
+		Expect(err).NotTo(HaveOccurred())
+
+		db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db).NotTo(BeNil())
 	})

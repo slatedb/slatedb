@@ -14,6 +14,58 @@ import (
 	"unsafe"
 )
 
+type config interface {
+	DbConfig | DbReaderConfig
+}
+
+type DbConfig struct {
+	url     *string
+	envFile *string
+}
+
+type DbReaderConfig struct {
+	url          *string
+	envFile      *string
+	checkpointId *string
+	opts         *DbReaderOptions
+}
+
+type Option[T config] func(*T)
+
+func WithUrl[T config](url string) Option[T] {
+	return func(cfg *T) {
+		switch c := any(cfg).(type) {
+		case *DbConfig:
+			c.url = &url
+		case *DbReaderConfig:
+			c.url = &url
+		}
+	}
+}
+
+func WithEnvFile[T config](envFile string) Option[T] {
+	return func(cfg *T) {
+		switch c := any(cfg).(type) {
+		case *DbConfig:
+			c.envFile = &envFile
+		case *DbReaderConfig:
+			c.envFile = &envFile
+		}
+	}
+}
+
+func WithCheckpointId(checkpointId string) Option[DbReaderConfig] {
+	return func(cfg *DbReaderConfig) {
+		cfg.checkpointId = &checkpointId
+	}
+}
+
+func WithDbReaderOptions(opts DbReaderOptions) Option[DbReaderConfig] {
+	return func(cfg *DbReaderConfig) {
+		cfg.opts = &opts
+	}
+}
+
 // ============================================================================
 // TYPE DEFINITIONS
 // ============================================================================

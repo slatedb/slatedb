@@ -29,42 +29,42 @@ type DbReader struct {
 // Example for reading latest state:
 //
 //	// Read from latest state with auto-refreshing checkpoint
-//	reader, err := slatedb.OpenReader("/tmp/mydb", &slatedb.StoreConfig{
-//	    Provider: slatedb.ProviderLocal,
-//	}, nil, &slatedb.DbReaderOptions{
+//	reader, err := slatedb.OpenReader("/tmp/mydb", WithDbReaderOptions(slatedb.DbReaderOptions{
 //	    ManifestPollInterval: 5000,  // Poll every 5 seconds
 //	    CheckpointLifetime:   30000, // 30 second checkpoint lifetime
 //	    MaxMemtableBytes:     1024 * 1024, // 1MB memtable buffer
-//	})
+//	}))
 //
 // Example using all defaults:
 //
-//	// Pass nil to use all defaults
-//	reader, err := slatedb.OpenReader("/tmp/mydb", &slatedb.StoreConfig{
-//	    Provider: slatedb.ProviderLocal,
-//	}, nil, nil)
-func OpenReader(path, url, envFile string, checkpointId *string, opts *DbReaderOptions) (*DbReader, error) {
+//	reader, err := slatedb.OpenReader("/tmp/mydb")
+func OpenReader(path string, opts ...Option[DbReaderConfig]) (*DbReader, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	var cURL, cEnvFile *C.char
-	if url != "" {
-		cURL = C.CString(url)
+	cfg := &DbReaderConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	var (
+		cURL, cEnvFile, cCheckpointId *C.char
+		cOpts                         *C.CSdbReaderOptions
+	)
+	if cfg.url != nil {
+		cURL = C.CString(*cfg.url)
 		defer C.free(unsafe.Pointer(cURL))
 	}
-	if envFile != "" {
-		cEnvFile = C.CString(envFile)
+	if cfg.envFile != nil {
+		cEnvFile = C.CString(*cfg.envFile)
 		defer C.free(unsafe.Pointer(cEnvFile))
 	}
-
-	// Convert checkpoint ID
-	var cCheckpointId *C.char
-	if checkpointId != nil {
-		cCheckpointId = C.CString(*checkpointId)
+	if cfg.checkpointId != nil {
+		cCheckpointId = C.CString(*cfg.checkpointId)
 		defer C.free(unsafe.Pointer(cCheckpointId))
 	}
-
-	cOpts := convertToCReaderOptions(opts)
+	if cfg.opts != nil {
+		cOpts = convertToCReaderOptions(cfg.opts)
+	}
 
 	handle := C.slatedb_reader_open(cPath, cURL, cEnvFile, cCheckpointId, cOpts)
 

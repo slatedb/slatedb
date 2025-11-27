@@ -79,17 +79,21 @@ func resultToError(result C.struct_CSdbResult) error {
 
 // Open opens a SlateDB database with default settings
 // For more advanced configuration, use NewBuilder() instead
-func Open(path, url, envFile string) (*DB, error) {
+func Open(path string, opts ...Option[DbConfig]) (*DB, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
+	cfg := &DbConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
 	var cURL, cEnvFile *C.char
-	if url != "" {
-		cURL = C.CString(url)
+	if cfg.url != nil {
+		cURL = C.CString(*cfg.url)
 		defer C.free(unsafe.Pointer(cURL))
 	}
-	if envFile != "" {
-		cEnvFile = C.CString(envFile)
+	if cfg.envFile != nil {
+		cEnvFile = C.CString(*cfg.envFile)
 		defer C.free(unsafe.Pointer(cEnvFile))
 	}
 
@@ -449,19 +453,27 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 // Builder represents a database builder that mirrors Rust's DbBuilder
 type Builder struct {
 	path         string
-	url          string
-	envFile      string
+	url          *string
+	envFile      *string
 	settings     *Settings
 	sstBlockSize *SstBlockSize
 }
 
 // NewBuilder creates a new database builder
-func NewBuilder(path, url, envFile string) (*Builder, error) {
-	return &Builder{
-		path:    path,
-		url:     url,
-		envFile: envFile,
-	}, nil
+func NewBuilder(path string) (*Builder, error) {
+	return &Builder{path: path}, nil
+}
+
+// WithUrl sets the URL for the database object store
+func (b *Builder) WithUrl(url string) *Builder {
+	b.url = &url
+	return b
+}
+
+// WithEnvFile sets the URL for the database object store
+func (b *Builder) WithEnvFile(envFile string) *Builder {
+	b.envFile = &envFile
+	return b
 }
 
 // WithSettings sets the Settings for the database
@@ -483,12 +495,12 @@ func (b *Builder) Build() (*DB, error) {
 	defer C.free(unsafe.Pointer(cPath))
 
 	var cURL, cEnvFile *C.char
-	if b.url != "" {
-		cURL = C.CString(b.url)
+	if b.url != nil {
+		cURL = C.CString(*b.url)
 		defer C.free(unsafe.Pointer(cURL))
 	}
-	if b.envFile != "" {
-		cEnvFile = C.CString(b.envFile)
+	if b.envFile != nil {
+		cEnvFile = C.CString(*b.envFile)
 		defer C.free(unsafe.Pointer(cEnvFile))
 	}
 
