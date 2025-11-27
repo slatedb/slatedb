@@ -39,19 +39,21 @@ pub extern "C" fn slatedb_open(
         Err(_) => return CSdbHandle::null(),
     };
 
-    let url_str: Option<&str> = match (url.is_null(), url) {
-        (true, _) => None,
-        (false, s) => match safe_str_from_ptr(s) {
+    let url_str: Option<&str> = if url.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(url) {
             Ok(s) => Some(s),
             Err(_) => return CSdbHandle::null(),
-        },
+        }
     };
-    let env_file_str = match (env_file.is_null(), env_file) {
-        (true, _) => None,
-        (false, s) => match safe_str_from_ptr(s) {
+    let env_file_str = if env_file.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(env_file) {
             Ok(s) => Some(s.to_string()),
             Err(_) => return CSdbHandle::null(),
-        },
+        }
     };
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
@@ -321,19 +323,21 @@ pub extern "C" fn slatedb_builder_new(
         Err(_) => return std::ptr::null_mut(),
     };
 
-    let url_str: Option<&str> = match (url.is_null(), url) {
-        (true, _) => None,
-        (false, s) => match safe_str_from_ptr(s) {
+    let url_str: Option<&str> = if url.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(url) {
             Ok(s) => Some(s),
             Err(_) => return std::ptr::null_mut(),
-        },
+        }
     };
-    let env_file_str = match (env_file.is_null(), env_file) {
-        (true, _) => None,
-        (false, s) => match safe_str_from_ptr(s) {
+    let env_file_str = if env_file.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(env_file) {
             Ok(s) => Some(s.to_string()),
             Err(_) => return std::ptr::null_mut(),
-        },
+        }
     };
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
