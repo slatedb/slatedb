@@ -58,6 +58,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::DateTime;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
@@ -414,8 +415,13 @@ impl CompactorEventHandler {
             } else {
                 0
             };
-            let elapsed_secs = if compaction.start_time_ms() > 0 {
-                ((current_time_ms - compaction.start_time_ms()) as f64) / 1000.0
+            let elapsed_secs = if compaction.start_time().timestamp_millis() > 0 {
+                let current_time = DateTime::from_timestamp_millis(current_time_ms as i64)
+                    .expect("valid timestamp");
+                current_time
+                    .signed_duration_since(compaction.start_time())
+                    .num_milliseconds() as f64
+                    / 1000.0
             } else {
                 0.0
             };
@@ -581,7 +587,9 @@ impl CompactorEventHandler {
                 break;
             }
             let compaction_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let compaction = Compaction::new(compaction_id, spec);
+            let db_state = self.state.db_state();
+            let start_time = self.system_clock.now();
+            let compaction = Compaction::new(compaction_id, spec, db_state, start_time);
             self.submit_compaction(compaction).await?;
         }
         Ok(())
@@ -615,15 +623,8 @@ impl CompactorEventHandler {
             compaction_logical_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
+            estimated_source_bytes: compaction.estimated_source_bytes(),
         };
-
-        // Set estimated source bytes and start time for metrics tracking
-        let estimated_source_bytes = job_args.estimated_source_bytes();
-        let start_time_ms = self.system_clock.now().timestamp_millis() as u64;
-
-        self.state.update_compaction(&compaction.id(), |c| {
-            c.set_estimated_source_bytes_and_start_time(estimated_source_bytes, start_time_ms);
-        });
 
         // TODO(sujeetsawala): Add job attempt to compaction
         let this_executor = self.executor.clone();
@@ -1791,13 +1792,20 @@ mod tests {
         // Two artificial compactions with known ULID timestamps
         let older_ts_ms: u64 = 1_000;
         let newer_ts_ms: u64 = 2_000;
+        let db_state = fixture.handler.state.db_state();
+        let older_time = DateTime::from_timestamp_millis(older_ts_ms as i64).unwrap();
+        let newer_time = DateTime::from_timestamp_millis(newer_ts_ms as i64).unwrap();
         let compaction_old = Compaction::new(
             Ulid::from_parts(older_ts_ms, 0),
             CompactionSpec::new(vec![], 10),
+            db_state,
+            older_time,
         );
         let compaction_new = Compaction::new(
             Ulid::from_parts(newer_ts_ms, 0),
             CompactionSpec::new(vec![], 11),
+            db_state,
+            newer_time,
         );
 
         fixture
@@ -1827,24 +1835,28 @@ mod tests {
 
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
 
-        let current_time_ms = fixture.handler.system_clock.now().timestamp_millis() as u64;
-        let start_time_1 = current_time_ms - 2000;
-        let start_time_2 = current_time_ms - 1000;
-        let total_bytes_1 = 1000u64;
-        let total_bytes_2 = 2000u64;
+        let current_time = fixture.handler.system_clock.now();
+        let current_time_ms = current_time.timestamp_millis() as u64;
+        let start_time_1 =
+            DateTime::from_timestamp_millis((current_time_ms - 2000) as i64).unwrap();
+        let start_time_2 =
+            DateTime::from_timestamp_millis((current_time_ms - 1000) as i64).unwrap();
 
+        let db_state = fixture.handler.state.db_state();
         let mut compaction_1 = Compaction::new(
-            Ulid::from_parts(start_time_1, 0),
+            Ulid::from_parts(start_time_1.timestamp_millis() as u64, 0),
             CompactionSpec::new(vec![], 10),
+            db_state,
+            start_time_1,
         );
-        compaction_1.set_estimated_source_bytes_and_start_time(total_bytes_1, start_time_1);
         compaction_1.set_bytes_processed(500);
 
         let mut compaction_2 = Compaction::new(
-            Ulid::from_parts(start_time_2, 0),
+            Ulid::from_parts(start_time_2.timestamp_millis() as u64, 0),
             CompactionSpec::new(vec![], 11),
+            db_state,
+            start_time_2,
         );
-        compaction_2.set_estimated_source_bytes_and_start_time(total_bytes_2, start_time_2);
         compaction_2.set_bytes_processed(1000);
 
         fixture
@@ -1865,7 +1877,7 @@ mod tests {
             .lookup(TOTAL_BYTES_BEING_COMPACTED)
             .unwrap()
             .get();
-        assert_eq!(total_bytes, (total_bytes_1 + total_bytes_2) as i64);
+        assert_eq!(total_bytes, 0);
 
         let throughput = fixture
             .stats_registry
@@ -1885,21 +1897,22 @@ mod tests {
 
         let start_time_ms = 1000u64;
         let current_time_ms = 3000u64;
-        let total_bytes = 2000u64;
         let processed_bytes = 1000u64;
 
+        let db_state = CoreDbState::new();
+        let start_time = DateTime::from_timestamp_millis(start_time_ms as i64).unwrap();
         let mut compaction = Compaction::new(
             Ulid::from_parts(start_time_ms, 0),
             CompactionSpec::new(vec![], 10),
+            &db_state,
+            start_time,
         );
-        compaction.set_estimated_source_bytes_and_start_time(total_bytes, start_time_ms);
         compaction.set_bytes_processed(processed_bytes);
 
         let current_time = DateTime::from_timestamp_millis(current_time_ms as i64).unwrap();
         let throughput = compaction.get_throughput(current_time);
         assert_eq!(throughput, 500.0);
 
-        let start_time = DateTime::from_timestamp_millis(start_time_ms as i64).unwrap();
         let throughput_zero = compaction.get_throughput(start_time);
         assert_eq!(throughput_zero, 0.0);
     }
@@ -1919,7 +1932,14 @@ mod tests {
             0
         );
 
-        let compaction = Compaction::new(Ulid::new(), CompactionSpec::new(vec![], 10));
+        let db_state = fixture.handler.state.db_state();
+        let start_time = fixture.handler.system_clock.now();
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![], 10),
+            db_state,
+            start_time,
+        );
         fixture
             .handler
             .state
