@@ -16,8 +16,7 @@ use std::sync::Arc;
 
 /// Implements `SequencedStorageProtocol<T>` on object storage.
 ///
-/// File layout and naming
-/// ----------------------
+/// ## File layout and naming
 /// - Objects are stored under a root directory and logical subdirectory provided at
 ///   construction time (see `ObjectStoreSequencedStorageProtocol::new`).
 /// - Each version is a single file whose name is a zero-padded 20-digit decimal id
@@ -60,11 +59,11 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
                 .expect("invalid filename")
                 .split('.')
                 .next()
-                .ok_or_else(|| TransactionalObjectError::InvalidState)?
+                .ok_or_else(|| TransactionalObjectError::InvalidObjectState)?
                 .parse()
                 .map(MonotonicId::new)
-                .map_err(|_| TransactionalObjectError::InvalidState),
-            _ => Err(TransactionalObjectError::InvalidState),
+                .map_err(|_| TransactionalObjectError::InvalidObjectState),
+            _ => Err(TransactionalObjectError::InvalidObjectState),
         }
     }
 }
@@ -136,11 +135,11 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         let base = &Path::from("/");
         let mut files_stream = self.object_store.list(Some(base));
         let mut items = Vec::new();
+        let id_range = (from, to);
         while let Some(file) = match files_stream.next().await.transpose() {
             Ok(file) => file,
             Err(e) => return Err(TransactionalObjectError::from(e)),
         } {
-            let id_range = (from, to);
             match self.parse_id(&file.location) {
                 Ok(id) if id_range.contains(&id) => {
                     items.push(GenericObjectMetadata {
@@ -150,7 +149,10 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                         size: file.size as u32,
                     });
                 }
-                Err(_) => warn!("unknown file in directory [location={:?}]", file.location),
+                Err(e) => warn!(
+                    "unknown file in directory [base={}, location={}, object_store={}, error={:?}]",
+                    base, file.location, self.object_store, e,
+                ),
                 _ => {}
             }
         }

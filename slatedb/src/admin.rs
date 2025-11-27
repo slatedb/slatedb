@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
+use crate::transactional_object::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -83,15 +84,40 @@ impl Admin {
         Ok(serde_json::to_string(&manifests)?)
     }
 
-    /// List checkpoints
-    pub async fn list_checkpoints(&self) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
+    /// List checkpoints, optionally filtering by name. When name is provided, only checkpoints
+    /// with this exact name will be returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `name_filter`: Name that will be used to filter checkpoints.
+    pub async fn list_checkpoints(
+        &self,
+        name_filter: Option<&str>,
+    ) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
             self.system_clock.clone(),
         );
         let (_, manifest) = manifest_store.read_latest_manifest().await?;
-        Ok(manifest.core.checkpoints)
+
+        let checkpoints = match name_filter {
+            Some("") => manifest
+                .core
+                .checkpoints
+                .into_iter()
+                .filter(|cp| cp.name.as_deref() == Some("") || cp.name.is_none())
+                .collect(),
+            Some(name) => manifest
+                .core
+                .checkpoints
+                .into_iter()
+                .filter(|cp| cp.name.as_deref() == Some(name))
+                .collect(),
+            None => manifest.core.checkpoints,
+        };
+
+        Ok(checkpoints)
     }
 
     /// Run the garbage collector once in the foreground.
@@ -231,10 +257,10 @@ impl Admin {
         ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
-                let mut dirty = stored_manifest.prepare_dirty();
+            .maybe_apply_update(|stored_manifest| {
+                let mut dirty = stored_manifest.prepare_dirty()?;
                 let expire_time = lifetime.map(|l| self.system_clock.now() + l);
-                let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
+                let Some(_) = dirty.value.core.checkpoints.iter_mut().find_map(|c| {
                     if c.id == id {
                         c.expire_time = expire_time;
                         return Some(());
@@ -258,16 +284,16 @@ impl Admin {
         ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
-                let mut dirty = stored_manifest.prepare_dirty();
+            .maybe_apply_update(|stored_manifest| {
+                let mut dirty = stored_manifest.prepare_dirty()?;
                 let checkpoints: Vec<Checkpoint> = dirty
-                    .core
+                    .core()
                     .checkpoints
                     .iter()
                     .filter(|c| c.id != id)
                     .cloned()
                     .collect();
-                dirty.core.checkpoints = checkpoints;
+                dirty.value.core.checkpoints = checkpoints;
                 Ok(Some(dirty))
             })
             .await
@@ -477,7 +503,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let endpoint = env::var("AWS_ENDPOINT").ok();
 
     // Start building the S3 object store builder with required params.
-    let mut builder = object_store::aws::AmazonS3Builder::new()
+    let mut builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch)
         .with_bucket_name(bucket)
         .with_region(region);
@@ -494,11 +520,9 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         }
     }
 
-    let builder = if let Some(endpoint) = endpoint {
-        builder.with_allow_http(true).with_endpoint(endpoint)
-    } else {
-        builder
-    };
+    if let Some(endpoint) = endpoint {
+        builder = builder.with_allow_http(true).with_endpoint(endpoint);
+    }
 
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }

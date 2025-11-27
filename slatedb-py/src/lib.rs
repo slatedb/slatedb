@@ -1025,13 +1025,14 @@ impl PySlateDB {
         })
     }
 
-    #[pyo3(signature = (scope = "all", *, lifetime = None, source = None))]
+    #[pyo3(signature = (scope = "all", *, lifetime = None, source = None, name = None))]
     fn create_checkpoint<'py>(
         &self,
         py: Python<'py>,
         scope: &str,
         lifetime: Option<u64>,
         source: Option<String>,
+        name: Option<String>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let db = self.inner.clone();
         let rt = get_runtime();
@@ -1053,9 +1054,16 @@ impl PySlateDB {
                 })
                 .transpose()?;
 
-            db.create_checkpoint(scope_enum, &CheckpointOptions { lifetime, source })
-                .await
-                .map_err(map_error)
+            db.create_checkpoint(
+                scope_enum,
+                &CheckpointOptions {
+                    lifetime,
+                    source,
+                    name,
+                },
+            )
+            .await
+            .map_err(map_error)
         })?;
         let dict = PyDict::new(py);
         dict.set_item("id", result.id.to_string())?;
@@ -1063,13 +1071,14 @@ impl PySlateDB {
         Ok(dict)
     }
 
-    #[pyo3(signature = (scope = "all", *, lifetime = None, source = None))]
+    #[pyo3(signature = (scope = "all", *, lifetime = None, source = None, name = None))]
     fn create_checkpoint_async<'py>(
         &self,
         py: Python<'py>,
         scope: &str,
         lifetime: Option<u64>,
         source: Option<String>,
+        name: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();
         let scope_enum = match scope.to_ascii_lowercase().as_str() {
@@ -1090,7 +1099,14 @@ impl PySlateDB {
                 })
                 .transpose()?;
             let result = db
-                .create_checkpoint(scope_enum, &CheckpointOptions { lifetime, source })
+                .create_checkpoint(
+                    scope_enum,
+                    &CheckpointOptions {
+                        lifetime,
+                        source,
+                        name,
+                    },
+                )
                 .await
                 .map_err(map_error)?;
             Python::with_gil(|py| {
@@ -2045,12 +2061,13 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (lifetime = None, source = None))]
+    #[pyo3(signature = (lifetime = None, source = None, name = None))]
     fn create_checkpoint<'py>(
         &self,
         py: Python<'py>,
         lifetime: Option<u64>,
         source: Option<String>,
+        name: Option<String>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let admin = self.inner.clone();
         let rt = get_runtime();
@@ -2063,7 +2080,11 @@ impl PySlateDBAdmin {
                 })
                 .transpose()?;
             admin
-                .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
+                .create_detached_checkpoint(&CheckpointOptions {
+                    lifetime,
+                    source,
+                    name,
+                })
                 .await
                 .map_err(map_error)
         })?;
@@ -2073,12 +2094,13 @@ impl PySlateDBAdmin {
         Ok(dict)
     }
 
-    #[pyo3(signature = (lifetime = None, source = None))]
+    #[pyo3(signature = (lifetime = None, source = None, name = None))]
     fn create_checkpoint_async<'py>(
         &self,
         py: Python<'py>,
         lifetime: Option<u64>,
         source: Option<String>,
+        name: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         future_into_py(py, async move {
@@ -2090,7 +2112,11 @@ impl PySlateDBAdmin {
                 })
                 .transpose()?;
             let result = admin
-                .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
+                .create_detached_checkpoint(&CheckpointOptions {
+                    lifetime,
+                    source,
+                    name,
+                })
                 .await
                 .map_err(map_error)?;
             Python::with_gil(|py| {
@@ -2103,12 +2129,16 @@ impl PySlateDBAdmin {
         })
     }
 
-    fn list_checkpoints<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    fn list_checkpoints<'py>(
+        &self,
+        py: Python<'py>,
+        name: Option<String>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let admin = self.inner.clone();
         let rt = get_runtime();
         let result = rt.block_on(async {
             admin
-                .list_checkpoints()
+                .list_checkpoints(name.as_deref())
                 .await
                 .map_err(|e| UnavailableError::new_err(e.to_string()))
         })?;
@@ -2120,16 +2150,21 @@ impl PySlateDBAdmin {
                 dict.set_item("manifest_id", c.manifest_id)?;
                 dict.set_item("expire_time", c.expire_time.map(|t| t.timestamp_millis()))?;
                 dict.set_item("create_time", c.create_time.timestamp_millis())?;
+                dict.set_item("name", c.name)?;
                 Ok(dict)
             })
             .collect::<PyResult<Vec<Bound<PyDict>>>>()
     }
 
-    fn list_checkpoints_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn list_checkpoints_async<'py>(
+        &self,
+        py: Python<'py>,
+        name: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         future_into_py(py, async move {
             let result = admin
-                .list_checkpoints()
+                .list_checkpoints(name.as_deref())
                 .await
                 .map_err(|e| UnavailableError::new_err(e.to_string()))?;
             Python::with_gil(|py| {
@@ -2141,6 +2176,7 @@ impl PySlateDBAdmin {
                         dict.set_item("manifest_id", c.manifest_id)?;
                         dict.set_item("expire_time", c.expire_time.map(|t| t.timestamp_millis()))?;
                         dict.set_item("create_time", c.create_time.timestamp_millis())?;
+                        dict.set_item("name", c.name)?;
                         // Convert to a GIL-independent PyObject for return
                         Ok(dict.into_any().unbind())
                     })

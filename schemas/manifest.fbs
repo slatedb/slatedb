@@ -103,4 +103,9 @@ table Checkpoint {
     // Optional metadata associated with the checkpoint. For example, the writer can use this to
     // clean up checkpoints from older writers.
     metadata: CheckpointMetadata;
+
+    // Optional name associated with the checkpoint. The name can be used to list the checkpoints.
+    // Note that name may not be unique and the list operation can return multiple checkpoints with
+    // the same name.
+    name: string;
 }

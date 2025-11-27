@@ -1,0 +1,56 @@
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=us-east-1
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  lowdown:
+    image: ghcr.io/criccomini/lowdown:latest
+    platform: linux/amd64
+    container_name: lowdown
+    depends_on:
+      - localstack
+    ports:
+      - "1080:1080"
+      - "7070:7070"
+    environment:
+      - DESTINATION_URL=http://localstack:4566
+      - PROXY_BIND=0.0.0.0
+      - PROXY_PORT=1080
+      - ADMIN_BIND=0.0.0.0
+      - ADMIN_PORT=7070
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:7070/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:latest
+    container_name: toxiproxy
+    depends_on:
+      - localstack
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9001/health >/dev/null 2>&1 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
+    ports:
+      - "8474:8474"
+      - "9001:9001"
+
+networks:
+  default:
+    name: chaos-net

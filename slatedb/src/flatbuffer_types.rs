@@ -223,6 +223,7 @@ impl FlatBufferManifestCodec {
                     0,
                 )
                 .expect("invalid timestamp"),
+                name: cp.name().map(|s| s.to_string()),
             })
             .collect();
         let sequence_tracker = match manifest.sequence_tracker() {
@@ -393,6 +394,10 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let checkpoint_expire_time_s =
             checkpoint.expire_time.map(|t| t.timestamp()).unwrap_or(0) as u32;
         let checkpoint_create_time_s = checkpoint.create_time.timestamp() as u32;
+        let name = checkpoint
+            .name
+            .as_ref()
+            .map(|n| self.builder.create_string(n));
         Checkpoint::create(
             &mut self.builder,
             &CheckpointArgs {
@@ -402,6 +407,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 checkpoint_create_time_s,
                 metadata: None,
                 metadata_type: CheckpointMetadata::NONE,
+                name,
             },
         )
     }
@@ -586,6 +592,7 @@ mod tests {
                 manifest_id: 1,
                 expire_time: None,
                 create_time: DateTime::<Utc>::from_timestamp(100, 0).expect("invalid timestamp"),
+                name: None,
             },
             checkpoint::Checkpoint {
                 id: uuid::Uuid::new_v4(),
@@ -594,6 +601,7 @@ mod tests {
                     DateTime::<Utc>::from_timestamp(1000, 0).expect("invalid timestamp"),
                 ),
                 create_time: DateTime::<Utc>::from_timestamp(200, 0).expect("invalid timestamp"),
+                name: Some("test_checkpoint".to_string()),
             },
         ];
         let manifest = Manifest::initial(core);
