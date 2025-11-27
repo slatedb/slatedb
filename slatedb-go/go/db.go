@@ -451,7 +451,6 @@ type Builder struct {
 	path         string
 	url          string
 	envFile      string
-	storeConfig  *StoreConfig
 	settings     *Settings
 	sstBlockSize *SstBlockSize
 }

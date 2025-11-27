@@ -29,6 +29,7 @@ slatedb-go/
 │   ├── error.rs        # Error handling and conversion
 │   ├── iterator.rs     # Scan and iterator FFI functions
 │   ├── memory.rs       # Memory management utilities
+│   ├── object_store.rs # Object store creation
 │   └── types.rs        # FFI type definitions
 ├── go/
 │   ├── go.mod          # Go module
@@ -101,7 +102,7 @@ db, _ := slatedb.Open("/tmp/cache", "s3://bucket/", "")
 defer db.Close()
 
 // Environment variables (automatic fallback)
-db, _ := slatedb.Open("/tmp/cache", "", "") // "" = use environment
+db, _ := slatedb.Open("/tmp/cache", "", "") // "" = in memory object storage
 defer db.Close()
 
 // Basic operations
@@ -381,7 +382,7 @@ type ScanOptions struct {
 
 ## Environment Variables
 
-Automatic object store configuration via environment variables (fallback when `url` or `envFile` is `""`):
+Automatic object store configuration via environment variables (when `url` is `""` and `envFile` is not `""`):
 
 ```bash
 # AWS

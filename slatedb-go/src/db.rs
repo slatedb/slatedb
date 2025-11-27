@@ -5,12 +5,13 @@ use tokio::runtime::Builder;
 
 use crate::config::{
     convert_put_options, convert_range_bounds, convert_read_options, convert_scan_options,
-    convert_write_options, create_object_store,
+    convert_write_options,
 };
 use crate::error::{
     create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
     CSdbResult,
 };
+use crate::object_store::create_object_store;
 use crate::types::{
     CSdbHandle, CSdbIterator, CSdbPutOptions, CSdbReadOptions, CSdbScanOptions, CSdbValue,
     CSdbWriteOptions, SlateDbFFI,

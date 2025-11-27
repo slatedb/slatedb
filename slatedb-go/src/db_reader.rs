@@ -9,12 +9,12 @@ use uuid::Uuid;
 // Import our shared modules
 use crate::config::{
     convert_range_bounds, convert_read_options, convert_reader_options, convert_scan_options,
-    create_object_store,
 };
 use crate::error::{
     create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
     CSdbResult,
 };
+use crate::object_store::create_object_store;
 use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue, SlateDbFFI};
 
 /// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
