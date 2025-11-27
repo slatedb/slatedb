@@ -72,6 +72,8 @@ typedef struct CSdbReadOptions {
     uint32_t durability_filter;
     // Whether to include dirty/uncommitted data
     bool dirty;
+    // Whether to cache fetched blocks
+    bool cache_blocks;
 } CSdbReadOptions;
 
 typedef struct CSdbValue {

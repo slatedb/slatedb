@@ -179,6 +179,7 @@ pub fn convert_read_options(c_opts: *const CSdbReadOptions) -> ReadOptions {
     ReadOptions {
         durability_filter,
         dirty: opts.dirty,
+        cache_blocks: opts.cache_blocks,
     }
 }
 

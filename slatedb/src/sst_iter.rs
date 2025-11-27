@@ -1318,4 +1318,106 @@ mod tests {
         let sst = writer.close().await.unwrap();
         (sst, nkeys)
     }
+
+    #[tokio::test]
+    #[cfg(feature = "moka")]
+    async fn test_sst_iter_cache_blocks() {
+        use crate::db_cache::moka::MokaCache;
+        use crate::db_cache::DbCache;
+        use crate::db_cache::SplitCache;
+
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
+        let block_cache = Arc::new(MokaCache::new());
+        let meta_cache = Arc::new(MokaCache::new());
+        let split_cache = Arc::new(
+            SplitCache::new()
+                .with_block_cache(Some(block_cache.clone()))
+                .with_meta_cache(Some(meta_cache))
+                .build(),
+        );
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path.clone(),
+            Some(split_cache.clone()),
+        ));
+
+        let mut builder = table_store.table_builder();
+        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
+        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
+        builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
+        builder.add_value(b"key4", b"value4", gen_attrs(4)).unwrap();
+        let encoded = builder.build().unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        table_store.write_sst(&id, encoded, false).await.unwrap();
+        let sst_handle = table_store.open_sst(&id).await.unwrap();
+
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: true,
+            ..SstIteratorOptions::default()
+        };
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        for i in 1..=4 {
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key, format!("key{}", i).as_bytes());
+            assert_eq!(kv.value, format!("value{}", i).as_bytes());
+        }
+
+        let kv = iter.next().await.unwrap();
+        assert!(kv.is_none());
+
+        // verify that block was cached
+        assert!(block_cache
+            .get_block(&(id, 0).into())
+            .await
+            .unwrap_or(None)
+            .is_some());
+
+        // remove block from cache and verify that it is not cached when iterating with cache_blocks=false
+        block_cache.remove(&(id, 0).into()).await;
+        let sst_handle = table_store.open_sst(&id).await.unwrap();
+        let sst_iter_options = SstIteratorOptions {
+            cache_blocks: false,
+            ..SstIteratorOptions::default()
+        };
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            table_store.clone(),
+            sst_iter_options,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        for i in 1..=4 {
+            let kv = iter.next().await.unwrap().unwrap();
+            assert_eq!(kv.key, format!("key{}", i).as_bytes());
+            assert_eq!(kv.value, format!("value{}", i).as_bytes());
+        }
+
+        let kv = iter.next().await.unwrap();
+        assert!(kv.is_none());
+
+        // verify that block is not cached
+        assert!(block_cache
+            .get_block(&(id, 0).into())
+            .await
+            .unwrap()
+            .is_none());
+    }
 }
