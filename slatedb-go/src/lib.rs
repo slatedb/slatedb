@@ -1,6 +1,7 @@
 // Import our modules
 mod config;
 mod error;
+mod object_store;
 mod types;
 
 // FFI function modules
@@ -8,8 +9,7 @@ pub mod batch;
 pub mod db; // Make this public so extern "C" functions are exported
 pub mod db_reader; // Make this public so extern "C" functions are exported
 pub mod iterator; // Make this public so extern "C" functions are exported
-pub mod memory;
-mod object_store;
+pub mod memory; // Make this public so extern "C" functions are exported // Make this public so extern "C" functions are exported
 // Make this public so extern "C" functions are exported // Make this public so extern "C" functions are exported
 
 // Re-export types that need to be visible to C
