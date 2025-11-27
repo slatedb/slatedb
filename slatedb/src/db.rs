@@ -1429,7 +1429,7 @@ mod tests {
     use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
-        CompactorOptions, DurabilityLevel, GarbageCollectorDirectoryOptions,
+        CompactorOptions, GarbageCollectorDirectoryOptions,
         GarbageCollectorOptions, ObjectStoreCacheOptions, Settings,
         SizeTieredCompactionSchedulerOptions, Ttl,
     };
