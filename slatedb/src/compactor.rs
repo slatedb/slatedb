@@ -58,6 +58,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::DateTime;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
@@ -394,6 +395,49 @@ impl CompactorEventHandler {
     /// Emits the current compaction state and per-job progress.
     fn handle_log_ticker(&self) {
         self.log_compaction_state();
+        self.log_compaction_throughput();
+    }
+
+    /// Logs per-job compaction progress and updates aggregate throughput metrics.
+    fn log_compaction_throughput(&self) {
+        let current_time = self.system_clock.now();
+        let current_time_ms = current_time.timestamp_millis() as u64;
+        let mut total_bytes = 0u64;
+        let mut total_throughput = 0.0;
+
+        for compaction in self.state.compactions() {
+            let throughput = compaction.get_throughput(current_time);
+            total_throughput += throughput;
+            total_bytes += compaction.estimated_source_bytes();
+
+            let percentage = if compaction.estimated_source_bytes() > 0 {
+                (compaction.bytes_processed() * 100 / compaction.estimated_source_bytes()) as u32
+            } else {
+                0
+            };
+            let elapsed_secs = if compaction.start_time().timestamp_millis() > 0 {
+                let current_time = DateTime::from_timestamp_millis(current_time_ms as i64)
+                    .expect("valid timestamp");
+                current_time
+                    .signed_duration_since(compaction.start_time())
+                    .num_milliseconds() as f64
+                    / 1000.0
+            } else {
+                0.0
+            };
+            debug!(
+                "compaction progress [id={}, progress={}%, processed_bytes={}, estimated_source_bytes={}, elapsed={:.2}s, throughput={:.2} bytes/sec]",
+                compaction.id(),
+                percentage,
+                compaction.bytes_processed(),
+                compaction.estimated_source_bytes(),
+                elapsed_secs,
+                throughput,
+            );
+        }
+
+        self.stats.total_bytes_being_compacted.set(total_bytes);
+        self.stats.total_throughput.set(total_throughput as u64);
     }
 
     /// Handles a polling tick by refreshing the manifest and possibly scheduling compactions.
@@ -543,7 +587,9 @@ impl CompactorEventHandler {
                 break;
             }
             let compaction_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let compaction = Compaction::new(compaction_id, spec);
+            let db_state = self.state.db_state();
+            let start_time = self.system_clock.now();
+            let compaction = Compaction::new(compaction_id, spec, db_state, start_time);
             self.submit_compaction(compaction).await?;
         }
         Ok(())
@@ -577,6 +623,7 @@ impl CompactorEventHandler {
             compaction_logical_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
+            estimated_source_bytes: compaction.estimated_source_bytes(),
         };
 
         // TODO(sujeetsawala): Add job attempt to compaction
@@ -721,12 +768,18 @@ pub mod stats {
     /// [super::CompactorEventHandler::update_longest_running_start_metric] for details.
     pub const COMPACTION_LOW_WATERMARK_TS: &str =
         compactor_stat_name!("compaction_low_watermark_ts");
+    pub const TOTAL_BYTES_BEING_COMPACTED: &str =
+        compactor_stat_name!("total_bytes_being_compacted");
+    pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
+        compactor_stat_name!("total_throughput_bytes_per_sec");
 
     pub(crate) struct CompactionStats {
         pub(crate) last_compaction_ts: Arc<Gauge<u64>>,
         pub(crate) running_compactions: Arc<Gauge<i64>>,
         pub(crate) bytes_compacted: Arc<Counter>,
         pub(crate) compaction_low_watermark_ts: Arc<Gauge<u64>>,
+        pub(crate) total_bytes_being_compacted: Arc<Gauge<u64>>,
+        pub(crate) total_throughput: Arc<Gauge<u64>>,
     }
 
     impl CompactionStats {
@@ -737,12 +790,16 @@ pub mod stats {
         /// - `running_compactions`: Gauge tracking active compaction attempts.
         /// - `bytes_compacted`: Counter of bytes written by the executor.
         /// - `compaction_low_watermark_ts`: Earliest ULID timestamp among active compactions (GC hint).
+        /// - `total_bytes_being_compacted`: Total bytes across all running compactions.
+        /// - `total_throughput_bytes_per_sec`: Combined throughput across all running compactions.
         pub(crate) fn new(stat_registry: Arc<StatRegistry>) -> Self {
             let stats = Self {
                 last_compaction_ts: Arc::new(Gauge::default()),
                 running_compactions: Arc::new(Gauge::default()),
                 bytes_compacted: Arc::new(Counter::default()),
                 compaction_low_watermark_ts: Arc::new(Gauge::default()),
+                total_bytes_being_compacted: Arc::new(Gauge::default()),
+                total_throughput: Arc::new(Gauge::default()),
             };
             stat_registry.register(LAST_COMPACTION_TS_SEC, stats.last_compaction_ts.clone());
             stat_registry.register(RUNNING_COMPACTIONS, stats.running_compactions.clone());
@@ -750,6 +807,14 @@ pub mod stats {
             stat_registry.register(
                 COMPACTION_LOW_WATERMARK_TS,
                 stats.compaction_low_watermark_ts.clone(),
+            );
+            stat_registry.register(
+                TOTAL_BYTES_BEING_COMPACTED,
+                stats.total_bytes_being_compacted.clone(),
+            );
+            stat_registry.register(
+                TOTAL_THROUGHPUT_BYTES_PER_SEC,
+                stats.total_throughput.clone(),
             );
             stats
         }
@@ -1727,13 +1792,20 @@ mod tests {
         // Two artificial compactions with known ULID timestamps
         let older_ts_ms: u64 = 1_000;
         let newer_ts_ms: u64 = 2_000;
+        let db_state = fixture.handler.state.db_state();
+        let older_time = DateTime::from_timestamp_millis(older_ts_ms as i64).unwrap();
+        let newer_time = DateTime::from_timestamp_millis(newer_ts_ms as i64).unwrap();
         let compaction_old = Compaction::new(
             Ulid::from_parts(older_ts_ms, 0),
             CompactionSpec::new(vec![], 10),
+            db_state,
+            older_time,
         );
         let compaction_new = Compaction::new(
             Ulid::from_parts(newer_ts_ms, 0),
             CompactionSpec::new(vec![], 11),
+            db_state,
+            newer_time,
         );
 
         fixture
@@ -1753,6 +1825,128 @@ mod tests {
             fixture.handler.stats.compaction_low_watermark_ts.value(),
             older_ts_ms
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_track_total_bytes_and_throughput() {
+        use crate::compactor::stats::{
+            TOTAL_BYTES_BEING_COMPACTED, TOTAL_THROUGHPUT_BYTES_PER_SEC,
+        };
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+
+        let current_time = fixture.handler.system_clock.now();
+        let current_time_ms = current_time.timestamp_millis() as u64;
+        let start_time_1 =
+            DateTime::from_timestamp_millis((current_time_ms - 2000) as i64).unwrap();
+        let start_time_2 =
+            DateTime::from_timestamp_millis((current_time_ms - 1000) as i64).unwrap();
+
+        let db_state = fixture.handler.state.db_state();
+        let mut compaction_1 = Compaction::new(
+            Ulid::from_parts(start_time_1.timestamp_millis() as u64, 0),
+            CompactionSpec::new(vec![], 10),
+            db_state,
+            start_time_1,
+        );
+        compaction_1.set_bytes_processed(500);
+
+        let mut compaction_2 = Compaction::new(
+            Ulid::from_parts(start_time_2.timestamp_millis() as u64, 0),
+            CompactionSpec::new(vec![], 11),
+            db_state,
+            start_time_2,
+        );
+        compaction_2.set_bytes_processed(1000);
+
+        fixture
+            .handler
+            .state
+            .add_compaction(compaction_1)
+            .expect("failed to add compaction 1");
+        fixture
+            .handler
+            .state
+            .add_compaction(compaction_2)
+            .expect("failed to add compaction 2");
+
+        fixture.handler.handle_log_ticker();
+
+        let total_bytes = fixture
+            .stats_registry
+            .lookup(TOTAL_BYTES_BEING_COMPACTED)
+            .unwrap()
+            .get();
+        assert_eq!(total_bytes, 0);
+
+        let throughput = fixture
+            .stats_registry
+            .lookup(TOTAL_THROUGHPUT_BYTES_PER_SEC)
+            .unwrap()
+            .get();
+        assert!(
+            throughput > 0,
+            "Expected throughput > 0, got {}",
+            throughput
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_track_per_job_throughput() {
+        use chrono::DateTime;
+
+        let start_time_ms = 1000u64;
+        let current_time_ms = 3000u64;
+        let processed_bytes = 1000u64;
+
+        let db_state = CoreDbState::new();
+        let start_time = DateTime::from_timestamp_millis(start_time_ms as i64).unwrap();
+        let mut compaction = Compaction::new(
+            Ulid::from_parts(start_time_ms, 0),
+            CompactionSpec::new(vec![], 10),
+            &db_state,
+            start_time,
+        );
+        compaction.set_bytes_processed(processed_bytes);
+
+        let current_time = DateTime::from_timestamp_millis(current_time_ms as i64).unwrap();
+        let throughput = compaction.get_throughput(current_time);
+        assert_eq!(throughput, 500.0);
+
+        let throughput_zero = compaction.get_throughput(start_time);
+        assert_eq!(throughput_zero, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_should_track_running_compactions_count() {
+        use crate::compactor::stats::RUNNING_COMPACTIONS;
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+
+        assert_eq!(
+            fixture
+                .stats_registry
+                .lookup(RUNNING_COMPACTIONS)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        let db_state = fixture.handler.state.db_state();
+        let start_time = fixture.handler.system_clock.now();
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![], 10),
+            db_state,
+            start_time,
+        );
+        fixture
+            .handler
+            .state
+            .add_compaction(compaction)
+            .expect("failed to add compaction");
+
+        assert_eq!(fixture.handler.state.compactions().count(), 1);
     }
 
     struct CompactorEventHandlerTestFixture {

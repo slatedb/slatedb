@@ -60,6 +60,8 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) is_dest_last_run: bool,
     /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
     pub(crate) retention_min_seq: Option<u64>,
+    /// Estimated total source bytes for this compaction.
+    pub(crate) estimated_source_bytes: u64,
 }
 
 impl std::fmt::Debug for StartCompactionJobArgs {
@@ -75,24 +77,9 @@ impl std::fmt::Debug for StartCompactionJobArgs {
                 &self.compaction_logical_clock_tick,
             )
             .field("is_dest_last_run", &self.is_dest_last_run)
-            .field("estimated_source_bytes", &self.estimated_source_bytes())
+            .field("estimated_source_bytes", &self.estimated_source_bytes)
             .field("retention_min_seq", &self.retention_min_seq)
             .finish()
-    }
-}
-
-impl StartCompactionJobArgs {
-    /// Estimates the total number of input bytes (L0 SSTs + Sorted Runs).
-    ///
-    /// Used by the compactor to track progress percentages for reporting.
-    pub(crate) fn estimated_source_bytes(&self) -> u64 {
-        let sst_size = self.ssts.iter().map(|sst| sst.estimate_size()).sum::<u64>();
-        let sr_size = self
-            .sorted_runs
-            .iter()
-            .map(|sr| sr.estimate_size())
-            .sum::<u64>();
-        sst_size + sr_size
     }
 }
 

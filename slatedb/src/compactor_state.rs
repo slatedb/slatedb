@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
+use chrono::{DateTime, Utc};
 use log::{error, info};
 use ulid::Ulid;
 
-use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
+use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 use crate::transactional_object::DirtyObject;
@@ -119,15 +120,55 @@ pub(crate) struct Compaction {
     spec: CompactionSpec,
     /// Total number of bytes processed so far for this compaction.
     bytes_processed: u64,
+    /// Estimated total number of source bytes to be processed for this compaction.
+    estimated_source_bytes: u64,
+    /// Start time of the compaction.
+    start_time: DateTime<Utc>,
 }
 
 impl Compaction {
-    pub(crate) fn new(id: Ulid, spec: CompactionSpec) -> Self {
+    pub(crate) fn new(
+        id: Ulid,
+        spec: CompactionSpec,
+        db_state: &CoreDbState,
+        start_time: DateTime<Utc>,
+    ) -> Self {
+        let estimated_source_bytes = Self::calculate_estimated_source_bytes(&spec, db_state);
+
         Self {
             id,
             spec,
             bytes_processed: 0,
+            estimated_source_bytes,
+            start_time,
         }
+    }
+
+    /// Calculates the estimated total source bytes for a compaction spec.
+    fn calculate_estimated_source_bytes(spec: &CompactionSpec, db_state: &CoreDbState) -> u64 {
+        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
+            .l0
+            .iter()
+            .filter_map(|sst| match sst.id {
+                SsTableId::Compacted(id) => Some((id, sst)),
+                _ => None,
+            })
+            .collect();
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
+
+        spec.sources()
+            .iter()
+            .map(|source| match source {
+                SourceId::Sst(id) => ssts_by_id
+                    .get(id)
+                    .map(|sst| sst.estimate_size())
+                    .unwrap_or(0),
+                SourceId::SortedRun(id) => {
+                    srs_by_id.get(id).map(|sr| sr.estimate_size()).unwrap_or(0)
+                }
+            })
+            .sum()
     }
 
     /// Returns all sorted run sources for this compaction.
@@ -178,6 +219,37 @@ impl Compaction {
     /// Sets bytes processed so far for this compaction.
     pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
         self.bytes_processed = bytes;
+    }
+
+    /// Gets the throughput for this compaction in bytes per second.
+    pub(crate) fn get_throughput(&self, current_time: DateTime<Utc>) -> f64 {
+        if self.start_time == DateTime::UNIX_EPOCH {
+            return 0.0;
+        }
+        let elapsed_secs = current_time
+            .signed_duration_since(self.start_time)
+            .num_milliseconds() as f64
+            / 1000.0;
+        if elapsed_secs > 0.0 {
+            (self.bytes_processed as f64) / elapsed_secs
+        } else {
+            0.0
+        }
+    }
+
+    /// Gets the estimated total source bytes for this compaction.
+    pub(crate) fn estimated_source_bytes(&self) -> u64 {
+        self.estimated_source_bytes
+    }
+
+    /// Gets the bytes processed so far.
+    pub(crate) fn bytes_processed(&self) -> u64 {
+        self.bytes_processed
+    }
+
+    /// Gets the start time.
+    pub(crate) fn start_time(&self) -> DateTime<Utc> {
+        self.start_time
     }
 }
 
@@ -440,14 +512,16 @@ mod tests {
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = build_l0_compaction(&state.db_state().l0, 0);
         // when:
-        let compaction = Compaction::new(compaction_id, spec.clone());
+        let db_state = state.db_state();
+        let start_time = system_clock.now();
+        let compaction = Compaction::new(compaction_id, spec.clone(), db_state, start_time);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
 
         // then:
         let mut compactions = state.compactions();
-        let expected = Compaction::new(compaction_id, spec.clone());
+        let expected = Compaction::new(compaction_id, spec.clone(), state.db_state(), start_time);
         assert_eq!(compactions.next().expect("compaction not found"), &expected);
         assert!(compactions.next().is_none());
     }
@@ -460,7 +534,8 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = build_l0_compaction(&before_compaction.l0, 0);
-        let compaction = Compaction::new(compaction_id, spec);
+        let start_time = system_clock.now();
+        let compaction = Compaction::new(compaction_id, spec, &before_compaction, start_time);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
@@ -509,7 +584,8 @@ mod tests {
         let before_compaction = state.db_state().clone();
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = build_l0_compaction(&before_compaction.l0, 0);
-        let compaction = Compaction::new(compaction_id, spec);
+        let start_time = system_clock.now();
+        let compaction = Compaction::new(compaction_id, spec, &before_compaction, start_time);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
@@ -564,13 +640,15 @@ mod tests {
         let rt = build_runtime();
         let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
-        let original_l0s = &state.db_state().clone().l0;
+        let before_compaction = state.db_state().clone();
+        let original_l0s = &before_compaction.l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(
             vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
             0,
         );
-        let compaction = Compaction::new(compaction_id, spec);
+        let start_time = system_clock.now();
+        let compaction = Compaction::new(compaction_id, spec, &before_compaction, start_time);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
@@ -630,7 +708,8 @@ mod tests {
         let rt = build_runtime();
         let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
-        let original_l0s = &state.db_state().clone().l0;
+        let before_compaction = state.db_state().clone();
+        let original_l0s = &before_compaction.l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
 
         let spec = CompactionSpec::new(
@@ -640,7 +719,8 @@ mod tests {
                 .collect(),
             0,
         );
-        let compaction = Compaction::new(compaction_id, spec);
+        let start_time = system_clock.now();
+        let compaction = Compaction::new(compaction_id, spec, &before_compaction, start_time);
         state
             .add_compaction(compaction.clone())
             .expect("failed to add compaction");
@@ -707,9 +787,9 @@ mod tests {
     fn test_should_submit_correct_compaction() {
         // given:
         let rt = build_runtime();
-        let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
-        // compact the last sst
-        let original_l0s = &state.db_state().clone().l0;
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let before_compaction = state.db_state().clone();
+        let original_l0s = &before_compaction.l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(
             original_l0s
@@ -720,7 +800,8 @@ mod tests {
                 .collect::<Vec<SourceId>>(),
             0,
         );
-        let compaction = Compaction::new(compaction_id, spec);
+        let start_time = system_clock.now();
+        let compaction = Compaction::new(compaction_id, spec, &before_compaction, start_time);
         let result = state.add_compaction(compaction.clone());
 
         // then:
@@ -732,8 +813,9 @@ mod tests {
         // given:
         let rt = build_runtime();
         let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
-        let original_l0s = &state.db_state().clone().l0;
-        let original_srs = &state.db_state().clone().compacted;
+        let before_compaction = state.db_state().clone();
+        let original_l0s = &before_compaction.l0;
+        let original_srs = &before_compaction.compacted;
         // L0: from 4th onward (index > 2)
         let l0_sources = original_l0s
             .iter()
@@ -751,7 +833,8 @@ mod tests {
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(sources, 0);
-        let compaction = Compaction::new(compaction_id, spec);
+        let start_time = system_clock.now();
+        let compaction = Compaction::new(compaction_id, spec, &before_compaction, start_time);
         let result = state.add_compaction(compaction.clone());
 
         // or simply:
