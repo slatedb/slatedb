@@ -24,6 +24,7 @@ This directory contains example programs demonstrating how to use [SlateDB](http
 
    Or run any other example by replacing `full_example` with the desired file name (without `.rs`).
 
-2. **S3 example Prerequisites:**
-   - For `s3_compatible.rs`, you need access to an S3-compatible service. The example is configured for LocalStack by default.
-   - Start LocalStack and create a bucket named `slatedb` before running the example.
+2. **Cloud Storage Prerequisites:**
+   - **S3**: For `s3_compatible.rs`, you need access to an S3-compatible service. The example is configured for LocalStack by default. Start LocalStack and create a bucket named `slatedb` before running.
+   - **Azure Blob Storage**: For `azure_blob_storage.rs`, you need an Azure account. Replace the three placeholders in the code: storage account name, access key, and container name.
+   - **Google Cloud Storage**: For `google_cloud_storage.rs`, you need a GCS bucket and service account JSON file. Replace the two placeholders in the code: service account JSON file path and bucket name.

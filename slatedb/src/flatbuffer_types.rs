@@ -11,11 +11,11 @@ use crate::checkpoint;
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{CoreDbState, SsTableHandle};
 
-#[path = "./generated/manifest_generated.rs"]
+#[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
 #[rustfmt::skip]
-mod manifest_generated;
-pub use manifest_generated::{
+mod root_generated;
+pub use root_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
     SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
 };
@@ -24,13 +24,15 @@ use crate::config::CompressionCodec;
 use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
-use crate::flatbuffer_types::manifest_generated::{
+use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
     CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun,
     SortedRunArgs, Uuid, UuidArgs,
 };
-use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
+use crate::seq_tracker::SequenceTracker;
+use crate::transactional_object::ObjectCodec;
 use crate::utils::clamp_allocated_size_bytes;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
@@ -120,21 +122,21 @@ impl FlatBufferSsTableInfoCodec {
 
 pub(crate) struct FlatBufferManifestCodec {}
 
-impl ManifestCodec for FlatBufferManifestCodec {
+impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
     fn encode(&self, manifest: &Manifest) -> Bytes {
         Self::create_from_manifest(manifest)
     }
 
-    fn decode(&self, bytes: &Bytes) -> Result<Manifest, SlateDBError> {
+    fn decode(&self, bytes: &Bytes) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
         if bytes.len() < 2 {
-            return Err(SlateDBError::EmptyManifest);
+            return Err(Box::new(SlateDBError::EmptyManifest));
         }
         let version = u16::from_be_bytes([bytes[0], bytes[1]]);
         if version != MANIFEST_FORMAT_VERSION {
-            return Err(SlateDBError::InvalidVersion {
+            return Err(Box::new(SlateDBError::InvalidVersion {
                 expected_version: MANIFEST_FORMAT_VERSION,
                 actual_version: version,
-            });
+            }));
         }
         let unversioned_bytes = bytes.slice(2..);
         let manifest = flatbuffers::root::<ManifestV1>(unversioned_bytes.as_ref())?;
@@ -147,13 +149,13 @@ impl FlatBufferManifestCodec {
         uuid::Uuid::from_u64_pair(uuid.high(), uuid.low())
     }
 
-    fn decode_bytes_range(range: manifest_generated::BytesRange) -> BytesRange {
+    fn decode_bytes_range(range: root_generated::BytesRange) -> BytesRange {
         let start_key = Self::decode_bytes_bound(range.start_bound());
         let end_key = Self::decode_bytes_bound(range.end_bound());
         BytesRange::new(start_key, end_key)
     }
 
-    fn decode_bytes_bound(bound: manifest_generated::BytesBound) -> Bound<Bytes> {
+    fn decode_bytes_bound(bound: root_generated::BytesBound) -> Bound<Bytes> {
         match (bound.bound_type(), bound.key()) {
             (BoundType::Included, Some(key)) => {
                 Bound::Included(Bytes::copy_from_slice(key.bytes()))
@@ -221,8 +223,14 @@ impl FlatBufferManifestCodec {
                     0,
                 )
                 .expect("invalid timestamp"),
+                name: cp.name().map(|s| s.to_string()),
             })
             .collect();
+        let sequence_tracker = match manifest.sequence_tracker() {
+            Some(bytes) => SequenceTracker::from_bytes(bytes.bytes())
+                .expect("Invalid encoding of sequence tracker in manifest."),
+            None => SequenceTracker::new(),
+        };
         let core = CoreDbState {
             initialized: manifest.initialized(),
             l0_last_compacted,
@@ -235,6 +243,7 @@ impl FlatBufferManifestCodec {
             checkpoints,
             wal_object_store_uri: manifest.wal_object_store_uri().map(|uri| uri.to_string()),
             recent_snapshot_min_seq: manifest.recent_snapshot_min_seq(),
+            sequence_tracker,
         };
         let external_dbs = manifest.external_dbs().map(|external_dbs| {
             external_dbs
@@ -385,6 +394,10 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let checkpoint_expire_time_s =
             checkpoint.expire_time.map(|t| t.timestamp()).unwrap_or(0) as u32;
         let checkpoint_create_time_s = checkpoint.create_time.timestamp() as u32;
+        let name = checkpoint
+            .name
+            .as_ref()
+            .map(|n| self.builder.create_string(n));
         Checkpoint::create(
             &mut self.builder,
             &CheckpointArgs {
@@ -394,6 +407,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 checkpoint_create_time_s,
                 metadata: None,
                 metadata_type: CheckpointMetadata::NONE,
+                name,
             },
         )
     }
@@ -407,15 +421,12 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(checkpoints_fb_vec.as_ref())
     }
 
-    fn add_bytes_range(
-        &mut self,
-        range: &BytesRange,
-    ) -> WIPOffset<manifest_generated::BytesRange<'b>> {
+    fn add_bytes_range(&mut self, range: &BytesRange) -> WIPOffset<root_generated::BytesRange<'b>> {
         let start_bound = self.add_bytes_bound(range.start_bound());
         let end_bound = self.add_bytes_bound(range.end_bound());
-        manifest_generated::BytesRange::create(
+        root_generated::BytesRange::create(
             &mut self.builder,
-            &manifest_generated::BytesRangeArgs {
+            &root_generated::BytesRangeArgs {
                 start_bound: Some(start_bound),
                 end_bound: Some(end_bound),
             },
@@ -425,15 +436,15 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn add_bytes_bound(
         &mut self,
         bound: Bound<&Bytes>,
-    ) -> WIPOffset<manifest_generated::BytesBound<'b>> {
+    ) -> WIPOffset<root_generated::BytesBound<'b>> {
         let (bound_type, key) = match bound {
             Bound::Included(key) => (BoundType::Included, Some(self.builder.create_vector(key))),
             Bound::Excluded(key) => (BoundType::Excluded, Some(self.builder.create_vector(key))),
             Bound::Unbounded => (BoundType::Unbounded, None),
         };
-        manifest_generated::BytesBound::create(
+        root_generated::BytesBound::create(
             &mut self.builder,
-            &manifest_generated::BytesBoundArgs { key, bound_type },
+            &root_generated::BytesBoundArgs { key, bound_type },
         )
     }
 
@@ -449,11 +460,11 @@ impl<'b> DbFlatBufferBuilder<'b> {
         let external_dbs = if manifest.external_dbs.is_empty() {
             None
         } else {
-            let external_dbs: Vec<WIPOffset<manifest_generated::ExternalDb>> = manifest
+            let external_dbs: Vec<WIPOffset<root_generated::ExternalDb>> = manifest
                 .external_dbs
                 .iter()
                 .map(|external_db| {
-                    let db_external_db_args = manifest_generated::ExternalDbArgs {
+                    let db_external_db_args = root_generated::ExternalDbArgs {
                         path: Some(self.builder.create_string(&external_db.path)),
                         source_checkpoint_id: Some(self.add_uuid(external_db.source_checkpoint_id)),
                         final_checkpoint_id: external_db
@@ -461,7 +472,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                             .map(|id| self.add_uuid(id)),
                         sst_ids: Some(self.add_compacted_sst_ids(external_db.sst_ids.iter())),
                     };
-                    manifest_generated::ExternalDb::create(&mut self.builder, &db_external_db_args)
+                    root_generated::ExternalDb::create(&mut self.builder, &db_external_db_args)
                 })
                 .collect();
             Some(self.builder.create_vector(external_dbs.as_ref()))
@@ -471,6 +482,8 @@ impl<'b> DbFlatBufferBuilder<'b> {
             .wal_object_store_uri
             .as_ref()
             .map(|uri| self.builder.create_string(uri));
+        let sequence_tracker_data = core.sequence_tracker.to_bytes();
+        let sequence_tracker = self.builder.create_vector(sequence_tracker_data.as_slice());
 
         let manifest = ManifestV1::create(
             &mut self.builder,
@@ -490,6 +503,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 last_l0_seq: core.last_l0_seq,
                 wal_object_store_uri,
                 recent_snapshot_min_seq: core.recent_snapshot_min_seq,
+                sequence_tracker: Some(sequence_tracker),
             },
         );
         self.builder.finish(manifest, None);
@@ -555,7 +569,8 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{FlatBufferManifestCodec, SsTableIndexOwned};
-    use crate::manifest::{ExternalDb, Manifest, ManifestCodec};
+    use crate::manifest::{ExternalDb, Manifest};
+    use crate::transactional_object::ObjectCodec;
     use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
 
@@ -565,7 +580,7 @@ mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
     use chrono::{DateTime, Utc};
 
-    use super::{manifest_generated, MANIFEST_FORMAT_VERSION};
+    use super::{root_generated, MANIFEST_FORMAT_VERSION};
 
     #[test]
     fn test_should_encode_decode_manifest_checkpoints() {
@@ -577,6 +592,7 @@ mod tests {
                 manifest_id: 1,
                 expire_time: None,
                 create_time: DateTime::<Utc>::from_timestamp(100, 0).expect("invalid timestamp"),
+                name: None,
             },
             checkpoint::Checkpoint {
                 id: uuid::Uuid::new_v4(),
@@ -585,6 +601,7 @@ mod tests {
                     DateTime::<Utc>::from_timestamp(1000, 0).expect("invalid timestamp"),
                 ),
                 create_time: DateTime::<Utc>::from_timestamp(200, 0).expect("invalid timestamp"),
+                name: Some("test_checkpoint".to_string()),
             },
         ];
         let manifest = Manifest::initial(core);
@@ -703,9 +720,9 @@ mod tests {
         let compacted = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
         let checkpoints = fbb.create_vector::<flatbuffers::WIPOffset<_>>(&[]);
 
-        let manifest = manifest_generated::ManifestV1::create(
+        let manifest = root_generated::ManifestV1::create(
             &mut fbb,
-            &manifest_generated::ManifestV1Args {
+            &root_generated::ManifestV1Args {
                 manifest_id: 0,
                 external_dbs: None,
                 initialized: false,
@@ -721,6 +738,7 @@ mod tests {
                 last_l0_seq: 0,
                 wal_object_store_uri: None,
                 recent_snapshot_min_seq: 0,
+                sequence_tracker: None,
             },
         );
         fbb.finish(manifest, None);
@@ -744,12 +762,16 @@ mod tests {
         let invalid_bytes = bytes.freeze();
 
         match codec.decode(&invalid_bytes) {
-            Err(SlateDBError::InvalidVersion {
-                expected_version,
-                actual_version,
-            }) => {
-                assert_eq!(expected_version, MANIFEST_FORMAT_VERSION);
-                assert_eq!(actual_version, MANIFEST_FORMAT_VERSION + 1);
+            Err(err) => {
+                let Some(SlateDBError::InvalidVersion {
+                    expected_version,
+                    actual_version,
+                }) = err.downcast_ref()
+                else {
+                    panic!("Expected SlateDBError::InvalidVersion but got {:?}", err);
+                };
+                assert_eq!(*expected_version, MANIFEST_FORMAT_VERSION);
+                assert_eq!(*actual_version, MANIFEST_FORMAT_VERSION + 1);
             }
             _ => panic!("Should fail with version mismatch"),
         }

@@ -67,31 +67,63 @@ errors follow the principles above.
 These are the currently supported `slatedb::ErrorKind`:
 
 ```rust
+/// Represents the reason that a database instance has been closed.
+#[derive(Debug, Clone, Copy)]
+pub enum CloseReason {
+    /// The database has been shutdown cleanly.
+    Clean,
+
+    /// The current instance has been fenced and is no longer usable.
+    Fenced,
+
+    /// One or more background tasks panicked.
+    Panic,
+}
+
 /// Represents the kind of public errors that can be returned to the user.
-#[derive(Debug)]
+///
+/// These are less specific and more prescriptive. Application developers or operators must
+/// decide how to proceed. Adding new [ErrorKind]s requires an RFC, and should happen very
+/// infrequently.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
 pub enum ErrorKind {
-    /// The database attempted to use an invalid configuration.
-    Configuration,
+    /// A transaction conflict occurred. The transaction must be retried or dropped.
+    Transaction,
 
-    /// The database attempted an invalid operation or an operation with an
-    /// invalid parameter (including misconfiguration).
-    Operation,
+    /// The database has been shutdown. The instance is no longer usable. The user must
+    /// create a new instance to continue using the database.
+    Closed(CloseReason),
 
-    /// Unexpected internal error. This error is fatal (i.e. the database must be closed).
-    System,
+    /// A storage or network service is unavailable. The user must retry or drop the
+    /// operation.
+    Unavailable,
 
-    /// Invalid persistent state (e.g. corrupted data files). The state must
-    /// be repaired before the database can be restarted.
-    PersistentState,
+    /// User attempted an invalid request. This might be:
+    ///
+    /// - An invalid configuration on initialization
+    /// - An invalid argument to a method
+    /// - An invalid method call
+    /// - A user-supplied plugin such as the compaction schedule supplier or logical clock
+    ///   failed.
+    ///
+    /// The user must correct the code, configuration, or argument and retry the operation.
+    Invalid,
 
-    /// Failed access database resources (e.g. remote storage) due to some
-    /// kind of authentication or authorization error. The operation can be
-    /// retried after the permission issue is resolved.
-    Permission,
+    /// Persisted data is in an unexpected state. This could be caused by:
+    ///
+    /// - Temporary or permanent machine or object storage corruption
+    /// - Incompatible file format versions between clients
+    /// - An eventual consistency issue in object storage
+    ///
+    /// The user must fix the data, use a compatible client version, retry the operation,
+    /// or drop the operation.
+    Data,
 
-    /// The operation failed due to a transient error (such as IO unavailability).
-    /// The operation can be retried after backing off.
-    Transient(Duration),
+    /// An unexpected internal error occurred. Users should not expect to see this error.
+    /// Please [open a Github issue](https://github.com/slatedb/slatedb/issues/new?template=bug_report.md&title=Internal+error+returned)
+    /// if you receive this error.
+    Internal,
 }
 ```
 
@@ -105,7 +137,7 @@ If you want to propagate another error into a public error, you have to use the 
 after constructing an error. For example if you want to propagate an `std::io::IOError`:
 
 ```rust
-let error = slatedb::Error::operation("failed connection".to_string()).with_source(my_ioerror)
+let error = slatedb::Error::unavailable("failed connection".to_string()).with_source(my_ioerror)
 ```
 
 In general, you should not construct public errors directly. It's recommended to use the internal `slatedb::SlateDBError`
@@ -127,6 +159,7 @@ We follow some conventions to generate message to ensure they are all consistent
 - Write messages in lowercase: `read channel error` instead of `Read Channel Error`.
 - If an error message includes variables, they're added at the end of the message in KEY=`VALUE` format. `unexpected range key. key=\`foo\`, range=\`[..]\`` instead of `unexpected key \`foo\` in range \`[..]\``.
 - Errors that propagate other errors don't include the propagated errors in the message. They will be included automatically when the internal error is translated into a public error. See the example below:
+
 ```rust
 // DO THIS
 enum SlateDBError {
@@ -140,4 +173,3 @@ enum SlateDBError {
   IOError(#[from] std::io::Error)
 }
 ```
-

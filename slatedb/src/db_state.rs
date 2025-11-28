@@ -2,9 +2,11 @@ use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
-use crate::manifest::store::DirtyManifest;
+use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
+use crate::seq_tracker::SequenceTracker;
+use crate::transactional_object::DirtyObject;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
@@ -111,10 +113,6 @@ impl SsTableHandle {
         }
     }
 
-    pub(crate) fn range_covers_key(&self, key: &[u8]) -> bool {
-        self.effective_range.contains(key)
-    }
-
     pub(crate) fn compacted_effective_range(&self) -> &BytesRange {
         &self.effective_range
     }
@@ -174,7 +172,7 @@ impl AsRef<SsTableHandle> for SsTableHandle {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Hash, Eq, Copy, Serialize)]
+#[derive(Clone, PartialEq, Hash, Eq, Copy, Serialize)]
 pub(crate) enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
@@ -194,6 +192,15 @@ impl SsTableId {
         match self {
             Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
             Compacted(ulid) => *ulid,
+        }
+    }
+}
+
+impl Debug for SsTableId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        match self {
+            Wal(id) => write!(f, "SsTableId::Wal({})", id),
+            Compacted(id) => write!(f, "SsTableId::Compacted({})", id.to_string()),
         }
     }
 }
@@ -299,19 +306,25 @@ impl SortedRun {
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
-    error: WatchableOnceCell<SlateDBError>,
+
+    /// If the database is closed, this will contain the result of the close operation.
+    /// Otherwise, it will be None.
+    ///
+    /// - `Ok(())` if the database was closed successfully.
+    /// - `Err(e)` if the database was closed with an error.
+    closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
 }
 
 // represents the state that is mutated by creating a new copy with the mutations
 #[derive(Clone)]
 pub(crate) struct COWDbState {
     pub(crate) imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-    pub(crate) manifest: DirtyManifest,
+    pub(crate) manifest: DirtyObject<Manifest>,
 }
 
 impl COWDbState {
     pub(crate) fn core(&self) -> &CoreDbState {
-        &self.manifest.core
+        self.manifest.core()
     }
 }
 
@@ -340,6 +353,7 @@ pub(crate) struct CoreDbState {
     /// recent snapshot still references an older version of a key, it should not be
     /// recycled. This field is updated when a new L0 is flushed.
     pub(crate) recent_snapshot_min_seq: u64,
+    pub(crate) sequence_tracker: SequenceTracker,
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) wal_object_store_uri: Option<String>,
 }
@@ -358,6 +372,7 @@ impl CoreDbState {
             checkpoints: vec![],
             wal_object_store_uri: None,
             recent_snapshot_min_seq: 0,
+            sequence_tracker: SequenceTracker::new(),
         }
     }
 
@@ -415,14 +430,14 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
-    pub fn new(manifest: DirtyManifest) -> Self {
+    pub fn new(manifest: DirtyObject<Manifest>) -> Self {
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 manifest,
             }),
-            error: WatchableOnceCell::new(),
+            closed_result: WatchableOnceCell::new(),
         }
     }
 
@@ -437,12 +452,12 @@ impl DbState {
         }
     }
 
-    pub fn error_reader(&self) -> WatchableOnceCellReader<SlateDBError> {
-        self.error.reader()
+    pub fn closed_result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+        self.closed_result.reader()
     }
 
-    pub(crate) fn error(&self) -> WatchableOnceCell<SlateDBError> {
-        self.error.clone()
+    pub(crate) fn closed_result(&self) -> WatchableOnceCell<Result<(), SlateDBError>> {
+        self.closed_result.clone()
     }
 
     pub fn memtable(&self) -> &WritableKVTable {
@@ -450,8 +465,11 @@ impl DbState {
     }
 
     pub fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) -> Result<(), SlateDBError> {
-        if let Some(err) = self.error.reader().read() {
-            return Err(err.clone());
+        if let Some(result) = self.closed_result.reader().read() {
+            return match result {
+                Ok(()) => Err(SlateDBError::Closed),
+                Err(e) => Err(e.clone()),
+            };
         }
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
         self.modify(|modifier| {
@@ -470,15 +488,18 @@ impl DbState {
         &mut self,
         memtable: WritableKVTable,
     ) -> Result<(), SlateDBError> {
-        if let Some(err) = self.error.reader().read() {
-            return Err(err.clone());
+        if let Some(result) = self.closed_result.reader().read() {
+            return match result {
+                Ok(()) => Err(SlateDBError::Closed),
+                Err(e) => Err(e.clone()),
+            };
         }
         assert!(self.memtable.is_empty());
         let _ = std::mem::replace(&mut self.memtable, memtable);
         Ok(())
     }
 
-    pub fn merge_remote_manifest(&mut self, remote_manifest: DirtyManifest) {
+    pub fn merge_remote_manifest(&mut self, remote_manifest: DirtyObject<Manifest>) {
         self.modify(|modifier| modifier.merge_remote_manifest(remote_manifest));
     }
 
@@ -505,36 +526,37 @@ impl<'a> StateModifier<'a> {
         Self { db_state, state }
     }
 
-    pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
+    pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
-        let l0_last_compacted = &remote_manifest.core.l0_last_compacted;
+        let l0_last_compacted = &remote_manifest.core().l0_last_compacted;
         let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
             self.state
                 .manifest
-                .core
+                .core()
                 .l0
                 .iter()
                 .cloned()
                 .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
                 .collect()
         } else {
-            self.state.manifest.core.l0.iter().cloned().collect()
+            self.state.manifest.core().l0.iter().cloned().collect()
         };
 
         let my_db_state = self.state.core();
-        remote_manifest.core = CoreDbState {
+        remote_manifest.value.core = CoreDbState {
             initialized: my_db_state.initialized,
-            l0_last_compacted: remote_manifest.core.l0_last_compacted,
+            l0_last_compacted: remote_manifest.value.core.l0_last_compacted,
             l0: new_l0,
-            compacted: remote_manifest.core.compacted,
+            compacted: remote_manifest.value.core.compacted,
             next_wal_sst_id: my_db_state.next_wal_sst_id,
             replay_after_wal_id: my_db_state.replay_after_wal_id,
             last_l0_clock_tick: my_db_state.last_l0_clock_tick,
             last_l0_seq: my_db_state.last_l0_seq,
-            checkpoints: remote_manifest.core.checkpoints,
-            wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
             recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
+            sequence_tracker: remote_manifest.value.core.sequence_tracker,
+            checkpoints: remote_manifest.value.core.checkpoints,
+            wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
         };
         self.state.manifest = remote_manifest;
     }
@@ -553,8 +575,8 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
         // statement -- probably some generic inference bug
         #[allow(clippy::needless_return)]
         return state.modify(|modifier| {
-            let next_wal_id = modifier.state.manifest.core.next_wal_sst_id;
-            modifier.state.manifest.core.next_wal_sst_id += 1;
+            let next_wal_id = modifier.state.manifest.core().next_wal_sst_id;
+            modifier.state.manifest.value.core.next_wal_sst_id += 1;
             next_wal_id
         });
     }
@@ -581,14 +603,19 @@ mod tests {
         let mut db_state = DbState::new(new_dirty_manifest());
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
-        updated_state.core = db_state.state.core().clone();
+        updated_state.value.core = db_state.state.core().clone();
         let checkpoint = Checkpoint {
             id: uuid::Uuid::new_v4(),
             manifest_id: 1,
             expire_time: None,
             create_time: DefaultSystemClock::default().now(),
+            name: None,
         };
-        updated_state.core.checkpoints.push(checkpoint.clone());
+        updated_state
+            .value
+            .core
+            .checkpoints
+            .push(checkpoint.clone());
 
         // when:
         db_state.merge_remote_manifest(updated_state);
@@ -604,15 +631,22 @@ mod tests {
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
-        compactor_state.core = db_state.state.core().clone();
-        let last_compacted = compactor_state.core.l0.pop_back().unwrap();
-        compactor_state.core.l0_last_compacted = Some(last_compacted.id.unwrap_compacted_id());
+        compactor_state.value.core = db_state.state.core().clone();
+        let last_compacted = compactor_state.value.core.l0.pop_back().unwrap();
+        compactor_state.value.core.l0_last_compacted =
+            Some(last_compacted.id.unwrap_compacted_id());
 
         // when:
         db_state.merge_remote_manifest(compactor_state.clone());
 
         // then:
-        let expected: Vec<SsTableId> = compactor_state.core.l0.iter().map(|l0| l0.id).collect();
+        let expected: Vec<SsTableId> = compactor_state
+            .value
+            .core
+            .l0
+            .iter()
+            .map(|l0| l0.id)
+            .collect();
         let merged: Vec<SsTableId> = db_state.state.core().l0.iter().map(|l0| l0.id).collect();
         assert_eq!(expected, merged);
     }
@@ -643,8 +677,9 @@ mod tests {
             let handle =
                 SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), dummy_info.clone());
             db_state.modify(|modifier| {
-                modifier.state.manifest.core.l0.push_front(handle);
-                modifier.state.manifest.core.replay_after_wal_id = imm.recent_flushed_wal_id();
+                modifier.state.manifest.value.core.l0.push_front(handle);
+                modifier.state.manifest.value.core.replay_after_wal_id =
+                    imm.recent_flushed_wal_id();
             });
         }
     }

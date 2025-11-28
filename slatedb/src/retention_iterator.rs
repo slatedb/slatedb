@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::clock::SystemClock;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
+use crate::seq_tracker::{FindOption, SequenceTracker};
 use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
 
@@ -33,6 +34,8 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     compaction_start_ts: i64,
     /// The system clock used to get the current timestamp. This is used on handling retention.
     system_clock: Arc<dyn SystemClock>,
+    /// Historical sequence metadata used to translate sequence numbers into wall-clock timestamps.
+    sequence_tracker: Arc<SequenceTracker>,
     /// The total number of bytes processed so far
     total_bytes_processed: u64,
 }
@@ -46,6 +49,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         filter_tombstone: bool,
         compaction_start_ts: i64,
         system_clock: Arc<dyn SystemClock>,
+        sequence_tracker: Arc<SequenceTracker>,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
@@ -54,6 +58,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             filter_tombstone,
             compaction_start_ts,
             system_clock,
+            sequence_tracker,
             buffer: RetentionBuffer::new(),
             total_bytes_processed: 0,
         })
@@ -72,34 +77,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         retention_timeout: Option<Duration>,
         retention_min_seq: Option<u64>,
         filter_tombstone: bool,
+        sequence_tracker: Arc<SequenceTracker>,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
-        for (idx, (_, entry)) in versions.into_iter().enumerate() {
-            // always keep the latest version (idx == 0), for older versions, check if they are within retention window.
-            // retention window is defined by either timeout or seq, or both. if both are not set, only the latest version
-            // is kept.
-            let in_retention_window_by_time = retention_timeout
-                .map(|timeout| {
-                    let create_ts = entry
-                        .create_ts
-                        .expect("a record with no create_ts should not happen");
-                    // TODO: This is wrong! We're mixing logical (create_ts) and physical (system_clock) timestamps.
-                    let current_system_ts = system_clock.now().timestamp_millis();
-                    create_ts + (timeout.as_millis() as i64) > current_system_ts
-                })
-                .unwrap_or(false);
-            let in_retention_window_by_seq = retention_min_seq
-                .map(|min_seq| entry.seq >= min_seq)
-                .unwrap_or(false);
-
-            let should_keep = idx == 0 || in_retention_window_by_time || in_retention_window_by_seq;
-            if !should_keep {
-                // if an entry is filtered out in retention, we should not
-                // continue have the earlier versions of the same key still
-                // included in the iterator.
-                break;
-            }
-
+        let current_system_ts = system_clock.now().timestamp_millis();
+        for (_, entry) in versions.into_iter() {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
@@ -119,8 +101,59 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 }
                 _ => entry,
             };
+            let entry_seq = entry.seq;
 
+            // always keep the entry with latest version.
             filtered_versions.insert(Reverse(entry.seq), entry);
+
+            // For older versions, we keep iterating until we find the first entry outside the retention
+            // window (by both time AND seq). This entry serves as a "boundary value" for snapshot reads.
+            //
+            // Example: Why we need the boundary value
+            //   1. set a = 'v0' (seq=1)
+            //   2. set a = 'v1' (seq=2)
+            //   3. set b = 'v2' (seq=3)
+            //   4. create snapshot s1 (captures seq=3, so min_retention_seq=3)
+            //   5. delete a (seq=4, creates tombstone)
+            //   6. run compaction (with retention_min_seq=3)
+            //
+            // For key 'a', the compaction will see:
+            //   - tombstone (seq=4) -> KEEP (latest version, AND seq > min_seq)
+            //   - 'v1' (seq=2) -> KEEP (boundary: first entry with seq <= min_seq)
+            //   - 'v0' (seq=1) -> DROP (older than boundary)
+            //
+            // The boundary value (seq=2) is crucial: if snapshot s1 reads key 'a', it needs to find
+            // a version at or before seq=3. Without keeping seq=2, the snapshot would incorrectly
+            // see the tombstone (seq=4) which didn't exist when the snapshot was created.
+            //
+            // Note: We use OR logic below because we keep iterating as long as the entry is within
+            // EITHER the time window OR the seq window. We only stop when it's outside BOTH.
+            let continue_retain_by_time = retention_timeout
+                .map(|timeout| {
+                    let create_sys_ts = sequence_tracker
+                        // Use RoundUp to conservatively estimate creation time. For example:
+                        // - If retention window is 10min and current time is 12:00:00
+                        // - And sequence tracker has timestamps at 11:49:30 and 11:50:30
+                        // - RoundUp will use 11:50:30 (later timestamp) to avoid over-aggressive filtering
+                        .find_ts(entry_seq, FindOption::RoundUp)
+                        .map(|ts| ts.timestamp_millis())
+                        // if the sequence number is greater than the last recorded sequence
+                        // number we just assume that it was produced now (so it effectively
+                        // should be kept in the filtered results)
+                        .unwrap_or(current_system_ts);
+                    create_sys_ts + (timeout.as_millis() as i64) > current_system_ts
+                })
+                .unwrap_or(false);
+            let continue_retain_by_seq = retention_min_seq
+                .map(|min_seq| entry_seq > min_seq)
+                .unwrap_or(false);
+
+            let continue_retain = continue_retain_by_time || continue_retain_by_seq;
+            if !continue_retain {
+                // if we find the first entry that neither in retention window by time nor by seq,
+                // we should break the loop to filter out the earlier versions of the same key.
+                break;
+            }
         }
 
         if filter_tombstone {
@@ -145,6 +178,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
 
 #[async_trait]
 impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.inner.init().await?;
+        Ok(())
+    }
+
     /// Retrieves the next entry from the retention iterator
     ///
     /// This method implements a state machine that:
@@ -199,6 +237,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                             retention_timeout,
                             retention_min_seq,
                             self.filter_tombstone,
+                            self.sequence_tracker.clone(),
                         )
                     })?;
                 }
@@ -370,6 +409,9 @@ mod tests {
     use super::*;
     use crate::types::RowEntry;
     use rstest::rstest;
+
+    #[cfg(feature = "test-util")]
+    use crate::seq_tracker::TrackedSeq;
 
     struct RetentionBufferTestCase {
         name: &'static str,
@@ -796,8 +838,9 @@ mod tests {
         system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest)
-            // value2 and value1 filtered out because seq <= retention_min_seq and not latest
+            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest in retention window)
+            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // Kept (boundary value for snapshots)
+            // value1 filtered out because it's older than the boundary
         ],
         filter_tombstone: false,
     })]
@@ -906,6 +949,7 @@ mod tests {
             test_case.retention_timeout,
             test_case.retention_min_seq,
             test_case.filter_tombstone,
+            Arc::new(SequenceTracker::new()),
         );
 
         // Convert filtered versions back to expected order
@@ -952,5 +996,86 @@ mod tests {
                 test_case.name, i
             );
         }
+    }
+
+    #[cfg(feature = "test-util")]
+    #[rstest]
+    #[case("exact_match", vec![(5, 1_000)], 5, 1_500, 700)]
+    #[case("before_first_rounds_up", vec![(10, 2_000)], 7, 2_100, 400)]
+    #[case(
+        "between_entries_rounds_up",
+        vec![(5, 1_000), (15, 2_000)],
+        11,
+        2_400,
+        500
+    )]
+    #[case(
+        "after_last_defaults_to_now",
+        vec![(5, 1_000)],
+        20,
+        1_500,
+        100
+    )]
+    #[case("no_tracker_defaults_to_now", vec![], 8, 2_000, 0)]
+    fn test_retention_uses_sequence_tracker_timestamp(
+        #[case] _name: &str,
+        #[case] tracker_points: Vec<(u64, i64)>,
+        #[case] entry_seq: u64,
+        #[case] clock_now: i64,
+        #[case] timeout_ms: u64,
+    ) {
+        use crate::clock::MockSystemClock;
+        use crate::test_utils::TestIterator;
+        use chrono::TimeZone;
+
+        let mut sorted_points = tracker_points;
+        sorted_points.sort_by_key(|(seq, _)| *seq);
+
+        let mut tracker = SequenceTracker::new();
+        for (seq, ts) in &sorted_points {
+            let ts = chrono::Utc.timestamp_millis_opt(*ts).unwrap();
+            tracker.insert(TrackedSeq { seq: *seq, ts });
+        }
+        let tracker = Arc::new(tracker);
+
+        let system_clock = Arc::new(MockSystemClock::with_time(clock_now));
+        let latest_seq = entry_seq + 10;
+        let mut versions = BTreeMap::new();
+        versions.insert(
+            Reverse(latest_seq),
+            RowEntry::new_value(b"k", b"new", latest_seq).with_create_ts(clock_now),
+        );
+        let target_entry = RowEntry::new_value(b"k", b"old", entry_seq);
+        versions.insert(Reverse(entry_seq), target_entry);
+
+        let timeout = if timeout_ms == 0 {
+            Duration::from_millis(0)
+        } else {
+            Duration::from_millis(timeout_ms)
+        };
+
+        let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
+            versions,
+            0,
+            system_clock.clone(),
+            Some(timeout),
+            None,
+            false,
+            tracker.clone(),
+        );
+
+        let derived_ts = sorted_points
+            .iter()
+            .find_map(|(seq, ts)| if *seq >= entry_seq { Some(*ts) } else { None })
+            .unwrap_or(clock_now);
+        let expected_keep_by_logic =
+            (derived_ts as i128 + timeout.as_millis() as i128) > clock_now as i128;
+
+        let actual_keep = filtered.contains_key(&Reverse(entry_seq));
+        assert_eq!(
+            actual_keep, expected_keep_by_logic,
+            "{:?}[{}@{} Now({})]",
+            filtered, entry_seq, derived_ts, clock_now
+        );
     }
 }

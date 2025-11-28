@@ -75,7 +75,7 @@ impl GcTask for WalGcTask {
         let active_manifests = self.manifest_store.read_active_manifests().await?;
         let latest_manifest = active_manifests
             .last_key_value()
-            .ok_or(SlateDBError::LatestManifestMissing)?
+            .ok_or(SlateDBError::LatestTransactionalObjectVersionMissing)?
             .1;
 
         let last_compacted_wal_sst_id = latest_manifest.core.replay_after_wal_id;

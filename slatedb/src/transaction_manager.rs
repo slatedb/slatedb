@@ -323,6 +323,11 @@ impl TransactionManagerInner {
     }
 
     fn has_write_write_conflict(&self, write_keys: &HashSet<Bytes>, started_seq: u64) -> bool {
+        // If the current transaction has no write operations, there's no write-write conflict
+        if write_keys.is_empty() {
+            return false;
+        }
+
         for committed_txn in &self.recent_committed_txns {
             // skip read-only transactions as they don't cause write conflicts
             if committed_txn.read_only {

@@ -1207,6 +1207,7 @@ impl<'a> ManifestV1<'a> {
   pub const VT_LAST_L0_SEQ: flatbuffers::VOffsetT = 28;
   pub const VT_WAL_OBJECT_STORE_URI: flatbuffers::VOffsetT = 30;
   pub const VT_RECENT_SNAPSHOT_MIN_SEQ: flatbuffers::VOffsetT = 32;
+  pub const VT_SEQUENCE_TRACKER: flatbuffers::VOffsetT = 34;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1226,6 +1227,7 @@ impl<'a> ManifestV1<'a> {
     builder.add_compactor_epoch(args.compactor_epoch);
     builder.add_writer_epoch(args.writer_epoch);
     builder.add_manifest_id(args.manifest_id);
+    if let Some(x) = args.sequence_tracker { builder.add_sequence_tracker(x); }
     if let Some(x) = args.wal_object_store_uri { builder.add_wal_object_store_uri(x); }
     if let Some(x) = args.checkpoints { builder.add_checkpoints(x); }
     if let Some(x) = args.compacted { builder.add_compacted(x); }
@@ -1342,6 +1344,13 @@ impl<'a> ManifestV1<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(ManifestV1::VT_RECENT_SNAPSHOT_MIN_SEQ, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn sequence_tracker(&self) -> Option<flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(ManifestV1::VT_SEQUENCE_TRACKER, None)}
+  }
 }
 
 impl flatbuffers::Verifiable for ManifestV1<'_> {
@@ -1366,6 +1375,7 @@ impl flatbuffers::Verifiable for ManifestV1<'_> {
      .visit_field::<u64>("last_l0_seq", Self::VT_LAST_L0_SEQ, false)?
      .visit_field::<flatbuffers::ForwardsUOffset<&str>>("wal_object_store_uri", Self::VT_WAL_OBJECT_STORE_URI, false)?
      .visit_field::<u64>("recent_snapshot_min_seq", Self::VT_RECENT_SNAPSHOT_MIN_SEQ, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("sequence_tracker", Self::VT_SEQUENCE_TRACKER, false)?
      .finish();
     Ok(())
   }
@@ -1386,6 +1396,7 @@ pub struct ManifestV1Args<'a> {
     pub last_l0_seq: u64,
     pub wal_object_store_uri: Option<flatbuffers::WIPOffset<&'a str>>,
     pub recent_snapshot_min_seq: u64,
+    pub sequence_tracker: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
 }
 impl<'a> Default for ManifestV1Args<'a> {
   #[inline]
@@ -1406,6 +1417,7 @@ impl<'a> Default for ManifestV1Args<'a> {
       last_l0_seq: 0,
       wal_object_store_uri: None,
       recent_snapshot_min_seq: 0,
+      sequence_tracker: None,
     }
   }
 }
@@ -1476,6 +1488,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> ManifestV1Builder<'a, 'b, A> {
     self.fbb_.push_slot::<u64>(ManifestV1::VT_RECENT_SNAPSHOT_MIN_SEQ, recent_snapshot_min_seq, 0);
   }
   #[inline]
+  pub fn add_sequence_tracker(&mut self, sequence_tracker: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ManifestV1::VT_SEQUENCE_TRACKER, sequence_tracker);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> ManifestV1Builder<'a, 'b, A> {
     let start = _fbb.start_table();
     ManifestV1Builder {
@@ -1511,6 +1527,7 @@ impl core::fmt::Debug for ManifestV1<'_> {
       ds.field("last_l0_seq", &self.last_l0_seq());
       ds.field("wal_object_store_uri", &self.wal_object_store_uri());
       ds.field("recent_snapshot_min_seq", &self.recent_snapshot_min_seq());
+      ds.field("sequence_tracker", &self.sequence_tracker());
       ds.finish()
   }
 }

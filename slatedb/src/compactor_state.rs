@@ -1,17 +1,21 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
-use log::{info, warn};
+use log::{error, info};
 use ulid::Ulid;
-use uuid::Uuid;
 
-use crate::compactor_state::CompactionStatus::Submitted;
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
-use crate::manifest::store::DirtyManifest;
+use crate::manifest::Manifest;
+use crate::transactional_object::DirtyObject;
 
+/// Identifier for a compaction input source.
+///
+/// A `SourceId` distinguishes between two kinds of inputs a compaction can read:
+/// an existing compacted sorted run (identified by its run id), or an L0 SSTable
+/// (identified by its ULID).
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(crate) enum SourceId {
+pub enum SourceId {
     SortedRun(u32),
     Sst(Ulid),
 }
@@ -32,11 +36,19 @@ impl Display for SourceId {
 }
 
 impl SourceId {
+    /// Unwraps the source as a Sorted Run id, panicking if it is an L0 SST.
+    ///
+    /// ## Returns
+    /// - The sorted run id.
+    ///
+    /// ## Panics
+    /// - If called on `SourceId::Sst`.
     pub(crate) fn unwrap_sorted_run(&self) -> u32 {
         self.maybe_unwrap_sorted_run()
             .expect("tried to unwrap Sst as Sorted Run")
     }
 
+    /// Returns the sorted run id if this source is a `SortedRun`, otherwise `None`.
     pub(crate) fn maybe_unwrap_sorted_run(&self) -> Option<u32> {
         match self {
             SourceId::SortedRun(id) => Some(*id),
@@ -44,6 +56,7 @@ impl SourceId {
         }
     }
 
+    /// Returns the SST ULID if this source is an `Sst`, otherwise `None`.
     pub(crate) fn maybe_unwrap_sst(&self) -> Option<Ulid> {
         match self {
             SourceId::SortedRun(_) => None,
@@ -52,109 +65,184 @@ impl SourceId {
     }
 }
 
+/// Immutable spec that describes a compaction. Currently, this only holds the
+/// input sources and destination SR id for a compaction.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum CompactionStatus {
-    Submitted,
-    #[allow(dead_code)]
-    InProgress,
+pub struct CompactionSpec {
+    /// Input sources for the compaction.
+    sources: Vec<SourceId>,
+    /// Destination sorted run id for the compaction.
+    destination: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Compaction {
-    pub(crate) status: CompactionStatus,
-    pub(crate) sources: Vec<SourceId>,
-    pub(crate) destination: u32,
-}
-
-impl Display for Compaction {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let displayed_sources: Vec<_> = self.sources.iter().map(|s| format!("{}", s)).collect();
-        write!(
-            f,
-            "{:?} -> {}: {:?}",
-            displayed_sources, self.destination, self.status
-        )
-    }
-}
-
-impl Compaction {
-    pub(crate) fn new(sources: Vec<SourceId>, destination: u32) -> Self {
+impl CompactionSpec {
+    /// Creates a new compaction spec describing which sources to compact and the destination SR id.
+    ///
+    /// ## Arguments
+    /// - `sources`: Ordered list of sources (L0 SST ULIDs and/or existing SR ids).
+    /// - `destination`: Sorted Run id for the compaction output.
+    pub fn new(sources: Vec<SourceId>, destination: u32) -> Self {
         Self {
-            status: Submitted,
             sources,
             destination,
         }
     }
+
+    /// The sources (input SSTs and sorted runs) for this compaction.
+    pub fn sources(&self) -> &Vec<SourceId> {
+        &self.sources
+    }
+
+    /// The destination sorted run id that will be produced by this compaction.
+    pub fn destination(&self) -> u32 {
+        self.destination
+    }
 }
 
+impl Display for CompactionSpec {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let displayed_sources: Vec<String> =
+            self.sources().iter().map(|s| format!("{}", s)).collect();
+        write!(f, "{:?} -> {}", displayed_sources, self.destination())
+    }
+}
+
+/// Canonical, internal record of a compaction.
+///
+/// A compaction is the unit tracked by the compactor: it has a stable `id` (ULID) and a `spec`
+/// (what to compact and where).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Compaction {
+    /// Stable id (ULID) used to track this compaction across messages and attempts.
+    id: Ulid,
+    /// What to compact (sources) and where to write (destination).
+    spec: CompactionSpec,
+    /// Total number of bytes processed so far for this compaction.
+    bytes_processed: u64,
+}
+
+impl Compaction {
+    pub(crate) fn new(id: Ulid, spec: CompactionSpec) -> Self {
+        Self {
+            id,
+            spec,
+            bytes_processed: 0,
+        }
+    }
+
+    /// Returns all sorted run sources for this compaction.
+    ///
+    /// ## Arguments
+    /// - `db_state`: The current core DB state from the manifest.
+    pub(crate) fn get_sorted_runs(&self, db_state: &CoreDbState) -> Vec<SortedRun> {
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
+
+        self.spec
+            .sources()
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sorted_run())
+            .filter_map(|id| srs_by_id.get(&id).map(|t| (*t).clone()))
+            .collect()
+    }
+
+    /// Returns all L0 SSTable sources for this compaction.
+    ///
+    /// ## Arguments
+    /// - `db_state`: The current core DB state from the manifest.
+    pub(crate) fn get_ssts(&self, db_state: &CoreDbState) -> Vec<SsTableHandle> {
+        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
+            .l0
+            .iter()
+            .map(|sst| (sst.id.unwrap_compacted_id(), sst))
+            .collect();
+
+        self.spec
+            .sources()
+            .iter()
+            .filter_map(|s| s.maybe_unwrap_sst())
+            .filter_map(|ulid| ssts_by_id.get(&ulid).map(|t| (*t).clone()))
+            .collect()
+    }
+
+    /// The stable id (ULID) used to track this compaction across messages and attempts.
+    pub(crate) fn id(&self) -> Ulid {
+        self.id
+    }
+
+    /// Returns the immutable compaction spec describing inputs and destination.
+    pub(crate) fn spec(&self) -> &CompactionSpec {
+        &self.spec
+    }
+
+    /// Sets bytes processed so far for this compaction.
+    pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
+        self.bytes_processed = bytes;
+    }
+}
+
+impl Display for Compaction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let displayed_sources: Vec<_> = self
+            .spec
+            .sources()
+            .iter()
+            .map(|s| format!("{}", s))
+            .collect();
+        write!(f, "{:?} -> {}", displayed_sources, self.spec.destination(),)?;
+        if self.bytes_processed > 0 {
+            write!(f, " ({} bytes processed)", self.bytes_processed)?;
+        }
+        Ok(())
+    }
+}
+
+/// Process-local runtime state owned by the compactor.
+///
+/// This is the in-memory view that a single compactor task uses to:
+/// - keep a fresh `DirtyManifest` (view of `CoreDbState`),
+/// - track in-flight compactions by id (ULID).
 pub struct CompactorState {
-    manifest: DirtyManifest,
-    compactions: HashMap<Uuid, Compaction>,
+    manifest: DirtyObject<Manifest>,
+    compactions: BTreeMap<Ulid, Compaction>,
 }
 
 impl CompactorState {
-    pub(crate) fn db_state(&self) -> &CoreDbState {
-        &self.manifest.core
+    /// Creates a new compactor state seeded with the provided dirty manifest. Compactions are
+    /// initialized empty.
+    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
+        Self {
+            manifest,
+            compactions: BTreeMap::new(),
+        }
     }
 
-    pub(crate) fn manifest(&self) -> &DirtyManifest {
+    /// Returns the current in-memory core DB state derived from the manifest.
+    pub(crate) fn db_state(&self) -> &CoreDbState {
+        self.manifest.core()
+    }
+
+    /// Returns the local dirty manifest that will be written back after compactions.
+    pub(crate) fn manifest(&self) -> &DirtyObject<Manifest> {
         &self.manifest
     }
 
-    pub(crate) fn num_compactions(&self) -> usize {
-        self.compactions.len()
+    /// Returns an iterator over all in-flight compactions.
+    pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
+        self.compactions.values()
     }
 
-    pub(crate) fn compactions(&self) -> Vec<Compaction> {
-        self.compactions.values().cloned().collect()
-    }
-
-    pub(crate) fn new(manifest: DirtyManifest) -> Self {
-        Self {
-            manifest,
-            compactions: HashMap::<Uuid, Compaction>::new(),
-        }
-    }
-
-    pub(crate) fn submit_compaction(
-        &mut self,
-        id: Uuid,
-        compaction: Compaction,
-    ) -> Result<Uuid, SlateDBError> {
-        self.validate_compaction(&compaction)?;
-        if self
-            .compactions
-            .values()
-            .any(|c| c.destination == compaction.destination)
-        {
-            // we already have an ongoing compaction for this destination
-            return Err(SlateDBError::InvalidCompaction);
-        }
-        if self
-            .db_state()
-            .compacted
-            .iter()
-            .any(|sr| sr.id == compaction.destination)
-        {
-            // the compaction overwrites an existing sr but doesn't include the sr
-            if !compaction.sources.iter().any(|src| match src {
-                SourceId::SortedRun(sr) => *sr == compaction.destination,
-                SourceId::Sst(_) => false,
-            }) {
-                return Err(SlateDBError::InvalidCompaction);
-            }
-        }
-        info!("accepted submitted compaction [compaction={}]", compaction);
-        self.compactions.insert(id, compaction);
-        Ok(id)
-    }
-
-    pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyManifest) {
+    /// Merges the remote (writer) manifest view into the compactor's local state.
+    ///
+    /// This preserves local knowledge about compactions already applied (e.g., L0 last
+    /// compacted marker, existing compacted runs) while pulling in newly created L0 SSTs
+    /// and other writer-updated fields.
+    pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // the writer may have added more l0 SSTs. Add these to our l0 list.
         let my_db_state = self.db_state();
         let last_compacted_l0 = my_db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &remote_manifest.core.l0;
+        let writer_l0 = &remote_manifest.core().l0;
         for writer_l0_sst in writer_l0 {
             let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
@@ -172,41 +260,91 @@ impl CompactorState {
 
         // write out the merged core db state and manifest
         let merged = CoreDbState {
-            initialized: remote_manifest.core.initialized,
+            initialized: remote_manifest.value.core.initialized,
             l0_last_compacted: my_db_state.l0_last_compacted,
             l0: merged_l0s,
             compacted: my_db_state.compacted.clone(),
-            next_wal_sst_id: remote_manifest.core.next_wal_sst_id,
-            replay_after_wal_id: remote_manifest.core.replay_after_wal_id,
-            last_l0_clock_tick: remote_manifest.core.last_l0_clock_tick,
-            last_l0_seq: remote_manifest.core.last_l0_seq,
-            checkpoints: remote_manifest.core.checkpoints.clone(),
+            next_wal_sst_id: remote_manifest.value.core.next_wal_sst_id,
+            replay_after_wal_id: remote_manifest.value.core.replay_after_wal_id,
+            last_l0_clock_tick: remote_manifest.value.core.last_l0_clock_tick,
+            last_l0_seq: remote_manifest.value.core.last_l0_seq,
+            checkpoints: remote_manifest.value.core.checkpoints.clone(),
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
-            recent_snapshot_min_seq: my_db_state.recent_snapshot_min_seq,
+            recent_snapshot_min_seq: remote_manifest.value.core.recent_snapshot_min_seq,
+            sequence_tracker: remote_manifest.value.core.sequence_tracker,
         };
-        remote_manifest.core = merged;
+        remote_manifest.value.core = merged;
         self.manifest = remote_manifest;
     }
 
-    pub(crate) fn finish_failed_compaction(&mut self, id: Uuid) {
-        self.compactions.remove(&id);
+    /// Validates and registers a newly submitted compaction with this compactor.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if accepted, or [`SlateDBError::InvalidCompaction`] if the compaction conflicts
+    ///   with an existing destination or violates destination overwrite rules.
+    pub(crate) fn add_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
+        let spec = compaction.spec();
+        if self
+            .compactions
+            .values()
+            .map(|c| c.spec())
+            .any(|c| c.destination() == spec.destination())
+        {
+            // we already have an ongoing compaction for this destination
+            return Err(SlateDBError::InvalidCompaction);
+        }
+        if self
+            .db_state()
+            .compacted
+            .iter()
+            .any(|sr| sr.id == spec.destination())
+            && !spec.sources().iter().any(|src| match src {
+                SourceId::SortedRun(sr) => *sr == spec.destination(),
+                SourceId::Sst(_) => false,
+            })
+        {
+            // the compaction overwrites an existing sr but doesn't include the sr
+            return Err(SlateDBError::InvalidCompaction);
+        }
+        info!("accepted submitted compaction [compaction={}]", compaction);
+
+        self.compactions.insert(compaction.id(), compaction);
+        Ok(())
     }
 
-    pub(crate) fn finish_compaction(&mut self, id: Uuid, output_sr: SortedRun) {
-        if let Some(compaction) = self.compactions.get(&id) {
-            info!("finished compaction [compaction={}]", compaction);
+    /// Removes a compaction from the in-flight map (called after completion or failure).
+    pub(crate) fn remove_compaction(&mut self, compaction_id: &Ulid) {
+        self.compactions.remove(compaction_id);
+    }
+
+    /// Mutates a running compaction in place if it exists.
+    pub(crate) fn update_compaction<F>(&mut self, compaction_id: &Ulid, f: F)
+    where
+        F: FnOnce(&mut Compaction),
+    {
+        if let Some(compaction) = self.compactions.get_mut(compaction_id) {
+            f(compaction);
+        }
+    }
+
+    /// Applies the effects of a finished compaction to the in-memory manifest.
+    ///
+    /// This removes compacted L0 SSTs and source SRs, inserts the output SR in id-descending
+    /// order, updates `l0_last_compacted`, and removes the compaction from the in-flight map.
+    pub(crate) fn finish_compaction(&mut self, compaction_id: Ulid, output_sr: SortedRun) {
+        if let Some(compaction) = self.compactions.get(&compaction_id) {
+            let spec = compaction.spec();
+            info!("finished compaction [spec={}]", spec);
             // reconstruct l0
-            let compaction_l0s: HashSet<Ulid> = compaction
-                .sources
+            let compaction_l0s: HashSet<Ulid> = spec
+                .sources()
                 .iter()
                 .filter_map(|id| id.maybe_unwrap_sst())
                 .collect();
-            let compaction_srs: HashSet<u32> = compaction
-                .sources
+            let compaction_srs: HashSet<u32> = spec
+                .sources()
                 .iter()
-                .chain(std::iter::once(&SourceId::SortedRun(
-                    compaction.destination,
-                )))
+                .chain(std::iter::once(&SourceId::SortedRun(spec.destination())))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
             let mut db_state = self.db_state().clone();
@@ -236,10 +374,10 @@ impl CompactorState {
                 new_compacted.push(output_sr.clone());
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
-            let first_source = compaction
-                .sources
+            let first_source = spec
+                .sources()
                 .first()
-                .expect("illegal: empty compaction");
+                .expect("illegal: empty compaction spec");
             if let Some(compacted_l0) = first_source.maybe_unwrap_sst() {
                 // if there are l0s, the newest must be the first entry in sources
                 // TODO: validate that this is the case
@@ -247,83 +385,25 @@ impl CompactorState {
             }
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
-            self.manifest.core = db_state;
-            self.compactions.remove(&id);
+            self.manifest.value.core = db_state;
+            if self.compactions.remove(&compaction_id).is_none() {
+                error!(
+                    "scheduled compaction not found [compaction_id={}]",
+                    compaction_id
+                );
+            }
+        } else {
+            error!("compaction not found [compaction_id={}]", compaction_id);
         }
     }
 
+    /// Debug assertion that compacted sorted runs are kept in strictly descending id order.
     fn assert_compacted_srs_in_id_order(compacted: &[SortedRun]) {
         let mut last_sr_id = u32::MAX;
         for sr in compacted.iter() {
             assert!(sr.id < last_sr_id);
             last_sr_id = sr.id;
         }
-    }
-
-    fn validate_compaction(&mut self, compaction: &Compaction) -> Result<(), SlateDBError> {
-        // Logical order of sources: [L0 (newest → oldest), then SRs (highest id → 0)]
-        let sources_logical_order: Vec<SourceId> = self
-            .db_state()
-            .l0
-            .iter()
-            .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
-            .chain(
-                self.db_state()
-                    .compacted
-                    .iter()
-                    .map(|sr| SourceId::SortedRun(sr.id)),
-            )
-            .collect();
-
-        // Validate compaction sources exist
-        if compaction.sources.is_empty() {
-            warn!("submitted compaction is empty: {:?}", compaction.sources);
-            return Err(SlateDBError::InvalidCompaction);
-        }
-
-        // Validate if the compaction sources are strictly consecutive elements in the db_state sources
-        if !sources_logical_order
-            .windows(compaction.sources.len())
-            .any(|w| w == compaction.sources.as_slice())
-        {
-            warn!("submitted compaction is not a consecutive series of sources from db state: {:?} {:?}",
-            compaction.sources, sources_logical_order);
-            return Err(SlateDBError::InvalidCompaction);
-        }
-
-        let has_sr = compaction
-            .sources
-            .iter()
-            .any(|s| matches!(s, SourceId::SortedRun(_)));
-
-        if has_sr {
-            // Must merge into the lowest-id SR among sources
-            let min_sr = compaction
-                .sources
-                .iter()
-                .filter_map(|s| s.maybe_unwrap_sorted_run())
-                .min()
-                .expect("at least one SR in sources");
-            if compaction.destination != min_sr {
-                warn!(
-                    "destination does not match lowest-id SR among sources: {:?} {:?}",
-                    compaction.destination, min_sr
-                );
-                return Err(SlateDBError::InvalidCompaction);
-            }
-        } else {
-            // L0-only: must create new SR with id > highest_existing
-            let highest_id = self.db_state().compacted.first().map_or(0, |sr| sr.id + 1);
-            if compaction.destination < highest_id {
-                warn!(
-                    "compaction destination is lesser than the expected L0-only highest_id: {:?} {:?}",
-                    compaction.destination, highest_id
-                );
-                return Err(SlateDBError::InvalidCompaction);
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -336,13 +416,14 @@ mod tests {
     use super::*;
     use crate::checkpoint::Checkpoint;
     use crate::clock::{DefaultSystemClock, SystemClock};
-    use crate::compactor_state::CompactionStatus::Submitted;
     use crate::compactor_state::SourceId::Sst;
     use crate::config::Settings;
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::utils::IdGenerator;
+    use crate::DbRand;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -351,34 +432,38 @@ mod tests {
     const PATH: &str = "/test/db";
 
     #[test]
-    fn test_should_register_compaction_as_submitted() {
+    fn test_should_register_compaction() {
         // given:
         let rt = build_runtime();
-        let (_, _, mut state) = build_test_state(rt.handle());
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
 
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&state.db_state().l0, 0);
         // when:
+        let compaction = Compaction::new(compaction_id, spec.clone());
         state
-            .submit_compaction(
-                uuid::Uuid::new_v4(),
-                build_l0_compaction(&state.db_state().l0, 0),
-            )
-            .unwrap();
+            .add_compaction(compaction.clone())
+            .expect("failed to add compaction");
 
         // then:
-        assert_eq!(state.compactions().len(), 1);
-        assert_eq!(state.compactions().first().unwrap().status, Submitted);
+        let mut compactions = state.compactions();
+        let expected = Compaction::new(compaction_id, spec.clone());
+        assert_eq!(compactions.next().expect("compaction not found"), &expected);
+        assert!(compactions.next().is_none());
     }
 
     #[test]
     fn test_should_update_dbstate_when_compaction_finished() {
         // given:
         let rt = build_runtime();
-        let (_, _, mut state) = build_test_state(rt.handle());
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
-        let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        let id = state
-            .submit_compaction(uuid::Uuid::new_v4(), compaction)
-            .unwrap();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&before_compaction.l0, 0);
+        let compaction = Compaction::new(compaction_id, spec);
+        state
+            .add_compaction(compaction.clone())
+            .expect("failed to add compaction");
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -386,7 +471,7 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(id, sr.clone());
+        state.finish_compaction(compaction_id, sr.clone());
 
         // then:
         assert_eq!(
@@ -420,12 +505,14 @@ mod tests {
     fn test_should_remove_compaction_when_compaction_finished() {
         // given:
         let rt = build_runtime();
-        let (_, _, mut state) = build_test_state(rt.handle());
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
         let before_compaction = state.db_state().clone();
-        let compaction = build_l0_compaction(&before_compaction.l0, 0);
-        let id = state
-            .submit_compaction(uuid::Uuid::new_v4(), compaction)
-            .unwrap();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&before_compaction.l0, 0);
+        let compaction = Compaction::new(compaction_id, spec);
+        state
+            .add_compaction(compaction.clone())
+            .expect("failed to add compaction");
 
         // when:
         let compacted_ssts = before_compaction.l0.iter().cloned().collect();
@@ -433,17 +520,17 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(id, sr.clone());
+        state.finish_compaction(compaction_id, sr.clone());
 
         // then:
-        assert_eq!(state.compactions().len(), 0)
+        assert_eq!(state.compactions().count(), 0)
     }
 
     #[test]
     fn test_should_merge_db_state_correctly_when_never_compacted() {
         // given:
         let rt = build_runtime();
-        let (os, mut sm, mut state) = build_test_state(rt.handle());
+        let (os, mut sm, mut state, _, _) = build_test_state(rt.handle());
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
         rt.block_on(db.put(&[b'a'; 16], &[b'b'; 48])).unwrap();
@@ -451,7 +538,7 @@ mod tests {
         wait_for_manifest_with_l0_len(&mut sm, rt.handle(), state.db_state().l0.len() + 1);
 
         // when:
-        state.merge_remote_manifest(sm.prepare_dirty());
+        state.merge_remote_manifest(sm.prepare_dirty().unwrap());
 
         // then:
         assert!(state.db_state().l0_last_compacted.is_none());
@@ -475,20 +562,20 @@ mod tests {
     fn test_should_merge_db_state_correctly() {
         // given:
         let rt = build_runtime();
-        let (os, mut sm, mut state) = build_test_state(rt.handle());
+        let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        let id = state
-            .submit_compaction(
-                uuid::Uuid::new_v4(),
-                Compaction::new(
-                    vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
-                    0,
-                ),
-            )
-            .unwrap();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::new(
+            vec![Sst(original_l0s.back().unwrap().id.unwrap_compacted_id())],
+            0,
+        );
+        let compaction = Compaction::new(compaction_id, spec);
+        state
+            .add_compaction(compaction.clone())
+            .expect("failed to add compaction");
         state.finish_compaction(
-            id,
+            compaction_id,
             SortedRun {
                 id: 0,
                 ssts: vec![original_l0s.back().unwrap().clone()],
@@ -502,7 +589,7 @@ mod tests {
         let db_state_before_merge = state.db_state().clone();
 
         // when:
-        state.merge_remote_manifest(sm.prepare_dirty());
+        state.merge_remote_manifest(sm.prepare_dirty().unwrap());
 
         // then:
         let db_state = state.db_state();
@@ -541,23 +628,24 @@ mod tests {
     fn test_should_merge_db_state_correctly_when_all_l0_compacted() {
         // given:
         let rt = build_runtime();
-        let (os, mut sm, mut state) = build_test_state(rt.handle());
+        let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        let id = state
-            .submit_compaction(
-                uuid::Uuid::new_v4(),
-                Compaction::new(
-                    original_l0s
-                        .iter()
-                        .map(|h| Sst(h.id.unwrap_compacted_id()))
-                        .collect(),
-                    0,
-                ),
-            )
-            .unwrap();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+
+        let spec = CompactionSpec::new(
+            original_l0s
+                .iter()
+                .map(|h| Sst(h.id.unwrap_compacted_id()))
+                .collect(),
+            0,
+        );
+        let compaction = Compaction::new(compaction_id, spec);
+        state
+            .add_compaction(compaction.clone())
+            .expect("failed to add compaction");
         state.finish_compaction(
-            id,
+            compaction_id,
             SortedRun {
                 id: 0,
                 ssts: original_l0s.clone().into(),
@@ -571,7 +659,7 @@ mod tests {
         wait_for_manifest_with_l0_len(&mut sm, rt.handle(), original_l0s.len() + 1);
 
         // when:
-        state.merge_remote_manifest(sm.prepare_dirty());
+        state.merge_remote_manifest(sm.prepare_dirty().unwrap());
 
         // then:
         let db_state = state.db_state();
@@ -604,8 +692,9 @@ mod tests {
             manifest_id: 1,
             expire_time: None,
             create_time: DefaultSystemClock::default().now(),
+            name: None,
         };
-        dirty.core.checkpoints.push(checkpoint.clone());
+        dirty.value.core.checkpoints.push(checkpoint.clone());
 
         // when:
         state.merge_remote_manifest(dirty);
@@ -615,74 +704,24 @@ mod tests {
     }
 
     #[test]
-    fn test_should_submit_invalid_compaction_wrong_order() {
-        // given:
-        let rt = build_runtime();
-        let (_, _, mut state) = build_test_state(rt.handle());
-
-        let l0_sst = &mut state.db_state().l0.clone();
-        let last_sst = l0_sst.pop_back();
-        l0_sst.push_front(last_sst.unwrap());
-        // when:
-        let compaction = build_l0_compaction(l0_sst, 0);
-        let result = state.submit_compaction(uuid::Uuid::new_v4(), compaction);
-
-        // then:
-        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
-    }
-
-    #[test]
-    fn test_should_submit_invalid_compaction_skipped_sst() {
-        // given:
-        let rt = build_runtime();
-        let (_, _, mut state) = build_test_state(rt.handle());
-
-        let l0_sst = &mut state.db_state().l0.clone();
-        let last_sst = l0_sst.pop_back().unwrap();
-        l0_sst.push_front(last_sst);
-        l0_sst.pop_back();
-        // when:
-        let compaction = build_l0_compaction(l0_sst, 0);
-        let result = state.submit_compaction(uuid::Uuid::new_v4(), compaction);
-
-        // then:
-        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
-    }
-
-    #[test]
-    fn test_should_submit_invalid_compaction_with_sr() {
-        // given:
-        let rt = build_runtime();
-        let (_, _, mut state) = build_test_state(rt.handle());
-
-        let mut compaction = build_l0_compaction(&state.db_state().l0, 0);
-        compaction.sources.push(SourceId::SortedRun(5));
-        // when:
-        let result = state.submit_compaction(uuid::Uuid::new_v4(), compaction);
-
-        // then:
-        assert!(matches!(result, Err(SlateDBError::InvalidCompaction)));
-    }
-
-    #[test]
     fn test_should_submit_correct_compaction() {
         // given:
         let rt = build_runtime();
-        let (_os, mut _sm, mut state) = build_test_state(rt.handle());
+        let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
         let original_l0s = &state.db_state().clone().l0;
-        let result = state.submit_compaction(
-            uuid::Uuid::new_v4(),
-            Compaction::new(
-                original_l0s
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _e)| i > &2usize)
-                    .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
-                    .collect::<Vec<SourceId>>(),
-                0,
-            ),
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::new(
+            original_l0s
+                .iter()
+                .enumerate()
+                .filter(|(i, _e)| i > &2usize)
+                .map(|(_i, x)| Sst(x.id.unwrap_compacted_id()))
+                .collect::<Vec<SourceId>>(),
+            0,
         );
+        let compaction = Compaction::new(compaction_id, spec);
+        let result = state.add_compaction(compaction.clone());
 
         // then:
         assert!(result.is_ok());
@@ -692,7 +731,7 @@ mod tests {
     fn test_source_boundary_compaction() {
         // given:
         let rt = build_runtime();
-        let (_os, mut _sm, mut state) = build_test_state(rt.handle());
+        let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         let original_l0s = &state.db_state().clone().l0;
         let original_srs = &state.db_state().clone().compacted;
         // L0: from 4th onward (index > 2)
@@ -709,7 +748,11 @@ mod tests {
 
         // If you need both:
         let sources: Vec<SourceId> = l0_sources.chain(sr_sources).collect();
-        let result = state.submit_compaction(uuid::Uuid::new_v4(), Compaction::new(sources, 0));
+
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = CompactionSpec::new(sources, 0);
+        let compaction = Compaction::new(compaction_id, spec);
+        let result = state.add_compaction(compaction.clone());
 
         // or simply:
         assert!(result.is_ok());
@@ -778,12 +821,12 @@ mod tests {
         .expect("no manifest found with l0 len");
     }
 
-    fn build_l0_compaction(ssts: &VecDeque<SsTableHandle>, dst: u32) -> Compaction {
+    fn build_l0_compaction(ssts: &VecDeque<SsTableHandle>, dst: u32) -> CompactionSpec {
         let sources = ssts
             .iter()
             .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
             .collect();
-        Compaction::new(sources, dst)
+        CompactionSpec::new(sources, dst)
     }
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
@@ -799,9 +842,16 @@ mod tests {
             .unwrap()
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_test_state(
         tokio_handle: &Handle,
-    ) -> (Arc<dyn ObjectStore>, StoredManifest, CompactorState) {
+    ) -> (
+        Arc<dyn ObjectStore>,
+        StoredManifest,
+        CompactorState,
+        Arc<dyn SystemClock>,
+        Arc<DbRand>,
+    ) {
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = build_db(os.clone(), tokio_handle);
         let l0_count: u64 = 5;
@@ -814,15 +864,18 @@ mod tests {
                 .unwrap();
         }
         tokio_handle.block_on(db.close()).unwrap();
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let rand: Arc<DbRand> = Arc::new(DbRand::default());
+
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(PATH),
             os.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            system_clock.clone(),
         ));
         let stored_manifest = tokio_handle
             .block_on(StoredManifest::load(manifest_store))
             .unwrap();
-        let state = CompactorState::new(stored_manifest.prepare_dirty());
-        (os, stored_manifest, state)
+        let state = CompactorState::new(stored_manifest.prepare_dirty().unwrap());
+        (os, stored_manifest, state, system_clock, rand)
     }
 }

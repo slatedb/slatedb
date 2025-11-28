@@ -1,8 +1,11 @@
-import pytest
-import tempfile
-import shutil
 import os
+import shutil
+import tempfile
+
+import pytest
+
 from slatedb import SlateDB
+
 
 @pytest.fixture
 def temp_dir():

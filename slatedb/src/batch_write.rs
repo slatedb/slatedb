@@ -30,23 +30,18 @@ use fail_parallel::fail_point;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::warn;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use crate::clock::SystemClock;
 use crate::config::WriteOptions;
-use crate::dispatcher::{MessageDispatcher, MessageHandler};
-use crate::types::{RowEntry, ValueDeletable};
+use crate::dispatcher::MessageHandler;
+use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
-use crate::{
-    batch::{WriteBatch, WriteOp},
-    db::DbInner,
-    error::SlateDBError,
-};
+use crate::{batch::WriteBatch, db::DbInner, error::SlateDBError};
+
+pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
 pub(crate) struct WriteBatchMessage {
     pub(crate) batch: WriteBatch,
@@ -66,7 +61,7 @@ impl std::fmt::Debug for WriteBatchMessage {
     }
 }
 
-struct WriteBatchEventHandler {
+pub(crate) struct WriteBatchEventHandler {
     db_inner: Arc<DbInner>,
     is_first_write: bool,
 }
@@ -106,11 +101,11 @@ impl MessageHandler<WriteBatchMessage> for WriteBatchEventHandler {
     async fn cleanup(
         &mut self,
         mut messages: BoxStream<'async_trait, WriteBatchMessage>,
-        _result: Result<(), SlateDBError>,
+        result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        // drain messages
+        let error = result.clone().err().unwrap_or(SlateDBError::Closed);
         while let Some(msg) = messages.next().await {
-            self.handle(msg).await?;
+            let _ = msg.done.send(Err(error.clone()));
         }
         Ok(())
     }
@@ -125,22 +120,23 @@ impl DbInner {
     ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         let now = self.mono_clock.now().await?;
         let commit_seq = self.oracle.last_seq.next();
-        let txn_id = batch.txn_id;
 
-        let entries = self.extract_row_entries(batch, commit_seq, now);
-        let conflict_keys = entries
-            .iter()
-            .map(|entry| entry.key.clone())
-            .collect::<HashSet<_>>();
-
-        // check if there's any conflict if this write batch is bound with a txn.
-        if let Some(txn_id) = &txn_id {
-            // TODO: this might better to be moved into the `commit()`` method of `DbTransaction`.
-            self.txn_manager.track_write_keys(txn_id, &conflict_keys);
+        // Check for transaction conflicts before proceeding with the write batch
+        // if this batch is part of a transaction.
+        if let Some(txn_id) = batch.txn_id.as_ref() {
             if self.txn_manager.check_has_conflict(txn_id) {
                 return Err(SlateDBError::TransactionConflict);
             }
         }
+
+        let entries = batch
+            .extract_entries(
+                commit_seq,
+                now,
+                self.settings.default_ttl,
+                self.settings.merge_operator.clone(),
+            )
+            .await?;
 
         let durable_watcher = if self.wal_enabled {
             // WAL entries must be appended to the wal buffer atomically. Otherwise,
@@ -148,8 +144,8 @@ impl DbInner {
             // would violate the guarantee that batches are written atomically. We do
             // this by appending the entire entry batch in a single call to the WAL buffer,
             // which holds a write lock during the append.
-            let wal_watcher = self.wal_buffer.append(&entries).await?.durable_watcher();
-            self.wal_buffer.maybe_trigger_flush().await?;
+            let wal_watcher = self.wal_buffer.append(&entries)?.durable_watcher();
+            self.wal_buffer.maybe_trigger_flush()?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
             self.write_entries_to_memtable(entries);
@@ -161,7 +157,7 @@ impl DbInner {
 
         // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
         // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
-        self.wal_buffer.track_last_applied_seq(commit_seq).await;
+        self.wal_buffer.track_last_applied_seq(commit_seq);
 
         // insert a fail point for easier to test the case where the last_committed_seq is not updated.
         // this is useful for testing the case where the reader is not able to see the writes.
@@ -173,16 +169,18 @@ impl DbInner {
 
         // track the recent committed txn for conflict check. if txn_id is not supplied,
         // we still consider this as an transaction commit.
-        if let Some(txn_id) = &txn_id {
+        if let Some(txn_id) = &batch.txn_id {
             self.txn_manager
                 .track_recent_committed_txn(txn_id, commit_seq);
         } else {
+            let write_keys = batch.keys();
             self.txn_manager
-                .track_recent_committed_write_batch(&conflict_keys, commit_seq);
+                .track_recent_committed_write_batch(&write_keys, commit_seq);
         }
 
         // update the last_committed_seq, so the writes will be visible to the readers.
         self.oracle.last_committed_seq.store(commit_seq);
+        self.record_memtable_sequence(commit_seq);
 
         // maybe freeze the memtable.
         {
@@ -205,45 +203,10 @@ impl DbInner {
         memtable.table().durable_watcher()
     }
 
-    /// Converts a WriteBatch into a vector of RowEntry objects with seq and timestamp set.
-    fn extract_row_entries(&self, batch: WriteBatch, seq: u64, now: i64) -> Vec<RowEntry> {
-        batch
-            .ops
-            .into_iter()
-            .map(|op| match op {
-                WriteOp::Put(key, value, opts) => RowEntry {
-                    key,
-                    value: ValueDeletable::Value(value.clone()),
-                    create_ts: Some(now),
-                    expire_ts: opts.expire_ts_from(self.settings.default_ttl, now),
-                    seq,
-                },
-                WriteOp::Delete(key) => RowEntry {
-                    key,
-                    value: ValueDeletable::Tombstone,
-                    create_ts: Some(now),
-                    expire_ts: None,
-                    seq,
-                },
-            })
-            .collect::<Vec<_>>()
-    }
-
-    pub(crate) fn spawn_write_task(
-        self: &Arc<Self>,
-        rx: tokio::sync::mpsc::UnboundedReceiver<WriteBatchMessage>,
-        tokio_handle: &Handle,
-        cancellation_token: CancellationToken,
-    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
-        let write_batch_event_handler = WriteBatchEventHandler::new(self.clone());
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(write_batch_event_handler),
-            rx,
-            self.system_clock.clone(),
-            cancellation_token,
-            self.state.write().error(),
-        );
-        Some(tokio_handle.spawn(async move { dispatcher.run().await }))
+    fn record_memtable_sequence(&self, seq: u64) {
+        let ts = self.system_clock.now();
+        let guard = self.state.read();
+        guard.memtable().record_sequence(seq, ts);
     }
 }
 

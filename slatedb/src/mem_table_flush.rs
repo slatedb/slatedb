@@ -2,22 +2,22 @@ use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::db_state::SsTableId;
-use crate::dispatcher::{MessageDispatcher, MessageFactory, MessageHandler};
+use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::utils::IdGenerator;
 use async_trait::async_trait;
+use fail_parallel::fail_point;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use std::cmp;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::Sender;
-use tokio_util::sync::CancellationToken;
 use tracing::instrument;
+
+pub(crate) const MEMTABLE_FLUSHER_TASK_NAME: &str = "memtable_writer";
 
 #[derive(Debug)]
 pub(crate) enum MemtableFlushMsg {
@@ -37,6 +37,10 @@ pub(crate) struct MemtableFlusher {
 }
 
 impl MemtableFlusher {
+    pub(crate) fn new(db_inner: Arc<DbInner>, manifest: FenceableManifest) -> Self {
+        Self { db_inner, manifest }
+    }
+
     pub(crate) async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
         self.manifest.refresh().await?;
         let mut wguard_state = self.db_inner.state.write();
@@ -55,8 +59,8 @@ impl MemtableFlusher {
         let id = self.db_inner.rand.rng().gen_uuid();
         let checkpoint = self.manifest.new_checkpoint(id, options)?;
         let manifest_id = checkpoint.manifest_id;
-        dirty.core.checkpoints.push(checkpoint);
-        self.manifest.update_manifest(dirty).await?;
+        dirty.value.core.checkpoints.push(checkpoint);
+        self.manifest.update(dirty).await?;
         Ok(CheckpointCreateResult { id, manifest_id })
     }
 
@@ -65,7 +69,7 @@ impl MemtableFlusher {
             let rguard_state = self.db_inner.state.read();
             rguard_state.state().manifest.clone()
         };
-        self.manifest.update_manifest(dirty).await
+        self.manifest.update(dirty).await
     }
 
     pub(crate) async fn write_checkpoint_safely(
@@ -75,7 +79,7 @@ impl MemtableFlusher {
         loop {
             self.load_manifest().await?;
             let result = self.write_checkpoint(options).await;
-            if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
+            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
                 debug!("conflicting manifest version. updating and retrying write again.");
             } else {
                 return result;
@@ -86,7 +90,7 @@ impl MemtableFlusher {
     pub(crate) async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             let result = self.write_manifest().await;
-            if matches!(result, Err(SlateDBError::ManifestVersionExists)) {
+            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
                 debug!("conflicting manifest version. updating and retrying write again.");
                 self.load_manifest().await?;
             } else {
@@ -121,6 +125,14 @@ impl MemtableFlusher {
                 .db_inner
                 .flush_imm_table(&id, imm_memtable.table(), true)
                 .await?;
+            fail_point!(
+                Arc::clone(&self.db_inner.fp_registry),
+                "after-flush-imm-to-l0-before-manifest"
+            );
+            let last_seq = imm_memtable
+                .table()
+                .last_seq()
+                .expect("flush of l0 with no entries");
             {
                 let min_active_snapshot_seq = self.db_inner.txn_manager.min_active_seq();
 
@@ -132,41 +144,56 @@ impl MemtableFlusher {
                         .pop_back()
                         .expect("expected imm memtable");
                     assert!(Arc::ptr_eq(&popped, &imm_memtable));
-                    modifier.state.manifest.core.l0.push_front(sst_handle);
-                    modifier.state.manifest.core.replay_after_wal_id =
+                    modifier.state.manifest.value.core.l0.push_front(sst_handle);
+                    modifier.state.manifest.value.core.replay_after_wal_id =
                         imm_memtable.recent_flushed_wal_id();
 
                     // ensure the persisted manifest tick never goes backwards in time
                     let memtable_tick = imm_memtable.table().last_tick();
-                    modifier.state.manifest.core.last_l0_clock_tick = cmp::max(
-                        modifier.state.manifest.core.last_l0_clock_tick,
+                    modifier.state.manifest.value.core.last_l0_clock_tick = cmp::max(
+                        modifier.state.manifest.value.core.last_l0_clock_tick,
                         memtable_tick,
                     );
-                    if modifier.state.manifest.core.last_l0_clock_tick != memtable_tick {
+                    if modifier.state.manifest.value.core.last_l0_clock_tick != memtable_tick {
                         return Err(SlateDBError::InvalidClockTick {
-                            last_tick: modifier.state.manifest.core.last_l0_clock_tick,
+                            last_tick: modifier.state.manifest.value.core.last_l0_clock_tick,
                             next_tick: memtable_tick,
                         });
                     }
 
                     // update the persisted manifest last_l0_seq as the latest seq in the imm.
-                    if let Some(seq) = imm_memtable.table().last_seq() {
-                        modifier.state.manifest.core.last_l0_seq = seq;
-                    };
+                    assert!(last_seq >= modifier.state.manifest.value.core.last_l0_seq);
+                    modifier.state.manifest.value.core.last_l0_seq = last_seq;
 
                     // update the persisted manifest recent_snapshot_min_seq to inform the compactor
                     // can safely reclaim the entries with smaller seq. if there's no active snapshot,
                     // we simply use the latest l0 seq.
-                    modifier.state.manifest.core.recent_snapshot_min_seq =
-                        min_active_snapshot_seq.unwrap_or(modifier.state.manifest.core.last_l0_seq);
+                    modifier.state.manifest.value.core.recent_snapshot_min_seq =
+                        min_active_snapshot_seq.unwrap_or(last_seq);
+
+                    let sequence_tracker = imm_memtable.sequence_tracker();
+                    modifier
+                        .state
+                        .manifest
+                        .value
+                        .core
+                        .sequence_tracker
+                        .extend_from(sequence_tracker);
 
                     Ok(())
                 })?;
             }
             imm_memtable.notify_flush_to_l0(Ok(()));
+            self.db_inner.db_stats.immutable_memtable_flushes.inc();
             match self.write_manifest_safely().await {
                 Ok(_) => {
+                    // at this point we know the data in the memtable is durably stored
+                    // so notify the relevant listeners
                     imm_memtable.table().notify_durable(Ok(()));
+                    self.db_inner
+                        .oracle
+                        .last_remote_persisted_seq
+                        .store_if_greater(last_seq);
                 }
                 Err(err) => {
                     if matches!(err, SlateDBError::Fenced) {
@@ -188,11 +215,13 @@ impl MemtableFlusher {
     }
 
     async fn flush_and_record(&mut self) -> Result<(), SlateDBError> {
+        fail_point!(
+            Arc::clone(&self.db_inner.fp_registry),
+            "flush-memtable-to-l0"
+        );
         let result = self.flush_imm_memtables_to_l0().await;
         if let Err(err) = &result {
             error!("error from memtable flush [error={:?}]", err);
-        } else {
-            self.db_inner.db_stats.immutable_memtable_flushes.inc();
         }
         result
     }
@@ -238,10 +267,7 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
         mut messages: BoxStream<'async_trait, MemtableFlushMsg>,
         result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        let error = result
-            .clone()
-            .err()
-            .unwrap_or(SlateDBError::BackgroundTaskShutdown);
+        let error = result.clone().err().unwrap_or(SlateDBError::Closed);
         // drain remaining messages
         while let Some(message) = messages.next().await {
             match message {
@@ -263,11 +289,14 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
 
         // notify in-memory memtables of error
         let state = self.db_inner.state.read();
-        info!("notifying in-memory memtable of error");
+        debug!(
+            "notifying in-memory memtable of shutdown [result={:?}]",
+            result
+        );
         state.memtable().table().notify_durable(Err(error.clone()));
         for imm_table in state.state().imm_memtable.iter() {
-            info!(
-                "notifying imm memtable of error [last_wal_id={}, error={:?}]",
+            debug!(
+                "notifying imm memtable of shutdown [last_wal_id={}, error={:?}]",
                 imm_table.recent_flushed_wal_id(),
                 error,
             );
@@ -275,28 +304,5 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
             imm_table.table().notify_durable(Err(error.clone()));
         }
         Ok(())
-    }
-}
-
-impl DbInner {
-    pub(crate) fn spawn_memtable_flush_task(
-        self: &Arc<Self>,
-        manifest: FenceableManifest,
-        flush_rx: UnboundedReceiver<MemtableFlushMsg>,
-        tokio_handle: &Handle,
-        cancellation_token: CancellationToken,
-    ) -> Option<tokio::task::JoinHandle<Result<(), SlateDBError>>> {
-        let memtable_flush_handler = MemtableFlusher {
-            db_inner: self.clone(),
-            manifest,
-        };
-        let mut dispatcher = MessageDispatcher::new(
-            Box::new(memtable_flush_handler),
-            flush_rx,
-            self.system_clock.clone(),
-            cancellation_token.clone(),
-            self.state.read().error(),
-        );
-        Some(tokio_handle.spawn(async move { dispatcher.run().await }))
     }
 }

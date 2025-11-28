@@ -50,7 +50,7 @@ ulid = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 walkdir = { workspace = true }
 zstd = { workspace = true, optional = true }
-tokio-util = { workspace = true, default-features = false, features = ["rt"] }
+tokio-util = { workspace = true, default-features = false, features = ["rt", "join-map"] }
 thread_local = { workspace = true }
 url = "2.5.4"
 

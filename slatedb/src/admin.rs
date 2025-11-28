@@ -2,14 +2,17 @@ use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
-use crate::dispatcher::MessageDispatcher;
+use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
+use crate::seq_tracker::FindOption;
 use crate::utils::{IdGenerator, WatchableOnceCell};
+use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -18,12 +21,12 @@ use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
+use crate::transactional_object::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -81,15 +84,40 @@ impl Admin {
         Ok(serde_json::to_string(&manifests)?)
     }
 
-    /// List checkpoints
-    pub async fn list_checkpoints(&self) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
+    /// List checkpoints, optionally filtering by name. When name is provided, only checkpoints
+    /// with this exact name will be returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `name_filter`: Name that will be used to filter checkpoints.
+    pub async fn list_checkpoints(
+        &self,
+        name_filter: Option<&str>,
+    ) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
             self.system_clock.clone(),
         );
         let (_, manifest) = manifest_store.read_latest_manifest().await?;
-        Ok(manifest.core.checkpoints)
+
+        let checkpoints = match name_filter {
+            Some("") => manifest
+                .core
+                .checkpoints
+                .into_iter()
+                .filter(|cp| cp.name.as_deref() == Some("") || cp.name.is_none())
+                .collect(),
+            Some(name) => manifest
+                .core
+                .checkpoints
+                .into_iter()
+                .filter(|cp| cp.name.as_deref() == Some(name))
+                .collect(),
+            None => manifest.core.checkpoints,
+        };
+
+        Ok(checkpoints)
     }
 
     /// Run the garbage collector once in the foreground.
@@ -123,13 +151,8 @@ impl Admin {
     /// # Arguments
     ///
     /// * `gc_opts`: The garbage collector options.
-    /// * `cancellation_token`: The cancellation token to stop the garbage collector.
-    pub async fn run_gc_in_background(
-        &self,
-        gc_opts: GarbageCollectorOptions,
-        cancellation_token: CancellationToken,
-    ) -> Result<(), Box<dyn Error>> {
-        let tracker = TaskTracker::new();
+    ///
+    pub async fn run_gc(&self, gc_opts: GarbageCollectorOptions) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
@@ -140,20 +163,22 @@ impl Admin {
         .build();
 
         let (_, rx) = mpsc::unbounded_channel();
-        let mut gc_dispatcher = MessageDispatcher::new(
-            Box::new(gc),
-            rx,
-            self.system_clock.clone(),
-            cancellation_token,
-            WatchableOnceCell::new(),
-        );
+        let closed_result = WatchableOnceCell::new();
+        let task_executor = MessageHandlerExecutor::new(closed_result, self.system_clock.clone());
 
-        let jh = tracker.spawn(async move { gc_dispatcher.run().await });
-        tracker.close();
-        tracker.wait().await;
-        jh.await
-            .expect("Failed to finish garbage collector task")
-            .map_err(Into::into)
+        task_executor
+            .add_handler(
+                GC_TASK_NAME.to_string(),
+                Box::new(gc),
+                rx,
+                &Handle::current(),
+            )
+            .map_err(Into::<crate::Error>::into)?;
+
+        task_executor
+            .join_task(GC_TASK_NAME)
+            .await
+            .map_err(Into::<crate::Error>::into)
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
@@ -232,10 +257,10 @@ impl Admin {
         ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
-                let mut dirty = stored_manifest.prepare_dirty();
+            .maybe_apply_update(|stored_manifest| {
+                let mut dirty = stored_manifest.prepare_dirty()?;
                 let expire_time = lifetime.map(|l| self.system_clock.now() + l);
-                let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
+                let Some(_) = dirty.value.core.checkpoints.iter_mut().find_map(|c| {
                     if c.id == id {
                         c.expire_time = expire_time;
                         return Some(());
@@ -259,20 +284,72 @@ impl Admin {
         ));
         let mut stored_manifest = StoredManifest::load(manifest_store).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
-                let mut dirty = stored_manifest.prepare_dirty();
+            .maybe_apply_update(|stored_manifest| {
+                let mut dirty = stored_manifest.prepare_dirty()?;
                 let checkpoints: Vec<Checkpoint> = dirty
-                    .core
+                    .core()
                     .checkpoints
                     .iter()
                     .filter(|c| c.id != id)
                     .cloned()
                     .collect();
-                dirty.core.checkpoints = checkpoints;
+                dirty.value.core.checkpoints = checkpoints;
                 Ok(Some(dirty))
             })
             .await
             .map_err(Into::into)
+    }
+
+    /// Returns the timestamp or sequence from the latest manifest's sequence tracker.
+    /// When `round_up` is true, uses the next higher value; otherwise the previous one.
+    pub async fn get_timestamp_for_sequence(
+        &self,
+        seq: u64,
+        round_up: bool,
+    ) -> Result<Option<DateTime<Utc>>, crate::Error> {
+        let manifest_store = self.manifest_store();
+
+        let id_manifest = manifest_store.try_read_latest_manifest().await?;
+        let Some((_id, manifest)) = id_manifest else {
+            return Ok(None);
+        };
+
+        let opt = if round_up {
+            FindOption::RoundUp
+        } else {
+            FindOption::RoundDown
+        };
+        Ok(manifest.core.sequence_tracker.find_ts(seq, opt))
+    }
+
+    /// Returns the sequence for a given timestamp from the latest manifest's sequence tracker.
+    /// When `round_up` is true, uses the next higher value; otherwise the previous one.
+    pub async fn get_sequence_for_timestamp(
+        &self,
+        ts: DateTime<Utc>,
+        round_up: bool,
+    ) -> Result<Option<u64>, crate::Error> {
+        let manifest_store = self.manifest_store();
+
+        let id_manifest = manifest_store.try_read_latest_manifest().await?;
+        let Some((_id, manifest)) = id_manifest else {
+            return Ok(None);
+        };
+
+        let opt = if round_up {
+            FindOption::RoundUp
+        } else {
+            FindOption::RoundDown
+        };
+        Ok(manifest.core.sequence_tracker.find_seq(ts, opt))
+    }
+
+    fn manifest_store(&self) -> ManifestStore {
+        ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.system_clock.clone(),
+        )
     }
 
     /// Clone a database. If no db already exists at the specified path, then this will create
@@ -365,7 +442,10 @@ impl Admin {
 ///
 /// | Provider | Value | Documentation |
 /// |----------|-------|---------------|
+/// | Local | `local` | [load_local] |
 /// | AWS | `aws` | [load_aws] |
+/// | Azure | `azure` | [load_azure] |
+/// | OpenDAL | `opendal` | [load_opendal] |
 pub fn load_object_store_from_env(
     env_file: Option<String>,
 ) -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
@@ -423,7 +503,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let endpoint = env::var("AWS_ENDPOINT").ok();
 
     // Start building the S3 object store builder with required params.
-    let mut builder = object_store::aws::AmazonS3Builder::new()
+    let mut builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch)
         .with_bucket_name(bucket)
         .with_region(region);
@@ -440,11 +520,9 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         }
     }
 
-    let builder = if let Some(endpoint) = endpoint {
-        builder.with_allow_http(true).with_endpoint(endpoint)
-    } else {
-        builder
-    };
+    if let Some(endpoint) = endpoint {
+        builder = builder.with_allow_http(true).with_endpoint(endpoint);
+    }
 
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }

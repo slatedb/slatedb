@@ -72,6 +72,8 @@ typedef struct CSdbReadOptions {
     uint32_t durability_filter;
     // Whether to include dirty/uncommitted data
     bool dirty;
+    // Whether to cache fetched blocks
+    bool cache_blocks;
 } CSdbReadOptions;
 
 typedef struct CSdbValue {
@@ -131,17 +133,17 @@ typedef struct CSdbScanResult {
 
 #define SsTableIndex_VT_BLOCK_META 4
 
-#define Uuid_VT_HIGH 4
+#define CompactedSstId_VT_HIGH 4
 
-#define Uuid_VT_LOW 6
+#define CompactedSstId_VT_LOW 6
 
-#define ExternalDb_VT_PATH 4
+#define CompactedSsTable_VT_ID 4
 
-#define ExternalDb_VT_SOURCE_CHECKPOINT_ID 6
+#define CompactedSsTable_VT_INFO 6
 
-#define ExternalDb_VT_FINAL_CHECKPOINT_ID 8
+#define CompactedSsTable_VT_VISIBLE_RANGE 8
 
-#define ExternalDb_VT_SST_IDS 10
+#define SortedRun_VT_SSTS 6
 
 #define BytesBound_VT_KEY 4
 
@@ -150,6 +152,14 @@ typedef struct CSdbScanResult {
 #define BytesRange_VT_START_BOUND 4
 
 #define BytesRange_VT_END_BOUND 6
+
+#define ExternalDb_VT_PATH 4
+
+#define ExternalDb_VT_SOURCE_CHECKPOINT_ID 6
+
+#define ExternalDb_VT_FINAL_CHECKPOINT_ID 8
+
+#define ExternalDb_VT_SST_IDS 10
 
 #define ManifestV1_VT_MANIFEST_ID 4
 
@@ -181,13 +191,7 @@ typedef struct CSdbScanResult {
 
 #define ManifestV1_VT_RECENT_SNAPSHOT_MIN_SEQ 32
 
-#define CompactedSsTable_VT_ID 4
-
-#define CompactedSsTable_VT_INFO 6
-
-#define CompactedSsTable_VT_VISIBLE_RANGE 8
-
-#define SortedRun_VT_SSTS 6
+#define ManifestV1_VT_SEQUENCE_TRACKER 34
 
 #define WriterCheckpoint_VT_EPOCH 4
 
@@ -198,6 +202,8 @@ typedef struct CSdbScanResult {
 #define Checkpoint_VT_METADATA_TYPE 12
 
 #define Checkpoint_VT_METADATA 14
+
+#define Checkpoint_VT_NAME 16
 
 // Initialize logging for SlateDB Go bindings
 // This should be called once before using any other SlateDB functions
@@ -270,7 +276,7 @@ struct CSdbResult slatedb_write_batch_write(struct CSdbHandle handle,
 // - `batch` must be a valid pointer to a WriteBatch that was previously allocated
 struct CSdbResult slatedb_write_batch_close(struct CSdbWriteBatch *batch);
 
-struct CSdbHandle slatedb_open(const char *path, const char *store_config_json);
+struct CSdbHandle slatedb_open(const char *path, const char *url, const char *env_file);
 
 // # Safety
 //
@@ -316,20 +322,22 @@ struct CSdbResult slatedb_close(struct CSdbHandle handle);
 // # Safety
 //
 // - `handle` must contain a valid database handle pointer
-// - `start` must point to valid memory of at least `start_len` bytes (if not null)
-// - `end` must point to valid memory of at least `end_len` bytes (if not null)
-// - `options` must be a valid pointer to CSdbScanOptions or null
-// - `iter_out` must be a valid pointer to a location where an iterator pointer can be stored
+// - `start_key` must point to valid memory of at least `start_key_len` bytes (if not null)
+// - `end_key` must point to valid memory of at least `end_key_len` bytes (if not null)
+// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
 struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
-                                            const uint8_t *start,
-                                            uintptr_t start_len,
-                                            const uint8_t *end,
-                                            uintptr_t end_len,
-                                            const struct CSdbScanOptions *options,
-                                            struct CSdbIterator **iter_out);
+                                            const uint8_t *start_key,
+                                            uintptr_t start_key_len,
+                                            const uint8_t *end_key,
+                                            uintptr_t end_key_len,
+                                            const struct CSdbScanOptions *scan_options,
+                                            struct CSdbIterator **iterator_ptr);
 
 // Create a new DbBuilder
-struct DbBuilder_String *slatedb_builder_new(const char *path, const char *store_config_json);
+struct DbBuilder_String *slatedb_builder_new(const char *path,
+                                             const char *url,
+                                             const char *env_file);
 
 // Set settings on DbBuilder from JSON
 //
@@ -361,7 +369,8 @@ struct CSdbHandle slatedb_builder_build(struct DbBuilder_String *builder);
 void slatedb_builder_free(struct DbBuilder_String *builder);
 
 struct CSdbReaderHandle slatedb_reader_open(const char *path,
-                                            const char *store_config_json,
+                                            const char *url,
+                                            const char *env_file,
                                             const char *checkpoint_id,
                                             const struct CSdbReaderOptions *reader_options);
 
@@ -370,12 +379,12 @@ struct CSdbReaderHandle slatedb_reader_open(const char *path,
 // - `handle` must contain a valid reader handle pointer
 // - `key` must point to valid memory of at least `key_len` bytes
 // - `read_options` must be a valid pointer to CSdbReadOptions or null
-// - `result` must be a valid pointer to a location where a value can be stored
+// - `value_out` must be a valid pointer to a location where a value can be stored
 struct CSdbResult slatedb_reader_get_with_options(struct CSdbReaderHandle handle,
                                                   const uint8_t *key,
                                                   uintptr_t key_len,
                                                   const struct CSdbReadOptions *read_options,
-                                                  struct CSdbValue *result);
+                                                  struct CSdbValue *value_out);
 
 // # Safety
 //

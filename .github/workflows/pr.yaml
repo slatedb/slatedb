@@ -63,8 +63,12 @@ jobs:
 
   flatbuffers:
     runs-on: ubuntu-latest
+    needs: tests
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Allow script to fetch base ref/commits if needed
+          fetch-depth: 0
 
       # Install specific version of flatc (24.3.25)
       - name: Install flatc
@@ -73,11 +77,21 @@ jobs:
           unzip Linux.flatc.binary.g++-13.zip
           sudo mv flatc /usr/local/bin/
 
+      # Check schema evolution rules against the base revision
+      - name: Check FlatBuffers evolution
+        run: bash scripts/check_flatbuffers_evolution.sh
+
       # Check for differences
       - name: Generate and validate files
         run: |
-          flatc -o tmp/generated --rust --gen-all schemas/manifest.fbs
-          if ! diff -r slatedb/src/generated/*.rs tmp/generated; then
+          flatc -o tmp/generated --rust --gen-all schemas/root.fbs
+          # Validate only files produced by root.fbs in this step.
+          # The checked-in generated folder may also contain outputs from other schemas
+          # (e.g., manifest_generated.rs) and docs (README.md). Those are unrelated to
+          # this invocation of flatc and would show up as "extra files" in a recursive
+          # dir-to-dir diff even when root.fbs outputs match. Exclude them to avoid
+          # false positives.
+          if ! diff -r -x 'README.md' -x 'manifest_generated.rs' slatedb/src/generated tmp/generated; then
             echo "Generated files do not match!"
             exit 1
           fi
@@ -141,6 +155,18 @@ jobs:
           source .venv/bin/activate
           maturin develop
           pip install -e .[test]
+
+      - name: Install lint dependencies (Ruff)
+        working-directory: ./slatedb-py
+        run: |
+          source .venv/bin/activate
+          pip install -e .[lint]
+
+      - name: Run Ruff linter
+        working-directory: ./slatedb-py
+        run: |
+          source .venv/bin/activate
+          ruff check . --output-format=github
 
       - name: Run Python tests
         working-directory: ./slatedb-py
@@ -216,6 +242,7 @@ jobs:
 
   microbenchmarks:
     runs-on: ubuntu-latest
+    needs: tests
     steps:
       - uses: actions/checkout@v4
 
@@ -242,6 +269,7 @@ jobs:
 
   test_website:
     runs-on: ubuntu-latest
+    needs: tests
     steps:
       - uses: actions/checkout@v4
       - name: Get changed files

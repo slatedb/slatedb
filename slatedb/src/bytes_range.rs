@@ -130,6 +130,13 @@ impl BytesRange {
     pub(crate) fn comparable_end_bound(&self) -> EndBound<&Bytes> {
         self.inner.comparable_end_bound()
     }
+
+    pub(crate) fn as_point(&self) -> Option<&Bytes> {
+        match (self.start_bound(), self.end_bound()) {
+            (Bound::Included(start), Bound::Included(end)) if start == end => Some(start),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

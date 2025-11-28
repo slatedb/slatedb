@@ -33,9 +33,13 @@ jobs:
           ssh-key: ${{ secrets.RELEASE_SSH_KEY }}
           ref: ${{ github.ref }}
 
-      # Set up Rust stable
+      # Set up Rust stable for installing cargo-edit
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # Install cargo-edit with locked dependencies using stable toolchain
       - name: Install cargo-edit
-        run: cargo install cargo-edit
+        run: cargo +stable install cargo-edit --locked
 
       # Set Cargo.toml version using cargo-edit
       - name: Set version

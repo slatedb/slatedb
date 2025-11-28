@@ -1,7 +1,6 @@
 use std::os::raw::c_char;
 use std::ptr;
 
-use slatedb::admin::load_object_store_from_env;
 use slatedb::config::DbReaderOptions;
 use slatedb::DbReader;
 use tokio::runtime::{Builder, Runtime};
@@ -10,12 +9,12 @@ use uuid::Uuid;
 // Import our shared modules
 use crate::config::{
     convert_range_bounds, convert_read_options, convert_reader_options, convert_scan_options,
-    create_object_store, parse_store_config,
 };
 use crate::error::{
     create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
     CSdbResult,
 };
+use crate::object_store::create_object_store;
 use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue, SlateDbFFI};
 
 /// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
@@ -81,7 +80,8 @@ impl Default for CSdbReaderOptions {
 #[no_mangle]
 pub extern "C" fn slatedb_reader_open(
     path: *const c_char,
-    store_config_json: *const c_char,
+    url: *const c_char,
+    env_file: *const c_char,
     checkpoint_id: *const c_char, // Nullable - use null for latest
     reader_options: *const CSdbReaderOptions,
 ) -> CSdbReaderHandle {
@@ -131,33 +131,25 @@ pub extern "C" fn slatedb_reader_open(
         }
     };
 
-    // Create object store: try config first, fall back to environment on any failure
-    let object_store = {
-        let store_result = safe_str_from_ptr(store_config_json)
-            .and_then(|json_str| {
-                parse_store_config(json_str).map_err(|_| CSdbError::InvalidArgument)
-            })
-            .and_then(|config| {
-                create_object_store(&config).map_err(|_| CSdbError::InvalidArgument)
-            });
-
-        match store_result {
-            Ok(store) => store,
-            Err(config_error) => {
-                log::warn!("slatedb_reader_open: Store config failed, trying environment fallback. Config error: {:?}", config_error);
-                // Config failed, try environment fallback
-                match load_object_store_from_env(None) {
-                    Ok(store) => {
-                        log::info!("slatedb_reader_open: Successfully created object store from environment");
-                        store
-                    }
-                    Err(env_error) => {
-                        log::error!("slatedb_reader_open: Both store config and environment fallback failed. Config error: {:?}, Env error: {}", config_error, env_error);
-                        return CSdbReaderHandle::null();
-                    }
-                }
-            }
+    let url_str: Option<&str> = if url.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(url) {
+            Ok(s) => Some(s),
+            Err(_) => return CSdbReaderHandle::null(),
         }
+    };
+    let env_file_str = if env_file.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(env_file) {
+            Ok(s) => Some(s.to_string()),
+            Err(_) => return CSdbReaderHandle::null(),
+        }
+    };
+    let object_store = match create_object_store(url_str, env_file_str) {
+        Ok(store) => store,
+        Err(_) => return CSdbReaderHandle::null(),
     };
 
     // Open DbReader
@@ -187,52 +179,49 @@ pub extern "C" fn slatedb_reader_open(
 /// - `handle` must contain a valid reader handle pointer
 /// - `key` must point to valid memory of at least `key_len` bytes
 /// - `read_options` must be a valid pointer to CSdbReadOptions or null
-/// - `result` must be a valid pointer to a location where a value can be stored
+/// - `value_out` must be a valid pointer to a location where a value can be stored
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_reader_get_with_options(
     mut handle: CSdbReaderHandle,
     key: *const u8,
     key_len: usize,
     read_options: *const CSdbReadOptions,
-    result: *mut CSdbValue,
+    value_out: *mut CSdbValue,
 ) -> CSdbResult {
     if handle.is_null() {
         return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
     }
 
-    if key.is_null() || result.is_null() {
-        return create_error_result(CSdbError::NullPointer, "Key or result is null");
+    if key.is_null() || value_out.is_null() {
+        return create_error_result(CSdbError::NullPointer, "Key or value_out is null");
     }
 
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
+
+    // Convert C read options to Rust ReadOptions
     let rust_read_opts = convert_read_options(read_options);
 
     let inner = handle.as_inner();
     match inner.block_on(inner.reader.get_with_options(key_slice, &rust_read_opts)) {
         Ok(Some(bytes)) => {
-            let data = bytes.as_ptr() as *mut u8;
-            let len = bytes.len();
+            let value_vec = bytes.to_vec();
+            let len = value_vec.len();
 
-            // Leak the bytes so they remain valid for C caller
-            std::mem::forget(bytes);
+            let boxed_slice = value_vec.into_boxed_slice();
+            let data = Box::into_raw(boxed_slice) as *mut u8;
 
             unsafe {
-                *result = CSdbValue { data, len };
+                *value_out = CSdbValue { data, len };
             }
             create_success_result()
         }
-        Ok(None) => {
-            unsafe {
-                *result = CSdbValue {
-                    data: ptr::null_mut(),
-                    len: 0,
-                };
-            }
-            create_success_result()
-        }
+        Ok(None) => create_error_result(CSdbError::NotFound, "Key not found"),
         Err(e) => {
             let error_code = slate_error_to_code(&e);
-            create_error_result(error_code, &format!("Get operation failed: {}", e))
+            create_error_result(
+                error_code,
+                &format!("Get with options operation failed: {}", e),
+            )
         }
     }
 }

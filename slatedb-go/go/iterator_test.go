@@ -22,9 +22,10 @@ var _ = Describe("Iterator", func() {
 		tmpDir, err = os.MkdirTemp("", "slatedb_iterator_test_*")
 		Expect(err).NotTo(HaveOccurred())
 
-		db, err = slatedb.Open(tmpDir, &slatedb.StoreConfig{
-			Provider: slatedb.ProviderLocal,
-		})
+		envFile, err := createEnvFile(tmpDir)
+		Expect(err).NotTo(HaveOccurred())
+
+		db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db).NotTo(BeNil())
 

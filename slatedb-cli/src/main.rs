@@ -1,9 +1,11 @@
 use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
+use chrono::{TimeZone, Utc};
 use object_store::path::Path;
 use slatedb::admin::{self, Admin, AdminBuilder};
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
+use slatedb::FindOption;
 use std::error::Error;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -42,14 +44,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match args.command {
         CliCommands::ReadManifest { id } => exec_read_manifest(&admin, id).await?,
         CliCommands::ListManifests { start, end } => exec_list_manifest(&admin, start, end).await?,
-        CliCommands::CreateCheckpoint { lifetime, source } => {
-            exec_create_checkpoint(&admin, lifetime, source).await?
-        }
+        CliCommands::CreateCheckpoint {
+            lifetime,
+            source,
+            name,
+        } => exec_create_checkpoint(&admin, lifetime, source, name).await?,
         CliCommands::RefreshCheckpoint { id, lifetime } => {
             exec_refresh_checkpoint(&admin, id, lifetime).await?;
         }
         CliCommands::DeleteCheckpoint { id } => exec_delete_checkpoint(&admin, id).await?,
-        CliCommands::ListCheckpoints {} => exec_list_checkpoints(&admin).await?,
+        CliCommands::ListCheckpoints { name } => exec_list_checkpoints(&admin, name).await?,
         CliCommands::RunGarbageCollection { resource, min_age } => {
             exec_gc_once(&admin, resource, min_age).await?
         }
@@ -57,7 +61,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             manifest,
             wal,
             compacted,
-        } => schedule_gc(&admin, manifest, wal, compacted, cancellation_token).await?,
+        } => schedule_gc(&admin, manifest, wal, compacted).await?,
+
+        CliCommands::SeqToTs { seq, round } => {
+            exec_seq_to_ts(&admin, seq, matches!(round, FindOption::RoundUp)).await?
+        }
+        CliCommands::TsToSeq { ts_secs, round } => {
+            exec_ts_to_seq(&admin, ts_secs, matches!(round, FindOption::RoundUp)).await?
+        }
     }
 
     Ok(())
@@ -95,9 +106,14 @@ async fn exec_create_checkpoint(
     admin: &Admin,
     lifetime: Option<Duration>,
     source: Option<Uuid>,
+    name: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let result = admin
-        .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
+        .create_detached_checkpoint(&CheckpointOptions {
+            lifetime,
+            source,
+            name,
+        })
         .await?;
     println!("{:?}", result);
     Ok(())
@@ -117,8 +133,11 @@ async fn exec_delete_checkpoint(admin: &Admin, id: Uuid) -> Result<(), Box<dyn E
     Ok(())
 }
 
-async fn exec_list_checkpoints(admin: &Admin) -> Result<(), Box<dyn Error>> {
-    let checkpoint = admin.list_checkpoints().await?;
+async fn exec_list_checkpoints(
+    admin: &Admin,
+    name_filter: Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    let checkpoint = admin.list_checkpoints(name_filter.as_deref()).await?;
     let checkpoint_json = serde_json::to_string(&checkpoint)?;
     println!("{}", checkpoint_json);
     Ok(())
@@ -161,7 +180,6 @@ async fn schedule_gc(
     manifest_schedule: Option<GcSchedule>,
     wal_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
-    cancellation_token: CancellationToken,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(schedule: GcSchedule) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -175,8 +193,26 @@ async fn schedule_gc(
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
     };
 
-    admin
-        .run_gc_in_background(gc_opts, cancellation_token)
-        .await?;
+    admin.run_gc(gc_opts).await?;
+    Ok(())
+}
+
+async fn exec_seq_to_ts(admin: &Admin, seq: u64, round_up: bool) -> Result<(), Box<dyn Error>> {
+    match admin.get_timestamp_for_sequence(seq, round_up).await? {
+        Some(ts) => println!("{}", ts.to_rfc3339()),
+        None => println!("not found"),
+    }
+    Ok(())
+}
+
+async fn exec_ts_to_seq(admin: &Admin, ts_secs: i64, round_up: bool) -> Result<(), Box<dyn Error>> {
+    let ts = Utc
+        .timestamp_opt(ts_secs, 0)
+        .single()
+        .ok_or("invalid unix seconds")?;
+    match admin.get_sequence_for_timestamp(ts, round_up).await? {
+        Some(seq) => println!("{}", seq),
+        None => println!("not found"),
+    }
     Ok(())
 }

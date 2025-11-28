@@ -11,26 +11,29 @@ use ouroboros::self_referencing;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering::SeqCst;
 
-use crate::bytes_range::BytesRange;
+use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
+
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 
 /// Memtable may contains multiple versions of a single user key, with a monotonically increasing sequence number.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct KVTableInternalKey {
-    user_key: Bytes,
-    seq: u64,
+pub(crate) struct SequencedKey {
+    pub(crate) user_key: Bytes,
+    pub(crate) seq: u64,
 }
 
-impl KVTableInternalKey {
+impl SequencedKey {
     pub fn new(user_key: Bytes, seq: u64) -> Self {
         Self { user_key, seq }
     }
 }
 
-impl Ord for KVTableInternalKey {
+impl Ord for SequencedKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.user_key
             .cmp(&other.user_key)
@@ -38,7 +41,7 @@ impl Ord for KVTableInternalKey {
     }
 }
 
-impl PartialOrd for KVTableInternalKey {
+impl PartialOrd for SequencedKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -46,16 +49,16 @@ impl PartialOrd for KVTableInternalKey {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct KVTableInternalKeyRange {
-    start_bound: Bound<KVTableInternalKey>,
-    end_bound: Bound<KVTableInternalKey>,
+    start_bound: Bound<SequencedKey>,
+    end_bound: Bound<SequencedKey>,
 }
 
-impl RangeBounds<KVTableInternalKey> for KVTableInternalKeyRange {
-    fn start_bound(&self) -> Bound<&KVTableInternalKey> {
+impl RangeBounds<SequencedKey> for KVTableInternalKeyRange {
+    fn start_bound(&self) -> Bound<&SequencedKey> {
         self.start_bound.as_ref()
     }
 
-    fn end_bound(&self) -> Bound<&KVTableInternalKey> {
+    fn end_bound(&self) -> Bound<&SequencedKey> {
         self.end_bound.as_ref()
     }
 }
@@ -69,13 +72,13 @@ impl RangeBounds<KVTableInternalKey> for KVTableInternalKeyRange {
 impl<T: RangeBounds<Bytes>> From<T> for KVTableInternalKeyRange {
     fn from(range: T) -> Self {
         let start_bound = match range.start_bound() {
-            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), u64::MAX)),
-            Bound::Excluded(key) => Bound::Excluded(KVTableInternalKey::new(key.clone(), 0)),
+            Bound::Included(key) => Bound::Included(SequencedKey::new(key.clone(), u64::MAX)),
+            Bound::Excluded(key) => Bound::Excluded(SequencedKey::new(key.clone(), 0)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let end_bound = match range.end_bound() {
-            Bound::Included(key) => Bound::Included(KVTableInternalKey::new(key.clone(), 0)),
-            Bound::Excluded(key) => Bound::Excluded(KVTableInternalKey::new(key.clone(), u64::MAX)),
+            Bound::Included(key) => Bound::Included(SequencedKey::new(key.clone(), 0)),
+            Bound::Excluded(key) => Bound::Excluded(SequencedKey::new(key.clone(), u64::MAX)),
             Bound::Unbounded => Bound::Unbounded,
         };
         Self {
@@ -86,7 +89,7 @@ impl<T: RangeBounds<Bytes>> From<T> for KVTableInternalKeyRange {
 }
 
 pub(crate) struct KVTable {
-    map: Arc<SkipMap<KVTableInternalKey, RowEntry>>,
+    map: Arc<SkipMap<SequencedKey, RowEntry>>,
     durable: WatchableOnceCell<Result<(), SlateDBError>>,
     entries_size_in_bytes: AtomicUsize,
     /// this corresponds to the timestamp of the most recent
@@ -94,6 +97,9 @@ pub(crate) struct KVTable {
     last_tick: AtomicI64,
     /// the sequence number of the most recent operation on this KVTable
     last_seq: AtomicU64,
+    /// A sequence tracker that correlates sequence numbers with system clock ticks.
+    /// The tracker is limited to 8192 entries and downsamples data when it gets full.
+    sequence_tracker: Mutex<SequenceTracker>,
 }
 
 pub(crate) struct KVTableMetadata {
@@ -134,6 +140,10 @@ impl WritableKVTable {
     pub(crate) fn is_empty(&self) -> bool {
         self.table.is_empty()
     }
+
+    pub(crate) fn record_sequence(&self, seq: u64, ts: DateTime<Utc>) {
+        self.table.record_sequence(seq, ts);
+    }
 }
 
 pub(crate) struct ImmutableMemtable {
@@ -149,15 +159,18 @@ pub(crate) struct ImmutableMemtable {
     table: Arc<KVTable>,
     /// This flushed watchable cell is useful for users who enable `await_durable` on the writes.
     flushed: WatchableOnceCell<Result<(), SlateDBError>>,
+    /// A snapshot of the sequence tracker taken when this immutable memtable was created.
+    /// This avoids needing to access the sequence tracker through a mutex on the underlying table.
+    sequence_tracker: SequenceTracker,
 }
 
 #[self_referencing]
-pub(crate) struct MemTableIteratorInner<T: RangeBounds<KVTableInternalKey>> {
-    map: Arc<SkipMap<KVTableInternalKey, RowEntry>>,
+pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
+    map: Arc<SkipMap<SequencedKey, RowEntry>>,
     /// `inner` is the Iterator impl of SkipMap, which is the underlying data structure of MemTable.
     #[borrows(map)]
     #[not_covariant]
-    inner: Range<'this, KVTableInternalKey, T, KVTableInternalKey, RowEntry>,
+    inner: Range<'this, SequencedKey, T, SequencedKey, RowEntry>,
     ordering: IterationOrder,
     item: Option<RowEntry>,
 }
@@ -165,6 +178,10 @@ pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange
 
 #[async_trait]
 impl KeyValueIterator for MemTableIterator {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.next_entry_sync())
     }
@@ -198,10 +215,12 @@ impl MemTableIterator {
 
 impl ImmutableMemtable {
     pub(crate) fn new(table: WritableKVTable, recent_flushed_wal_id: u64) -> Self {
+        let sequence_tracker = table.table.sequence_tracker_snapshot();
         Self {
             table: table.table,
             recent_flushed_wal_id,
             flushed: WatchableOnceCell::new(),
+            sequence_tracker,
         }
     }
 
@@ -220,6 +239,10 @@ impl ImmutableMemtable {
     pub(crate) fn notify_flush_to_l0(&self, result: Result<(), SlateDBError>) {
         self.flushed.write(result);
     }
+
+    pub(crate) fn sequence_tracker(&self) -> &SequenceTracker {
+        &self.sequence_tracker
+    }
 }
 
 impl KVTable {
@@ -230,6 +253,7 @@ impl KVTable {
             durable: WatchableOnceCell::new(),
             last_tick: AtomicI64::new(i64::MIN),
             last_seq: AtomicU64::new(0),
+            sequence_tracker: Mutex::new(SequenceTracker::new()),
         }
     }
 
@@ -263,28 +287,6 @@ impl KVTable {
         }
     }
 
-    /// Get the value for a given key.
-    /// Returns None if the key is not in the memtable at all,
-    /// Some(None) if the key is in the memtable but has a tombstone value,
-    /// Some(Some(value)) if the key is in the memtable with a non-tombstone value.
-    pub(crate) fn get(&self, key: &[u8], max_seq: Option<u64>) -> Option<RowEntry> {
-        let user_key = Bytes::from(key.to_vec());
-        let range = KVTableInternalKeyRange::from(BytesRange::new(
-            Bound::Included(user_key.clone()),
-            Bound::Included(user_key),
-        ));
-        self.map
-            .range(range)
-            .find(|entry| {
-                if let Some(max_seq) = max_seq {
-                    entry.key().seq <= max_seq
-                } else {
-                    true
-                }
-            })
-            .map(|entry| entry.value().clone())
-    }
-
     pub(crate) fn iter(&self) -> MemTableIterator {
         self.range_ascending(..)
     }
@@ -311,7 +313,7 @@ impl KVTable {
     }
 
     pub(crate) fn put(&self, row: RowEntry) {
-        let internal_key = KVTableInternalKey::new(row.key.clone(), row.seq);
+        let internal_key = SequencedKey::new(row.key.clone(), row.seq);
         let previous_size = Cell::new(None);
 
         // it is safe to use fetch_max here to update the last tick
@@ -355,6 +357,15 @@ impl KVTable {
     pub(crate) fn notify_durable(&self, result: Result<(), SlateDBError>) {
         self.durable.write(result);
     }
+
+    pub(crate) fn record_sequence(&self, seq: u64, ts: DateTime<Utc>) {
+        let mut tracker = self.sequence_tracker.lock();
+        tracker.insert(TrackedSeq { seq, ts });
+    }
+
+    pub(crate) fn sequence_tracker_snapshot(&self) -> SequenceTracker {
+        self.sequence_tracker.lock().clone()
+    }
 }
 
 #[cfg(test)]
@@ -362,6 +373,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::bytes_range::BytesRange;
     use crate::merge_iterator::MergeIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::assert_iterator;
@@ -464,9 +476,7 @@ mod tests {
 
         // in merge iterator, it should only return one entry
         let iter = table.table().iter();
-        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter]))
-            .await
-            .unwrap();
+        let mut merge_iter = MergeIterator::new(VecDeque::from(vec![iter])).unwrap();
         assert_iterator(
             &mut merge_iter,
             vec![
@@ -553,59 +563,59 @@ mod tests {
             start_bound: Bound::Unbounded,
             end_bound: Bound::Unbounded,
         },
-        vec![KVTableInternalKey::new(Bytes::from_static(b"abc111"), 1)],
+        vec![SequencedKey::new(Bytes::from_static(b"abc111"), 1)],
         vec![]
     )]
     #[case(
         BytesRange::from(Bytes::from_static(b"abc111")..=Bytes::from_static(b"abc333")),
         KVTableInternalKeyRange {
-            start_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc111"), u64::MAX)),
-            end_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc333"), 0)),
+            start_bound: Bound::Included(SequencedKey::new(Bytes::from_static(b"abc111"), u64::MAX)),
+            end_bound: Bound::Included(SequencedKey::new(Bytes::from_static(b"abc333"), 0)),
         },
         vec![
-            KVTableInternalKey::new(Bytes::from_static(b"abc111"), 1),
-            KVTableInternalKey::new(Bytes::from_static(b"abc222"), 2),
-            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 3),
-            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 0),
-            KVTableInternalKey::new(Bytes::from_static(b"abc333"), u64::MAX),
+            SequencedKey::new(Bytes::from_static(b"abc111"), 1),
+            SequencedKey::new(Bytes::from_static(b"abc222"), 2),
+            SequencedKey::new(Bytes::from_static(b"abc333"), 3),
+            SequencedKey::new(Bytes::from_static(b"abc333"), 0),
+            SequencedKey::new(Bytes::from_static(b"abc333"), u64::MAX),
         ],
-        vec![KVTableInternalKey::new(Bytes::from_static(b"abc444"), 4)]
+        vec![SequencedKey::new(Bytes::from_static(b"abc444"), 4)]
     )]
     #[case(
         BytesRange::from(Bytes::from_static(b"abc222")..Bytes::from_static(b"abc444")),
         KVTableInternalKeyRange {
-            start_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc222"), u64::MAX)),
-            end_bound: Bound::Excluded(KVTableInternalKey::new(Bytes::from_static(b"abc444"), u64::MAX)),
+            start_bound: Bound::Included(SequencedKey::new(Bytes::from_static(b"abc222"), u64::MAX)),
+            end_bound: Bound::Excluded(SequencedKey::new(Bytes::from_static(b"abc444"), u64::MAX)),
         },
         vec![
-            KVTableInternalKey::new(Bytes::from_static(b"abc222"), 1),
-            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 2),
+            SequencedKey::new(Bytes::from_static(b"abc222"), 1),
+            SequencedKey::new(Bytes::from_static(b"abc333"), 2),
         ],
         vec![
-            KVTableInternalKey::new(Bytes::from_static(b"abc444"), 0),
-            KVTableInternalKey::new(Bytes::from_static(b"abc444"), u64::MAX),
-            KVTableInternalKey::new(Bytes::from_static(b"abc555"), u64::MAX),
+            SequencedKey::new(Bytes::from_static(b"abc444"), 0),
+            SequencedKey::new(Bytes::from_static(b"abc444"), u64::MAX),
+            SequencedKey::new(Bytes::from_static(b"abc555"), u64::MAX),
         ]
     )]
     #[case(
         BytesRange::from(..=Bytes::from_static(b"abc333")),
         KVTableInternalKeyRange {
             start_bound: Bound::Unbounded,
-            end_bound: Bound::Included(KVTableInternalKey::new(Bytes::from_static(b"abc333"), 0)),
+            end_bound: Bound::Included(SequencedKey::new(Bytes::from_static(b"abc333"), 0)),
         },
         vec![
-            KVTableInternalKey::new(Bytes::from_static(b"abc111"), 1),
-            KVTableInternalKey::new(Bytes::from_static(b"abc222"), 2),
-            KVTableInternalKey::new(Bytes::from_static(b"abc333"), 3),
-            KVTableInternalKey::new(Bytes::from_static(b"abc333"), u64::MAX),
+            SequencedKey::new(Bytes::from_static(b"abc111"), 1),
+            SequencedKey::new(Bytes::from_static(b"abc222"), 2),
+            SequencedKey::new(Bytes::from_static(b"abc333"), 3),
+            SequencedKey::new(Bytes::from_static(b"abc333"), u64::MAX),
         ],
-        vec![KVTableInternalKey::new(Bytes::from_static(b"abc444"), 4)]
+        vec![SequencedKey::new(Bytes::from_static(b"abc444"), 4)]
     )]
     fn test_from_internal_key_range(
         #[case] range: BytesRange,
         #[case] expected: KVTableInternalKeyRange,
-        #[case] should_contains: Vec<KVTableInternalKey>,
-        #[case] should_not_contains: Vec<KVTableInternalKey>,
+        #[case] should_contains: Vec<SequencedKey>,
+        #[case] should_not_contains: Vec<SequencedKey>,
     ) {
         let range = KVTableInternalKeyRange::from(range);
         assert_eq!(range, expected);

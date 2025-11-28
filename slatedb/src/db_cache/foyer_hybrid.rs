@@ -59,10 +59,10 @@
 //! ```
 //!
 
-use std::sync::Arc;
-
-use crate::db_cache::{CachedEntry, CachedKey, DbCache};
-use crate::error::SlateDBError::FoyerCacheReadingError;
+use crate::{
+    db_cache::{CachedEntry, CachedKey, DbCache},
+    error::SlateDBError,
+};
 use async_trait::async_trait;
 
 pub struct FoyerHybridCache {
@@ -80,7 +80,7 @@ impl FoyerHybridCache {
         self.inner
             .get(key)
             .await
-            .map_err(|e| FoyerCacheReadingError(Arc::new(e.into())).into())
+            .map_err(|e| SlateDBError::from(e).into())
             .map(|maybe_v| maybe_v.map(|v| v.value().clone()))
     }
 }

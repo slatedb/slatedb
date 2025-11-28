@@ -62,11 +62,11 @@ impl DbSnapshot {
         key: K,
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, crate::Error> {
-        self.db_inner.check_error()?;
+        self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader
-            .get_with_options(key, options, &db_state, Some(self.started_seq))
+            .get_with_options(key, options, &db_state, None, Some(self.started_seq))
             .await
             .map_err(Into::into)
     }
@@ -111,7 +111,7 @@ impl DbSnapshot {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = (start, end);
-        self.db_inner.check_error()?;
+        self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader
@@ -119,7 +119,9 @@ impl DbSnapshot {
                 BytesRange::from(range),
                 options,
                 &db_state,
+                None,
                 Some(self.started_seq),
+                None,
             )
             .await
             .map_err(Into::into)
@@ -164,6 +166,7 @@ mod tests {
     use crate::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
+    use crate::oracle::Oracle;
     use crate::{Db, Error};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -652,7 +655,7 @@ mod tests {
                 .expect("Failed to create test database"),
         );
         db.put(b"key1", b"value1").await?;
-        let recent_committed_seq = db.inner.oracle.last_committed_seq.load();
+        let recent_committed_seq = db.inner.oracle.last_committed_seq();
 
         // Configure the failpoint to "pause", blocking the put after memtable write but before commit
         fail_parallel::cfg(fp_registry.clone(), "write-batch-pre-commit", "pause").unwrap();

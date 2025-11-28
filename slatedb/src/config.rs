@@ -166,6 +166,7 @@ use crate::error::SlateDBError;
 
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
+use crate::merge_operator::MergeOperatorType;
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -233,7 +234,7 @@ pub enum DurabilityLevel {
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -242,6 +243,18 @@ pub struct ReadOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
+    /// Whether or not fetched blocks should be cached
+    pub cache_blocks: bool,
+}
+
+impl Default for ReadOptions {
+    fn default() -> Self {
+        Self {
+            durability_filter: DurabilityLevel::default(),
+            dirty: false,
+            cache_blocks: true,
+        }
+    }
 }
 
 impl ReadOptions {
@@ -256,6 +269,13 @@ impl ReadOptions {
     pub fn with_durability_filter(self, durability_filter: DurabilityLevel) -> Self {
         Self {
             durability_filter,
+            ..self
+        }
+    }
+
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
+        Self {
+            cache_blocks,
             ..self
         }
     }
@@ -281,7 +301,7 @@ pub struct ScanOptions {
 }
 
 impl Default for ScanOptions {
-    /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Remote`].
+    /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Memory`].
     fn default() -> Self {
         Self {
             durability_filter: DurabilityLevel::default(),
@@ -414,6 +434,43 @@ impl PutOptions {
     }
 }
 
+/// Configuration for client merge operations. `MergeOptions` is supplied for each
+/// merge operand inserted into the database.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct MergeOptions {
+    /// The time-to-live (ttl) for this merge operand. This behaves the same as
+    /// [`PutOptions::ttl`], where the latest non-expired value or merge operand
+    /// dictates the canonical TTL for a key.
+    pub ttl: Ttl,
+}
+
+impl MergeOptions {
+    // TODO(agavra): deduplicate this with PutOptions::expire_ts_from
+    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+        match self.ttl {
+            Ttl::Default => match default {
+                None => None,
+                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+            },
+            Ttl::NoExpiry => None,
+            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
+        }
+    }
+
+    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+        // for overflow, we will just assume no TTL
+        if ttl > i64::MAX as u64 {
+            return None;
+        };
+        let expire_ts = now + (ttl as i64);
+        if expire_ts < now {
+            return None;
+        };
+
+        Some(expire_ts)
+    }
+}
+
 #[non_exhaustive]
 #[derive(Clone, Default, PartialEq, Debug)]
 pub enum Ttl {
@@ -449,6 +506,9 @@ pub struct CheckpointOptions {
     /// is useful for users to establish checkpoints from existing checkpoints, but with a different
     /// lifecycle and/or metadata.
     pub source: Option<Uuid>,
+
+    /// Optionally specifies a name for the checkpoint. Can be used to list the checkpoints.
+    pub name: Option<String>,
 }
 
 /// Settings represents the configuration options that a user can tweak to customize
@@ -567,6 +627,14 @@ pub struct Settings {
     ///
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
+
+    /// The merge operator to use for the database. If not set, the database will not support merge operations.
+    ///
+    /// The merge operator allows applications to bypass the traditional read/modify/write cycle
+    /// by expressing partial updates using an associative operator. Merge operands are combined
+    /// during reads and compactions to produce the final result.
+    #[serde(skip)]
+    pub merge_operator: Option<MergeOperatorType>,
 }
 
 // Implement Debug manually for DbOptions.
@@ -595,6 +663,14 @@ impl std::fmt::Debug for Settings {
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("filter_bits_per_key", &self.filter_bits_per_key)
             .field("default_ttl", &self.default_ttl)
+            .field(
+                "merge_operator",
+                &self
+                    .merge_operator
+                    .as_ref()
+                    .map(|_| "Some(merge_operator)")
+                    .unwrap_or("None"),
+            )
             .finish()
     }
 }
@@ -754,6 +830,7 @@ impl Default for Settings {
             garbage_collector_options: None,
             filter_bits_per_key: 10,
             default_ttl: None,
+            merge_operator: None,
         }
     }
 }
@@ -778,6 +855,9 @@ pub struct DbReaderOptions {
 
     #[serde(skip)]
     pub block_cache: Option<Arc<dyn DbCache>>,
+
+    #[serde(skip)]
+    pub merge_operator: Option<MergeOperatorType>,
 }
 
 impl Default for DbReaderOptions {
@@ -787,6 +867,7 @@ impl Default for DbReaderOptions {
             checkpoint_lifetime: Duration::from_secs(10 * 60),
             max_memtable_bytes: 64 * 1024 * 1024,
             block_cache: default_block_cache(),
+            merge_operator: None,
         }
     }
 }
@@ -1229,6 +1310,7 @@ object_store_cache_options:
         let options = ReadOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
+        assert!(options.cache_blocks);
 
         let options = ScanOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);

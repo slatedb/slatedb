@@ -63,7 +63,8 @@ pub struct SystemClockTicker<'a> {
 }
 
 impl<'a> SystemClockTicker<'a> {
-    fn new(clock: &'a dyn SystemClock, duration: Duration) -> Self {
+    /// Creates a new ticker that emits a signal every `duration` interval.
+    pub fn new(clock: &'a dyn SystemClock, duration: Duration) -> Self {
         Self {
             clock,
             duration,

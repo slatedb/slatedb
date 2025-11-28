@@ -3,16 +3,17 @@ use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
 use crate::error::SlateDBError;
-use crate::error::SlateDBError::BackgroundTaskPanic;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
+use log::error;
 use rand::{Rng, RngCore};
+use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
@@ -23,7 +24,7 @@ use std::collections::VecDeque;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
     tx: tokio::sync::watch::Sender<Option<T>>,
@@ -76,6 +77,7 @@ impl<T: Clone> WatchableOnceCellReader<T> {
 /// When the task exits, the provided cleanup fn is called with a reference to the returned
 /// result. If the task panics, the cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_task<F, T, C>(
+    name: String,
     handle: &tokio::runtime::Handle,
     cleanup_fn: C,
     future: F,
@@ -93,9 +95,15 @@ where
     //       details.
     let wrapped = AssertUnwindSafe(future).catch_unwind().map(move |outcome| {
         let result = match outcome {
-            Ok(Ok(val)) => Ok(val),
-            Ok(Err(e)) => Err(e),
-            Err(panic) => Err(BackgroundTaskPanic(Arc::new(Mutex::new(panic)))),
+            Ok(result) => result,
+            Err(payload) => {
+                error!(
+                    "spawned task panicked. [name={}, panic={}]",
+                    name,
+                    panic_string(&payload)
+                );
+                Err(SlateDBError::BackgroundTaskPanic(name))
+            }
         };
         cleanup_fn(&result);
         result
@@ -231,7 +239,7 @@ pub trait SendSafely<T> {
     /// before the sender is shut down.`
     fn send_safely(
         &self,
-        error_reader: WatchableOnceCellReader<SlateDBError>,
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         message: T,
     ) -> Result<(), SlateDBError>;
 }
@@ -241,14 +249,17 @@ impl<T> SendSafely<T> for UnboundedSender<T> {
     #[inline]
     fn send_safely(
         &self,
-        error_reader: WatchableOnceCellReader<SlateDBError>,
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         message: T,
     ) -> Result<(), SlateDBError> {
         match self.send(message) {
             Ok(_) => Ok(()),
             Err(e) => {
-                if let Some(err) = error_reader.read() {
-                    Err(err)
+                if let Some(result) = closed_result_reader.read() {
+                    match result {
+                        Ok(()) => Err(SlateDBError::Closed),
+                        Err(err) => Err(err),
+                    }
                 } else {
                     panic!("Failed to send message to unbounded channel: {}", e);
                 }
@@ -291,25 +302,22 @@ impl<R: RngCore> IdGenerator for R {
 /// Arguments:
 /// - `clock`: The clock to use for the timeout.
 /// - `duration`: The duration to wait for the future to complete.
-/// - `op`: The name of the operation that will time out, for logging purposes.
+/// - `operation`: The name of the operation that will time out, for logging purposes.
 /// - `future`: The future to timeout
 ///
 /// Returns:
 /// - `Ok(T)`: If the future completes within the specified duration.
 /// - `Err(SlateDBError::Timeout)`: If the future does not complete within the specified duration.
-pub async fn timeout<T>(
+pub async fn timeout<T, Err>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
-    op: &'static str,
-    future: impl Future<Output = Result<T, SlateDBError>> + Send,
-) -> Result<T, SlateDBError> {
+    error_fn: impl FnOnce() -> Err,
+    future: impl Future<Output = Result<T, Err>> + Send,
+) -> Result<T, Err> {
     tokio::select! {
         biased;
         res = future => res,
-        _ = clock.sleep(duration) => Err(SlateDBError::Timeout {
-            op,
-            backoff: duration,
-        })
+        _ = clock.sleep(duration) => Err(error_fn())
     }
 }
 
@@ -502,6 +510,103 @@ where
     Ok(out)
 }
 
+/// Returns a string representation of a panic. The following panic types are
+/// converted to their string representation:
+///
+/// - Result<(), SlateDBError>
+/// - SlateDBError
+/// - Box<dyn std::error::Error>
+/// - String
+/// - &'static str
+///
+/// Other panic types are handled by printing a generic message with the type name.
+#[allow(dead_code)]
+pub fn panic_string(panic: &Box<dyn Any + Send>) -> String {
+    if let Some(result) = panic.downcast_ref::<Result<(), SlateDBError>>() {
+        match result {
+            Ok(()) => "ok".to_string(),
+            Err(e) => e.to_string(),
+        }
+    } else if let Some(err) = panic.downcast_ref::<SlateDBError>() {
+        err.to_string()
+    } else if let Some(err) = panic.downcast_ref::<Box<dyn std::error::Error>>() {
+        err.to_string()
+    } else if let Some(err) = panic.downcast_ref::<String>() {
+        err.clone()
+    } else if let Some(err) = panic.downcast_ref::<&str>() {
+        err.to_string()
+    } else {
+        format!(
+            "task panicked with unknown type [type_id=`{:?}`]",
+            (**panic).type_id()
+        )
+    }
+}
+
+/// Splits a `catch_unwind` result
+/// (`Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>`) into a
+/// `Result<(), SlateDBError>` and an optional `Box<dyn std::any::Any + Send>`
+/// containing the panic payload.
+///
+/// # Arguments
+///
+/// * `name`: The name of the task
+/// * `unwind_result`: The result of the catch_unwind
+///
+/// # Returns
+///
+/// - (Ok(()), None) if the task completed successfully
+/// - (Err(SlateDBError:: .. ), None) if the task completed with an error
+/// - (Err(SlateDBError::BackgroundTaskPanic), Some(payload)) if the task panicked
+pub(crate) fn split_unwind_result(
+    name: String,
+    unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>,
+) -> (
+    Result<(), SlateDBError>,
+    Option<Box<dyn std::any::Any + Send>>,
+) {
+    match unwind_result {
+        Ok(result) => (result.clone(), None),
+        Err(payload) => (Err(SlateDBError::BackgroundTaskPanic(name)), Some(payload)),
+    }
+}
+
+/// Splits a `join` result
+/// (`Result<Result<(), SlateDBError>, tokio::task::JoinError>`) into a
+/// `Result<(), SlateDBError>` and an optional `Box<dyn std::any::Any + Send>`
+/// containing the panic payload.
+///
+/// # Arguments
+///
+/// * `name`: The name of the task
+/// * `join_result`: The result of the join handle
+///
+/// # Returns
+///
+/// - (Ok(()), None) if the task completed successfully
+/// - (Err(SlateDBError:: .. ), None) if the task completed with an error
+/// - (Err(SlateDBError::BackgroundTaskCancelled), None) if the task was cancelled
+/// - (Err(SlateDBError::BackgroundTaskPanic), Some(payload)) if the task panicked
+pub(crate) fn split_join_result(
+    name: String,
+    join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError>,
+) -> (
+    Result<(), SlateDBError>,
+    Option<Box<dyn std::any::Any + Send>>,
+) {
+    match join_result {
+        Ok(task_result) => (task_result.clone(), None),
+        Err(join_error) => {
+            if join_error.is_cancelled() {
+                (Err(SlateDBError::BackgroundTaskCancelled(name)), None)
+            } else {
+                let payload = join_error.into_panic();
+                (Err(SlateDBError::BackgroundTaskPanic(name)), Some(payload))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -511,10 +616,11 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
+        compute_max_parallel, panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
+    use std::any::Any;
     use std::collections::VecDeque;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -591,9 +697,12 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
-        let task = spawn_bg_task(&handle, move |err| captor2.capture(err), async {
-            Err(SlateDBError::Fenced)
-        });
+        let task = spawn_bg_task(
+            "test".to_string(),
+            &handle,
+            move |err| captor2.capture(err),
+            async { Err(SlateDBError::Fenced) },
+        );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
         assert!(matches!(result, Err(SlateDBError::Fenced)));
@@ -609,7 +718,12 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
-        let task = spawn_bg_task(&handle, move |err| captor2.capture(err), monitored);
+        let task = spawn_bg_task(
+            "test".to_string(),
+            &handle,
+            move |err| captor2.capture(err),
+            monitored,
+        );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
         assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
@@ -625,7 +739,12 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let captor2 = captor.clone();
 
-        let task = spawn_bg_task(&handle, move |err| captor2.capture(err), async { Ok(()) });
+        let task = spawn_bg_task(
+            "test".to_string(),
+            &handle,
+            move |err| captor2.capture(err),
+            async { Ok(()) },
+        );
 
         let result: Result<(), SlateDBError> = task.await.expect("join failure");
         assert!(matches!(result, Ok(())));
@@ -777,7 +896,12 @@ mod tests {
 
         // When: we execute a future with a timeout
         let completed_future = async { Ok::<_, SlateDBError>(42) };
-        let timeout_future = timeout(clock, Duration::from_millis(100), "test", completed_future);
+        let timeout_future = timeout(
+            clock,
+            Duration::from_millis(100),
+            || unreachable!(),
+            completed_future,
+        );
 
         // Then: the future should complete successfully with the expected value
         let result = timeout_future.await;
@@ -795,12 +919,15 @@ mod tests {
         // Given: a mock clock and a future that will never complete
         let clock = Arc::new(MockSystemClock::new());
         let never_completes = std::future::pending::<Result<(), SlateDBError>>();
+        let timeout_duration = Duration::from_millis(100);
 
         // When: we execute the future with a timeout and advance the clock past the timeout duration
         let timeout_future = timeout(
             clock.clone(),
-            Duration::from_millis(100),
-            "test",
+            timeout_duration,
+            || SlateDBError::TransactionalObjectTimeout {
+                timeout: timeout_duration,
+            },
             never_completes,
         );
         let done = Arc::new(AtomicBool::new(false));
@@ -818,7 +945,10 @@ mod tests {
         // Then: the future should complete with a timeout error
         let result = timeout_future.await;
         done.store(true, SeqCst);
-        assert!(matches!(result, Err(SlateDBError::Timeout { .. })));
+        assert!(matches!(
+            result,
+            Err(SlateDBError::TransactionalObjectTimeout { .. })
+        ));
     }
 
     #[tokio::test]
@@ -834,7 +964,7 @@ mod tests {
         let timeout_future = timeout(
             clock,
             Duration::from_millis(100),
-            "test",
+            || unreachable!(),
             completes_immediately,
         );
 
@@ -1005,7 +1135,7 @@ mod tests {
         let res: Result<VecDeque<usize>, SlateDBError> =
             build_concurrent(inputs, 3, |x| async move {
                 if x == 5 {
-                    Err(SlateDBError::Unsupported("boom".into()))
+                    Err(SlateDBError::Fenced)
                 } else {
                     Ok(Some(x))
                 }
@@ -1048,5 +1178,198 @@ mod tests {
             observed_peak,
             max_parallel
         );
+    }
+
+    #[test]
+    fn panic_string_handles_slatedb_error() {
+        // Given a SlateDBError payload
+        let err = SlateDBError::InvalidDBState;
+        let payload: Box<dyn Any + Send> = Box::new(err.clone());
+
+        // When
+        let msg = panic_string(&payload);
+
+        // Then: it should stringify the exact error
+        assert_eq!(msg, err.to_string());
+    }
+
+    #[test]
+    fn panic_string_handles_slatedb_result() {
+        // Given a SlateDBError payload
+        let payload: Box<Result<(), SlateDBError>> = Box::new(Err(SlateDBError::InvalidDBState));
+
+        // When
+        let msg = panic_string(&(payload as Box<dyn Any + Send>));
+
+        // Then: it should stringify the exact error
+        assert_eq!(msg, SlateDBError::InvalidDBState.to_string());
+    }
+
+    #[test]
+    fn panic_string_handles_string() {
+        let s: Box<dyn Any + Send> = Box::new(String::from("hello"));
+        let msg = panic_string(&s);
+        assert_eq!(msg, "hello");
+    }
+
+    #[test]
+    fn panic_string_handles_static_str() {
+        let s: Box<dyn Any + Send> = Box::new("boom");
+        let msg = panic_string(&s);
+        assert_eq!(msg, "boom");
+    }
+
+    #[test]
+    fn panic_string_falls_back_for_boxed_error_trait_object() {
+        // The function attempts to downcast to `Box<dyn std::error::Error>`.
+        // However, because `panic_string` requires `Send`, a realistic panic payload
+        // would be `Box<dyn std::error::Error + Send + Sync>`, which does not
+        // match the downcast target exactly and therefore takes the fallback path.
+        let err_box: Box<dyn Any + Send> = Box::new(std::io::Error::other("oh no"));
+
+        let msg = panic_string(&err_box);
+        assert!(msg.contains("task panicked with unknown type"));
+    }
+
+    #[test]
+    fn panic_string_falls_back_for_unknown_type() {
+        #[derive(Clone, Debug)]
+        struct MyType;
+
+        let msg = panic_string(&(Box::new(MyType) as Box<dyn Any + Send>));
+        assert!(msg.contains("task panicked with unknown type"));
+    }
+
+    #[test]
+    fn test_split_unwind_result_ok_ok() {
+        // Given: a successful unwind result
+        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+            Ok(Ok(()));
+
+        // When: we split the result
+        let (result, payload) = super::split_unwind_result("test".to_string(), unwind_result);
+
+        // Then: result should be Ok and payload should be None
+        assert!(result.is_ok());
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_split_unwind_result_ok_error() {
+        // Given: an unwind result with a task error
+        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+            Ok(Err(SlateDBError::Fenced));
+
+        // When: we split the result
+        let (result, payload) = super::split_unwind_result("test".to_string(), unwind_result);
+
+        // Then: result should be the error and payload should be None
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_split_unwind_result_panic() {
+        // Given: an unwind result that panicked with a non-SlateDBError (e.g., a string)
+        let panic_msg = "something went wrong";
+        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+            Err(Box::new(panic_msg));
+
+        // When: we split the result
+        let (result, payload) = super::split_unwind_result("test_task".to_string(), unwind_result);
+
+        // Then: result should be BackgroundTaskPanic and payload should contain the original panic
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskPanic(ref name)) if name == "test_task"
+        ));
+        assert!(payload.is_some());
+        // Verify the payload contains the original panic message
+        if let Some(p) = payload {
+            if let Some(msg) = p.downcast_ref::<&str>() {
+                assert_eq!(msg, &panic_msg);
+            } else {
+                panic!("expected &str, got {:?}", p);
+            }
+        }
+    }
+
+    #[test]
+    fn test_split_join_result_ok_ok() {
+        // Given: a successful join result
+        let join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError> = Ok(Ok(()));
+
+        // When: we split the result
+        let (result, payload) = super::split_join_result("test".to_string(), join_result);
+
+        // Then: result should be Ok and payload should be None
+        assert!(result.is_ok());
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_split_join_result_ok_error() {
+        // Given: a join result with a task error
+        let join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError> =
+            Ok(Err(SlateDBError::Fenced));
+
+        // When: we split the result
+        let (result, payload) = super::split_join_result("test".to_string(), join_result);
+
+        // Then: result should be the error and payload should be None
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert!(payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_split_join_result_cancelled() {
+        // Given: a join result from a cancelled task
+        let handle = tokio::spawn(async {
+            // Wait forever
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+
+        // Cancel the task
+        handle.abort();
+        let join_result = handle.await;
+
+        // When: we split the result
+        let (result, payload) = super::split_join_result("test_task".to_string(), join_result);
+
+        // Then: result should be BackgroundTaskCancelled and payload should be None
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskCancelled(ref name)) if name == "test_task"
+        ));
+        assert!(payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_split_join_result_panic() {
+        // Given: a join result from a task that panicked with a non-SlateDBError
+        let handle = tokio::spawn(async {
+            panic!("something went wrong");
+        });
+
+        let join_result = handle.await;
+
+        // When: we split the result
+        let (result, payload) = super::split_join_result("test_task".to_string(), join_result);
+
+        // Then: result should be BackgroundTaskPanic and payload should contain the original panic
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskPanic(ref name)) if name == "test_task"
+        ));
+        assert!(payload.is_some());
+        if let Some(p) = payload {
+            if let Some(msg) = p.downcast_ref::<&str>() {
+                assert_eq!(msg, &"something went wrong");
+            } else {
+                panic!("expected &str, got {:?}", p);
+            }
+        }
     }
 }

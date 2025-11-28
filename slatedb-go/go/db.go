@@ -79,19 +79,25 @@ func resultToError(result C.struct_CSdbResult) error {
 
 // Open opens a SlateDB database with default settings
 // For more advanced configuration, use NewBuilder() instead
-func Open(path string, storeConfig *StoreConfig) (*DB, error) {
+func Open(path string, opts ...Option[DbConfig]) (*DB, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	// Convert Go structs to JSON strings
-	storeConfigJSON, storeConfigPtr := convertStoreConfigToJSON(storeConfig)
-	defer func() {
-		if storeConfigPtr != nil {
-			C.free(storeConfigPtr)
-		}
-	}()
+	cfg := &DbConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	var cURL, cEnvFile *C.char
+	if cfg.url != nil {
+		cURL = C.CString(*cfg.url)
+		defer C.free(unsafe.Pointer(cURL))
+	}
+	if cfg.envFile != nil {
+		cEnvFile = C.CString(*cfg.envFile)
+		defer C.free(unsafe.Pointer(cEnvFile))
+	}
 
-	handle := C.slatedb_open(cPath, storeConfigJSON)
+	handle := C.slatedb_open(cPath, cURL, cEnvFile)
 
 	// Check if handle is null (indicates error)
 	if handle._0 == nil {
@@ -212,7 +218,7 @@ func (db *DB) GetWithOptions(key []byte, readOpts *ReadOptions) ([]byte, error) 
 	}
 
 	keyPtr := (*C.uint8_t)(unsafe.Pointer(&key[0]))
-	var value C.struct_CSdbValue
+	var value C.CSdbValue
 	cReadOpts := convertToCReadOptions(readOpts)
 
 	result := C.slatedb_get_with_options(
@@ -447,21 +453,27 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 // Builder represents a database builder that mirrors Rust's DbBuilder
 type Builder struct {
 	path         string
-	storeConfig  *StoreConfig
+	url          *string
+	envFile      *string
 	settings     *Settings
 	sstBlockSize *SstBlockSize
 }
 
 // NewBuilder creates a new database builder
-func NewBuilder(path string, storeConfig *StoreConfig) (*Builder, error) {
-	if storeConfig == nil {
-		return nil, errors.New("storeConfig cannot be nil")
-	}
+func NewBuilder(path string) (*Builder, error) {
+	return &Builder{path: path}, nil
+}
 
-	return &Builder{
-		path:        path,
-		storeConfig: storeConfig,
-	}, nil
+// WithUrl sets the URL for the database object store
+func (b *Builder) WithUrl(url string) *Builder {
+	b.url = &url
+	return b
+}
+
+// WithEnvFile sets the URL for the database object store
+func (b *Builder) WithEnvFile(envFile string) *Builder {
+	b.envFile = &envFile
+	return b
 }
 
 // WithSettings sets the Settings for the database
@@ -478,20 +490,21 @@ func (b *Builder) WithSstBlockSize(size SstBlockSize) *Builder {
 
 // Build creates the database using the configured options
 func (b *Builder) Build() (*DB, error) {
-	// Convert StoreConfig to JSON
-	storeConfigJSON, err := json.Marshal(b.storeConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal store config: %w", err)
-	}
-
 	// Create builder via FFI
 	cPath := C.CString(b.path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	cStoreConfigJSON := C.CString(string(storeConfigJSON))
-	defer C.free(unsafe.Pointer(cStoreConfigJSON))
+	var cURL, cEnvFile *C.char
+	if b.url != nil {
+		cURL = C.CString(*b.url)
+		defer C.free(unsafe.Pointer(cURL))
+	}
+	if b.envFile != nil {
+		cEnvFile = C.CString(*b.envFile)
+		defer C.free(unsafe.Pointer(cEnvFile))
+	}
 
-	builderPtr := C.slatedb_builder_new(cPath, cStoreConfigJSON)
+	builderPtr := C.slatedb_builder_new(cPath, cURL, cEnvFile)
 	if builderPtr == nil {
 		return nil, errors.New("failed to create database builder")
 	}

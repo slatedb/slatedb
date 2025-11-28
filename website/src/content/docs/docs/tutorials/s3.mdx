@@ -16,10 +16,12 @@ cd slatedb-playground
 
 ## Add dependencies
 
-Now add SlateDB and the `object_store` crate to your `Cargo.toml`:
+Now add SlateDB and the required dependencies to your `Cargo.toml`:
 
 ```bash
-cargo add slatedb object-store tokio --features object-store/aws
+cargo add slatedb tokio --features tokio/macros,tokio/rt-multi-thread
+cargo add object-store --features object-store/aws
+cargo add anyhow
 ```
 
 :::note

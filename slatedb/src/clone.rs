@@ -67,15 +67,14 @@ pub(crate) async fn create_clone<P: Into<Path>>(
         )
         .await?;
 
-        let mut dirty = clone_manifest.prepare_dirty();
-        dirty.core.initialized = true;
-        clone_manifest.update_manifest(dirty).await?;
+        let mut dirty = clone_manifest.prepare_dirty()?;
+        dirty.value.core.initialized = true;
+        clone_manifest.update(dirty).await?;
     }
 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn create_clone_manifest(
     clone_manifest_store: Arc<ManifestStore>,
     parent_manifest_store: Arc<ManifestStore>,
@@ -168,6 +167,7 @@ async fn create_clone_manifest(
                     &CheckpointOptions {
                         lifetime: None,
                         source: Some(external_db.source_checkpoint_id),
+                        name: None,
                     },
                 )
                 .await?;
@@ -201,6 +201,7 @@ async fn get_or_create_parent_checkpoint(
                     &CheckpointOptions {
                         lifetime: Some(Duration::from_secs(300)),
                         source: None,
+                        name: None,
                     },
                 )
                 .await?
@@ -275,7 +276,7 @@ async fn load_initialized_manifest(
     manifest_store: Arc<ManifestStore>,
 ) -> Result<StoredManifest, SlateDBError> {
     let Some(manifest) = StoredManifest::try_load(manifest_store.clone()).await? else {
-        return Err(SlateDBError::LatestManifestMissing);
+        return Err(SlateDBError::LatestTransactionalObjectVersionMissing);
     };
 
     if !manifest.db_state().initialized {
@@ -803,6 +804,9 @@ mod tests {
             Arc::new(DbRand::default()),
         )
         .await;
-        assert!(matches!(result, Err(SlateDBError::Unsupported(..))));
+        assert!(matches!(
+            result,
+            Err(SlateDBError::WalStoreReconfigurationError)
+        ));
     }
 }

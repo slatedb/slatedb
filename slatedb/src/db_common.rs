@@ -36,7 +36,7 @@ impl DbInner {
 
         guard.freeze_memtable(wal_id)?;
         self.memtable_flush_notifier.send_safely(
-            guard.error_reader(),
+            guard.closed_result_reader(),
             MemtableFlushMsg::FlushImmutableMemtables { sender: None },
         )?;
         Ok(())
@@ -59,10 +59,15 @@ impl DbInner {
         self.freeze_memtable(&mut guard, recent_flushed_wal_id)?;
 
         let last_wal = replayed_memtable.last_wal_id;
-        guard.modify(|modifier| modifier.state.manifest.core.next_wal_sst_id = last_wal + 1);
+        guard.modify(|modifier| modifier.state.manifest.value.core.next_wal_sst_id = last_wal + 1);
 
         // update seqs and clock
+        // we know these won't move backwards (even though the replayed wal files might contain some
+        // older rows) because the wal replay iterator ignores any entries with seq num lower than
+        // l0_last_seq from the manifest
+        assert!(self.oracle.last_seq.load() <= replayed_memtable.last_seq);
         self.oracle.last_seq.store(replayed_memtable.last_seq);
+        assert!(self.oracle.last_committed_seq.load() <= replayed_memtable.last_seq);
         self.oracle
             .last_committed_seq
             .store(replayed_memtable.last_seq);

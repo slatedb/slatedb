@@ -1,7 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
-#![allow(clippy::result_large_err)]
+#![allow(clippy::result_large_err, clippy::too_many_arguments)]
 // Disallow non-approved non-deterministic types and functions in production code
 #![deny(clippy::disallowed_types, clippy::disallowed_methods)]
 #![cfg_attr(
@@ -42,10 +42,14 @@ pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
 pub use db_read::DbRead;
 pub use db_reader::DbReader;
-pub use error::{Error, ErrorKind};
+pub use db_snapshot::DbSnapshot;
+pub use db_transaction::DBTransaction;
+pub use error::{CloseReason, Error, ErrorKind};
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
+pub use seq_tracker::FindOption;
+pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 
 pub mod admin;
@@ -81,6 +85,7 @@ mod db_read;
 mod db_reader;
 mod db_snapshot;
 mod db_state;
+mod db_transaction;
 mod dispatcher;
 mod error;
 mod filter;
@@ -90,6 +95,7 @@ mod flush;
 mod garbage_collector;
 mod iter;
 mod manifest;
+mod map_iter;
 mod mem_table;
 mod mem_table_flush;
 mod merge_iterator;
@@ -114,7 +120,7 @@ mod tablestore;
 #[cfg(test)]
 mod test_utils;
 mod transaction_manager;
-mod transactional_object_store;
+mod transactional_object;
 mod types;
 mod utils;
 mod wal_buffer;

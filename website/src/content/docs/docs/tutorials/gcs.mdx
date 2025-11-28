@@ -1,0 +1,109 @@
+---
+title: Connect SlateDB to Google Cloud Storage
+description: Learn how to connect SlateDB to Google Cloud Storage
+---
+
+This tutorial shows you how to use SlateDB on Google Cloud Storage (GCS). You would need a GCS account to complete the tutorial.
+
+## Setup
+
+[Install](https://cloud.google.com/sdk/docs/install) the Google Cloud SDK (gcloud CLI).
+
+## Create Storage bucket and Service Account
+
+The following steps create a storage bucket and generate service account credentials. This section can be skipped if you already have a bucket and service account key.
+
+```bash
+# Set bucket name and project ID
+BucketName=<ReplaceWithBucketName>
+ProjectID=<ReplaceWithProjectID>
+
+# Login to Google Cloud
+gcloud auth login
+
+# Set the default project
+gcloud config set project $ProjectID
+
+# Create a storage bucket (if needed)
+gcloud storage buckets create gs://$BucketName --location=us-central1
+
+# Create a service account for authentication
+ServiceAccountName=slatedb-gcs-test
+gcloud iam service-accounts create $ServiceAccountName \
+    --display-name="SlateDB GCS Test Service Account"
+
+# Grant the service account access to the project (for storage operations)
+gcloud projects add-iam-policy-binding $ProjectID \
+    --member="serviceAccount:$ServiceAccountName@$ProjectID.iam.gserviceaccount.com" \
+    --role="roles/storage.objectAdmin"
+
+# Create and download a key for the service account
+gcloud iam service-accounts keys create ~/slatedb-gcs-key.json \
+    --iam-account=$ServiceAccountName@$ProjectID.iam.gserviceaccount.com
+```
+
+Now you have your service account key file ready to use.
+
+## Create a project
+
+Let's start by creating a new Rust project:
+
+```bash
+cargo init slatedb-gcs
+cd slatedb-gcs
+```
+
+## Add dependencies
+
+Now add SlateDB and the required dependencies to your `Cargo.toml`:
+
+```bash
+cargo add slatedb tokio --features tokio/macros,tokio/rt-multi-thread
+cargo add object-store --features object-store/gcp
+cargo add anyhow
+```
+
+:::note
+
+If you see "`object_store::path::Path` and `object_store::path::Path` have similar names, but are actually distinct types", you might need to pin the `object_store` version to match `slatedb`'s `object_store` version. SlateDB also exports `slatedb::object_store` for convenience, if you'd rather use that.
+
+:::
+
+## Write some code
+
+This code demonstrates puts that wait for results to be durable, and then puts that do not wait.
+
+import { Code } from '@astrojs/starlight/components';
+import gcsExample from '/../examples/src/google_cloud_storage.rs?raw'
+
+<Code code={gcsExample} lang="rust" title="main.rs" />
+
+## Check the bucket contents
+
+```bash
+gcloud storage ls gs://$BucketName/tmp/slatedb_google_cloud_storage/
+
+gs://$BucketName/tmp/slatedb_google_cloud_storage/manifest/
+gs://$BucketName/tmp/slatedb_google_cloud_storage/wal/
+```
+
+There are three folders:
+
+- `manifest`: Contains the manifest files. Manifest files define the state of the DB, including the set of SSTs that are part of the DB.
+- `wal`: Contains the write-ahead log files.
+- `compacted`: Contains the compacted SST files (may not appear in short examples).
+
+Let's check the `wal` folder:
+
+```bash
+gcloud storage ls -l gs://$BucketName/tmp/slatedb_google_cloud_storage/wal/
+
+        74  2025-10-05T14:26:52Z  gs://sibasishtest/tmp/slatedb_google_cloud_storage/wal/00000000000000000001.sst
+       163  2025-10-05T14:26:56Z  gs://sibasishtest/tmp/slatedb_google_cloud_storage/wal/00000000000000000002.sst
+      1047  2025-10-05T14:26:57Z  gs://sibasishtest/tmp/slatedb_google_cloud_storage/wal/00000000000000000003.sst
+     36483  2025-10-05T14:26:58Z  gs://sibasishtest/tmp/slatedb_google_cloud_storage/wal/00000000000000000004.sst
+        74  2025-10-05T14:27:02Z  gs://sibasishtest/tmp/slatedb_google_cloud_storage/wal/00000000000000000005.sst
+        74  2025-10-05T15:42:19Z  gs://sibasishtest/tmp/slatedb_google_cloud_storage/wal/00000000000000000006.sst
+```
+
+Each of these SST files is a write-ahead log (WAL) entry. They get flushed based on the `flush_interval` config or when `flush` is called explicitly.

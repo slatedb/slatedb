@@ -1,6 +1,6 @@
 use crate::clock::LogicalClock;
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
-use crate::compactor_state::{Compaction, CompactorState, SourceId};
+use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
@@ -9,6 +9,7 @@ use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::BoxStream;
+use futures::{stream, StreamExt};
 use object_store::path::Path;
 use object_store::{
     GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutOptions as OS_PutOptions,
@@ -20,13 +21,17 @@ use std::fmt;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Once};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
+    iterator
+        .init()
+        .await
+        .expect("iterator init failed in assert_iterator");
     for expected_entry in entries.iter() {
         assert_next_entry(iterator, expected_entry).await;
     }
@@ -41,6 +46,10 @@ pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
     iterator: &mut T,
     expected_entry: &RowEntry,
 ) {
+    iterator
+        .init()
+        .await
+        .expect("iterator init failed in assert_next_entry");
     let actual_entry = iterator
         .next_entry()
         .await
@@ -84,10 +93,19 @@ impl TestIterator {
         self.entries.push_back(Ok(entry));
         self
     }
+
+    pub(crate) fn with_row_entry(mut self, entry: RowEntry) -> Self {
+        self.entries.push_back(Ok(entry));
+        self
+    }
 }
 
 #[async_trait]
 impl KeyValueIterator for TestIterator {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         self.entries.pop_front().map_or(Ok(None), |e| match e {
             Ok(kv) => Ok(Some(kv)),
@@ -118,6 +136,10 @@ impl TestClock {
         TestClock {
             ticker: AtomicI64::new(0),
         }
+    }
+
+    pub(crate) fn set(&self, tick: i64) {
+        self.ticker.store(tick, Ordering::SeqCst);
     }
 }
 
@@ -184,7 +206,7 @@ pub(crate) fn decode_codec_entries(
 pub(crate) async fn assert_ranged_db_scan<T: RangeBounds<Bytes>>(
     table: &BTreeMap<Bytes, Bytes>,
     range: T,
-    iter: &mut DbIterator<'_>,
+    iter: &mut DbIterator,
 ) {
     let mut expected = table.range(range);
     loop {
@@ -274,33 +296,26 @@ pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> Encod
     encoded_sst_builder.build().unwrap()
 }
 
+/// A compactor that compacts if there are L0s and `should_compact` returns true.
+/// All SSTs from L0 and all sorted runs are always compacted into sorted run 0.
 #[derive(Clone)]
 pub(crate) struct OnDemandCompactionScheduler {
-    pub(crate) should_compact: Arc<AtomicBool>,
+    pub(crate) should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>,
 }
 
 impl OnDemandCompactionScheduler {
-    fn new() -> Self {
-        Self {
-            should_compact: Arc::new(AtomicBool::new(false)),
-        }
+    fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
+        Self { should_compact }
     }
 }
 
 impl CompactionScheduler for OnDemandCompactionScheduler {
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<Compaction> {
-        if !self.should_compact.load(Ordering::SeqCst) {
+    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactionSpec> {
+        if !(self.should_compact)(state) {
             return vec![];
         }
 
-        // this compactor will only compact if there are L0s,
-        // it won't compact only lower levels for simplicity
         let db_state = state.db_state();
-        if db_state.l0.is_empty() {
-            return vec![];
-        }
-
-        self.should_compact.store(false, Ordering::SeqCst);
 
         // always compact into sorted run 0
         let next_sr_id = 0;
@@ -317,7 +332,7 @@ impl CompactionScheduler for OnDemandCompactionScheduler {
             sources.push(SourceId::SortedRun(sr.id));
         }
 
-        vec![Compaction::new(sources, next_sr_id)]
+        vec![CompactionSpec::new(sources, next_sr_id)]
     }
 }
 
@@ -326,9 +341,9 @@ pub(crate) struct OnDemandCompactionSchedulerSupplier {
 }
 
 impl OnDemandCompactionSchedulerSupplier {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
         Self {
-            scheduler: OnDemandCompactionScheduler::new(),
+            scheduler: OnDemandCompactionScheduler::new(should_compact),
         }
     }
 }
@@ -372,6 +387,18 @@ pub(crate) struct FlakyObjectStore {
     // Head: transient failures on first N attempts
     fail_first_head: AtomicUsize,
     head_attempts: AtomicUsize,
+    // List: transient failures on first N `list` calls
+    fail_first_list: AtomicUsize,
+    // List: on a failing call, inject an error after this many successful items
+    list_fail_after: AtomicUsize,
+    // List: total number of `list` invocations
+    list_attempts: AtomicUsize,
+    // List with offset: transient failures on first N `list_with_offset` calls
+    fail_first_list_with_offset: AtomicUsize,
+    // List with offset: on a failing call, inject an error after this many successful items
+    list_with_offset_fail_after: AtomicUsize,
+    // List with offset: total number of `list_with_offset` invocations
+    list_with_offset_attempts: AtomicUsize,
 }
 
 impl FlakyObjectStore {
@@ -383,6 +410,12 @@ impl FlakyObjectStore {
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
             head_attempts: AtomicUsize::new(0),
+            fail_first_list: AtomicUsize::new(0),
+            list_fail_after: AtomicUsize::new(0),
+            list_attempts: AtomicUsize::new(0),
+            fail_first_list_with_offset: AtomicUsize::new(0),
+            list_with_offset_fail_after: AtomicUsize::new(0),
+            list_with_offset_attempts: AtomicUsize::new(0),
         }
     }
 
@@ -396,12 +429,62 @@ impl FlakyObjectStore {
         self
     }
 
+    pub(crate) fn with_list_failures(self, fail_times: usize, fail_after: usize) -> Self {
+        self.fail_first_list.store(fail_times, Ordering::SeqCst);
+        self.list_fail_after.store(fail_after, Ordering::SeqCst);
+        self
+    }
+
+    pub(crate) fn with_list_with_offset_failures(
+        self,
+        fail_times: usize,
+        fail_after: usize,
+    ) -> Self {
+        self.fail_first_list_with_offset
+            .store(fail_times, Ordering::SeqCst);
+        self.list_with_offset_fail_after
+            .store(fail_after, Ordering::SeqCst);
+        self
+    }
+
     pub(crate) fn put_attempts(&self) -> usize {
         self.put_opts_attempts.load(Ordering::SeqCst)
     }
 
     pub(crate) fn head_attempts(&self) -> usize {
         self.head_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn list_attempts(&self) -> usize {
+        self.list_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn list_with_offset_attempts(&self) -> usize {
+        self.list_with_offset_attempts.load(Ordering::SeqCst)
+    }
+
+    /// Inject a failure after `fail_after` successful items in the stream.
+    ///
+    /// ## Args
+    /// * `stream`: The stream to inject the failure into
+    /// * `fail_after`: The number of successful items to yield before injecting the failure
+    /// * `store_label`: The label to use in the error
+    /// * `message`: The message to use in the error
+    fn fail_stream(
+        stream: BoxStream<'static, object_store::Result<ObjectMeta>>,
+        fail_after: usize,
+        store_label: &'static str,
+        message: &'static str,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        stream
+            .take(fail_after)
+            .chain(stream::once(async move {
+                Err(object_store::Error::Generic {
+                    store: store_label,
+                    source: Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, message)),
+                })
+            }))
+            .boxed()
     }
 }
 
@@ -501,6 +584,26 @@ impl ObjectStore for FlakyObjectStore {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.list_attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_first_list
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            let fail_after = self.list_fail_after.load(Ordering::SeqCst);
+            return Self::fail_stream(
+                self.inner.list(prefix),
+                fail_after,
+                "flaky_list",
+                "injected list failure",
+            );
+        }
         self.inner.list(prefix)
     }
 
@@ -509,6 +612,27 @@ impl ObjectStore for FlakyObjectStore {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.list_with_offset_attempts
+            .fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_first_list_with_offset
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            let fail_after = self.list_with_offset_fail_after.load(Ordering::SeqCst);
+            return Self::fail_stream(
+                self.inner.list_with_offset(prefix, offset),
+                fail_after,
+                "flaky_list_with_offset",
+                "injected list_with_offset failure",
+            );
+        }
         self.inner.list_with_offset(prefix, offset)
     }
 

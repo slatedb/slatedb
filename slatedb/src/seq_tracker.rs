@@ -21,8 +21,8 @@ pub(crate) struct TrackedSeq {
 
 /// Rounding behavior for non-exact matches in sequence-timestamp lookups.
 #[allow(dead_code)]
-#[derive(PartialEq)]
-pub(crate) enum FindOption {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FindOption {
     /// Round up to the next higher value when no exact match is found.
     RoundUp,
     /// Round down to the next lower value when no exact match is found.
@@ -34,7 +34,7 @@ pub(crate) enum FindOption {
 /// Uses two sorted arrays for bi-directional lookup between sequence numbers and timestamps.
 /// When capacity is reached, downsamples by removing every other entry to maintain bounded memory.
 /// Data is compressed using Gorilla encoding (delta-of-deltas) for efficient storage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct SequenceTracker {
     /// Sorted array of sequence numbers
     sequence_numbers: Vec<u64>,
@@ -46,6 +46,16 @@ pub(crate) struct SequenceTracker {
     interval_secs: u64,
     /// Last recorded timestamp to enforce interval
     last_recorded_ts: Option<i64>,
+}
+
+impl PartialEq for SequenceTracker {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare only the essential data, ignoring last_recorded_ts which is implementation detail
+        self.sequence_numbers == other.sequence_numbers
+            && self.timestamps == other.timestamps
+            && self.capacity == other.capacity
+            && self.interval_secs == other.interval_secs
+    }
 }
 
 #[allow(dead_code)]
@@ -82,10 +92,20 @@ impl SequenceTracker {
 
         // Ensure monotonic ordering
         if let Some(last_seq) = self.sequence_numbers.last() {
-            assert!(seq.seq >= *last_seq, "Sequence numbers must be monotonic");
+            assert!(
+                seq.seq >= *last_seq,
+                "Sequence numbers must be monotonic. seq: {}, last_seq: {}",
+                seq.seq,
+                *last_seq
+            );
         }
         if let Some(last_ts) = self.timestamps.last() {
-            assert!(ts_secs >= *last_ts, "Timestamps must be monotonic");
+            assert!(
+                ts_secs >= *last_ts,
+                "Timestamps must be monotonic. ts_secs: {}, last_ts: {}",
+                ts_secs,
+                *last_ts
+            );
         }
 
         self.sequence_numbers.push(seq.seq);
@@ -95,6 +115,18 @@ impl SequenceTracker {
         // Downsample if we exceed capacity
         if self.sequence_numbers.len() > self.capacity as usize {
             self.downsample();
+        }
+    }
+
+    pub(crate) fn extend_from(&mut self, other: &SequenceTracker) {
+        if other.sequence_numbers.is_empty() {
+            return;
+        }
+
+        for (seq, &ts_secs) in other.sequence_numbers.iter().zip(other.timestamps.iter()) {
+            if let Some(ts) = DateTime::from_timestamp(ts_secs, 0) {
+                self.insert(TrackedSeq { seq: *seq, ts });
+            }
         }
     }
 
@@ -150,6 +182,16 @@ impl SequenceTracker {
                 _ => None,
             },
         }
+    }
+
+    /// Serialize the tracker into bytes using the RFC-0012 format.
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        encode_sequence_tracker(self)
+    }
+
+    /// Deserialize the tracker from bytes using the RFC-0012 format.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        decode_sequence_tracker(bytes)
     }
 }
 
@@ -481,6 +523,161 @@ mod tests {
         assert_eq!(tracker.sequence_numbers[0], 0);
     }
 
+    #[test]
+    fn extend_from_non_empty_tracker() {
+        // given
+        let mut tracker1 = SequenceTracker::with_config(10, 1);
+        tracker1.insert(TrackedSeq {
+            seq: 100,
+            ts: DateTime::from_timestamp(1000, 0).unwrap(),
+        });
+        tracker1.insert(TrackedSeq {
+            seq: 200,
+            ts: DateTime::from_timestamp(2000, 0).unwrap(),
+        });
+
+        let mut tracker2 = SequenceTracker::with_config(10, 1);
+        tracker2.insert(TrackedSeq {
+            seq: 300,
+            ts: DateTime::from_timestamp(3000, 0).unwrap(),
+        });
+        tracker2.insert(TrackedSeq {
+            seq: 400,
+            ts: DateTime::from_timestamp(4000, 0).unwrap(),
+        });
+
+        // when
+        tracker1.extend_from(&tracker2);
+
+        // then
+        assert_eq!(tracker1.sequence_numbers.len(), 4);
+        assert_eq!(tracker1.sequence_numbers, vec![100, 200, 300, 400]);
+        assert_eq!(
+            tracker1.find_ts(300, FindOption::RoundDown),
+            DateTime::from_timestamp(3000, 0)
+        );
+        assert_eq!(
+            tracker1.find_ts(400, FindOption::RoundDown),
+            DateTime::from_timestamp(4000, 0)
+        );
+    }
+
+    #[test]
+    fn extend_empty_tracker() {
+        // given
+        let mut tracker1 = SequenceTracker::with_config(10, 1);
+        let mut tracker2 = SequenceTracker::with_config(10, 1);
+        tracker2.insert(TrackedSeq {
+            seq: 100,
+            ts: DateTime::from_timestamp(1000, 0).unwrap(),
+        });
+        tracker2.insert(TrackedSeq {
+            seq: 200,
+            ts: DateTime::from_timestamp(2000, 0).unwrap(),
+        });
+
+        // when
+        tracker1.extend_from(&tracker2);
+
+        // then
+        assert_eq!(tracker1.sequence_numbers.len(), 2);
+        assert_eq!(tracker1.sequence_numbers, vec![100, 200]);
+        assert_eq!(
+            tracker1.find_ts(100, FindOption::RoundDown),
+            DateTime::from_timestamp(1000, 0)
+        );
+        assert_eq!(
+            tracker1.find_ts(200, FindOption::RoundDown),
+            DateTime::from_timestamp(2000, 0)
+        );
+    }
+
+    #[test]
+    fn extend_from_empty_tracker() {
+        // given
+        let mut tracker1 = SequenceTracker::with_config(10, 1);
+        tracker1.insert(TrackedSeq {
+            seq: 100,
+            ts: DateTime::from_timestamp(1000, 0).unwrap(),
+        });
+        let tracker2 = SequenceTracker::with_config(10, 1);
+        let initial_len = tracker1.sequence_numbers.len();
+
+        // when
+        tracker1.extend_from(&tracker2);
+
+        // then - should be unchanged
+        assert_eq!(tracker1.sequence_numbers.len(), initial_len);
+        assert_eq!(tracker1.sequence_numbers, vec![100]);
+    }
+
+    #[test]
+    fn extend_respects_interval_filtering() {
+        // given - tracker1 has last entry at timestamp 1000
+        let mut tracker1 = SequenceTracker::with_config(10, 60);
+        tracker1.insert(TrackedSeq {
+            seq: 100,
+            ts: DateTime::from_timestamp(1000, 0).unwrap(),
+        });
+
+        // tracker2 uses interval of 1 second so all entries get inserted
+        // but when extending into tracker1 (interval 60), some will be filtered
+        let mut tracker2 = SequenceTracker::with_config(10, 1);
+        tracker2.insert(TrackedSeq {
+            seq: 200,
+            ts: DateTime::from_timestamp(1030, 0).unwrap(), // only 30 seconds after tracker1's 1000 - should be ignored
+        });
+        tracker2.insert(TrackedSeq {
+            seq: 300,
+            ts: DateTime::from_timestamp(1060, 0).unwrap(), // 60 seconds after tracker1's 1000 - should be recorded
+        });
+        tracker2.insert(TrackedSeq {
+            seq: 400,
+            ts: DateTime::from_timestamp(1110, 0).unwrap(), // only 50 seconds after tracker1's 1060 - should be ignored
+        });
+        tracker2.insert(TrackedSeq {
+            seq: 500,
+            ts: DateTime::from_timestamp(1120, 0).unwrap(), // 60 seconds after tracker1's 1060 - should be recorded
+        });
+
+        // when
+        tracker1.extend_from(&tracker2);
+
+        // then - only entries that respect the interval should be added
+        assert_eq!(tracker1.sequence_numbers.len(), 3); // 100, 300, 500
+        assert_eq!(tracker1.sequence_numbers, vec![100, 300, 500]);
+    }
+
+    #[test]
+    fn extend_triggers_downsampling() {
+        // given
+        let mut tracker1 = SequenceTracker::with_config(4, 1);
+        // Fill tracker1 to capacity
+        for i in 0..4 {
+            tracker1.insert(TrackedSeq {
+                seq: (i * 100) as u64,
+                ts: DateTime::from_timestamp((i * 1000) as i64, 0).unwrap(),
+            });
+        }
+
+        let mut tracker2 = SequenceTracker::with_config(10, 1);
+        // Add entries that will trigger downsampling
+        for i in 4..7 {
+            tracker2.insert(TrackedSeq {
+                seq: (i * 100) as u64,
+                ts: DateTime::from_timestamp((i * 1000) as i64, 0).unwrap(),
+            });
+        }
+
+        // when
+        tracker1.extend_from(&tracker2);
+
+        // then - should have downsampled to keep within capacity
+        assert!(tracker1.sequence_numbers.len() <= 4);
+        // First entry should still be present after downsampling
+        assert_eq!(tracker1.sequence_numbers[0], 0);
+    }
+
     #[rstest]
     #[case::exact_match(8, FindOption::RoundDown, Some(200))]
     #[case::exact_match_round_up(8, FindOption::RoundUp, Some(200))]
@@ -687,5 +884,95 @@ mod tests {
             assert_eq!(decoded.sequence_numbers, tracker.sequence_numbers);
             assert_eq!(decoded.timestamps, tracker.timestamps);
         });
+    }
+    #[test]
+    fn admin_seq_tracker_seq_to_ts_rounding() -> Result<(), crate::Error> {
+        use crate::admin::AdminBuilder;
+        use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+        use crate::db::Db;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use object_store::ObjectStore;
+        use std::sync::Arc;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let path = Path::from("/tmp/test_admin_seq_tracker_seq_to_ts");
+
+            let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+
+            let db = Db::builder(path.clone(), object_store.clone())
+                .with_settings(Settings::default())
+                .build()
+                .await?;
+            db.put(b"k1", b"v1").await?;
+            db.put(b"k2", b"v2").await?;
+            db.put(b"k3", b"v3").await?;
+
+            db.create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+                .await?;
+            db.close().await?;
+
+            let ts_first = admin.get_timestamp_for_sequence(0, true).await?;
+            assert!(ts_first.is_some());
+
+            let ts_after_last = admin.get_timestamp_for_sequence(u64::MAX, true).await?;
+            assert!(ts_after_last.is_none());
+
+            Ok::<_, crate::Error>(())
+        })?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn admin_seq_tracker_ts_to_seq_rounding() -> Result<(), crate::Error> {
+        use crate::admin::AdminBuilder;
+        use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+        use crate::db::Db;
+        use chrono::{TimeZone, Utc};
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use object_store::ObjectStore;
+        use std::sync::Arc;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let path = Path::from("/tmp/test_admin_seq_tracker_ts_to_seq");
+
+            let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+
+            let db = Db::builder(path.clone(), object_store.clone())
+                .with_settings(Settings::default())
+                .build()
+                .await?;
+            db.put(b"a", b"1").await?;
+            db.put(b"b", b"2").await?;
+
+            db.create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+                .await?;
+            db.close().await?;
+
+            let long_ago = Utc.timestamp_opt(1, 0).single().unwrap();
+            let seq_before_first = admin.get_sequence_for_timestamp(long_ago, false).await?;
+            assert!(
+                seq_before_first.is_none(),
+                "round-down before first ts should yield None"
+            );
+
+            let now = Utc::now();
+            let seq_latest = admin.get_sequence_for_timestamp(now, false).await?;
+            assert!(
+                seq_latest.is_some(),
+                "round-down at/after last ts should yield Some(seq)"
+            );
+
+            Ok::<_, crate::Error>(())
+        })?;
+
+        Ok(())
     }
 }

@@ -1,25 +1,27 @@
 ---
-import { Icon } from '@astrojs/starlight/components';
+import bookHeartIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/book-heart.svg?raw';
+import githubIcon from '@hackernoon/pixel-icon-library/icons/SVG/brands/github.svg?raw';
+import discordIcon from '@hackernoon/pixel-icon-library/icons/SVG/brands/discord.svg?raw';
 
 const links: Array<{
     label: string;
     href: string;
-    icon: 'open-book' | 'github' | 'discord';
+    icon: string;
 }> = [
 	{
 		label: 'Introduction',
 		href: '/docs/get-started/introduction/',
-		icon: 'open-book',
+		icon: bookHeartIcon,
 	},
     {
         label: 'GitHub',
         href: 'https://github.com/slatedb/slatedb',
-        icon: 'github',
+        icon: githubIcon,
     },
     {
         label: 'Discord',
         href: 'https://discord.gg/mHYmGy5MgA',
-        icon: 'discord',
+        icon: discordIcon,
     },
 ]
 ---
@@ -30,7 +32,7 @@ const links: Array<{
 			{links.map(({ label, href, icon }) => (
 				<a {href} rel="me" class="sl-flex">
 					<span class="sr-only">{label}</span>
-					<Icon name={icon} size="var(--sl-social-icon-size)" />
+					<span class="social-icon" set:html={icon} />
 				</a>
 			))}
 		</>
@@ -38,13 +40,48 @@ const links: Array<{
 }
 
 <style>
-		a {
-			color: var(--sl-social-icon-color);
-			padding: 0.5em;
-			margin: -0.5em;
-		}
+	a {
+		color: var(--sl-social-icon-color);
+		padding: 0.5em;
+		margin: -0.5em;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		position: relative;
+	}
 
-		svg:hover {
-			color: var(--sl-social-icon-hover-color);
-		}
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		clip-path: inset(50%);
+		white-space: nowrap;
+		border-width: 0;
+		z-index: -1;
+		left: 0;
+		top: 0;
+	}
+
+	.social-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--sl-social-icon-size, 1.5rem);
+		height: var(--sl-social-icon-size, 1.5rem);
+		flex-shrink: 0;
+	}
+
+	.social-icon svg {
+		width: 100%;
+		height: 100%;
+		fill: currentColor;
+	}
+
+	a:hover .social-icon svg {
+		fill: var(--sl-social-icon-hover-color);
+	}
 </style>

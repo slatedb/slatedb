@@ -399,7 +399,16 @@ pub(crate) mod sample {
 
         if let Some(end) = test_utils::bound_as_option(range.end_bound()) {
             if !can_decrement_without_truncation(end) {
-                let min_len = range.start_bound().map(|b| b.len());
+                let min_len = match range.start_bound() {
+                    // If start bound is unbounded, minvalue_bytes uses 0 as the length,
+                    // and random_range(0 ..) is inclusive. This can lead to an empty length
+                    // result, which will trigger a failure in the assertion below (is_empty).
+                    // Prevent this by using Excluded(0) as the min len so we get a non-empty
+                    // result no matter what.
+                    Unbounded => Excluded(0),
+                    Included(b) => Included(b.len()),
+                    Excluded(b) => Excluded(b.len()),
+                };
                 let max_len = range.end_bound().map(|b| b.len());
                 let result = minvalue_bytes(rng, min_len, max_len);
                 assert!(
@@ -471,12 +480,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "calculated empty bytes for range")]
-    fn test_bytes_in_range() {
+    fn test_bytes_in_range_with_multiple_bytes() {
         let mut rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
         let range = BytesRange::new(
             Bound::Unbounded,
-            Bound::Included(Bytes::from_static(&[0; 1])),
+            Bound::Included(Bytes::from_static(&[0; 2])),
         );
         sample::bytes_in_range(&mut rng, &range);
     }

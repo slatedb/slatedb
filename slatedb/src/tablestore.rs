@@ -159,7 +159,7 @@ impl TableStore {
             + 1)
     }
 
-    pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter {
+    pub(crate) fn table_writer(&self, id: SsTableId) -> EncodedSsTableWriter<'_> {
         let object_store = self.object_stores.store_for(&id);
         let path = self.path(&id);
         EncodedSsTableWriter {
@@ -172,7 +172,7 @@ impl TableStore {
         }
     }
 
-    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
+    pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
         self.sst_format.table_builder()
     }
 
@@ -682,7 +682,7 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
+        let mut iter = SstIterator::new_owned_initialized(.., sst, ts.clone(), sst_iter_options)
             .await
             .unwrap()
             .expect("Expected Some(iter) but got None");
@@ -750,7 +750,7 @@ mod tests {
             ..SstIteratorOptions::default()
         };
         // then:
-        let mut iter = SstIterator::new_owned(.., sst, ts.clone(), sst_iter_options)
+        let mut iter = SstIterator::new_owned_initialized(.., sst, ts.clone(), sst_iter_options)
             .await
             .unwrap()
             .expect("Expected Some(iter) but got None");

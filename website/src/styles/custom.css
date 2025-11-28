@@ -1,10 +1,9 @@
 :root {
-    --sl-social-icon-color: white;
-    --sl-social-icon-hover-color: #faed27;
+    --sl-social-icon-color: #475569;
+    --sl-social-icon-hover-color: black;
     --sl-social-icon-size: 1.5rem;
-    --sl-color-yellow: #faed27;
-    --sl-color-yellow-low: #faec2746;
-    --sl-image-bg-color: white;
+    --sl-image-bg-color: black;
+    --sl-color-bg-nav: white;
 }
 
 .getting-started {
@@ -22,4 +21,14 @@
 /* Hide the theme selector */
 starlight-theme-select {
     display: none;
+}
+
+/* Remove border-bottom only on main page (pages without sidebar) */
+.page:not([data-has-sidebar]) .header {
+    border-bottom: none !important;
+}
+
+/* Reduce logo size */
+.site-title img {
+    height: calc((var(--sl-nav-height) - 2 * var(--sl-nav-pad-y)) * 0.8) !important;
 }
