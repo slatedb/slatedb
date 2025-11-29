@@ -21,6 +21,7 @@ typedef enum CSdbError {
     InternalError = 5,
     NullPointer = 6,
     InvalidHandle = 7,
+    InvalidProvider = 8,
 } CSdbError;
 
 // Internal struct for managing database iterators in FFI
@@ -66,6 +67,11 @@ typedef struct CSdbHandle {
 typedef struct CSdbWriteOptions {
     bool await_durable;
 } CSdbWriteOptions;
+
+typedef struct CSdbHandleResult {
+    struct CSdbHandle _0;
+    struct CSdbResult _1;
+} CSdbHandleResult;
 
 typedef struct CSdbReadOptions {
     // Durability filter: 0=Memory, 1=Remote
@@ -276,7 +282,7 @@ struct CSdbResult slatedb_write_batch_write(struct CSdbHandle handle,
 // - `batch` must be a valid pointer to a WriteBatch that was previously allocated
 struct CSdbResult slatedb_write_batch_close(struct CSdbWriteBatch *batch);
 
-struct CSdbHandle slatedb_open(const char *path, const char *url, const char *env_file);
+struct CSdbHandleResult slatedb_open(const char *path, const char *url, const char *env_file);
 
 // # Safety
 //
