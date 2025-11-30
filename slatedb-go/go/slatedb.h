@@ -72,6 +72,8 @@ typedef struct CSdbReadOptions {
     uint32_t durability_filter;
     // Whether to include dirty/uncommitted data
     bool dirty;
+    // Whether to cache fetched blocks
+    bool cache_blocks;
 } CSdbReadOptions;
 
 typedef struct CSdbValue {
@@ -274,7 +276,7 @@ struct CSdbResult slatedb_write_batch_write(struct CSdbHandle handle,
 // - `batch` must be a valid pointer to a WriteBatch that was previously allocated
 struct CSdbResult slatedb_write_batch_close(struct CSdbWriteBatch *batch);
 
-struct CSdbHandle slatedb_open(const char *path, const char *store_config_json);
+struct CSdbHandle slatedb_open(const char *path, const char *url, const char *env_file);
 
 // # Safety
 //
@@ -333,7 +335,9 @@ struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
                                             struct CSdbIterator **iterator_ptr);
 
 // Create a new DbBuilder
-struct DbBuilder_String *slatedb_builder_new(const char *path, const char *store_config_json);
+struct DbBuilder_String *slatedb_builder_new(const char *path,
+                                             const char *url,
+                                             const char *env_file);
 
 // Set settings on DbBuilder from JSON
 //
@@ -365,7 +369,8 @@ struct CSdbHandle slatedb_builder_build(struct DbBuilder_String *builder);
 void slatedb_builder_free(struct DbBuilder_String *builder);
 
 struct CSdbReaderHandle slatedb_reader_open(const char *path,
-                                            const char *store_config_json,
+                                            const char *url,
+                                            const char *env_file,
                                             const char *checkpoint_id,
                                             const struct CSdbReaderOptions *reader_options);
 
