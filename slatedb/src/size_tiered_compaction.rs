@@ -423,8 +423,6 @@ impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
 mod tests {
     use std::collections::VecDeque;
 
-    use crate::clock::SystemClock;
-
     use crate::compactor::CompactionScheduler;
 
     use crate::clock::DefaultSystemClock;
@@ -563,9 +561,7 @@ mod tests {
 
         let job_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![3, 2, 1, 0]);
-        let db_state = state.db_state();
-        let start_time = system_clock.now();
-        let compactor_job = Compaction::new(job_id, request, db_state, start_time);
+        let compactor_job = Compaction::new(job_id, request);
 
         state
             .add_compaction(compactor_job.clone())
@@ -651,9 +647,7 @@ mod tests {
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let request = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
-        let db_state = state.db_state();
-        let start_time = system_clock.now();
-        let compactor_job = Compaction::new(compaction_id, request, db_state, start_time);
+        let compactor_job = Compaction::new(compaction_id, request);
         state
             .add_compaction(compactor_job.clone())
             .expect("failed to add job");
@@ -687,13 +681,9 @@ mod tests {
         let system_clock = Arc::new(DefaultSystemClock::new());
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let db_state = state.db_state();
-        let start_time = system_clock.now();
         let compactor_job = Compaction::new(
             compaction_id,
             create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
-            db_state,
-            start_time,
         );
         state
             .add_compaction(compactor_job.clone())

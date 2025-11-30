@@ -58,7 +58,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::DateTime;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
 use tokio::runtime::Handle;
@@ -402,35 +401,45 @@ impl CompactorEventHandler {
     fn log_compaction_throughput(&self) {
         let current_time = self.system_clock.now();
         let current_time_ms = current_time.timestamp_millis() as u64;
+        let db_state = self.state.db_state();
         let mut total_bytes = 0u64;
         let mut total_throughput = 0.0;
 
         for compaction in self.state.compactions() {
-            let throughput = compaction.get_throughput(current_time);
-            total_throughput += throughput;
-            total_bytes += compaction.estimated_source_bytes();
+            let estimated_source_bytes =
+                Self::calculate_estimated_source_bytes(compaction, db_state);
+            total_bytes += estimated_source_bytes;
 
-            let percentage = if compaction.estimated_source_bytes() > 0 {
-                (compaction.bytes_processed() * 100 / compaction.estimated_source_bytes()) as u32
-            } else {
-                0
-            };
-            let elapsed_secs = if compaction.start_time().timestamp_millis() > 0 {
-                let current_time = DateTime::from_timestamp_millis(current_time_ms as i64)
-                    .expect("valid timestamp");
-                current_time
-                    .signed_duration_since(compaction.start_time())
-                    .num_milliseconds() as f64
-                    / 1000.0
+            // Calculate throughput using ULID timestamp
+            let start_time_ms = compaction
+                .id()
+                .datetime()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("invalid duration")
+                .as_millis() as u64;
+            let elapsed_secs = if start_time_ms > 0 {
+                (current_time_ms as f64 - start_time_ms as f64) / 1000.0
             } else {
                 0.0
+            };
+            let throughput = if elapsed_secs > 0.0 {
+                compaction.bytes_processed() as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+            total_throughput += throughput;
+
+            let percentage = if estimated_source_bytes > 0 {
+                (compaction.bytes_processed() * 100 / estimated_source_bytes) as u32
+            } else {
+                0
             };
             debug!(
                 "compaction progress [id={}, progress={}%, processed_bytes={}, estimated_source_bytes={}, elapsed={:.2}s, throughput={:.2} bytes/sec]",
                 compaction.id(),
                 percentage,
                 compaction.bytes_processed(),
-                compaction.estimated_source_bytes(),
+                estimated_source_bytes,
                 elapsed_secs,
                 throughput,
             );
@@ -438,6 +447,41 @@ impl CompactorEventHandler {
 
         self.stats.total_bytes_being_compacted.set(total_bytes);
         self.stats.total_throughput.set(total_throughput as u64);
+    }
+
+    /// Calculates the estimated total source bytes for a compaction.
+    fn calculate_estimated_source_bytes(
+        compaction: &Compaction,
+        db_state: &crate::db_state::CoreDbState,
+    ) -> u64 {
+        use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+        use std::collections::HashMap;
+
+        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
+            .l0
+            .iter()
+            .filter_map(|sst| match sst.id {
+                SsTableId::Compacted(id) => Some((id, sst)),
+                _ => None,
+            })
+            .collect();
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
+
+        compaction
+            .spec()
+            .sources()
+            .iter()
+            .map(|source| match source {
+                SourceId::Sst(id) => ssts_by_id
+                    .get(id)
+                    .map(|sst| sst.estimate_size())
+                    .unwrap_or(0),
+                SourceId::SortedRun(id) => {
+                    srs_by_id.get(id).map(|sr| sr.estimate_size()).unwrap_or(0)
+                }
+            })
+            .sum()
     }
 
     /// Handles a polling tick by refreshing the manifest and possibly scheduling compactions.
@@ -587,9 +631,7 @@ impl CompactorEventHandler {
                 break;
             }
             let compaction_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let db_state = self.state.db_state();
-            let start_time = self.system_clock.now();
-            let compaction = Compaction::new(compaction_id, spec, db_state, start_time);
+            let compaction = Compaction::new(compaction_id, spec);
             self.submit_compaction(compaction).await?;
         }
         Ok(())
@@ -623,7 +665,7 @@ impl CompactorEventHandler {
             compaction_logical_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
-            estimated_source_bytes: compaction.estimated_source_bytes(),
+            estimated_source_bytes: Self::calculate_estimated_source_bytes(&compaction, db_state),
         };
 
         // TODO(sujeetsawala): Add job attempt to compaction
@@ -1792,20 +1834,13 @@ mod tests {
         // Two artificial compactions with known ULID timestamps
         let older_ts_ms: u64 = 1_000;
         let newer_ts_ms: u64 = 2_000;
-        let db_state = fixture.handler.state.db_state();
-        let older_time = DateTime::from_timestamp_millis(older_ts_ms as i64).unwrap();
-        let newer_time = DateTime::from_timestamp_millis(newer_ts_ms as i64).unwrap();
         let compaction_old = Compaction::new(
             Ulid::from_parts(older_ts_ms, 0),
             CompactionSpec::new(vec![], 10),
-            db_state,
-            older_time,
         );
         let compaction_new = Compaction::new(
             Ulid::from_parts(newer_ts_ms, 0),
             CompactionSpec::new(vec![], 11),
-            db_state,
-            newer_time,
         );
 
         fixture
@@ -1832,6 +1867,7 @@ mod tests {
         use crate::compactor::stats::{
             TOTAL_BYTES_BEING_COMPACTED, TOTAL_THROUGHPUT_BYTES_PER_SEC,
         };
+        use chrono::DateTime;
 
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
 
@@ -1842,20 +1878,15 @@ mod tests {
         let start_time_2 =
             DateTime::from_timestamp_millis((current_time_ms - 1000) as i64).unwrap();
 
-        let db_state = fixture.handler.state.db_state();
         let mut compaction_1 = Compaction::new(
             Ulid::from_parts(start_time_1.timestamp_millis() as u64, 0),
             CompactionSpec::new(vec![], 10),
-            db_state,
-            start_time_1,
         );
         compaction_1.set_bytes_processed(500);
 
         let mut compaction_2 = Compaction::new(
             Ulid::from_parts(start_time_2.timestamp_millis() as u64, 0),
             CompactionSpec::new(vec![], 11),
-            db_state,
-            start_time_2,
         );
         compaction_2.set_bytes_processed(1000);
 
@@ -1893,27 +1924,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_track_per_job_throughput() {
-        use chrono::DateTime;
-
         let start_time_ms = 1000u64;
         let current_time_ms = 3000u64;
         let processed_bytes = 1000u64;
 
-        let db_state = CoreDbState::new();
-        let start_time = DateTime::from_timestamp_millis(start_time_ms as i64).unwrap();
         let mut compaction = Compaction::new(
             Ulid::from_parts(start_time_ms, 0),
             CompactionSpec::new(vec![], 10),
-            &db_state,
-            start_time,
         );
         compaction.set_bytes_processed(processed_bytes);
 
-        let current_time = DateTime::from_timestamp_millis(current_time_ms as i64).unwrap();
-        let throughput = compaction.get_throughput(current_time);
+        // Calculate throughput manually using ULID timestamp
+        let elapsed_secs = (current_time_ms as f64 - start_time_ms as f64) / 1000.0;
+        let throughput = processed_bytes as f64 / elapsed_secs;
         assert_eq!(throughput, 500.0);
 
-        let throughput_zero = compaction.get_throughput(start_time);
+        // At start time, throughput should be 0
+        let elapsed_zero = (start_time_ms as f64 - start_time_ms as f64) / 1000.0;
+        let throughput_zero = if elapsed_zero > 0.0 {
+            processed_bytes as f64 / elapsed_zero
+        } else {
+            0.0
+        };
         assert_eq!(throughput_zero, 0.0);
     }
 
@@ -1932,14 +1964,7 @@ mod tests {
             0
         );
 
-        let db_state = fixture.handler.state.db_state();
-        let start_time = fixture.handler.system_clock.now();
-        let compaction = Compaction::new(
-            Ulid::new(),
-            CompactionSpec::new(vec![], 10),
-            db_state,
-            start_time,
-        );
+        let compaction = Compaction::new(Ulid::new(), CompactionSpec::new(vec![], 10));
         fixture
             .handler
             .state

@@ -287,6 +287,10 @@ impl CompactionExecuteBench {
             })
             .collect();
         info!("loaded compaction job");
+
+        // Calculate estimated source bytes from the sorted runs
+        let estimated_source_bytes: u64 = srs.iter().map(|sr| sr.estimate_size()).sum();
+
         StartCompactionJobArgs {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: job.id(),
@@ -296,7 +300,7 @@ impl CompactionExecuteBench {
             compaction_logical_clock_tick: state.last_l0_clock_tick,
             retention_min_seq: Some(state.recent_snapshot_min_seq),
             is_dest_last_run,
-            estimated_source_bytes: job.estimated_source_bytes(),
+            estimated_source_bytes,
         }
     }
 
@@ -353,9 +357,7 @@ impl CompactionExecuteBench {
         let compactor_job = source_sr_ids.map(|_source_sr_ids| {
             let id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
             let spec = CompactionSpec::new(sources, destination_sr_id);
-            let db_state = manifest.db_state();
-            let start_time = self.system_clock.now();
-            Compaction::new(id, spec, db_state, start_time)
+            Compaction::new(id, spec)
         });
 
         info!("load compaction job");
