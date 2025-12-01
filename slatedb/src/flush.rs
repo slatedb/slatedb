@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use bytes::Bytes;
 use crate::db::DbInner;
 use crate::db_state;
 use crate::db_state::SsTableHandle;
@@ -7,6 +5,8 @@ use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::mem_table::KVTable;
 use crate::types::ValueDeletable;
+use bytes::Bytes;
+use std::sync::Arc;
 
 impl DbInner {
     pub(crate) async fn flush_imm_table(
@@ -60,13 +60,17 @@ mod tests {
             .unwrap()
     }
 
-    async fn verify_sst(db: &Db, sst_handle: &SsTableHandle, entries: &[(Bytes, u64, ValueDeletable)]) {
-        let index = db.inner.table_store.read_index(&sst_handle).await.unwrap();
+    async fn verify_sst(
+        db: &Db,
+        sst_handle: &SsTableHandle,
+        entries: &[(Bytes, u64, ValueDeletable)],
+    ) {
+        let index = db.inner.table_store.read_index(sst_handle).await.unwrap();
         let block_count = index.borrow().block_meta().len();
         let blocks = db
             .inner
             .table_store
-            .read_blocks(&sst_handle, 0..block_count)
+            .read_blocks(sst_handle, 0..block_count)
             .await
             .unwrap();
         let mut found_entries = Vec::new();
@@ -75,11 +79,7 @@ mod tests {
             block_iter.init().await.unwrap();
 
             while let Some(entry) = block_iter.next_entry().await.unwrap() {
-                found_entries.push((
-                    entry.key.clone(),
-                    entry.seq,
-                    entry.value.clone(),
-                ));
+                found_entries.push((entry.key.clone(), entry.seq, entry.value.clone()));
             }
         }
         assert_eq!(entries.len(), found_entries.len());
@@ -107,11 +107,7 @@ mod tests {
             .unwrap();
 
         // Then
-        verify_sst(
-            &db,
-            &sst_handle,
-            &[]
-        ).await;
+        verify_sst(&db, &sst_handle, &[]).await;
 
         db.close().await.unwrap();
     }
@@ -135,10 +131,13 @@ mod tests {
         verify_sst(
             &db,
             &sst_handle,
-            &[
-                (Bytes::from("key1"), 1, ValueDeletable::Value(Bytes::from("value1"))),
-            ]
-        ).await;
+            &[(
+                Bytes::from("key1"),
+                1,
+                ValueDeletable::Value(Bytes::from("value1")),
+            )],
+        )
+        .await;
 
         db.close().await.unwrap();
     }
@@ -165,11 +164,24 @@ mod tests {
             &db,
             &sst_handle,
             &[
-                (Bytes::from("key1"), 1, ValueDeletable::Value(Bytes::from("value1"))),
-                (Bytes::from("key2"), 2, ValueDeletable::Value(Bytes::from("value2"))),
-                (Bytes::from("key3"), 3, ValueDeletable::Value(Bytes::from("value3"))),
-            ]
-        ).await;
+                (
+                    Bytes::from("key1"),
+                    1,
+                    ValueDeletable::Value(Bytes::from("value1")),
+                ),
+                (
+                    Bytes::from("key2"),
+                    2,
+                    ValueDeletable::Value(Bytes::from("value2")),
+                ),
+                (
+                    Bytes::from("key3"),
+                    3,
+                    ValueDeletable::Value(Bytes::from("value3")),
+                ),
+            ],
+        )
+        .await;
 
         db.close().await.unwrap();
     }
@@ -198,8 +210,9 @@ mod tests {
         verify_sst(
             &db,
             &sst_handle,
-            &[(key, 3, ValueDeletable::Value(value_v3))]
-        ).await;
+            &[(key, 3, ValueDeletable::Value(value_v3))],
+        )
+        .await;
 
         db.close().await.unwrap();
     }
@@ -239,8 +252,9 @@ mod tests {
                 (key1, 3, ValueDeletable::Value(value3)),
                 (key2, 7, ValueDeletable::Value(value7)),
                 (key3, 4, ValueDeletable::Value(value4)),
-            ]
-        ).await;
+            ],
+        )
+        .await;
 
         db.close().await.unwrap();
     }
@@ -277,8 +291,9 @@ mod tests {
                 (key1, 2, ValueDeletable::Tombstone),
                 (key2, 3, ValueDeletable::Tombstone),
                 (key3, 5, ValueDeletable::Value(value3)),
-            ]
-        ).await;
+            ],
+        )
+        .await;
 
         db.close().await.unwrap();
     }
@@ -324,8 +339,9 @@ mod tests {
                 (key2, 2, ValueDeletable::Value(value2)),
                 (key3.clone(), 6, ValueDeletable::Value(value6)),
                 (key3, 4, ValueDeletable::Merge(value4)),
-            ]
-        ).await;
+            ],
+        )
+        .await;
 
         db.close().await.unwrap();
     }
