@@ -23,7 +23,7 @@ var _ = Describe("DbReader", func() {
 		envFile, err := createEnvFile(tmpDir)
 		Expect(err).NotTo(HaveOccurred())
 
-		db, err := slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
+		db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db).NotTo(BeNil())
 
@@ -37,8 +37,7 @@ var _ = Describe("DbReader", func() {
 
 	AfterEach(func() {
 		if dbReader != nil {
-			err := dbReader.Close()
-			Expect(err).NotTo(HaveOccurred())
+			Expect(dbReader.Close()).NotTo(HaveOccurred())
 		}
 		if db != nil {
 			Expect(db.Close()).NotTo(HaveOccurred())
@@ -47,6 +46,15 @@ var _ = Describe("DbReader", func() {
 	})
 
 	Describe("Core Operations", func() {
+		It("should get a key-value pair", func() {
+			key := []byte("test_key")
+			value := []byte("test_value")
+
+			retrievedValue, err := dbReader.Get(key)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(retrievedValue).To(Equal(value))
+		})
+
 		It("should return ErrNotFound for non-existent key", func() {
 			_, err := dbReader.Get([]byte("non_existent"))
 			Expect(err).To(Equal(slatedb.ErrNotFound))
