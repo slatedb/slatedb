@@ -404,7 +404,7 @@ impl CompactorEventHandler {
         let db_state = self.state.db_state();
         let mut total_estimated_bytes = 0u64;
         let mut total_bytes_processed = 0u64;
-        let mut max_elapsed_secs = 0.0f64;
+        let mut total_elapsed_secs = 0.0f64;
 
         for compaction in self.state.compactions() {
             let estimated_source_bytes =
@@ -424,7 +424,7 @@ impl CompactorEventHandler {
             } else {
                 0.0
             };
-            max_elapsed_secs = max_elapsed_secs.max(elapsed_secs);
+            total_elapsed_secs += elapsed_secs;
 
             // Per-job throughput for logging
             let throughput = if elapsed_secs > 0.0 {
@@ -449,8 +449,8 @@ impl CompactorEventHandler {
             );
         }
 
-        let total_throughput = if max_elapsed_secs > 0.0 {
-            total_bytes_processed as f64 / max_elapsed_secs
+        let total_throughput = if total_elapsed_secs > 0.0 {
+            total_bytes_processed as f64 / total_elapsed_secs
         } else {
             0.0
         };
