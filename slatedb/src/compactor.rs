@@ -402,15 +402,17 @@ impl CompactorEventHandler {
         let current_time = self.system_clock.now();
         let current_time_ms = current_time.timestamp_millis() as u64;
         let db_state = self.state.db_state();
-        let mut total_bytes = 0u64;
-        let mut total_throughput = 0.0;
+        let mut total_estimated_bytes = 0u64;
+        let mut total_bytes_processed = 0u64;
+        let mut max_elapsed_secs = 0.0f64;
 
         for compaction in self.state.compactions() {
             let estimated_source_bytes =
                 Self::calculate_estimated_source_bytes(compaction, db_state);
-            total_bytes += estimated_source_bytes;
+            total_estimated_bytes += estimated_source_bytes;
+            total_bytes_processed += compaction.bytes_processed();
 
-            // Calculate throughput using ULID timestamp
+            // Calculate elapsed time using ULID timestamp
             let start_time_ms = compaction
                 .id()
                 .datetime()
@@ -422,12 +424,14 @@ impl CompactorEventHandler {
             } else {
                 0.0
             };
+            max_elapsed_secs = max_elapsed_secs.max(elapsed_secs);
+
+            // Per-job throughput for logging
             let throughput = if elapsed_secs > 0.0 {
                 compaction.bytes_processed() as f64 / elapsed_secs
             } else {
                 0.0
             };
-            total_throughput += throughput;
 
             let percentage = if estimated_source_bytes > 0 {
                 (compaction.bytes_processed() * 100 / estimated_source_bytes) as u32
@@ -445,7 +449,15 @@ impl CompactorEventHandler {
             );
         }
 
-        self.stats.total_bytes_being_compacted.set(total_bytes);
+        let total_throughput = if max_elapsed_secs > 0.0 {
+            total_bytes_processed as f64 / max_elapsed_secs
+        } else {
+            0.0
+        };
+
+        self.stats
+            .total_bytes_being_compacted
+            .set(total_estimated_bytes);
         self.stats.total_throughput.set(total_throughput as u64);
     }
 
@@ -460,9 +472,9 @@ impl CompactorEventHandler {
         let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
             .l0
             .iter()
-            .filter_map(|sst| match sst.id {
-                SsTableId::Compacted(id) => Some((id, sst)),
-                _ => None,
+            .map(|sst| match sst.id {
+                SsTableId::Compacted(id) => (id, sst),
+                SsTableId::Wal(_) => unreachable!("L0 SSTs should never have SsTableId::Wal"),
             })
             .collect();
         let srs_by_id: HashMap<u32, &SortedRun> =
@@ -475,11 +487,12 @@ impl CompactorEventHandler {
             .map(|source| match source {
                 SourceId::Sst(id) => ssts_by_id
                     .get(id)
-                    .map(|sst| sst.estimate_size())
-                    .unwrap_or(0),
-                SourceId::SortedRun(id) => {
-                    srs_by_id.get(id).map(|sr| sr.estimate_size()).unwrap_or(0)
-                }
+                    .expect("compaction source SST not found in L0")
+                    .estimate_size(),
+                SourceId::SortedRun(id) => srs_by_id
+                    .get(id)
+                    .expect("compaction source sorted run not found")
+                    .estimate_size(),
             })
             .sum()
     }
