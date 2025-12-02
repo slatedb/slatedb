@@ -756,7 +756,7 @@ impl Settings {
     /// use slatedb::config::Settings;
     ///
     /// // Assuming environment variables like SLATEDB_FLUSH_INTERVAL, SLATEDB_WAL_ENABLED, etc. are set
-    /// let config = Settings::from_env_defaults("SLATEDB_", Settings::default()).expect("Failed to load options from env");
+    /// let config = Settings::from_env_with_default("SLATEDB_", Settings::default()).expect("Failed to load options from env");
     /// ```
     pub fn from_env_with_default(
         prefix: &str,
