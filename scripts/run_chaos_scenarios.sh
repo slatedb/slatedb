@@ -175,7 +175,14 @@ run_smoke() {
   AWS_ENDPOINT="$endpoint" \
   AWS_S3_FORCE_PATH_STYLE=true \
   RUST_LOG=${RUST_LOG:-info} \
-  cargo test --quiet -p slatedb --test db test_concurrent_writers_and_readers -- --nocapture
+  env \
+    SLATEDB_TEST_GARBAGE_COLLECTOR_OPTIONS.MANIFEST_OPTIONS.INTERVAL=0ms \
+    SLATEDB_TEST_GARBAGE_COLLECTOR_OPTIONS.MANIFEST_OPTIONS.MIN_AGE=0ms \
+    SLATEDB_TEST_GARBAGE_COLLECTOR_OPTIONS.WAL_OPTIONS.INTERVAL=0ms \
+    SLATEDB_TEST_GARBAGE_COLLECTOR_OPTIONS.WAL_OPTIONS.MIN_AGE=0ms \
+    SLATEDB_TEST_GARBAGE_COLLECTOR_OPTIONS.COMPACTED_OPTIONS.INTERVAL=0ms \
+    SLATEDB_TEST_GARBAGE_COLLECTOR_OPTIONS.COMPACTED_OPTIONS.MIN_AGE=0ms \
+    cargo test --quiet -p slatedb --test db test_concurrent_writers_and_readers -- --nocapture
 }
 
 # Scenarios
