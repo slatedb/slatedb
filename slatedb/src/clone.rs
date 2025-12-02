@@ -502,10 +502,13 @@ mod tests {
             object_store.clone(),
             system_clock.clone(),
         ));
-        let mut parent_sm =
-            StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new())
-                .await
-                .unwrap();
+        let mut parent_sm = StoredManifest::create_new_db(
+            parent_manifest_store,
+            CoreDbState::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
         let uuid_1 = rand.rng().gen_uuid();
         let checkpoint_1 = parent_sm
             .write_checkpoint(uuid_1, &CheckpointOptions::default())

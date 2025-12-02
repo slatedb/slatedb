@@ -457,7 +457,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             Some(manifest) => manifest,
             None => {
                 let state = CoreDbState::new_with_wal_object_store(wal_object_store_uri);
-                StoredManifest::create_new_db(manifest_store.clone(), state).await?
+                StoredManifest::create_new_db(manifest_store.clone(), state, system_clock.clone())
+                    .await?
             }
         };
         let mut manifest = FenceableManifest::init_writer(
