@@ -635,8 +635,7 @@ mod tests {
         let rt = build_runtime();
         let (os, mut sm, mut state, system_clock, rand) = build_test_state(rt.handle());
         // compact the last sst
-        let before_compaction = state.db_state().clone();
-        let original_l0s = &before_compaction.l0;
+        let original_l0s = &state.db_state().clone().l0;
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
 
         let spec = CompactionSpec::new(
@@ -738,9 +737,8 @@ mod tests {
         // given:
         let rt = build_runtime();
         let (_os, mut _sm, mut state, system_clock, rand) = build_test_state(rt.handle());
-        let before_compaction = state.db_state().clone();
-        let original_l0s = &before_compaction.l0;
-        let original_srs = &before_compaction.compacted;
+        let original_l0s = &state.db_state().clone().l0;
+        let original_srs = &state.db_state().clone().compacted;
         // L0: from 4th onward (index > 2)
         let l0_sources = original_l0s
             .iter()
