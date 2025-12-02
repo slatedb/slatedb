@@ -38,6 +38,8 @@ use tracing_subscriber::EnvFilter;
 /// - `SLATEDB_TEST_NUM_READERS` (default: `2`) — number of concurrent reader tasks.
 /// - `SLATEDB_TEST_WRITES_PER_TASK` (default: `100`) — number of writes per writer.
 /// - `SLATEDB_TEST_KEY_LENGTH` (default: `256`) — padded key length in byte.
+/// - `SLATEDB_TEST_*` (e.g. `SLATEDB_TEST_FLUSH_INTERVAL`) — override [`Settings`] fields
+///   used for this test; unspecified fields fall back to the defaults below.
 ///
 /// ## Usage
 ///
@@ -86,21 +88,26 @@ async fn test_concurrent_writers_and_readers() {
     } else {
         Arc::new(InMemory::new()) as Arc<dyn ObjectStore>
     };
-    let config = Settings {
-        flush_interval: Some(Duration::from_millis(100)),
-        manifest_poll_interval: Duration::from_millis(100),
-        manifest_update_timeout: Duration::from_secs(300),
-        compactor_options: Some(CompactorOptions {
-            poll_interval: Duration::from_millis(100),
+
+    let config = Settings::from_env_with_default(
+        "SLATEDB_TEST_",
+        Settings {
+            flush_interval: Some(Duration::from_millis(100)),
+            manifest_poll_interval: Duration::from_millis(100),
+            manifest_update_timeout: Duration::from_secs(300),
+            compactor_options: Some(CompactorOptions {
+                poll_interval: Duration::from_millis(100),
+                ..Default::default()
+            }),
+            // Allow 16KB of unflushed data
+            max_unflushed_bytes: 16 * 1024,
+            min_filter_keys: 0,
+            // Allow up to four 4096-byte blocks per-SST
+            l0_sst_size_bytes: 4 * 4096,
             ..Default::default()
-        }),
-        // Allow 16KB of unflushed data
-        max_unflushed_bytes: 16 * 1024,
-        min_filter_keys: 0,
-        // Allow up to four 4096-byte blocks per-SST
-        l0_sst_size_bytes: 4 * 4096,
-        ..Default::default()
-    };
+        },
+    )
+    .expect("failed to load db settings from environment");
     let supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
         SizeTieredCompactionSchedulerOptions {
             min_compaction_sources: 1,

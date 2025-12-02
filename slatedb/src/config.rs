@@ -743,6 +743,44 @@ impl Settings {
     /// # Arguments
     ///
     /// * `prefix` - A string that specifies the prefix for the environment variables to be considered.
+    /// * `default` - The base `Settings` value to merge environment overrides into.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Settings)` if the environment variables were successfully read and parsed.
+    /// * `Err(Error)` if there was an error reading or parsing the environment variables.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slatedb::config::Settings;
+    ///
+    /// // Assuming environment variables like SLATEDB_FLUSH_INTERVAL, SLATEDB_WAL_ENABLED, etc. are set
+    /// let config = Settings::from_env_with_default("SLATEDB_", Settings::default()).expect("Failed to load options from env");
+    /// ```
+    pub fn from_env_with_default(
+        prefix: &str,
+        default: Settings,
+    ) -> Result<Settings, crate::Error> {
+        Figment::from(default)
+            .merge(Env::prefixed(prefix))
+            .extract()
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
+    }
+
+    /// Loads Settings from environment variables with a specified prefix.
+    ///
+    /// This function attempts to create a Settings instance by reading environment variables
+    /// that start with the given prefix. Nested options are separated by a dot (.) in the environment variable names.
+    ///
+    /// For example, if the prefix is "SLATEDB_" and there's an environment variable named "SLATEDB_DB_FLUSH_INTERVAL",
+    /// it would correspond to the `flush_interval` field within the `Settings` struct.
+    /// If there is an environment variable named "SLATEDB_OBJECT_STORE_CACHE_OPTIONS.ROOT_FOLDER",
+    /// it would correspond to the `root_folder` field within the `ObjectStoreCacheOptions` within `Settings`".
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - A string that specifies the prefix for the environment variables to be considered.
     ///
     /// # Returns
     ///
@@ -758,10 +796,7 @@ impl Settings {
     /// let config = Settings::from_env("SLATEDB_").expect("Failed to load options from env");
     /// ```
     pub fn from_env(prefix: &str) -> Result<Settings, crate::Error> {
-        Figment::from(Settings::default())
-            .merge(Env::prefixed(prefix))
-            .extract()
-            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
+        Settings::from_env_with_default(prefix, Settings::default())
     }
 
     /// Loads Settings from multiple configuration sources in a specific order.
