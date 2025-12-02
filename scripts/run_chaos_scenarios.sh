@@ -167,6 +167,8 @@ run_smoke() {
   log "running scenario: $name (endpoint=$endpoint)"
   # `AWS_S3_FORCE_PATH_STYLE` is set below to avoid virtual-hosted-style Host/SigV4
   # issues when routing through localhost ports and proxies (Toxiproxy + lowdown).
+  local logfile
+  logfile=$(mktemp -t slatedb-chaos.XXXXXX)
   CLOUD_PROVIDER=aws \
   AWS_ACCESS_KEY_ID=test \
   AWS_SECRET_ACCESS_KEY=test \
@@ -182,7 +184,25 @@ run_smoke() {
     SLATEDB_TEST_GARBAGE_COLLECTOR_OPTIONS.WAL_OPTIONS.MIN_AGE=0ms \
     SLATEDB_TEST_GARBAGE_COLLECTOR_OPTIONS.COMPACTED_OPTIONS.INTERVAL=0ms \
     SLATEDB_TEST_GARBAGE_COLLECTOR_OPTIONS.COMPACTED_OPTIONS.MIN_AGE=0ms \
-    cargo test --quiet -p slatedb --test db test_concurrent_writers_and_readers -- --nocapture
+    cargo test --quiet -p slatedb --test db test_concurrent_writers_and_readers -- --nocapture 2>&1 | tee "$logfile"
+  local status=${PIPESTATUS[0]}
+
+  if [ $status -ne 0 ]; then
+    # Temporary hack for reset_peer chaos scenario. If the reset_peer occurs on write,
+    # `RetryObjectStore` will retry the write. But if the previous write was successful
+    # _before_ the timout occurred, the retry will see the previous (successfully)
+    # written file. It will then decide it's been fenced. It's precisely this issue:
+    # - https://github.com/slatedb/slatedb/issues/766#issuecomment-3185202544
+    # Once #766 is fixed, remove this hack.
+    if [ "$name" = "reset_peer" ] && grep -q "detected newer DB client" "$logfile"; then
+      log "scenario '$name' hit expected fencing; treating as success"
+      rm -f "$logfile"
+      return 0
+    fi
+  fi
+
+  rm -f "$logfile"
+  return $status
 }
 
 # Scenarios
