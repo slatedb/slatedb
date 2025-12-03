@@ -3787,15 +3787,15 @@ mod tests {
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/testdb";
+        let should_compact_l0 = Arc::new(AtomicBool::new(false));
+        let this_should_compact_l0 = should_compact_l0.clone();
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| this_should_compact_l0.swap(false, Ordering::SeqCst),
+        )));
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
             .with_merge_operator(Arc::new(TestMergeOperator {}))
-            .with_compaction_scheduler_supplier(Arc::new(
-                SizeTieredCompactionSchedulerSupplier::new(SizeTieredCompactionSchedulerOptions {
-                    min_compaction_sources: 2,
-                    ..SizeTieredCompactionSchedulerOptions::default()
-                }),
-            ))
+            .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
             .unwrap();
@@ -3816,6 +3816,7 @@ mod tests {
         .unwrap();
 
         // await a compaction
+        should_compact_l0.store(true, Ordering::SeqCst);
         let db_poll = db.clone();
         tokio::time::timeout(Duration::from_secs(10), async move {
             loop {

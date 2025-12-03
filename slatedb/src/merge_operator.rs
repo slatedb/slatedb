@@ -180,7 +180,7 @@ pub(crate) struct MergeOperatorIterator<T: KeyValueIterator> {
     merge_different_expire_ts: bool,
     now: i64,
     /// A barrier sequence number that supports snapshot reads using this iterator. If not None,
-    /// the iterator ill not merge entries with sequence number greater than this value.
+    /// the iterator will not merge entries with sequence number greater than this value.
     snapshot_barrier_seq: Option<u64>,
 }
 

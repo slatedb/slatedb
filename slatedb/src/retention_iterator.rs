@@ -157,9 +157,9 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
 
             let continue_retain = continue_retain_by_time || continue_retain_by_seq || is_merge;
             if !continue_retain {
-                // if we find the first non-merge entry that neither in retention window by time nor
-                // by seq we should break the loop to filter out the earlier versions of the same
-                // key.
+                // if we find the first non-merge entry that's neither in retention window by time
+                // nor by seq we should break the loop to filter out the earlier versions of the
+                // same key.
                 break;
             }
         }
