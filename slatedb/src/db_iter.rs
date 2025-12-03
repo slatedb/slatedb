@@ -265,7 +265,10 @@ impl DbIterator {
                 iter,
                 true,
                 now,
-                max_seq,
+                // Its important not to set a snapshot seq num barrier for this merge iterator
+                // The entries in the write batch iterator have seq num u64::MAX and any merges
+                // there need to be merged with the entries from the other iterators.
+                None,
             ));
         } else {
             // When no merge operator is configured, wrap with iterator that errors on merge operands
