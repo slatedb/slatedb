@@ -251,7 +251,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
             buffered_entry: None,
             merge_different_expire_ts,
             now,
-            snapshot_barrier_seq
+            snapshot_barrier_seq,
         }
     }
 }

@@ -260,7 +260,13 @@ impl DbIterator {
         };
 
         if let Some(merge_operator) = merge_operator {
-            iter = Box::new(MergeOperatorIterator::new(merge_operator, iter, true, now, max_seq));
+            iter = Box::new(MergeOperatorIterator::new(
+                merge_operator,
+                iter,
+                true,
+                now,
+                max_seq,
+            ));
         } else {
             // When no merge operator is configured, wrap with iterator that errors on merge operands
             iter = Box::new(MergeOperatorRequiredIterator::new(iter));

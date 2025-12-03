@@ -203,7 +203,7 @@ impl TokioCompactionExecutorInner {
                 merge_iter,
                 false,
                 job_args.compaction_logical_clock_tick,
-                job_args.retention_min_seq
+                job_args.retention_min_seq,
             ))
         } else {
             Box::new(MergeOperatorRequiredIterator::new(merge_iter)) as Box<dyn KeyValueIterator>
@@ -374,23 +374,28 @@ impl TokioCompactionExecutorInner {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-    use bytes::{Bytes, BytesMut};
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use crate::{Db, MergeOperator, MergeOperatorError};
+    use super::*;
     use crate::bytes_range::BytesRange;
     use crate::clock::DefaultSystemClock;
     use crate::config::{FlushOptions, FlushType};
     use crate::sst_iter::SstView;
     use crate::stats::StatRegistry;
-    use crate::types::{ValueDeletable};
-    use super::*;
+    use crate::types::ValueDeletable;
+    use crate::{Db, MergeOperator, MergeOperatorError};
+    use bytes::{Bytes, BytesMut};
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use std::time::Duration;
 
     struct TestMergeOperator {}
 
     impl MergeOperator for TestMergeOperator {
-        fn merge(&self, _key: &Bytes, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+        fn merge(
+            &self,
+            _key: &Bytes,
+            existing_value: Option<Bytes>,
+            value: Bytes,
+        ) -> Result<Bytes, MergeOperatorError> {
             let mut result = BytesMut::new();
             existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
             result.extend_from_slice(value.as_ref());
@@ -409,9 +414,14 @@ mod tests {
         let db = Db::builder(path.clone(), os.clone())
             .with_system_clock(clock.clone())
             .build()
-            .await.unwrap();
+            .await
+            .unwrap();
         let table_store = db.inner.table_store.clone();
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path.as_str()), os.clone(), clock.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(path.as_str()),
+            os.clone(),
+            clock.clone(),
+        ));
         let executor = TokioCompactionExecutor::new(
             handle,
             options,
@@ -421,7 +431,7 @@ mod tests {
             Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
             clock,
             manifest_store.clone(),
-            Some(Arc::new(TestMergeOperator{}))
+            Some(Arc::new(TestMergeOperator {})),
         );
 
         // write some merges and get the seq number after the second merge
@@ -431,7 +441,11 @@ mod tests {
         let started_seq = snapshot.started_seq();
         db.merge(b"foo", b"2").await.unwrap();
         db.merge(b"foo", b"3").await.unwrap();
-        db.flush_with_options(FlushOptions { flush_type: FlushType::MemTable}).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
         // start a compaction of a single sst
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         assert_eq!(1, manifest.core.l0.len());
@@ -449,37 +463,47 @@ mod tests {
         executor.start_compaction_job(compaction);
 
         // wait for it to finish
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            async move {
-                loop {
-                    let msg = rx.recv().await.unwrap();
-                    if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
-                        return result;
-                    }
+        let result = tokio::time::timeout(Duration::from_secs(5), async move {
+            loop {
+                let msg = rx.recv().await.unwrap();
+                if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
+                    return result;
                 }
             }
-        ).await.unwrap().unwrap();
+        })
+        .await
+        .unwrap()
+        .unwrap();
 
         assert_eq!(1, result.ssts.len());
         let sst = result.ssts[0].clone();
         let mut iter = SstIterator::new(
             SstView::Borrowed(&sst, BytesRange::from(..)),
             table_store.clone(),
-            SstIteratorOptions::default()
-        ).unwrap();
+            SstIteratorOptions::default(),
+        )
+        .unwrap();
         iter.init().await.unwrap();
         let next = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
-        assert_eq!(next.value, ValueDeletable::Merge(Bytes::from(b"3".as_slice())));
+        assert_eq!(
+            next.value,
+            ValueDeletable::Merge(Bytes::from(b"3".as_slice()))
+        );
         assert_eq!(next.seq, started_seq + 2);
         let next = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
-        assert_eq!(next.value, ValueDeletable::Merge(Bytes::from(b"2".as_slice())));
+        assert_eq!(
+            next.value,
+            ValueDeletable::Merge(Bytes::from(b"2".as_slice()))
+        );
         assert_eq!(next.seq, started_seq + 1);
         let next = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
-        assert_eq!(next.value, ValueDeletable::Merge(Bytes::from(b"01".as_slice())));
+        assert_eq!(
+            next.value,
+            ValueDeletable::Merge(Bytes::from(b"01".as_slice()))
+        );
         assert_eq!(next.seq, started_seq);
         assert!(iter.next_entry().await.unwrap().is_none());
     }

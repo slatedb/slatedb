@@ -1408,16 +1408,6 @@ impl DbRead for Db {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-    use chrono::TimeDelta;
-    #[cfg(feature = "test-util")]
-    use chrono::{TimeZone, Utc};
-    use fail_parallel::FailPointRegistry;
-    use std::collections::BTreeMap;
-    use std::collections::Bound::Included;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-    use bytes::BytesMut;
     use super::*;
     use crate::cached_object_store::stats::{
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
@@ -1448,11 +1438,23 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
     use crate::types::RowEntry;
-    use crate::{proptest_util, test_utils, CloseReason, KeyValue, MergeOperator, MergeOperatorError};
+    use crate::{
+        proptest_util, test_utils, CloseReason, KeyValue, MergeOperator, MergeOperatorError,
+    };
+    use async_trait::async_trait;
+    use bytes::BytesMut;
+    use chrono::TimeDelta;
+    #[cfg(feature = "test-util")]
+    use chrono::{TimeZone, Utc};
+    use fail_parallel::FailPointRegistry;
     use futures::{future, future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use proptest::test_runner::{TestRng, TestRunner};
+    use std::collections::BTreeMap;
+    use std::collections::Bound::Included;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
     use tokio::runtime::Runtime;
     use tracing::info;
 
@@ -3770,7 +3772,12 @@ mod tests {
         struct TestMergeOperator {}
 
         impl MergeOperator for TestMergeOperator {
-            fn merge(&self, _key: &Bytes, existing_value: Option<Bytes>, value: Bytes) -> Result<Bytes, MergeOperatorError> {
+            fn merge(
+                &self,
+                _key: &Bytes,
+                existing_value: Option<Bytes>,
+                value: Bytes,
+            ) -> Result<Bytes, MergeOperatorError> {
                 let mut result = BytesMut::new();
                 existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
                 result.extend_from_slice(value.as_ref());
@@ -3782,13 +3789,13 @@ mod tests {
         let path = "/tmp/testdb";
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
-            .with_merge_operator(Arc::new(TestMergeOperator{}))
-            .with_compaction_scheduler_supplier(Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-                SizeTieredCompactionSchedulerOptions {
+            .with_merge_operator(Arc::new(TestMergeOperator {}))
+            .with_compaction_scheduler_supplier(Arc::new(
+                SizeTieredCompactionSchedulerSupplier::new(SizeTieredCompactionSchedulerOptions {
                     min_compaction_sources: 2,
                     ..SizeTieredCompactionSchedulerOptions::default()
-                }
-            )))
+                }),
+            ))
             .build()
             .await
             .unwrap();
@@ -3796,9 +3803,17 @@ mod tests {
 
         db.merge(b"foo", b"0").await.unwrap();
         let snapshot = db.snapshot().await.unwrap();
-        db.flush_with_options(FlushOptions{ flush_type: FlushType::MemTable }).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
         db.merge(b"foo", b"1").await.unwrap();
-        db.flush_with_options(FlushOptions{ flush_type: FlushType::MemTable }).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
 
         // await a compaction
         let db_poll = db.clone();
@@ -3812,7 +3827,9 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let result = snapshot.get(b"foo").await.unwrap();
         assert_eq!(result, Some(Bytes::copy_from_slice(b"0")));

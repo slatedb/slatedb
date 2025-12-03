@@ -8,8 +8,8 @@ use crate::clock::SystemClock;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::seq_tracker::{FindOption, SequenceTracker};
-use crate::types::{RowEntry, ValueDeletable};
 use crate::types::ValueDeletable::Tombstone;
+use crate::types::{RowEntry, ValueDeletable};
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -104,7 +104,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                         expire_ts: None,
                         create_ts: entry.create_ts,
                     }
-                },
+                }
                 _ => entry,
             };
 
