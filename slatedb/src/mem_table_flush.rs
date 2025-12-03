@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot::Sender;
 use tracing::instrument;
+use crate::merge_operator::MergeOperatorType;
 
 pub(crate) const MEMTABLE_FLUSHER_TASK_NAME: &str = "memtable_writer";
 
@@ -34,11 +35,16 @@ pub(crate) enum MemtableFlushMsg {
 pub(crate) struct MemtableFlusher {
     db_inner: Arc<DbInner>,
     manifest: FenceableManifest,
+    merge_operator: Option<MergeOperatorType>,
 }
 
 impl MemtableFlusher {
-    pub(crate) fn new(db_inner: Arc<DbInner>, manifest: FenceableManifest) -> Self {
-        Self { db_inner, manifest }
+    pub(crate) fn new(
+        db_inner: Arc<DbInner>,
+        manifest: FenceableManifest,
+        merge_operator: Option<MergeOperatorType>
+    ) -> Self {
+        Self { db_inner, manifest, merge_operator }
     }
 
     pub(crate) async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
@@ -121,9 +127,20 @@ impl MemtableFlusher {
                     .rng()
                     .gen_ulid(self.db_inner.system_clock.as_ref()),
             );
+            // TODO: should we max with manifest?
+            let min_active_snapshot_seq = self.db_inner.txn_manager.min_active_seq();
+            let memtable_tick = imm_memtable.table().last_tick();
             let sst_handle = self
                 .db_inner
-                .flush_imm_table(&id, imm_memtable.table(), true)
+                .flush_imm_table(
+                    &id,
+                    imm_memtable.table(),
+                    true,
+                    min_active_snapshot_seq,
+                    self.merge_operator.clone(),
+                    memtable_tick,
+                    self.db_inner.system_clock.clone(),
+                )
                 .await?;
             fail_point!(
                 Arc::clone(&self.db_inner.fp_registry),
@@ -134,8 +151,6 @@ impl MemtableFlusher {
                 .last_seq()
                 .expect("flush of l0 with no entries");
             {
-                let min_active_snapshot_seq = self.db_inner.txn_manager.min_active_seq();
-
                 let mut guard = self.db_inner.state.write();
                 guard.modify(|modifier| {
                     let popped = modifier
@@ -149,7 +164,6 @@ impl MemtableFlusher {
                         imm_memtable.recent_flushed_wal_id();
 
                     // ensure the persisted manifest tick never goes backwards in time
-                    let memtable_tick = imm_memtable.table().last_tick();
                     modifier.state.manifest.value.core.last_l0_clock_tick = cmp::max(
                         modifier.state.manifest.value.core.last_l0_clock_tick,
                         memtable_tick,

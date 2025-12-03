@@ -209,7 +209,6 @@ impl TokioCompactionExecutorInner {
             Box::new(MergeOperatorRequiredIterator::new(merge_iter)) as Box<dyn KeyValueIterator>
         };
 
-        let stored_manifest = StoredManifest::load(self.manifest_store.clone()).await?;
         let mut retention_iter = RetentionIterator::new(
             merge_iter,
             None,
@@ -217,7 +216,6 @@ impl TokioCompactionExecutorInner {
             job_args.is_dest_last_run,
             job_args.compaction_logical_clock_tick,
             self.clock.clone(),
-            Arc::new(stored_manifest.db_state().sequence_tracker.clone()),
         )
         .await?;
         retention_iter.init().await?;

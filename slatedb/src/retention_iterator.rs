@@ -20,8 +20,9 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     /// The upstream iterator providing entries in decreasing order of sequence numbers
     inner: T,
     /// Retention time duration. Entries with create_ts older than (current_time - retention_time)
-    /// will be filtered out (except the latest version)
-    retention_timeout: Option<Duration>,
+    /// will be filtered out (except the latest version), and
+    /// Historical sequence metadata used to translate sequence numbers into wall-clock timestamps.
+    retention_timeout: Option<(Duration, Arc<SequenceTracker>)>,
     /// The min sequence number to retain. It's taken from the minimum sequence number of the
     /// active snapshots.
     retention_min_seq: Option<u64>,
@@ -34,8 +35,6 @@ pub(crate) struct RetentionIterator<T: KeyValueIterator> {
     compaction_start_ts: i64,
     /// The system clock used to get the current timestamp. This is used on handling retention.
     system_clock: Arc<dyn SystemClock>,
-    /// Historical sequence metadata used to translate sequence numbers into wall-clock timestamps.
-    sequence_tracker: Arc<SequenceTracker>,
     /// The total number of bytes processed so far
     total_bytes_processed: u64,
 }
@@ -44,12 +43,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
     /// Creates a new retention iterator with the specified retention policy
     pub(crate) async fn new(
         inner: T,
-        retention_timeout: Option<Duration>,
+        retention_timeout: Option<(Duration, Arc<SequenceTracker>)>,
         retention_min_seq: Option<u64>,
         filter_tombstone: bool,
         compaction_start_ts: i64,
         system_clock: Arc<dyn SystemClock>,
-        sequence_tracker: Arc<SequenceTracker>,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
@@ -58,7 +56,6 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             filter_tombstone,
             compaction_start_ts,
             system_clock,
-            sequence_tracker,
             buffer: RetentionBuffer::new(),
             total_bytes_processed: 0,
         })
@@ -74,10 +71,9 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
         versions: BTreeMap<Reverse<u64>, RowEntry>,
         compaction_start_ts: i64,
         system_clock: Arc<dyn SystemClock>,
-        retention_timeout: Option<Duration>,
+        retention_timeout: Option<&(Duration, Arc<SequenceTracker>)>,
         retention_min_seq: Option<u64>,
         filter_tombstone: bool,
-        sequence_tracker: Arc<SequenceTracker>,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
         let current_system_ts = system_clock.now().timestamp_millis();
@@ -136,7 +132,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             // Note: We use OR logic below because we keep iterating as long as the entry is within
             // EITHER the time window OR the seq window. We only stop when it's outside BOTH.
             let continue_retain_by_time = retention_timeout
-                .map(|timeout| {
+                .map(|(timeout, sequence_tracker)| {
                     let create_sys_ts = sequence_tracker
                         // Use RoundUp to conservatively estimate creation time. For example:
                         // - If retention window is 10min and current time is 12:00:00
@@ -234,7 +230,7 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                 RetentionBufferState::NeedProcess => {
                     // Apply retention filtering to collected versions
                     let compaction_start_ts = self.compaction_start_ts;
-                    let retention_timeout = self.retention_timeout;
+                    let retention_timeout = self.retention_timeout.as_ref();
                     let retention_min_seq = self.retention_min_seq;
                     let system_clock = self.system_clock.clone();
                     self.buffer.process_retention(|versions| {
@@ -245,7 +241,6 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
                             retention_timeout,
                             retention_min_seq,
                             self.filter_tombstone,
-                            self.sequence_tracker.clone(),
                         )
                     })?;
                 }
@@ -1013,10 +1008,9 @@ mod tests {
             versions,
             test_case.compaction_start_ts,
             system_clock,
-            test_case.retention_timeout,
+            test_case.retention_timeout.map(|t| (t, Arc::new(SequenceTracker::new()))).as_ref(),
             test_case.retention_min_seq,
             test_case.filter_tombstone,
-            Arc::new(SequenceTracker::new()),
         );
 
         // Convert filtered versions back to expected order
@@ -1125,10 +1119,9 @@ mod tests {
             versions,
             0,
             system_clock.clone(),
-            Some(timeout),
+            Some((timeout, tracker.clone())).as_ref(),
             None,
             false,
-            tracker.clone(),
         );
 
         let derived_ts = sorted_points

@@ -224,6 +224,10 @@ impl DbInner {
                     &SsTableId::Wal(empty_wal_id),
                     empty_wal.table().clone(),
                     false,
+                    None,
+                    None,
+                    0,
+                    self.system_clock.clone()
                 )
                 .await
             {

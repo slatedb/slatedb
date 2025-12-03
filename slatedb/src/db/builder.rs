@@ -508,7 +508,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
         task_executor.add_handler(
             MEMTABLE_FLUSHER_TASK_NAME.to_string(),
-            Box::new(MemtableFlusher::new(inner.clone(), manifest)),
+            Box::new(MemtableFlusher::new(inner.clone(), manifest, merge_operator.clone())),
             memtable_flush_rx,
             &tokio_handle,
         )?;
