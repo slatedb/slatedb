@@ -332,6 +332,10 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 Ok(sr) => self
                     .finish_compaction(id, sr)
                     .await
+                    .map_err(|e| {
+                        error!("error finishing compaction job: {}", e);
+                        e
+                    })
                     .expect("fatal error finishing compaction"),
                 Err(err) => {
                     error!("error executing compaction [error={:#?}]", err);
@@ -693,7 +697,10 @@ impl CompactorEventHandler {
             this_executor.start_compaction_job(job_args);
         })
         .await
-        .map_err(|_| SlateDBError::CompactionExecutorFailed);
+        .map_err(|e| {
+            error!("failed to start compaction job: {:?}", e);
+            SlateDBError::CompactionExecutorFailed
+        });
         #[cfg(dst)]
         let result = tokio::spawn(async move {
             this_executor.start_compaction_job(job_args);
