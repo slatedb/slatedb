@@ -1778,6 +1778,9 @@ mod tests {
             .await
             .unwrap();
 
+        // take a snapshot to ensure the keys are retained
+        let snapshot = db.snapshot().await.unwrap();
+
         // write enough rows with the same key that we yield an L0 SST with multiple blocks
         let mut last_val: String = "foo".to_string();
         for x in 0..4096 {
@@ -1824,6 +1827,7 @@ mod tests {
             Some(Bytes::copy_from_slice(last_val.as_bytes())),
             db.get(b"key").await.unwrap()
         );
+        drop(snapshot);
         db.close().await.unwrap();
     }
 
