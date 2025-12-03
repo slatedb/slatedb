@@ -459,6 +459,7 @@ mod tests {
             compaction_logical_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(started_seq),
+            estimated_source_bytes: 0,
         };
         executor.start_compaction_job(compaction);
 
