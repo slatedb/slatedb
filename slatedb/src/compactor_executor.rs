@@ -208,7 +208,8 @@ impl TokioCompactionExecutorInner {
             Box::new(MergeOperatorRequiredIterator::new(merge_iter)) as Box<dyn KeyValueIterator>
         };
 
-        let stored_manifest = StoredManifest::load(self.manifest_store.clone()).await?;
+        let stored_manifest =
+            StoredManifest::load(self.manifest_store.clone(), self.clock.clone()).await?;
         let mut retention_iter = RetentionIterator::new(
             merge_iter,
             None,

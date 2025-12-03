@@ -1,5 +1,5 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::{DefaultSystemClock, SystemClock};
+use crate::clock::SystemClock;
 use crate::config::CheckpointOptions;
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -210,43 +210,39 @@ impl StoredManifest {
         parent_path: String,
         source_checkpoint_id: Uuid,
         rand: Arc<DbRand>,
+        clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let manifest = Manifest::cloned(parent_manifest, parent_path, source_checkpoint_id, rand);
-        Self::init(
-            clone_manifest_store,
-            manifest,
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
+        Self::init(clone_manifest_store, manifest, clock).await
     }
 
     /// Load the current manifest from the supplied manifest store. If there is no db at the
     /// manifest store's path then this fn returns None. Otherwise, on success it returns a
     /// Result with an instance of StoredManifest.
-    pub(crate) async fn try_load(store: Arc<ManifestStore>) -> Result<Option<Self>, SlateDBError> {
+    pub(crate) async fn try_load(
+        store: Arc<ManifestStore>,
+        clock: Arc<dyn SystemClock>,
+    ) -> Result<Option<Self>, SlateDBError> {
         let Some(inner) = SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner)
             as Arc<dyn TransactionalStorageProtocol<Manifest, MonotonicId>>)
         .await?
         else {
             return Ok(None);
         };
-        Ok(Some(Self {
-            inner,
-            clock: Arc::clone(&store.clock),
-        }))
+        Ok(Some(Self { inner, clock }))
     }
 
     /// Load the current manifest from the supplied manifest store. If successful,
     /// this method returns a [`Result`] with an instance of [`StoredManifest`].
     /// If no manifests could be found, the error [`LatestTransactionalObjectVersionMissing`] is returned.
-    pub(crate) async fn load(store: Arc<ManifestStore>) -> Result<Self, SlateDBError> {
+    pub(crate) async fn load(
+        store: Arc<ManifestStore>,
+        clock: Arc<dyn SystemClock>,
+    ) -> Result<Self, SlateDBError> {
         SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner)
             as Arc<dyn TransactionalStorageProtocol<Manifest, MonotonicId>>)
         .await?
-        .map(|inner| Self {
-            inner,
-            clock: Arc::clone(&store.clock),
-        })
+        .map(|inner| Self { inner, clock })
         .ok_or(LatestTransactionalObjectVersionMissing)
     }
 
@@ -473,6 +469,10 @@ where
 
 pub(crate) struct ManifestStore {
     inner: Arc<dyn SequencedStorageProtocol<Manifest>>,
+
+    #[allow(dead_code)]
+    // TODO: remove this unused field after the StoredManifest's create and load methods
+    // have been changed to accept the system clock as a parameter.
     clock: Arc<dyn SystemClock>,
 }
 
@@ -643,7 +643,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let mut sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
         sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
 
         let result = sm2.update(sm2.prepare_dirty().unwrap()).await;
@@ -699,7 +701,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let mut sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
         let mut dirty = sm.prepare_dirty().unwrap();
         dirty.value.core.next_wal_sst_id = 123;
         sm.update(dirty).await.unwrap();
@@ -723,7 +727,9 @@ mod tests {
         .unwrap();
         let timeout = Duration::from_secs(300);
         for i in 1..5 {
-            let sm = StoredManifest::load(ms.clone()).await.unwrap();
+            let sm = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
             FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
@@ -748,7 +754,9 @@ mod tests {
             FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
 
         FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()))
             .await
@@ -771,7 +779,9 @@ mod tests {
         .unwrap();
         let timeout = Duration::from_secs(300);
         for i in 1..5 {
-            let sm = StoredManifest::load(ms.clone()).await.unwrap();
+            let sm = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
             FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
@@ -796,7 +806,9 @@ mod tests {
             FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
 
         FenceableManifest::init_compactor(sm2, timeout, Arc::new(DefaultSystemClock::new()))
             .await
@@ -843,7 +855,9 @@ mod tests {
             FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
         let mut compactor2 =
             FenceableManifest::init_compactor(sm2, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
@@ -872,7 +886,9 @@ mod tests {
             FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-        let sm2 = StoredManifest::load(ms.clone()).await.unwrap();
+        let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
         let mut fm2 =
             FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()))
                 .await
@@ -1342,7 +1358,9 @@ mod tests {
         .await
         .unwrap();
 
-        let sm_b = StoredManifest::load(Arc::clone(&ms)).await.unwrap();
+        let sm_b = StoredManifest::load(Arc::clone(&ms), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
         let timeout = Duration::from_secs(300);
 
         let mut fm_b =

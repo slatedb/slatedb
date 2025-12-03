@@ -371,7 +371,8 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
         let manifest = FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
@@ -1613,7 +1614,10 @@ mod tests {
         assert_eq!(result, Some(Bytes::from("new_value")));
 
         // verify the compacted state in manifest
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         assert!(
             !db_state.compacted.is_empty(),
@@ -1677,7 +1681,10 @@ mod tests {
 
         // then: verify that merges with different expire times are NOT merged together
         // Reading should get only the latest merge since they weren't combined
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         assert!(
             !db_state.compacted.is_empty(),
@@ -2041,7 +2048,10 @@ mod tests {
             )
             .await
             .unwrap();
-            let manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+            let manifest =
+                StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                    .await
+                    .unwrap();
             Self {
                 manifest,
                 manifest_store,
@@ -2506,7 +2516,10 @@ mod tests {
     }
 
     async fn get_db_state(manifest_store: Arc<ManifestStore>) -> CoreDbState {
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         stored_manifest.db_state().clone()
     }
 
