@@ -316,6 +316,7 @@ impl WriteBatch {
                 it,
                 false,
                 now,
+                None,
             ));
         }
 

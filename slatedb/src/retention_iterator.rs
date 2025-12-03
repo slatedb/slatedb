@@ -8,8 +8,8 @@ use crate::clock::SystemClock;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::seq_tracker::{FindOption, SequenceTracker};
-use crate::types::RowEntry;
 use crate::types::ValueDeletable::Tombstone;
+use crate::types::{RowEntry, ValueDeletable};
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -85,9 +85,15 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
+            let is_merge = matches!(&entry.value, ValueDeletable::Merge(_));
             let entry = match entry.expire_ts.as_ref() {
                 Some(expire_ts) if *expire_ts <= compaction_start_ts => {
-                    // insert a tombstone instead of just filtering out the
+                    if is_merge {
+                        // just skip expired merge entries rather than write a tombstone
+                        // as earlier merges may still be un-expired
+                        continue;
+                    }
+                    // for values, insert a tombstone instead of just filtering out the
                     // value in the iterator because this may otherwise "revive"
                     // an older version of the KV pair that has a larger TTL in
                     // a lower level of the LSM tree
@@ -101,6 +107,7 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 }
                 _ => entry,
             };
+
             let entry_seq = entry.seq;
 
             // always keep the entry with latest version.
@@ -148,10 +155,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 .map(|min_seq| entry_seq > min_seq)
                 .unwrap_or(false);
 
-            let continue_retain = continue_retain_by_time || continue_retain_by_seq;
+            let continue_retain = continue_retain_by_time || continue_retain_by_seq || is_merge;
             if !continue_retain {
-                // if we find the first entry that neither in retention window by time nor by seq,
-                // we should break the loop to filter out the earlier versions of the same key.
+                // if we find the first non-merge entry that's neither in retention window by time
+                // nor by seq we should break the loop to filter out the earlier versions of the
+                // same key.
                 break;
             }
         }
@@ -929,9 +937,68 @@ mod tests {
         ],
         filter_tombstone: true, // tombstone is not in the tail, so not filtered out
     })]
-    #[tokio::test]
+    #[case(RetentionIteratorTestCase {
+        name: "filter_out_expired_merge_entries",
+        input_entries: vec![
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
+            RowEntry::new_merge(b"key1", b"value2", 2).with_create_ts(900).with_expire_ts(950), // Expired
+            RowEntry::new_merge(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
+        ],
+        retention_timeout: Some(Duration::ZERO),
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
+            RowEntry::new_merge(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
+        ],
+        filter_tombstone: false,
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "retain_up_to_first_non_merge_entry",
+        input_entries: vec![
+            RowEntry::new_merge(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+        retention_timeout: Some(Duration::ZERO),
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_merge(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+        ],
+        filter_tombstone: false,
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "retain_up_to_first_non_merge_entry_when_seq_num_provided",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+        retention_timeout: Some(Duration::ZERO),
+        retention_min_seq: Some(4),
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+        ],
+        filter_tombstone: false,
+    })]
+    #[test]
     #[cfg(feature = "test-util")]
-    async fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
+    fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
         use crate::clock::MockSystemClock;
         use crate::test_utils::TestIterator;
 
