@@ -530,6 +530,7 @@ mod tests {
         unsorted_data: Vec<RowEntry>,
         expected: Vec<RowEntry>,
         merge_different_expire_ts: bool,
+        snapshot_barrier_seq: Option<u64>,
     }
 
     impl Default for TestCase {
@@ -538,6 +539,7 @@ mod tests {
                 unsorted_data: vec![],
                 expected: vec![],
                 merge_different_expire_ts: true,
+                snapshot_barrier_seq: None,
             }
         }
     }
@@ -580,7 +582,8 @@ mod tests {
         ],
         // On write path (compaction, memtable), we don't merge entries
         // with different expire timestamps to allow per-element expiration.
-        merge_different_expire_ts: false
+        merge_different_expire_ts: false,
+        ..TestCase::default()
     })]
     #[case::merge_with_tombstone(TestCase {
         unsorted_data: vec![
@@ -609,6 +612,22 @@ mod tests {
         ],
         ..TestCase::default()
     })]
+    #[case::merge_with_snapshot_barrier(TestCase {
+        unsorted_data: vec![
+            RowEntry::new_merge(b"key1", b"1", 1),
+            RowEntry::new_merge(b"key1", b"2", 2),
+            RowEntry::new_merge(b"key1", b"3", 3),
+            RowEntry::new_merge(b"key1", b"4", 4),
+            RowEntry::new_value(b"key1", b"5", 5)
+        ],
+        expected: vec![
+            RowEntry::new_value(b"key1", b"5", 5),
+            RowEntry::new_merge(b"key1", b"4", 4),
+            RowEntry::new_merge(b"key1", b"123", 3),
+        ],
+        snapshot_barrier_seq: Some(3),
+        ..TestCase::default()
+    })]
     #[tokio::test]
     async fn test(#[case] test_case: TestCase) {
         let merge_operator = Arc::new(MockMergeOperator {});
@@ -617,7 +636,7 @@ mod tests {
             test_case.unsorted_data.into(),
             test_case.merge_different_expire_ts,
             0,
-            None,
+            test_case.snapshot_barrier_seq,
         );
         assert_iterator(&mut iterator, test_case.expected).await;
     }

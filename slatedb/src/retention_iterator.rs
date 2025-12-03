@@ -937,9 +937,68 @@ mod tests {
         ],
         filter_tombstone: true, // tombstone is not in the tail, so not filtered out
     })]
-    #[tokio::test]
+    #[case(RetentionIteratorTestCase {
+        name: "filter_out_expired_merge_entries",
+        input_entries: vec![
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
+            RowEntry::new_merge(b"key1", b"value2", 2).with_create_ts(900).with_expire_ts(950), // Expired
+            RowEntry::new_merge(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
+        ],
+        retention_timeout: Some(Duration::ZERO),
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
+            RowEntry::new_merge(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
+        ],
+        filter_tombstone: false,
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "retain_up_to_first_non_merge_entry",
+        input_entries: vec![
+            RowEntry::new_merge(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+        retention_timeout: Some(Duration::ZERO),
+        retention_min_seq: None,
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_merge(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+        ],
+        filter_tombstone: false,
+    })]
+    #[case(RetentionIteratorTestCase {
+        name: "retain_up_to_first_non_merge_entry_when_seq_num_provided",
+        input_entries: vec![
+            RowEntry::new_value(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
+        ],
+        retention_timeout: Some(Duration::ZERO),
+        retention_min_seq: Some(4),
+        system_clock_ts: 1000,
+        compaction_start_ts: 1000,
+        expected_entries: vec![
+            RowEntry::new_value(b"key1", b"value5", 5).with_create_ts(1050),
+            RowEntry::new_merge(b"key1", b"value4", 4).with_create_ts(1000),
+            RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+        ],
+        filter_tombstone: false,
+    })]
+    #[test]
     #[cfg(feature = "test-util")]
-    async fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
+    fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
         use crate::clock::MockSystemClock;
         use crate::test_utils::TestIterator;
 
