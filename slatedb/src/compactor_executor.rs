@@ -203,6 +203,7 @@ impl TokioCompactionExecutorInner {
                 merge_iter,
                 false,
                 job_args.compaction_logical_clock_tick,
+                job_args.retention_min_seq
             ))
         } else {
             Box::new(MergeOperatorRequiredIterator::new(merge_iter)) as Box<dyn KeyValueIterator>
@@ -453,11 +454,8 @@ mod tests {
             async move {
                 loop {
                     let msg = rx.recv().await.unwrap();
-                    match msg {
-                        CompactorMessage::CompactionJobFinished { id, result } => {
-                            return result;
-                        }
-                        _ => {}
+                    if let CompactorMessage::CompactionJobFinished { id: _, result } = msg {
+                        return result;
                     }
                 }
             }

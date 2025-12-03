@@ -3779,15 +3779,13 @@ mod tests {
         }
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let clock = Arc::new(DefaultSystemClock::new());
         let path = "/tmp/testdb";
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone(), clock.clone()));
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
             .with_merge_operator(Arc::new(TestMergeOperator{}))
             .with_compaction_scheduler_supplier(Arc::new(SizeTieredCompactionSchedulerSupplier::new(
                 SizeTieredCompactionSchedulerOptions {
-                    min_compaction_sources: 1,
+                    min_compaction_sources: 2,
                     ..SizeTieredCompactionSchedulerOptions::default()
                 }
             )))
@@ -3798,7 +3796,7 @@ mod tests {
 
         db.merge(b"foo", b"0").await.unwrap();
         let snapshot = db.snapshot().await.unwrap();
-        //db.flush_with_options(FlushOptions{ flush_type: FlushType::MemTable }).await.unwrap();
+        db.flush_with_options(FlushOptions{ flush_type: FlushType::MemTable }).await.unwrap();
         db.merge(b"foo", b"1").await.unwrap();
         db.flush_with_options(FlushOptions{ flush_type: FlushType::MemTable }).await.unwrap();
 
@@ -3808,7 +3806,7 @@ mod tests {
             loop {
                 {
                     let db_state = db_poll.inner.state.read();
-                    if db_state.state().core().compacted.len() > 0 {
+                    if !db_state.state().core().compacted.is_empty() {
                         return;
                     }
                 }

@@ -8,7 +8,7 @@ use crate::clock::SystemClock;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::seq_tracker::{FindOption, SequenceTracker};
-use crate::types::RowEntry;
+use crate::types::{RowEntry, ValueDeletable};
 use crate::types::ValueDeletable::Tombstone;
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
@@ -85,9 +85,15 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
             // but for now we do it inline
+            let is_merge = matches!(&entry.value, ValueDeletable::Merge(_));
             let entry = match entry.expire_ts.as_ref() {
                 Some(expire_ts) if *expire_ts <= compaction_start_ts => {
-                    // insert a tombstone instead of just filtering out the
+                    if is_merge {
+                        // just skip expired merge entries rather than write a tombstone
+                        // as earlier merges may still be un-expired
+                        continue;
+                    }
+                    // for values, insert a tombstone instead of just filtering out the
                     // value in the iterator because this may otherwise "revive"
                     // an older version of the KV pair that has a larger TTL in
                     // a lower level of the LSM tree
@@ -98,9 +104,10 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                         expire_ts: None,
                         create_ts: entry.create_ts,
                     }
-                }
+                },
                 _ => entry,
             };
+
             let entry_seq = entry.seq;
 
             // always keep the entry with latest version.
@@ -148,10 +155,11 @@ impl<T: KeyValueIterator> RetentionIterator<T> {
                 .map(|min_seq| entry_seq > min_seq)
                 .unwrap_or(false);
 
-            let continue_retain = continue_retain_by_time || continue_retain_by_seq;
+            let continue_retain = continue_retain_by_time || continue_retain_by_seq || is_merge;
             if !continue_retain {
-                // if we find the first entry that neither in retention window by time nor by seq,
-                // we should break the loop to filter out the earlier versions of the same key.
+                // if we find the first non-merge entry that neither in retention window by time nor
+                // by seq we should break the loop to filter out the earlier versions of the same
+                // key.
                 break;
             }
         }
