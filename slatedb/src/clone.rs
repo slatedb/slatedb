@@ -1,5 +1,5 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::{DefaultSystemClock, SystemClock};
+use crate::clock::SystemClock;
 use crate::config::CheckpointOptions;
 use crate::db_state::{CoreDbState, SsTableId};
 use crate::error::SlateDBError;
@@ -115,7 +115,8 @@ async fn create_clone_manifest(
             }
             None => {
                 let mut parent_manifest =
-                    load_initialized_manifest(parent_manifest_store.clone()).await?;
+                    load_initialized_manifest(parent_manifest_store.clone(), system_clock.clone())
+                        .await?;
                 let parent_checkpoint = get_or_create_parent_checkpoint(
                     &mut parent_manifest,
                     parent_checkpoint_id,
@@ -158,7 +159,7 @@ async fn create_clone_manifest(
             ))
         };
         let mut external_db_manifest =
-            load_initialized_manifest(external_db_manifest_store).await?;
+            load_initialized_manifest(external_db_manifest_store, system_clock.clone()).await?;
 
         if external_db_manifest
             .db_state()
@@ -278,10 +279,10 @@ async fn validate_external_dbs_contain_final_checkpoint(
 
 async fn load_initialized_manifest(
     manifest_store: Arc<ManifestStore>,
+    system_clock: Arc<dyn SystemClock>,
 ) -> Result<StoredManifest, SlateDBError> {
     let Some(manifest) =
-        StoredManifest::try_load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
-            .await?
+        StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?
     else {
         return Err(SlateDBError::LatestTransactionalObjectVersionMissing);
     };
@@ -473,7 +474,7 @@ mod tests {
             parent_path.to_string(),
             non_existent_source_checkpoint_id,
             rand.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            system_clock.clone(),
         )
         .await
         .unwrap();
@@ -540,7 +541,7 @@ mod tests {
             parent_path.to_string(),
             checkpoint_1.id,
             rand.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            system_clock.clone(),
         )
         .await
         .unwrap();
@@ -586,7 +587,7 @@ mod tests {
             original_parent_path.to_string(),
             uuid::Uuid::new_v4(),
             rand.clone(),
-            Arc::new(DefaultSystemClock::new()),
+            system_clock.clone(),
         )
         .await
         .unwrap();
@@ -774,8 +775,7 @@ mod tests {
             system_clock.clone(),
         ));
         let mut parent_manifest =
-            StoredManifest::load(parent_manifest_store, Arc::new(DefaultSystemClock::new()))
-                .await?;
+            StoredManifest::load(parent_manifest_store, system_clock.clone()).await?;
         parent_manifest.delete_checkpoint(checkpoint.id).await?;
 
         // Attempting to clone with a missing checkpoint should fail

@@ -1,5 +1,5 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
-use crate::clock::{DefaultSystemClock, SystemClock};
+use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::dispatcher::MessageHandlerExecutor;
@@ -231,7 +231,7 @@ impl Admin {
             .validate_no_wal_object_store_configured()
             .await?;
         let mut stored_manifest =
-            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new())).await?;
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         let checkpoint_id = self.rand.rng().gen_uuid();
         let checkpoint = stored_manifest
             .write_checkpoint(checkpoint_id, options)
@@ -257,7 +257,7 @@ impl Admin {
             self.system_clock.clone(),
         ));
         let mut stored_manifest =
-            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new())).await?;
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
@@ -285,7 +285,7 @@ impl Admin {
             self.system_clock.clone(),
         ));
         let mut stored_manifest =
-            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new())).await?;
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
