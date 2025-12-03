@@ -117,6 +117,18 @@ typedef struct CSdbScanResult {
     struct CSdbValue next_key;
 } CSdbScanResult;
 
+#define Uuid_VT_HIGH 4
+
+#define Uuid_VT_LOW 6
+
+#define BytesBound_VT_KEY 4
+
+#define BytesBound_VT_BOUND_TYPE 6
+
+#define BytesRange_VT_START_BOUND 4
+
+#define BytesRange_VT_END_BOUND 6
+
 #define SsTableInfo_VT_FIRST_KEY 4
 
 #define SsTableInfo_VT_INDEX_OFFSET 6
@@ -133,10 +145,6 @@ typedef struct CSdbScanResult {
 
 #define SsTableIndex_VT_BLOCK_META 4
 
-#define CompactedSstId_VT_HIGH 4
-
-#define CompactedSstId_VT_LOW 6
-
 #define CompactedSsTable_VT_ID 4
 
 #define CompactedSsTable_VT_INFO 6
@@ -145,13 +153,15 @@ typedef struct CSdbScanResult {
 
 #define SortedRun_VT_SSTS 6
 
-#define BytesBound_VT_KEY 4
+#define TieredCompactionSpec_VT_SORTED_RUNS 6
 
-#define BytesBound_VT_BOUND_TYPE 6
+#define Compaction_VT_SPEC_TYPE 6
 
-#define BytesRange_VT_START_BOUND 4
+#define Compaction_VT_SPEC 8
 
-#define BytesRange_VT_END_BOUND 6
+#define CompactionStateV1_VT_COMPACTOR_EPOCH 4
+
+#define CompactionStateV1_VT_RECENT_COMPACTIONS 6
 
 #define ExternalDb_VT_PATH 4
 
@@ -168,8 +178,6 @@ typedef struct CSdbScanResult {
 #define ManifestV1_VT_INITIALIZED 8
 
 #define ManifestV1_VT_WRITER_EPOCH 10
-
-#define ManifestV1_VT_COMPACTOR_EPOCH 12
 
 #define ManifestV1_VT_REPLAY_AFTER_WAL_ID 14
 

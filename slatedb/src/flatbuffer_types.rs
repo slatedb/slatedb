@@ -26,8 +26,8 @@ use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
-    CompactedSsTableArgs, CompactedSstId, CompactedSstIdArgs, CompressionFormat, SortedRun,
-    SortedRunArgs, Uuid, UuidArgs,
+    CompactedSsTableArgs, CompressionFormat, SortedRun, SortedRunArgs, Ulid as FbUlid,
+    UlidArgs as FbUlidArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
@@ -171,14 +171,11 @@ impl FlatBufferManifestCodec {
     }
 
     pub fn manifest(manifest: &ManifestV1) -> Manifest {
-        let l0_last_compacted = manifest
-            .l0_last_compacted()
-            .map(|id| Ulid::from((id.high(), id.low())));
+        let l0_last_compacted = manifest.l0_last_compacted().map(|id| id.ulid());
         let mut l0 = VecDeque::new();
 
         for man_sst in manifest.l0().iter() {
-            let man_sst_id = man_sst.id();
-            let sst_id = Compacted(Ulid::from((man_sst_id.high(), man_sst_id.low())));
+            let sst_id = Compacted(man_sst.id().ulid());
 
             let sst_info = FlatBufferSsTableInfoCodec::sst_info(&man_sst.info());
             let l0_sst = SsTableHandle::new_compacted(
@@ -272,7 +269,7 @@ impl FlatBufferManifestCodec {
     }
 }
 
-impl CompactedSstId<'_> {
+impl FbUlid<'_> {
     pub(crate) fn ulid(&self) -> Ulid {
         Ulid::from((self.high(), self.low()))
     }
@@ -306,21 +303,21 @@ impl<'b> DbFlatBufferBuilder<'b> {
         )
     }
 
-    fn add_compacted_sst_id(&mut self, ulid: &Ulid) -> WIPOffset<CompactedSstId<'b>> {
+    fn add_compacted_sst_id(&mut self, ulid: &Ulid) -> WIPOffset<FbUlid<'b>> {
         let uidu128 = ulid.0;
         let high = (uidu128 >> 64) as u64;
         let low = ((uidu128 << 64) >> 64) as u64;
-        CompactedSstId::create(&mut self.builder, &CompactedSstIdArgs { high, low })
+        FbUlid::create(&mut self.builder, &FbUlidArgs { high, low })
     }
 
     fn add_compacted_sst_ids<'a, I>(
         &mut self,
         sst_ids: I,
-    ) -> WIPOffset<Vector<'b, ForwardsUOffset<CompactedSstId<'b>>>>
+    ) -> WIPOffset<Vector<'b, ForwardsUOffset<FbUlid<'b>>>>
     where
         I: Iterator<Item = &'a SsTableId>,
     {
-        let sst_ids: Vec<WIPOffset<CompactedSstId>> = sst_ids
+        let sst_ids: Vec<WIPOffset<FbUlid>> = sst_ids
             .map(|id| id.unwrap_compacted_id())
             .map(|id| self.add_compacted_sst_id(&id))
             .collect();
