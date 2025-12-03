@@ -138,7 +138,7 @@ var _ = Describe("DB", func() {
 		It("should create iterator for full scan", func() {
 			iter, err := db.Scan(nil, nil)
 			Expect(err).NotTo(HaveOccurred())
-			defer iter.Close()
+			defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
 
 			count := 0
 			for {
@@ -155,7 +155,7 @@ var _ = Describe("DB", func() {
 		It("should create iterator for range scan", func() {
 			iter, err := db.Scan([]byte("item:"), []byte("item:99"))
 			Expect(err).NotTo(HaveOccurred())
-			defer iter.Close()
+			defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
 
 			count := 0
 			for {
@@ -180,7 +180,7 @@ var _ = Describe("DB", func() {
 
 			iter, err := db.ScanWithOptions([]byte("item:"), []byte("item:99"), opts)
 			Expect(err).NotTo(HaveOccurred())
-			defer iter.Close()
+			defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
 
 			count := 0
 			for {

@@ -60,4 +60,21 @@ var _ = Describe("DbReader", func() {
 			Expect(err).To(Equal(slatedb.ErrNotFound))
 		})
 	})
+
+	Describe("Operations with Options", func() {
+		DescribeTable(
+			"should get with custom read options",
+			func(opts *slatedb.ReadOptions) {
+				key := []byte("test_key")
+				value := []byte("test_value")
+				retrievedValue, err := dbReader.GetWithOptions(key, opts)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(retrievedValue).To(Equal(value))
+			},
+			Entry("memory not dirty", &slatedb.ReadOptions{DurabilityFilter: slatedb.DurabilityMemory}),
+			Entry("memory dirty", &slatedb.ReadOptions{DurabilityFilter: slatedb.DurabilityMemory, Dirty: true}),
+			Entry("remote not dirty", &slatedb.ReadOptions{DurabilityFilter: slatedb.DurabilityRemote}),
+			Entry("remote dirty", &slatedb.ReadOptions{DurabilityFilter: slatedb.DurabilityRemote, Dirty: true}),
+		)
+	})
 })
