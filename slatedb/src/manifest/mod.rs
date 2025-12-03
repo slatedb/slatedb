@@ -214,7 +214,7 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
-    use crate::clock::DefaultSystemClock;
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::manifest::store::{ManifestStore, StoredManifest};
 
     use crate::config::CheckpointOptions;
@@ -235,15 +235,16 @@ mod tests {
     #[tokio::test]
     async fn test_init_clone_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         let parent_path = Path::from("/tmp/test_parent");
         let parent_manifest_store = Arc::new(ManifestStore::new(
             &parent_path,
             object_store.clone(),
-            Arc::new(DefaultSystemClock::default()),
+            clock.clone(),
         ));
         let mut parent_manifest =
-            StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new())
+            StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new(), clock.clone())
                 .await
                 .unwrap();
         let checkpoint = parent_manifest
@@ -295,17 +296,21 @@ mod tests {
     #[tokio::test]
     async fn test_write_new_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         let path = Path::from("/tmp/test_db");
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             object_store.clone(),
-            Arc::new(DefaultSystemClock::default()),
+            clock.clone(),
         ));
-        let mut manifest =
-            StoredManifest::create_new_db(Arc::clone(&manifest_store), CoreDbState::new())
-                .await
-                .unwrap();
+        let mut manifest = StoredManifest::create_new_db(
+            Arc::clone(&manifest_store),
+            CoreDbState::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
 
         let checkpoint = manifest
             .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())

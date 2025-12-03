@@ -179,6 +179,11 @@ impl Compaction {
     pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
         self.bytes_processed = bytes;
     }
+
+    /// Gets the bytes processed so far.
+    pub(crate) fn bytes_processed(&self) -> u64 {
+        self.bytes_processed
+    }
 }
 
 impl Display for Compaction {
