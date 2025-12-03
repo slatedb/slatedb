@@ -230,7 +230,8 @@ impl Admin {
         manifest_store
             .validate_no_wal_object_store_configured()
             .await?;
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         let checkpoint_id = self.rand.rng().gen_uuid();
         let checkpoint = stored_manifest
             .write_checkpoint(checkpoint_id, options)
@@ -255,7 +256,8 @@ impl Admin {
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
             self.system_clock.clone(),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
@@ -282,7 +284,8 @@ impl Admin {
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
             self.system_clock.clone(),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;

@@ -345,7 +345,7 @@ impl CompactionExecuteBench {
             None,
         );
 
-        let manifest = StoredManifest::load(manifest_store).await?;
+        let manifest = StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
 
         let sources: Vec<SourceId> = source_sr_ids
             .clone()

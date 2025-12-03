@@ -85,54 +85,59 @@ async fn create_clone_manifest(
     rand: Arc<DbRand>,
     #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
 ) -> Result<StoredManifest, SlateDBError> {
-    let clone_manifest = match StoredManifest::try_load(clone_manifest_store.clone()).await? {
-        Some(initialized_clone_manifest) if initialized_clone_manifest.db_state().initialized => {
-            validate_attached_to_external_db(
-                parent_path.clone(),
-                parent_checkpoint_id,
-                &initialized_clone_manifest,
-            )?;
-            validate_external_dbs_contain_final_checkpoint(
-                parent_manifest_store,
-                parent_path.clone(),
-                &initialized_clone_manifest,
-                object_store.clone(),
-                system_clock.clone(),
-            )
-            .await?;
-            return Ok(initialized_clone_manifest);
-        }
-        Some(uninitialized_clone_manifest) => {
-            validate_attached_to_external_db(
-                parent_path.clone(),
-                parent_checkpoint_id,
-                &uninitialized_clone_manifest,
-            )?;
-            uninitialized_clone_manifest
-        }
-        None => {
-            let mut parent_manifest =
-                load_initialized_manifest(parent_manifest_store.clone()).await?;
-            let parent_checkpoint = get_or_create_parent_checkpoint(
-                &mut parent_manifest,
-                parent_checkpoint_id,
-                rand.clone(),
-            )
-            .await?;
-            let parent_manifest_at_checkpoint = parent_manifest_store
-                .read_manifest(parent_checkpoint.manifest_id)
+    let clone_manifest =
+        match StoredManifest::try_load(clone_manifest_store.clone(), system_clock.clone()).await? {
+            Some(initialized_clone_manifest)
+                if initialized_clone_manifest.db_state().initialized =>
+            {
+                validate_attached_to_external_db(
+                    parent_path.clone(),
+                    parent_checkpoint_id,
+                    &initialized_clone_manifest,
+                )?;
+                validate_external_dbs_contain_final_checkpoint(
+                    parent_manifest_store,
+                    parent_path.clone(),
+                    &initialized_clone_manifest,
+                    object_store.clone(),
+                    system_clock.clone(),
+                )
                 .await?;
+                return Ok(initialized_clone_manifest);
+            }
+            Some(uninitialized_clone_manifest) => {
+                validate_attached_to_external_db(
+                    parent_path.clone(),
+                    parent_checkpoint_id,
+                    &uninitialized_clone_manifest,
+                )?;
+                uninitialized_clone_manifest
+            }
+            None => {
+                let mut parent_manifest =
+                    load_initialized_manifest(parent_manifest_store.clone(), system_clock.clone())
+                        .await?;
+                let parent_checkpoint = get_or_create_parent_checkpoint(
+                    &mut parent_manifest,
+                    parent_checkpoint_id,
+                    rand.clone(),
+                )
+                .await?;
+                let parent_manifest_at_checkpoint = parent_manifest_store
+                    .read_manifest(parent_checkpoint.manifest_id)
+                    .await?;
 
-            StoredManifest::create_uninitialized_clone(
-                clone_manifest_store,
-                &parent_manifest_at_checkpoint,
-                parent_path.clone(),
-                parent_checkpoint.id,
-                rand,
-            )
-            .await?
-        }
-    };
+                StoredManifest::create_uninitialized_clone(
+                    clone_manifest_store,
+                    &parent_manifest_at_checkpoint,
+                    parent_path.clone(),
+                    parent_checkpoint.id,
+                    rand,
+                    system_clock.clone(),
+                )
+                .await?
+            }
+        };
 
     fail_point!(fp_registry, "create-clone-manifest-io-error", |_| Err(
         SlateDBError::from(std::io::Error::other("oops"))
@@ -154,7 +159,7 @@ async fn create_clone_manifest(
             ))
         };
         let mut external_db_manifest =
-            load_initialized_manifest(external_db_manifest_store).await?;
+            load_initialized_manifest(external_db_manifest_store, system_clock.clone()).await?;
 
         if external_db_manifest
             .db_state()
@@ -274,8 +279,11 @@ async fn validate_external_dbs_contain_final_checkpoint(
 
 async fn load_initialized_manifest(
     manifest_store: Arc<ManifestStore>,
+    system_clock: Arc<dyn SystemClock>,
 ) -> Result<StoredManifest, SlateDBError> {
-    let Some(manifest) = StoredManifest::try_load(manifest_store.clone()).await? else {
+    let Some(manifest) =
+        StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?
+    else {
         return Err(SlateDBError::LatestTransactionalObjectVersionMissing);
     };
 
@@ -466,6 +474,7 @@ mod tests {
             parent_path.to_string(),
             non_existent_source_checkpoint_id,
             rand.clone(),
+            system_clock.clone(),
         )
         .await
         .unwrap();
@@ -532,6 +541,7 @@ mod tests {
             parent_path.to_string(),
             checkpoint_1.id,
             rand.clone(),
+            system_clock.clone(),
         )
         .await
         .unwrap();
@@ -577,6 +587,7 @@ mod tests {
             original_parent_path.to_string(),
             uuid::Uuid::new_v4(),
             rand.clone(),
+            system_clock.clone(),
         )
         .await
         .unwrap();
@@ -763,7 +774,8 @@ mod tests {
             object_store.clone(),
             system_clock.clone(),
         ));
-        let mut parent_manifest = StoredManifest::load(parent_manifest_store).await?;
+        let mut parent_manifest =
+            StoredManifest::load(parent_manifest_store, system_clock.clone()).await?;
         parent_manifest.delete_checkpoint(checkpoint.id).await?;
 
         // Attempting to clone with a missing checkpoint should fail

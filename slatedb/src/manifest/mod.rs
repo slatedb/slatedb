@@ -264,6 +264,7 @@ mod tests {
             parent_path.to_string(),
             checkpoint.id,
             Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
         )
         .await
         .unwrap();

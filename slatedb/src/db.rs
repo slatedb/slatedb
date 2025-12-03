@@ -2861,7 +2861,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
         };
@@ -2938,7 +2941,10 @@ mod tests {
             object_store.clone(),
             clock.clone(),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
             ..SsTableFormat::default()
@@ -3023,7 +3029,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
             ..SsTableFormat::default()
@@ -3164,7 +3173,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
         };
@@ -3723,7 +3735,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
@@ -4354,7 +4369,9 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         );
-        let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap();
+        let mut sm = StoredManifest::load(Arc::new(ms), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
 
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
@@ -4659,7 +4676,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, i64::MIN);
@@ -4710,7 +4730,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, 11);
@@ -4872,7 +4895,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         FenceableManifest::init_writer(
             stored_manifest,
             Duration::from_secs(300),
