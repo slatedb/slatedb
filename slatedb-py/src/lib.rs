@@ -19,7 +19,6 @@ use ::slatedb::config::{
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
     ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
-use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::DBTransaction;
 use ::slatedb::Db;
