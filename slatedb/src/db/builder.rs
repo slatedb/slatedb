@@ -348,6 +348,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             ))
         });
 
+        info!("loaded block cache");
+
         let system_clock = self
             .system_clock
             .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
@@ -392,6 +394,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         };
 
+        info!("loaded cached object store");
+
         let maybe_cached_main_object_store: Arc<dyn ObjectStore> = match &cached_object_store {
             Some(cached_store) => cached_store.clone(),
             None => retrying_main_object_store.clone(),
@@ -404,6 +408,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             system_clock.clone(),
         ));
         let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
+
+        info!("loaded manifest");
 
         // Validate WAL object store configuration
         if let Some(latest_manifest) = &latest_manifest {
@@ -426,6 +432,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             None => HashMap::new(),
         };
 
+        info!("extract external ssts");
+
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -445,12 +453,16 @@ impl<P: Into<Path>> DbBuilder<P> {
             }),
         ));
 
+        info!("loaded table store");
+
         // Get next WAL ID before writing manifest
         let replay_after_wal_id = match &latest_manifest {
             Some(latest_stored_manifest) => latest_stored_manifest.db_state().replay_after_wal_id,
             None => 0,
         };
         let next_wal_id = table_store.next_wal_sst_id(replay_after_wal_id).await?;
+
+        info!("got next wal id");
 
         // Initialize the database
         let stored_manifest = match latest_manifest {
@@ -467,6 +479,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             system_clock.clone(),
         )
         .await?;
+
+        info!("fenced manifest");
 
         // Setup communication channels
         let (memtable_flush_tx, memtable_flush_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -492,10 +506,14 @@ impl<P: Into<Path>> DbBuilder<P> {
             .await?,
         );
 
+        info!("created inner");
+
         // Fence writers if WAL is enabled
         if inner.wal_enabled {
             inner.fence_writers(&mut manifest, next_wal_id).await?;
         }
+
+        info!("fenced writers");
 
         // Setup background tasks
         let tokio_handle = Handle::current();
@@ -574,6 +592,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             )?;
         }
 
+        info!("loaded compactor");
+
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
         // If either are set, we need to initialize the garbage collector.
         if self.settings.garbage_collector_options.is_some() || self.gc_runtime.is_some() {
@@ -592,6 +612,8 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Monitor background tasks
         task_executor.monitor_on(&tokio_handle)?;
+
+        info!("start wal replay");
 
         // Replay WAL
         inner.replay_wal().await?;
