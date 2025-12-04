@@ -202,6 +202,22 @@ impl Display for Compaction {
     }
 }
 
+/// Container for compactions tracked by the compactor alongside its epoch.
+#[derive(Clone, Debug)]
+pub(crate) struct Compactions {
+    pub(crate) compactor_epoch: u64,
+    pub(crate) recent_compactions: BTreeMap<Ulid, Compaction>,
+}
+
+impl Compactions {
+    fn new(compactor_epoch: u64) -> Self {
+        Self {
+            recent_compactions: BTreeMap::new(),
+            compactor_epoch,
+        }
+    }
+}
+
 /// Process-local runtime state owned by the compactor.
 ///
 /// This is the in-memory view that a single compactor task uses to:
@@ -209,16 +225,17 @@ impl Display for Compaction {
 /// - track in-flight compactions by id (ULID).
 pub struct CompactorState {
     manifest: DirtyObject<Manifest>,
-    compactions: BTreeMap<Ulid, Compaction>,
+    compactions: Compactions,
 }
 
 impl CompactorState {
     /// Creates a new compactor state seeded with the provided dirty manifest. Compactions are
     /// initialized empty.
     pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
+        let compactor_epoch = manifest.value.compactor_epoch;
         Self {
             manifest,
-            compactions: BTreeMap::new(),
+            compactions: Compactions::new(compactor_epoch),
         }
     }
 
@@ -234,7 +251,7 @@ impl CompactorState {
 
     /// Returns an iterator over all in-flight compactions.
     pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
-        self.compactions.values()
+        self.compactions.recent_compactions.values()
     }
 
     /// Merges the remote (writer) manifest view into the compactor's local state.
@@ -280,6 +297,7 @@ impl CompactorState {
         };
         remote_manifest.value.core = merged;
         self.manifest = remote_manifest;
+        // TODO(criccomini) check compactor epoch to make sure it still matches our own, else fenced
     }
 
     /// Validates and registers a newly submitted compaction with this compactor.
@@ -291,6 +309,7 @@ impl CompactorState {
         let spec = compaction.spec();
         if self
             .compactions
+            .recent_compactions
             .values()
             .map(|c| c.spec())
             .any(|c| c.destination() == spec.destination())
@@ -313,13 +332,15 @@ impl CompactorState {
         }
         info!("accepted submitted compaction [compaction={}]", compaction);
 
-        self.compactions.insert(compaction.id(), compaction);
+        self.compactions
+            .recent_compactions
+            .insert(compaction.id(), compaction);
         Ok(())
     }
 
     /// Removes a compaction from the in-flight map (called after completion or failure).
     pub(crate) fn remove_compaction(&mut self, compaction_id: &Ulid) {
-        self.compactions.remove(compaction_id);
+        self.compactions.recent_compactions.remove(compaction_id);
     }
 
     /// Mutates a running compaction in place if it exists.
@@ -327,7 +348,7 @@ impl CompactorState {
     where
         F: FnOnce(&mut Compaction),
     {
-        if let Some(compaction) = self.compactions.get_mut(compaction_id) {
+        if let Some(compaction) = self.compactions.recent_compactions.get_mut(compaction_id) {
             f(compaction);
         }
     }
@@ -337,7 +358,7 @@ impl CompactorState {
     /// This removes compacted L0 SSTs and source SRs, inserts the output SR in id-descending
     /// order, updates `l0_last_compacted`, and removes the compaction from the in-flight map.
     pub(crate) fn finish_compaction(&mut self, compaction_id: Ulid, output_sr: SortedRun) {
-        if let Some(compaction) = self.compactions.get(&compaction_id) {
+        if let Some(compaction) = self.compactions.recent_compactions.get(&compaction_id) {
             let spec = compaction.spec();
             info!("finished compaction [spec={}]", spec);
             // reconstruct l0
@@ -391,7 +412,12 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.value.core = db_state;
-            if self.compactions.remove(&compaction_id).is_none() {
+            if self
+                .compactions
+                .recent_compactions
+                .remove(&compaction_id)
+                .is_none()
+            {
                 error!(
                     "scheduled compaction not found [compaction_id={}]",
                     compaction_id
