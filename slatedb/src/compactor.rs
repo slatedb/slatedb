@@ -776,8 +776,8 @@ impl CompactorEventHandler {
     ) -> Result<(), SlateDBError> {
         self.state.finish_compaction(id, output_sr);
         self.log_compaction_state();
-        self.write_compactions_safely().await?;
         self.write_manifest_safely().await?;
+        self.write_compactions_safely().await?;
         self.update_compaction_low_watermark();
         self.maybe_schedule_compactions().await?;
         self.stats
