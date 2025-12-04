@@ -962,11 +962,7 @@ mod tests {
                 .with_automatic_cleanup(true),
         );
         let path = Path::from("/");
-        let manifest_store = Arc::new(ManifestStore::new(
-            &path,
-            local_object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&path, local_object_store.clone()));
         let sst_format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(local_object_store.clone(), None),

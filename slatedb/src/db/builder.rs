@@ -401,7 +401,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             maybe_cached_main_object_store.clone(),
-            system_clock.clone(),
         ));
         let latest_manifest =
             StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
@@ -729,7 +728,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
-            self.system_clock.clone(),
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
@@ -837,7 +835,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
-            self.system_clock.clone(),
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store.clone(), None),

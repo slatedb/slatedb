@@ -221,11 +221,7 @@ mod tests {
         ));
 
         // Manifest store and initial manifest
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from("/root"),
-            main_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             CoreDbState::new(),
@@ -315,11 +311,7 @@ mod tests {
         ));
 
         // Manifest store and initial manifest
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from("/root"),
-            main_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             CoreDbState::new(),
@@ -411,11 +403,7 @@ mod tests {
         ));
 
         // Manifest store with empty DB
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from("/root"),
-            main_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             CoreDbState::new(),
