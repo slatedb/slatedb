@@ -320,7 +320,6 @@ impl CompactorState {
         };
         remote_manifest.value.core = merged;
         self.manifest = remote_manifest;
-        // TODO(criccomini) check compactor epoch to make sure it still matches our own, else fenced
     }
 
     /// Validates and registers a newly submitted compaction with this compactor.
