@@ -205,7 +205,11 @@ impl Display for Compaction {
 /// Container for compactions tracked by the compactor alongside its epoch.
 #[derive(Clone, Debug)]
 pub(crate) struct Compactions {
+    // The current compactor's epoch.
     pub(crate) compactor_epoch: u64,
+    /// The set of recent compactions tracked by this compactor. These may
+    /// be pending, in progress, or recently completed (either with success
+    /// or failure).
     pub(crate) recent_compactions: BTreeMap<Ulid, Compaction>,
 }
 
