@@ -327,11 +327,7 @@ impl CompactionExecuteBench {
         let stats = Arc::new(CompactionStats::new(registry.clone()));
         let os = self.object_store.clone();
 
-        let manifest_store = Arc::new(ManifestStore::new(
-            &self.path,
-            os.clone(),
-            self.system_clock.clone(),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
 
         let executor = TokioCompactionExecutor::new(
             Handle::current(),

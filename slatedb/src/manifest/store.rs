@@ -469,19 +469,10 @@ where
 
 pub(crate) struct ManifestStore {
     inner: Arc<dyn SequencedStorageProtocol<Manifest>>,
-
-    #[allow(dead_code)]
-    // TODO: remove this unused field after the StoredManifest's create and load methods
-    // have been changed to accept the system clock as a parameter.
-    clock: Arc<dyn SystemClock>,
 }
 
 impl ManifestStore {
-    pub(crate) fn new(
-        root_path: &Path,
-        object_store: Arc<dyn ObjectStore>,
-        clock: Arc<dyn SystemClock>,
-    ) -> Self {
+    pub(crate) fn new(root_path: &Path, object_store: Arc<dyn ObjectStore>) -> Self {
         let inner = Arc::new(ObjectStoreSequencedStorageProtocol::<Manifest>::new(
             root_path,
             object_store,
@@ -489,7 +480,7 @@ impl ManifestStore {
             "manifest",
             Box::new(FlatBufferManifestCodec {}),
         ));
-        Self { inner, clock }
+        Self { inner }
     }
 
     /// Delete a manifest from the object store.
@@ -917,11 +908,7 @@ mod tests {
     async fn test_should_read_specific_manifest() {
         // Given
         let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(
-            &Path::from(ROOT),
-            os.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
         let state = CoreDbState::new();
         let mut sm = StoredManifest::create_new_db(
             ms.clone(),
@@ -952,11 +939,7 @@ mod tests {
         let base = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
         let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
-        let ms = Arc::new(ManifestStore::new(
-            &Path::from(ROOT),
-            retrying.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), retrying.clone()));
 
         // When creating a new DB (initial manifest write under retry)
         let core = CoreDbState::new();
@@ -1055,11 +1038,7 @@ mod tests {
 
     fn new_memory_manifest_store() -> Arc<ManifestStore> {
         let os = Arc::new(InMemory::new());
-        Arc::new(ManifestStore::new(
-            &Path::from(ROOT),
-            os.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ))
+        Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()))
     }
 
     fn new_checkpoint(manifest_id: u64) -> Checkpoint {
@@ -1342,11 +1321,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_cretry_epoch_bump_if_manifest_version_exists() {
         let os = Arc::new(InMemory::new());
-        let ms = Arc::new(ManifestStore::new(
-            &Path::from(ROOT),
-            os.clone(),
-            Arc::new(DefaultSystemClock::default()),
-        ));
+        let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), os.clone()));
         let state = CoreDbState::new();
 
         // Mimic two writers A and B that try to bump the epoch at the same time
