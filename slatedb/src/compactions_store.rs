@@ -12,7 +12,6 @@ use chrono::Utc;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
-use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,10 +42,7 @@ impl StoredCompactions {
         store: Arc<CompactionsStore>,
         compactor_epoch: u64,
     ) -> Result<Self, SlateDBError> {
-        let compactions = Compactions {
-            compactor_epoch,
-            recent_compactions: BTreeMap::new(),
-        };
+        let compactions = Compactions::new(compactor_epoch);
         Self::init(store, compactions).await
     }
 

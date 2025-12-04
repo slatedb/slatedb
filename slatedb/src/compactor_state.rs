@@ -210,7 +210,7 @@ pub(crate) struct Compactions {
 }
 
 impl Compactions {
-    fn new(compactor_epoch: u64) -> Self {
+    pub(crate) fn new(compactor_epoch: u64) -> Self {
         Self {
             recent_compactions: BTreeMap::new(),
             compactor_epoch,
@@ -225,17 +225,22 @@ impl Compactions {
 /// - track in-flight compactions by id (ULID).
 pub struct CompactorState {
     manifest: DirtyObject<Manifest>,
-    compactions: Compactions,
+    compactions: DirtyObject<Compactions>,
 }
 
 impl CompactorState {
-    /// Creates a new compactor state seeded with the provided dirty manifest. Compactions are
-    /// initialized empty.
-    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
-        let compactor_epoch = manifest.value.compactor_epoch;
+    /// Creates a new compactor state seeded with the provided dirty manifest and compactions.
+    pub(crate) fn new(
+        manifest: DirtyObject<Manifest>,
+        compactions: DirtyObject<Compactions>,
+    ) -> Self {
+        debug_assert_eq!(
+            manifest.value.compactor_epoch,
+            compactions.value.compactor_epoch
+        );
         Self {
             manifest,
-            compactions: Compactions::new(compactor_epoch),
+            compactions,
         }
     }
 
@@ -251,7 +256,7 @@ impl CompactorState {
 
     /// Returns an iterator over all in-flight compactions.
     pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
-        self.compactions.recent_compactions.values()
+        self.compactions.value.recent_compactions.values()
     }
 
     /// Merges the remote (writer) manifest view into the compactor's local state.
@@ -309,6 +314,7 @@ impl CompactorState {
         let spec = compaction.spec();
         if self
             .compactions
+            .value
             .recent_compactions
             .values()
             .map(|c| c.spec())
@@ -333,6 +339,7 @@ impl CompactorState {
         info!("accepted submitted compaction [compaction={}]", compaction);
 
         self.compactions
+            .value
             .recent_compactions
             .insert(compaction.id(), compaction);
         Ok(())
@@ -340,7 +347,10 @@ impl CompactorState {
 
     /// Removes a compaction from the in-flight map (called after completion or failure).
     pub(crate) fn remove_compaction(&mut self, compaction_id: &Ulid) {
-        self.compactions.recent_compactions.remove(compaction_id);
+        self.compactions
+            .value
+            .recent_compactions
+            .remove(compaction_id);
     }
 
     /// Mutates a running compaction in place if it exists.
@@ -348,7 +358,12 @@ impl CompactorState {
     where
         F: FnOnce(&mut Compaction),
     {
-        if let Some(compaction) = self.compactions.recent_compactions.get_mut(compaction_id) {
+        if let Some(compaction) = self
+            .compactions
+            .value
+            .recent_compactions
+            .get_mut(compaction_id)
+        {
             f(compaction);
         }
     }
@@ -358,7 +373,12 @@ impl CompactorState {
     /// This removes compacted L0 SSTs and source SRs, inserts the output SR in id-descending
     /// order, updates `l0_last_compacted`, and removes the compaction from the in-flight map.
     pub(crate) fn finish_compaction(&mut self, compaction_id: Ulid, output_sr: SortedRun) {
-        if let Some(compaction) = self.compactions.recent_compactions.get(&compaction_id) {
+        if let Some(compaction) = self
+            .compactions
+            .value
+            .recent_compactions
+            .get(&compaction_id)
+        {
             let spec = compaction.spec();
             info!("finished compaction [spec={}]", spec);
             // reconstruct l0
@@ -414,6 +434,7 @@ impl CompactorState {
             self.manifest.value.core = db_state;
             if self
                 .compactions
+                .value
                 .recent_compactions
                 .remove(&compaction_id)
                 .is_none()
@@ -453,6 +474,7 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::transactional_object::test_utils::new_dirty_object;
     use crate::utils::IdGenerator;
     use crate::DbRand;
     use object_store::memory::InMemory;
@@ -715,7 +737,9 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut state = CompactorState::new(new_dirty_manifest());
+        let manifest = new_dirty_manifest();
+        let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
+        let mut state = CompactorState::new(manifest, compactions);
         // mimic an externally added checkpoint
         let mut dirty = new_dirty_manifest();
         let checkpoint = Checkpoint {
@@ -790,6 +814,10 @@ mod tests {
     }
 
     // test helpers
+
+    fn new_dirty_compactions(compactor_epoch: u64) -> DirtyObject<Compactions> {
+        new_dirty_object(1u64, Compactions::new(compactor_epoch))
+    }
 
     fn run_for<T, F>(duration: Duration, mut f: F) -> Option<T>
     where
@@ -906,7 +934,8 @@ mod tests {
         let stored_manifest = tokio_handle
             .block_on(StoredManifest::load(manifest_store))
             .unwrap();
-        let state = CompactorState::new(stored_manifest.prepare_dirty().unwrap());
+        let compactions = new_dirty_compactions(stored_manifest.manifest().compactor_epoch);
+        let state = CompactorState::new(stored_manifest.prepare_dirty().unwrap(), compactions);
         (os, stored_manifest, state, system_clock, rand)
     }
 }

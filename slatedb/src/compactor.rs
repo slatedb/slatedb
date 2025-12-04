@@ -65,6 +65,7 @@ use tracing::instrument;
 use ulid::Ulid;
 
 use crate::clock::SystemClock;
+use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
@@ -195,6 +196,7 @@ pub(crate) enum CompactorMessage {
 #[allow(dead_code)]
 pub(crate) struct Compactor {
     manifest_store: Arc<ManifestStore>,
+    compactions_store: Arc<CompactionsStore>,
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
@@ -209,6 +211,7 @@ pub(crate) struct Compactor {
 impl Compactor {
     pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
@@ -226,6 +229,7 @@ impl Compactor {
         ));
         Self {
             manifest_store,
+            compactions_store,
             table_store,
             options: Arc::new(options),
             scheduler_supplier,
@@ -263,6 +267,7 @@ impl Compactor {
         ));
         let handler = CompactorEventHandler::new(
             self.manifest_store.clone(),
+            self.compactions_store.clone(),
             self.options.clone(),
             scheduler,
             executor,
@@ -364,6 +369,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
 impl CompactorEventHandler {
     pub(crate) async fn new(
         manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
         options: Arc<CompactorOptions>,
         scheduler: Arc<dyn CompactionScheduler + Send + Sync>,
         executor: Arc<dyn CompactionExecutor + Send + Sync>,
@@ -372,13 +378,34 @@ impl CompactorEventHandler {
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
+        let manifest_compactor_epoch = stored_manifest.manifest().compactor_epoch;
         let manifest = FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
             system_clock.clone(),
         )
         .await?;
-        let state = CompactorState::new(manifest.prepare_dirty()?);
+        let dirty_manifest = manifest.prepare_dirty()?;
+        let stored_compactions =
+            match StoredCompactions::try_load(compactions_store.clone()).await? {
+                Some(compactions) => compactions,
+                None => {
+                    info!(
+                        "creating new compactions file [compactor_epoch={}]",
+                        manifest_compactor_epoch
+                    );
+                    StoredCompactions::create(compactions_store.clone(), manifest_compactor_epoch)
+                        .await?
+                }
+            };
+        let fenceable_compactions = FenceableCompactions::init(
+            stored_compactions,
+            options.manifest_update_timeout,
+            system_clock.clone(),
+        )
+        .await?;
+        let dirty_compactions = fenceable_compactions.prepare_dirty()?;
+        let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
             manifest,
@@ -957,7 +984,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, table_store) = build_test_stores(os.clone());
+        let (_, _, table_store) = build_test_stores(os.clone());
         let mut expected = HashMap::<Vec<u8>, Vec<u8>>::new();
         for i in 0..4 {
             let k = vec![b'a' + i as u8; 16];
@@ -1031,7 +1058,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (manifest_store, table_store) = build_test_stores(os.clone());
+        let (manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // put key 'a' into L1 (and key 'b' so that when we delete 'a' the SST is non-empty)
         // since these are both await_durable=true, we're guaranteed to have one L0 SST for each.
@@ -1129,7 +1156,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (manifest_store, table_store) = build_test_stores(os.clone());
+        let (manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // Write and flush key 'a' first (seq=1)
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
@@ -1221,7 +1248,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_manifest_store, table_store) = build_test_stores(os.clone());
+        let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // write merge operations across multiple L0 SSTs
         db.merge(b"key1", b"a").await.unwrap();
@@ -1293,7 +1320,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_manifest_store, table_store) = build_test_stores(os.clone());
+        let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // write initial merge operations and compact to L1
         db.merge(b"key1", b"a").await.unwrap();
@@ -1367,7 +1394,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_manifest_store, table_store) = build_test_stores(os.clone());
+        let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // write only merge operations without any base value
         db.merge(b"key1", b"x").await.unwrap();
@@ -1435,7 +1462,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_manifest_store, table_store) = build_test_stores(os.clone());
+        let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // write merge operations across three L0 SSTs in specific order
         db.merge(b"key1", b"1").await.unwrap();
@@ -1513,7 +1540,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_manifest_store, table_store) = build_test_stores(os.clone());
+        let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // ticker time = 0, expire time = 10
         insert_clock.ticker.store(0, atomic::Ordering::SeqCst);
@@ -1591,7 +1618,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (manifest_store, _table_store) = build_test_stores(os.clone());
+        let (manifest_store, _compactions_store, _table_store) = build_test_stores(os.clone());
 
         // write merge operations
         db.merge(b"key1", b"a").await.unwrap();
@@ -1642,7 +1669,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (manifest_store, table_store) = build_test_stores(os.clone());
+        let (manifest_store, _compactions_store, table_store) = build_test_stores(os.clone());
 
         // write merge operations with different TTLs
         db.merge_with_options(
@@ -1749,7 +1776,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_, table_store) = build_test_stores(os.clone());
+        let (_, _, table_store) = build_test_stores(os.clone());
 
         let value = &[b'a'; 64];
 
@@ -2006,7 +2033,7 @@ mod tests {
             let options = db_options(None);
 
             let os = Arc::new(InMemory::new());
-            let (manifest_store, table_store) = build_test_stores(os.clone());
+            let (manifest_store, compactions_store, table_store) = build_test_stores(os.clone());
             let db = Db::builder(PATH, os.clone())
                 .with_settings(options.clone())
                 .build()
@@ -2032,6 +2059,7 @@ mod tests {
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),
+                compactions_store,
                 compactor_options.clone(),
                 scheduler.clone(),
                 executor.clone(),
@@ -2446,7 +2474,9 @@ mod tests {
         None
     }
 
-    fn build_test_stores(os: Arc<dyn ObjectStore>) -> (Arc<ManifestStore>, Arc<TableStore>) {
+    fn build_test_stores(
+        os: Arc<dyn ObjectStore>,
+    ) -> (Arc<ManifestStore>, Arc<CompactionsStore>, Arc<TableStore>) {
         let sst_format = SsTableFormat {
             block_size: 32,
             min_filter_keys: 10,
@@ -2457,13 +2487,14 @@ mod tests {
             os.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
+        let compactions_store = Arc::new(CompactionsStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             sst_format,
             Path::from(PATH),
             None,
         ));
-        (manifest_store, table_store)
+        (manifest_store, compactions_store, table_store)
     }
 
     /// Waits until all writes have made their way to L1 or below. No data is allowed in
