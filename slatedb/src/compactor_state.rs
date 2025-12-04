@@ -234,7 +234,7 @@ impl CompactorState {
         manifest: DirtyObject<Manifest>,
         compactions: DirtyObject<Compactions>,
     ) -> Self {
-        debug_assert_eq!(
+        assert_eq!(
             manifest.value.compactor_epoch,
             compactions.value.compactor_epoch
         );
@@ -257,6 +257,20 @@ impl CompactorState {
     /// Returns an iterator over all in-flight compactions.
     pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
         self.compactions.value.recent_compactions.values()
+    }
+
+    /// Returns the dirty compactions tracked by this state.
+    pub(crate) fn compactions_dirty(&self) -> &DirtyObject<Compactions> {
+        &self.compactions
+    }
+
+    /// Replaces the tracked dirty compactions with the provided value.
+    pub(crate) fn set_compactions(&mut self, compactions: DirtyObject<Compactions>) {
+        assert_eq!(
+            self.manifest.value.compactor_epoch,
+            compactions.value.compactor_epoch
+        );
+        self.compactions = compactions;
     }
 
     /// Merges the remote (writer) manifest view into the compactor's local state.
