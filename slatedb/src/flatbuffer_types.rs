@@ -45,7 +45,7 @@ pub(crate) struct SsTableIndexOwned {
 
 impl SsTableIndexOwned {
     pub fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
-        flatbuffers::root::<SsTableIndex>(&data)?;
+        // flatbuffers::root::<SsTableIndex>(&data)?;
         Ok(Self { data })
     }
 
