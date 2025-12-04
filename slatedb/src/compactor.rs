@@ -2379,6 +2379,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_persist_failed_compaction_removal() {
+        // given:
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        let compaction = fixture.build_l0_compaction().await;
+        fixture.scheduler.inject_compaction(compaction.clone());
+        fixture.handler.handle_ticker().await.unwrap();
+        let job = fixture.assert_started_compaction(1).pop().unwrap();
+
+        // sanity: compaction persisted
+        let (_, stored) = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap();
+        assert_eq!(stored.recent_compactions.len(), 1);
+
+        // when: job fails
+        let msg = CompactorMessage::CompactionJobFinished {
+            id: job.id,
+            result: Err(SlateDBError::InvalidDBState),
+        };
+        fixture.handler.handle(msg).await.unwrap();
+
+        // then: compactions store cleared
+        let (_, stored_after) = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap();
+        assert!(
+            stored_after.recent_compactions.is_empty(),
+            "compactions should be removed after failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_error_when_finishing_if_compactions_fenced() {
+        // given:
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        let compaction = fixture.build_l0_compaction().await;
+        fixture.scheduler.inject_compaction(compaction.clone());
+        fixture.handler.handle_ticker().await.unwrap();
+        let job = fixture.assert_started_compaction(1).pop().unwrap();
+
+        // fence compactions before finish
+        let stored_compactions = StoredCompactions::load(fixture.compactions_store.clone())
+            .await
+            .unwrap();
+        FenceableCompactions::init(
+            stored_compactions,
+            fixture.handler.options.manifest_update_timeout,
+            fixture.handler.system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Build a minimal successful result
+        let db_state = fixture.latest_db_state().await;
+        let output_sr = SortedRun {
+            id: compaction.destination(),
+            ssts: db_state.l0.iter().cloned().collect(),
+        };
+        let msg = CompactorMessage::CompactionJobFinished {
+            id: job.id,
+            result: Ok(output_sr),
+        };
+
+        // when:
+        let result = fixture.handler.handle(msg).await;
+
+        // then:
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
     async fn test_should_not_schedule_conflicting_compaction() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
