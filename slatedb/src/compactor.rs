@@ -2691,7 +2691,6 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(PATH),
             os.clone(),
-            Arc::new(DefaultSystemClock::new()),
         ));
         let compactions_store = Arc::new(CompactionsStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(

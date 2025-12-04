@@ -940,11 +940,7 @@ mod tests {
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand: Arc<DbRand> = Arc::new(DbRand::default());
 
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(PATH),
-            os.clone(),
-            system_clock.clone(),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let stored_manifest = tokio_handle
             .block_on(StoredManifest::load(
                 manifest_store,

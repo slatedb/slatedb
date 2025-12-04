@@ -418,11 +418,7 @@ mod tests {
             .await
             .unwrap();
         let table_store = db.inner.table_store.clone();
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(path.as_str()),
-            os.clone(),
-            clock.clone(),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path.as_str()), os.clone()));
         let executor = TokioCompactionExecutor::new(
             handle,
             options,
