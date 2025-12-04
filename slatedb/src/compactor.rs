@@ -804,9 +804,7 @@ impl CompactorEventHandler {
         if let Err(err) = self.start_compaction(job_id, compaction).await {
             self.state.remove_compaction(&job_id);
             // Best effort to persist the removal; prefer fencing errors for visibility.
-            if let Err(update_err) = self.write_compactions().await {
-                return Err(update_err);
-            }
+            self.write_compactions().await?;
             return Err(err);
         }
         Ok(())

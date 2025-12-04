@@ -1,6 +1,7 @@
 use crate::clock::SystemClock;
 use crate::compactor_state::Compactions;
 use crate::error::SlateDBError;
+#[allow(dead_code)]
 use crate::error::SlateDBError::LatestTransactionalObjectVersionMissing;
 use crate::flatbuffer_types::FlatBufferCompactionsCodec;
 use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
@@ -12,6 +13,7 @@ use chrono::Utc;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
+#[cfg(test)]
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +67,7 @@ impl StoredCompactions {
     /// Load the current compactions state from the supplied compactions store. If successful,
     /// this method returns a [`Result`] with an instance of [`StoredCompactions`].
     /// If no compactions could be found, the error [`LatestTransactionalObjectVersionMissing`] is returned.
+    #[cfg(test)]
     pub(crate) async fn load(store: Arc<CompactionsStore>) -> Result<Self, SlateDBError> {
         SimpleTransactionalObject::<Compactions>::try_load(Arc::clone(&store.inner)
             as Arc<dyn TransactionalStorageProtocol<Compactions, MonotonicId>>)
@@ -78,38 +81,27 @@ impl StoredCompactions {
         self.inner.id().into()
     }
 
+    #[cfg(test)]
     pub(crate) fn compactions(&self) -> &Compactions {
         self.inner.object()
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<Compactions>, SlateDBError> {
         Ok(self.inner.prepare_dirty()?)
     }
 
-    #[allow(unused)]
+    #[cfg(test)]
     pub(crate) async fn refresh(&mut self) -> Result<&Compactions, SlateDBError> {
         Ok(self.inner.refresh().await?)
     }
 
+    #[cfg(test)]
     pub(crate) async fn update(
         &mut self,
         dirty: DirtyObject<Compactions>,
     ) -> Result<(), SlateDBError> {
         Ok(self.inner.update(dirty).await?)
-    }
-
-    /// Apply an update to stored compactions, retrying on version conflicts by refreshing the
-    /// local state and re-applying the mutator. If the mutator returns `None`, no update is
-    /// performed.
-    pub(crate) async fn maybe_apply_update<F>(&mut self, mutator: F) -> Result<(), SlateDBError>
-    where
-        F: Fn(
-                &SimpleTransactionalObject<Compactions>,
-            ) -> Result<Option<DirtyObject<Compactions>>, SlateDBError>
-            + Send
-            + Sync,
-    {
-        Ok(self.inner.maybe_apply_update(mutator).await?)
     }
 }
 
@@ -152,6 +144,7 @@ impl FenceableCompactions {
         Ok(self.inner.update(dirty).await?)
     }
 
+    #[cfg(test)]
     pub(crate) async fn maybe_apply_update<F>(&mut self, mutator: F) -> Result<(), SlateDBError>
     where
         F: Fn(
@@ -166,6 +159,7 @@ impl FenceableCompactions {
 
 /// Represents the metadata of a compactions file stored in the object store.
 #[derive(Serialize, Debug)]
+#[allow(dead_code)]
 pub(crate) struct CompactionsFileMetadata {
     pub(crate) id: u64,
     #[serde(serialize_with = "serialize_path")]
@@ -175,6 +169,7 @@ pub(crate) struct CompactionsFileMetadata {
     pub(crate) size: u32,
 }
 
+#[allow(dead_code)]
 fn serialize_path<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -199,6 +194,7 @@ impl CompactionsStore {
     }
 
     /// Delete a compactions file from the object store.
+    #[cfg(test)]
     pub(crate) async fn delete_compactions(&self, id: u64) -> Result<(), SlateDBError> {
         Ok(self.inner.delete(MonotonicId::new(id)).await?)
     }
@@ -207,6 +203,7 @@ impl CompactionsStore {
     /// range is the current compactions state.
     /// # Arguments
     /// * `id_range` - The range of IDs to list
+    #[cfg(test)]
     pub(crate) async fn list_compactions<R: RangeBounds<u64>>(
         &self,
         id_range: R,
@@ -229,6 +226,7 @@ impl CompactionsStore {
         Ok(compactions)
     }
 
+    #[cfg(test)]
     pub(crate) async fn try_read_latest_compactions(
         &self,
     ) -> Result<Option<(u64, Compactions)>, SlateDBError> {
@@ -239,12 +237,14 @@ impl CompactionsStore {
             .map(|opt| opt.map(|(id, compactions)| (id.into(), compactions)))?)
     }
 
+    #[cfg(test)]
     pub(crate) async fn read_latest_compactions(&self) -> Result<(u64, Compactions), SlateDBError> {
         self.try_read_latest_compactions()
             .await?
             .ok_or(LatestTransactionalObjectVersionMissing)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn try_read_compactions(
         &self,
         id: u64,
@@ -252,6 +252,7 @@ impl CompactionsStore {
         Ok(self.inner.try_read(MonotonicId::new(id)).await?)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn read_compactions(&self, id: u64) -> Result<Compactions, SlateDBError> {
         self.try_read_compactions(id)
             .await?
