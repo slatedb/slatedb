@@ -375,7 +375,8 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        let stored_manifest = StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
         let manifest_compactor_epoch = stored_manifest.manifest().compactor_epoch;
         let manifest = FenceableManifest::init_compactor(
             stored_manifest,
