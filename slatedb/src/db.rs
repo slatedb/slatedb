@@ -1408,16 +1408,6 @@ impl DbRead for Db {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-    use chrono::TimeDelta;
-    #[cfg(feature = "test-util")]
-    use chrono::{TimeZone, Utc};
-    use fail_parallel::FailPointRegistry;
-    use std::collections::BTreeMap;
-    use std::collections::Bound::Included;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
     use super::*;
     use crate::cached_object_store::stats::{
         OBJECT_STORE_CACHE_PART_ACCESS, OBJECT_STORE_CACHE_PART_HITS,
@@ -1448,11 +1438,23 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
     use crate::types::RowEntry;
-    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
+    use crate::{
+        proptest_util, test_utils, CloseReason, KeyValue, MergeOperator, MergeOperatorError,
+    };
+    use async_trait::async_trait;
+    use bytes::BytesMut;
+    use chrono::TimeDelta;
+    #[cfg(feature = "test-util")]
+    use chrono::{TimeZone, Utc};
+    use fail_parallel::FailPointRegistry;
     use futures::{future, future::join_all, StreamExt};
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use proptest::test_runner::{TestRng, TestRunner};
+    use std::collections::BTreeMap;
+    use std::collections::Bound::Included;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
     use tokio::runtime::Runtime;
     use tracing::info;
 
@@ -2859,7 +2861,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
         };
@@ -2936,7 +2941,10 @@ mod tests {
             object_store.clone(),
             clock.clone(),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
             ..SsTableFormat::default()
@@ -3021,7 +3029,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let sst_format = SsTableFormat {
             min_filter_keys: 10,
             ..SsTableFormat::default()
@@ -3162,7 +3173,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let write_options = WriteOptions {
             await_durable: false,
         };
@@ -3721,7 +3735,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         assert_eq!(db_state.next_wal_sst_id, next_wal_id);
     }
@@ -3763,6 +3780,77 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_read_merges_from_snapshot_across_compaction() {
+        struct TestMergeOperator {}
+
+        impl MergeOperator for TestMergeOperator {
+            fn merge(
+                &self,
+                _key: &Bytes,
+                existing_value: Option<Bytes>,
+                value: Bytes,
+            ) -> Result<Bytes, MergeOperatorError> {
+                let mut result = BytesMut::new();
+                existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
+                result.extend_from_slice(value.as_ref());
+                Ok(result.freeze())
+            }
+        }
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/testdb";
+        let should_compact_l0 = Arc::new(AtomicBool::new(false));
+        let this_should_compact_l0 = should_compact_l0.clone();
+        let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| this_should_compact_l0.swap(false, Ordering::SeqCst),
+        )));
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024 * 1024, None))
+            .with_merge_operator(Arc::new(TestMergeOperator {}))
+            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .build()
+            .await
+            .unwrap();
+        let db = Arc::new(db);
+
+        db.merge(b"foo", b"0").await.unwrap();
+        let snapshot = db.snapshot().await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.merge(b"foo", b"1").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // await a compaction
+        should_compact_l0.store(true, Ordering::SeqCst);
+        let db_poll = db.clone();
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                {
+                    let db_state = db_poll.inner.state.read();
+                    if !db_state.state().core().compacted.is_empty() {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let result = snapshot.get(b"foo").await.unwrap();
+        assert_eq!(result, Some(Bytes::copy_from_slice(b"0")));
+        let result = db.get(b"foo").await.unwrap();
+        assert_eq!(result, Some(Bytes::copy_from_slice(b"01")));
     }
 
     #[tokio::test]
@@ -4281,7 +4369,9 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         );
-        let mut sm = StoredManifest::load(Arc::new(ms)).await.unwrap();
+        let mut sm = StoredManifest::load(Arc::new(ms), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
 
         // write enough to fill up a few l0 SSTs
         for i in 0..4 {
@@ -4586,7 +4676,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, i64::MIN);
@@ -4637,7 +4730,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let stored_manifest = StoredManifest::load(manifest_store).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, 11);
@@ -4799,7 +4895,10 @@ mod tests {
             object_store.clone(),
             Arc::new(DefaultSystemClock::new()),
         ));
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         FenceableManifest::init_writer(
             stored_manifest,
             Duration::from_secs(300),

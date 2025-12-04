@@ -408,7 +408,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             &path,
             maybe_cached_main_object_store.clone(),
         ));
-        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
+        let latest_manifest =
+            StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
 
         // Validate WAL object store configuration
         if let Some(latest_manifest) = &latest_manifest {

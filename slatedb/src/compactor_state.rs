@@ -946,7 +946,10 @@ mod tests {
             system_clock.clone(),
         ));
         let stored_manifest = tokio_handle
-            .block_on(StoredManifest::load(manifest_store))
+            .block_on(StoredManifest::load(
+                manifest_store,
+                Arc::new(DefaultSystemClock::new()),
+            ))
             .unwrap();
         let compactions = new_dirty_compactions(stored_manifest.manifest().compactor_epoch);
         let state = CompactorState::new(stored_manifest.prepare_dirty().unwrap(), compactions);

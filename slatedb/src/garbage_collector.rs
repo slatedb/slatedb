@@ -206,7 +206,9 @@ impl GarbageCollector {
     }
 
     async fn remove_expired_checkpoints(&self) -> Result<(), SlateDBError> {
-        let mut stored_manifest = StoredManifest::load(Arc::clone(&self.manifest_store)).await?;
+        let mut stored_manifest =
+            StoredManifest::load(Arc::clone(&self.manifest_store), self.system_clock.clone())
+                .await?;
 
         stored_manifest
             .maybe_apply_update(|manifest| self.filter_expired_checkpoints(manifest))

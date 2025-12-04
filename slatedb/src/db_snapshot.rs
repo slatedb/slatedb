@@ -49,6 +49,11 @@ impl DbSnapshot {
         self.get_with_options(key, &ReadOptions::default()).await
     }
 
+    #[cfg(test)]
+    pub(crate) fn started_seq(&self) -> u64 {
+        self.started_seq
+    }
+
     /// Get a value from the snapshot with custom read options.
     ///
     /// ## Arguments
