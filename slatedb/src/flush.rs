@@ -3,10 +3,10 @@ use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::mem_table::KVTable;
-use crate::types::ValueDeletable;
-use bytes::Bytes;
+use crate::mem_table::{KVTable, MemTableIterator};
 use std::sync::Arc;
+use crate::reader::DbStateReader;
+use crate::retention_iterator::RetentionIterator;
 
 impl DbInner {
     pub(crate) async fn flush_imm_table(
@@ -16,15 +16,19 @@ impl DbInner {
         write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
-        let mut iter = imm_table.iter();
-        let mut last_key: Option<Bytes> = None;
+        // let mut iter = imm_table.iter();
+        // let mut last_key: Option<Bytes> = None;
+        // while let Some(entry) = iter.next_entry().await? {
+        //     if matches!(entry.value, ValueDeletable::Merge(_)) {
+        //         sst_builder.add(entry)?;
+        //     } else if last_key.as_ref() != Some(&entry.key) {
+        //         last_key = Some(entry.key.clone());
+        //         sst_builder.add(entry)?;
+        //     }
+        // }
+        let mut iter = self.load_iterators(imm_table.clone()).await?;
         while let Some(entry) = iter.next_entry().await? {
-            if matches!(entry.value, ValueDeletable::Merge(_)) {
-                sst_builder.add(entry)?;
-            } else if last_key.as_ref() != Some(&entry.key) {
-                last_key = Some(entry.key.clone());
-                sst_builder.add(entry)?;
-            }
+            sst_builder.add(entry)?;
         }
 
         let encoded_sst = sst_builder.build()?;
@@ -37,6 +41,22 @@ impl DbInner {
             .fetch_max_last_durable_tick(imm_table.last_tick());
 
         Ok(handle)
+    }
+
+    async fn load_iterators(&self, imm_table: Arc<KVTable>) -> Result<RetentionIterator<MemTableIterator>, SlateDBError> {
+        let state = self.state.read().view();
+        println!("min active seq: {:?}", self.txn_manager.min_active_seq());
+        let mut iter = RetentionIterator::new(
+            imm_table.iter(),
+            None,
+            self.txn_manager.min_active_seq(),
+            false,
+            self.system_clock.now().timestamp(),
+            self.system_clock.clone(),
+            Arc::new(state.core().sequence_tracker.clone()),
+        ).await?;
+        iter.init().await?;
+        Ok(iter)
     }
 }
 
@@ -51,6 +71,7 @@ mod tests {
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use std::sync::Arc;
+    use rstest::rstest;
     use ulid::Ulid;
 
     async fn setup_test_db() -> Db {
@@ -186,20 +207,58 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    struct FlushImmTableTestCase {
+        min_active_seq: u64,
+        row_entries: Vec<RowEntry>,
+        expected_entries: Vec<(Bytes, u64, ValueDeletable)>,
+    }
+
+    #[rstest]
+    #[case(FlushImmTableTestCase {
+        min_active_seq: 1,
+        row_entries: vec![
+            RowEntry::new_value(&Bytes::from("key"), b"value_v1", 1),
+            RowEntry::new_value(&Bytes::from("key"), b"value_v3", 3),
+            RowEntry::new_value(&Bytes::from("key"), b"value_v2", 2),
+        ],
+        expected_entries: vec![
+            (Bytes::from("key"), 1, ValueDeletable::Value(Bytes::from("value_v1"))),
+            (Bytes::from("key"), 2, ValueDeletable::Value(Bytes::from("value_v2"))),
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value_v3"))),
+        ],
+    })]
+    #[case(FlushImmTableTestCase {
+        min_active_seq: 3,
+        row_entries: vec![
+            RowEntry::new_value(&Bytes::from("key"), b"value_v1", 1),
+            RowEntry::new_value(&Bytes::from("key"), b"value_v3", 3),
+            RowEntry::new_value(&Bytes::from("key"), b"value_v2", 2),
+        ],
+        expected_entries: vec![
+            (Bytes::from("key"), 3, ValueDeletable::Value(Bytes::from("value_v3")))
+        ],
+    })]
     #[tokio::test]
-    async fn test_flush_deduplicates_keeping_highest_seq() {
+    async fn test_flush_deduplicates_keeping_highest_seq(#[case] test_case: FlushImmTableTestCase)
+    {
         // Given
         let db = setup_test_db().await;
+        {
+            let mut state = db.inner.state.write();
+            state
+                .modify(|modifier|
+                    modifier.state.manifest.value.core.recent_snapshot_min_seq = test_case.min_active_seq);
+        }
         let table = WritableKVTable::new();
-        let key = Bytes::from("key1");
-        let value_v3 = Bytes::from("value_v3");
-        table.put(RowEntry::new_value(key.as_ref(), b"value_v1", 1));
-        table.put(RowEntry::new_value(key.as_ref(), &value_v3, 3));
-        table.put(RowEntry::new_value(key.as_ref(), b"value_v2", 2));
-        assert_eq!(table.table().metadata().entry_num, 3);
+        let row_entries_length = test_case.row_entries.len();
+        for row_entry in test_case.row_entries {
+            table.put(row_entry);
+        }
+        assert_eq!(table.table().metadata().entry_num, row_entries_length);
         let id = SsTableId::Compacted(Ulid::new());
 
         // When
+        println!("{:?}", db.inner.txn_manager.min_active_seq());
         let sst_handle = db
             .inner
             .flush_imm_table(&id, table.table().clone(), false)
@@ -210,7 +269,7 @@ mod tests {
         verify_sst(
             &db,
             &sst_handle,
-            &[(key, 3, ValueDeletable::Value(value_v3))],
+            &test_case.expected_entries,
         )
         .await;
 
