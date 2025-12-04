@@ -621,7 +621,7 @@ impl CompactorEventHandler {
 
     /// Persists the current compactions state to the compactions store and refreshes the
     /// local dirty object with the latest version.
-    async fn write_compactions(&mut self) -> Result<(), SlateDBError> {
+    async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
         let desired_value = self.state.compactions_dirty().value.clone();
         loop {
             let mut dirty_compactions = self.compactions.prepare_dirty()?;
@@ -761,7 +761,7 @@ impl CompactorEventHandler {
     /// Records a failed compaction attempt.
     async fn finish_failed_compaction(&mut self, id: Ulid) -> Result<(), SlateDBError> {
         self.state.remove_compaction(&id);
-        self.write_compactions().await?;
+        self.write_compactions_safely().await?;
         self.update_compaction_low_watermark();
         Ok(())
     }
@@ -776,7 +776,7 @@ impl CompactorEventHandler {
     ) -> Result<(), SlateDBError> {
         self.state.finish_compaction(id, output_sr);
         self.log_compaction_state();
-        self.write_compactions().await?;
+        self.write_compactions_safely().await?;
         self.write_manifest_safely().await?;
         self.update_compaction_low_watermark();
         self.maybe_schedule_compactions().await?;
@@ -800,14 +800,14 @@ impl CompactorEventHandler {
         }
 
         self.state.add_compaction(compaction.clone())?;
-        self.write_compactions().await?;
+        self.write_compactions_safely().await?;
         // Compactions and jobs are 1:1 right now.
         let job_id = compaction.id();
         tracing::Span::current().record("id", tracing::field::display(&job_id));
         if let Err(err) = self.start_compaction(job_id, compaction).await {
             self.state.remove_compaction(&job_id);
             // Best effort to persist the removal; prefer fencing errors for visibility.
-            self.write_compactions().await?;
+            self.write_compactions_safely().await?;
             return Err(err);
         }
         Ok(())
@@ -1975,7 +1975,7 @@ mod tests {
             CompactionSpec::new(vec![SourceId::Sst(Ulid::new())], 0),
         );
         handler.state.add_compaction(compaction).unwrap();
-        handler.write_compactions().await.unwrap();
+        handler.write_compactions_safely().await.unwrap();
 
         let (_, persisted) = compactions_store
             .try_read_latest_compactions()
@@ -2016,7 +2016,7 @@ mod tests {
         );
 
         // Persisting after restart should clear the stored compactions as well.
-        handler.write_compactions().await.unwrap();
+        handler.write_compactions_safely().await.unwrap();
         let (_, persisted_after_clear) = compactions_store
             .try_read_latest_compactions()
             .await
