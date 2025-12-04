@@ -238,11 +238,8 @@ mod tests {
         let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         let parent_path = Path::from("/tmp/test_parent");
-        let parent_manifest_store = Arc::new(ManifestStore::new(
-            &parent_path,
-            object_store.clone(),
-            clock.clone(),
-        ));
+        let parent_manifest_store =
+            Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
         let mut parent_manifest =
             StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new(), clock.clone())
                 .await
@@ -253,11 +250,7 @@ mod tests {
             .unwrap();
 
         let clone_path = Path::from("/tmp/test_clone");
-        let clone_manifest_store = Arc::new(ManifestStore::new(
-            &clone_path,
-            object_store.clone(),
-            Arc::new(DefaultSystemClock::default()),
-        ));
+        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         let clone_stored_manifest = StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
             parent_manifest.manifest(),
@@ -300,11 +293,7 @@ mod tests {
         let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         let path = Path::from("/tmp/test_db");
-        let manifest_store = Arc::new(ManifestStore::new(
-            &path,
-            object_store.clone(),
-            clock.clone(),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut manifest = StoredManifest::create_new_db(
             Arc::clone(&manifest_store),
             CoreDbState::new(),

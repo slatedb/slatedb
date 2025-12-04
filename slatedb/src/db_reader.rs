@@ -556,7 +556,6 @@ impl DbReader {
             path,
             object_store,
             block_cache: options.block_cache.clone(),
-            system_clock: clock.clone(),
         };
 
         Self::open_internal(
@@ -1270,7 +1269,6 @@ mod tests {
             Arc::new(ManifestStore::new(
                 &self.path,
                 Arc::clone(&self.object_store),
-                self.system_clock.clone(),
             ))
         }
     }

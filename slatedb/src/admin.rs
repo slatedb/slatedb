@@ -53,7 +53,6 @@ impl Admin {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         );
         let id_manifest = if let Some(id) = maybe_id {
             manifest_store
@@ -78,7 +77,6 @@ impl Admin {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         );
         let manifests = manifest_store.list_manifests(range).await?;
         Ok(serde_json::to_string(&manifests)?)
@@ -97,7 +95,6 @@ impl Admin {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         );
         let (_, manifest) = manifest_store.read_latest_manifest().await?;
 
@@ -225,7 +222,6 @@ impl Admin {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         ));
         manifest_store
             .validate_no_wal_object_store_configured()
@@ -254,7 +250,6 @@ impl Admin {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         ));
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
@@ -282,7 +277,6 @@ impl Admin {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         ));
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
@@ -351,7 +345,6 @@ impl Admin {
         ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         )
     }
 
