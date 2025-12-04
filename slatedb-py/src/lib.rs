@@ -95,8 +95,7 @@ fn resolve_object_store_py(
     if let Some(u) = url {
         return Db::resolve_object_store(u).map_err(map_error);
     }
-    load_object_store_from_env(env_file)
-        .map_err(|e| InvalidError::new_err(e.to_string()))
+    load_object_store_from_env(env_file).map_err(|e| InvalidError::new_err(e.to_string()))
 }
 
 fn build_gc_options_from_kwargs(
