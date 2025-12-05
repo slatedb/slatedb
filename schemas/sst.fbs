@@ -1,3 +1,5 @@
+include "common.fbs";
+
 enum CompressionFormat: byte {
     None,
     Snappy,
@@ -39,13 +41,8 @@ table SsTableIndex {
     block_meta: [BlockMeta] (required);
 }
 
-table CompactedSstId {
-    high: uint64;
-    low: uint64;
-}
-
 table CompactedSsTable {
-    id: CompactedSstId (required);
+    id: Ulid (required);
     info: SsTableInfo (required);
     visible_range: BytesRange;
 }

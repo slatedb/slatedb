@@ -15,7 +15,7 @@ table ExternalDb {
     final_checkpoint_id: Uuid;
 
     // Compacted SST IDs belonging to external DB that are currently being referenced.
-    sst_ids: [CompactedSstId] (required);
+    sst_ids: [Ulid] (required);
 }
 
 // Manifest to persist state of DB.
@@ -48,7 +48,7 @@ table ManifestV1 {
     wal_id_last_seen: ulong;
 
     // The last compacted l0
-    l0_last_compacted: CompactedSstId;
+    l0_last_compacted: Ulid;
 
     // A list of the L0 SSTs that are valid to read in the `compacted` folder.
     l0: [CompactedSsTable] (required);
