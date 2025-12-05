@@ -1984,7 +1984,7 @@ mod tests {
             .unwrap()
             .expect("compactions should exist after first write");
         assert!(
-            !persisted.iter().next().is_none(),
+            persisted.iter().next().is_some(),
             "expected stored compactions to include the seeded compaction"
         );
 
