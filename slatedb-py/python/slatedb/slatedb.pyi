@@ -1846,9 +1846,12 @@ class SlateDBAdmin:
         """
         ...
 
-    def list_checkpoints(self) -> list[Checkpoint]:
+    def list_checkpoints(self, name: str | None = None) -> list[Checkpoint]:
         """
         List known checkpoints for the database path/object store.
+
+        Args:
+            name: Optional checkpoint name. When present, only exact matches will be returned.
 
         Returns:
             A list of :class:`Checkpoint` metadata dicts.
@@ -1859,12 +1862,15 @@ class SlateDBAdmin:
         """
         ...
 
-    async def list_checkpoints_async(self) -> list[Checkpoint]:
+    async def list_checkpoints_async(self, name: str | None = None) -> list[Checkpoint]:
         """
         Async variant of ``list_checkpoints``.
 
         Returns:
             A list of :class:`Checkpoint` metadata dicts.
+
+        Args:
+            name: Optional checkpoint name. When present, only exact matches will be returned.
 
         Examples:
             >>> await admin.list_checkpoints_async()
