@@ -307,16 +307,10 @@ mod tests {
         let mut sc = StoredCompactions::create(store.clone(), 0).await.unwrap();
         let compaction = new_compaction();
         let mut dirty = sc.prepare_dirty().unwrap();
-        dirty
-            .value
-            .recent_compactions
-            .insert(compaction.id(), compaction.clone());
+        dirty.value.insert(compaction.clone());
         sc.update(dirty).await.unwrap();
 
-        assert!(sc
-            .compactions()
-            .recent_compactions
-            .contains_key(&compaction.id()));
+        assert!(sc.compactions().contains(&compaction.id()));
     }
 
     #[tokio::test]
@@ -326,19 +320,13 @@ mod tests {
         let mut sc2 = StoredCompactions::load(store.clone()).await.unwrap();
         let compaction = new_compaction();
         let mut dirty = sc.prepare_dirty().unwrap();
-        dirty
-            .value
-            .recent_compactions
-            .insert(compaction.id(), compaction.clone());
+        dirty.value.insert(compaction.clone());
         sc.update(dirty).await.unwrap();
 
         let refreshed = sc2.refresh().await.unwrap();
 
-        assert!(refreshed.recent_compactions.contains_key(&compaction.id()));
-        assert!(sc2
-            .compactions()
-            .recent_compactions
-            .contains_key(&compaction.id()));
+        assert!(refreshed.contains(&compaction.id()));
+        assert!(sc2.compactions().contains(&compaction.id()));
     }
 
     #[tokio::test]

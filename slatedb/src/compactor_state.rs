@@ -210,15 +210,47 @@ pub(crate) struct Compactions {
     /// The set of recent compactions tracked by this compactor. These may
     /// be pending, in progress, or recently completed (either with success
     /// or failure).
-    pub(crate) recent_compactions: BTreeMap<Ulid, Compaction>,
+    recent_compactions: BTreeMap<Ulid, Compaction>,
 }
 
 impl Compactions {
     pub(crate) fn new(compactor_epoch: u64) -> Self {
         Self {
-            recent_compactions: BTreeMap::new(),
             compactor_epoch,
+            recent_compactions: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn with_compactions(mut self, compactions: Vec<Compaction>) -> Self {
+        let recent_compactions = compactions
+            .into_iter()
+            .map(|c| (c.id(), c))
+            .collect::<BTreeMap<Ulid, Compaction>>();
+        self.recent_compactions = recent_compactions;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, compaction: Compaction) {
+        self.recent_compactions.insert(compaction.id, compaction);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, compaction_id: &Ulid) -> Option<&Compaction> {
+        self.recent_compactions.get(compaction_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, compaction_id: &Ulid) -> bool {
+        self.recent_compactions.contains_key(compaction_id)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Compaction> {
+        self.recent_compactions.values()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.recent_compactions.clear();
     }
 }
 

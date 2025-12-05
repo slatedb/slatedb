@@ -406,7 +406,7 @@ impl CompactorEventHandler {
         let compactions = fenceable_compactions;
         let mut dirty_compactions = compactions.prepare_dirty()?;
         // TODO(criccomini): Always start with no jobs for now. Remove this when we add job resume support.
-        dirty_compactions.value.recent_compactions.clear();
+        dirty_compactions.value.clear();
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
@@ -1984,7 +1984,7 @@ mod tests {
             .unwrap()
             .expect("compactions should exist after first write");
         assert!(
-            !persisted.recent_compactions.is_empty(),
+            !persisted.iter().next().is_none(),
             "expected stored compactions to include the seeded compaction"
         );
 
@@ -2005,12 +2005,6 @@ mod tests {
         .unwrap();
 
         assert!(handler.state.compactions().next().is_none());
-        assert!(handler
-            .state
-            .compactions_dirty()
-            .value
-            .recent_compactions
-            .is_empty());
         assert!(
             handler.state.manifest().value.compactor_epoch > first_epoch,
             "compactor epoch should advance on restart"
@@ -2024,7 +2018,7 @@ mod tests {
             .unwrap()
             .expect("compactions should exist after clearing");
         assert!(
-            persisted_after_clear.recent_compactions.is_empty(),
+            persisted_after_clear.iter().next().is_none(),
             "stored compactions should be cleared after restart"
         );
     }
@@ -2405,12 +2399,18 @@ mod tests {
             .read_latest_compactions()
             .await
             .unwrap();
-        assert_eq!(stored_compactions.recent_compactions.len(), 1);
-        let running_id = *stored_compactions
-            .recent_compactions
-            .keys()
+        assert_eq!(
+            stored_compactions
+                .iter()
+                .collect::<Vec<&Compaction>>()
+                .len(),
+            1
+        );
+        let running_id = stored_compactions
+            .iter()
             .next()
-            .expect("compaction should be persisted");
+            .expect("compaction should be persisted")
+            .id();
         let state_id = fixture
             .handler
             .state
@@ -2443,7 +2443,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            stored_compactions.recent_compactions.is_empty(),
+            stored_compactions.iter().next().is_none(),
             "compactions should be cleared after finish"
         );
     }
@@ -2491,7 +2491,7 @@ mod tests {
             .read_latest_compactions()
             .await
             .unwrap();
-        assert_eq!(stored.recent_compactions.len(), 1);
+        assert_eq!(stored.iter().collect::<Vec<&Compaction>>().len(), 1);
 
         // when: job fails
         let msg = CompactorMessage::CompactionJobFinished {
@@ -2507,7 +2507,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            stored_after.recent_compactions.is_empty(),
+            stored_after.iter().next().is_none(),
             "compactions should be removed after failure"
         );
     }

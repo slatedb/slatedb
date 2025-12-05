@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -309,15 +309,13 @@ impl FlatBufferCompactionsCodec {
     }
 
     pub fn compactions(compactions: &CompactionsV1) -> Result<CompactorCompactions, SlateDBError> {
-        let mut recent_compactions = BTreeMap::new();
-        for compaction in compactions.recent_compactions().iter() {
-            let compaction = Self::compaction(&compaction)?;
-            recent_compactions.insert(compaction.id(), compaction);
-        }
-        Ok(CompactorCompactions {
-            compactor_epoch: compactions.compactor_epoch(),
-            recent_compactions,
-        })
+        let recent_compactions = compactions
+            .recent_compactions()
+            .iter()
+            .map(|c| Self::compaction(&c))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(CompactorCompactions::new(compactions.compactor_epoch())
+            .with_compactions(recent_compactions))
     }
 
     fn compaction(compaction: &FbCompaction) -> Result<CompactorCompaction, SlateDBError> {
@@ -594,7 +592,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
     }
 
     fn create_compactions(&mut self, compactions: &CompactorCompactions) -> Bytes {
-        let compactions_fb = self.add_compactions(compactions.recent_compactions.values());
+        let compactions_fb = self.add_compactions(compactions.iter());
         let compactions = CompactionsV1::create(
             &mut self.builder,
             &CompactionsV1Args {
@@ -736,7 +734,6 @@ mod tests {
     use crate::manifest::{ExternalDb, Manifest};
     use crate::transactional_object::ObjectCodec;
     use crate::{checkpoint, error::SlateDBError};
-    use std::collections::BTreeMap;
     use std::collections::VecDeque;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
@@ -986,16 +983,9 @@ mod tests {
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
         );
-        let mut compactions = Compactions {
-            compactor_epoch: 9,
-            recent_compactions: BTreeMap::new(),
-        };
-        compactions
-            .recent_compactions
-            .insert(compaction_l0.id(), compaction_l0.clone());
-        compactions
-            .recent_compactions
-            .insert(compaction_sr.id(), compaction_sr.clone());
+        let mut compactions = Compactions::new(9);
+        compactions.insert(compaction_l0.clone());
+        compactions.insert(compaction_sr.clone());
 
         let codec = FlatBufferCompactionsCodec {};
         let bytes = codec.encode(&compactions);
@@ -1004,14 +994,12 @@ mod tests {
         assert_eq!(decoded.compactor_epoch, compactions.compactor_epoch);
         assert_eq!(
             decoded
-                .recent_compactions
                 .get(&compaction_l0.id())
                 .expect("missing l0 compaction"),
             &compaction_l0
         );
         assert_eq!(
             decoded
-                .recent_compactions
                 .get(&compaction_sr.id())
                 .expect("missing sr compaction"),
             &compaction_sr
@@ -1021,10 +1009,7 @@ mod tests {
     #[test]
     fn test_should_validate_compactions_version() {
         let codec = FlatBufferCompactionsCodec {};
-        let compactions = Compactions {
-            compactor_epoch: 1,
-            recent_compactions: BTreeMap::new(),
-        };
+        let compactions = Compactions::new(1);
         let bytes = codec.encode(&compactions);
 
         let invalid_version = super::COMPACTIONS_FORMAT_VERSION + 1;
