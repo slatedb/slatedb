@@ -13,6 +13,7 @@
 
 use crate::checkpoint::Checkpoint;
 use crate::clock::SystemClock;
+use crate::compactions_store::CompactionsStore;
 use crate::config::GarbageCollectorOptions;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
@@ -146,6 +147,7 @@ impl GarbageCollector {
     /// A new `GarbageCollector` instance configured with the provided components.
     pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
         options: GarbageCollectorOptions,
         stat_registry: Arc<StatRegistry>,
@@ -160,6 +162,7 @@ impl GarbageCollector {
         );
         let compacted_gc_task = CompactedGcTask::new(
             manifest_store.clone(),
+            compactions_store,
             table_store.clone(),
             stats.clone(),
             options.compacted_options,
@@ -266,6 +269,8 @@ mod tests {
 
     use crate::checkpoint::Checkpoint;
     use crate::clock::DefaultSystemClock;
+    use crate::compactions_store::StoredCompactions;
+    use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::compactor_stats::COMPACTION_LOW_WATERMARK_TS;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::dispatcher::MessageHandlerExecutor;
@@ -285,7 +290,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_manifest() {
-        let (manifest_store, table_store, local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
 
         // Create a manifest
         let state = CoreDbState::new();
@@ -318,7 +323,13 @@ mod tests {
         assert_eq!(manifests[0].last_modified, now_minus_24h);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
 
         // Verify that the first manifest was deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -328,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_only_recent_manifests() {
-        let (manifest_store, table_store, _) = build_objects();
+        let (manifest_store, compactions_store, table_store, _) = build_objects();
 
         // Create a manifest
         let mut stored_manifest = StoredManifest::create_new_db(
@@ -352,7 +363,13 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
 
         // Verify that no manifests were deleted
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -402,7 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_expired_checkpoints() {
-        let (manifest_store, table_store, local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
 
         // Manifest 1
         let state = CoreDbState::new();
@@ -443,7 +460,13 @@ mod tests {
         }
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
 
         // The GC should create a new manifest version 4 with the expired
         // checkpoint removed.
@@ -467,7 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collector_should_not_clean_manifests_referenced_by_checkpoints() {
-        let (manifest_store, table_store, local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
 
         // Manifest 1
         let state = CoreDbState::new();
@@ -505,7 +528,13 @@ mod tests {
         assert_eq!(manifests.len(), 4);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
 
         // Verify that the latest manifest version is still 4 with the active checkpoint
         let (latest_manifest_id, latest_manifest) =
@@ -525,7 +554,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_old_active_manifest() {
-        let (manifest_store, table_store, local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
 
         // Create a manifest
         let mut stored_manifest = StoredManifest::create_new_db(
@@ -563,7 +592,13 @@ mod tests {
         assert_eq!(manifests[1].last_modified, now_minus_24h_2);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
 
         // Verify that the first manifest was deleted, but the second is still safe
         let manifests = manifest_store.list_manifests(..).await.unwrap();
@@ -584,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts() {
-        let (manifest_store, table_store, local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
 
         // write a wal sst
@@ -627,7 +662,13 @@ mod tests {
         );
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
 
         // Verify that the first WAL was deleted and the second is kept
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -637,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_do_not_remove_wals_referenced_by_active_checkpoints() {
-        let (manifest_store, table_store, local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
 
         let id1 = SsTableId::Wal(1);
@@ -680,7 +721,13 @@ mod tests {
         }
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
 
         // Only the first table is deleted. The second is eligible,
         // but the reference in the checkpoint is still active.
@@ -692,7 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts_and_keep_expired_last_compacted() {
-        let (manifest_store, table_store, local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
         let path_resolver = PathResolver::new("/");
 
         // write a wal sst
@@ -748,7 +795,13 @@ mod tests {
         );
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), None).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
 
         // Verify that the first WAL was deleted and the second is kept even though it's expired
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -769,7 +822,7 @@ mod tests {
     /// are deleted.
     #[tokio::test]
     async fn test_collect_garbage_compacted_ssts() {
-        let (manifest_store, table_store, _local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, _local_object_store) = build_objects();
         // Use ULID timestamps to model "expired" vs "unexpired" SSTs relative to the
         // compacted GC min_age of 1h.
         let now = DefaultSystemClock::default().now();
@@ -831,7 +884,13 @@ mod tests {
         assert_eq!(current_manifest.core.compacted[0].ssts.len(), 2);
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), Some(now)).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            Some(now),
+        )
+        .await;
 
         // Verify that only inactive, expired SSTs were deleted.
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
@@ -868,7 +927,7 @@ mod tests {
     /// are deleted.
     #[tokio::test]
     async fn test_collect_garbage_compacted_ssts_respects_checkpoint_references() {
-        let (manifest_store, table_store, _local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, _local_object_store) = build_objects();
         // Make all SSTs "expired" according to ULID timestamp so that min_age
         // does not prevent their collection; checkpoint references will gate GC.
         let now = DefaultSystemClock::default().now();
@@ -916,7 +975,13 @@ mod tests {
         stored_manifest.update(dirty).await.unwrap();
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), Some(now)).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            Some(now),
+        )
+        .await;
 
         // Verify that the active tables are still there
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
@@ -935,7 +1000,13 @@ mod tests {
             .unwrap();
 
         // Start the garbage collector
-        run_gc_once(manifest_store.clone(), table_store.clone(), Some(now)).await;
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            Some(now),
+        )
+        .await;
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
         // After dropping the checkpoint, the L0 and SST that were only kept alive by
         // the checkpoint can be collected.
@@ -952,9 +1023,14 @@ mod tests {
 
     /// Builds the objects needed to construct the garbage collector.
     /// # Returns
-    /// A tuple containing the manifest store, table store, local object store,
-    /// and database stats
-    fn build_objects() -> (Arc<ManifestStore>, Arc<TableStore>, Arc<LocalFileSystem>) {
+    /// A tuple containing the manifest store, compactions store, table store,
+    /// and local object store
+    fn build_objects() -> (
+        Arc<ManifestStore>,
+        Arc<CompactionsStore>,
+        Arc<TableStore>,
+        Arc<LocalFileSystem>,
+    ) {
         let tempdir = tempfile::tempdir().unwrap().keep();
         let local_object_store = Arc::new(
             LocalFileSystem::new_with_prefix(tempdir)
@@ -963,6 +1039,7 @@ mod tests {
         );
         let path = Path::from("/");
         let manifest_store = Arc::new(ManifestStore::new(&path, local_object_store.clone()));
+        let compactions_store = Arc::new(CompactionsStore::new(&path, local_object_store.clone()));
         let sst_format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(local_object_store.clone(), None),
@@ -971,7 +1048,12 @@ mod tests {
             None,
         ));
 
-        (manifest_store, table_store, local_object_store)
+        (
+            manifest_store,
+            compactions_store,
+            table_store,
+            local_object_store,
+        )
     }
 
     /// Create an SSTable with a fixed ULID timestamp and write it to the table store.
@@ -1052,14 +1134,46 @@ mod tests {
 
     async fn run_gc_once(
         manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
         compaction_low_watermark_dt: Option<DateTime<Utc>>,
     ) {
         // Start the garbage collector
         let stats = Arc::new(StatRegistry::new());
 
+        // Ensure there is a compactions state file so GC can read persisted compaction hints.
+        if StoredCompactions::try_load(compactions_store.clone())
+            .await
+            .unwrap()
+            .is_none()
+        {
+            let manifest = StoredManifest::load(
+                manifest_store.clone(),
+                Arc::new(DefaultSystemClock::default()),
+            )
+            .await
+            .unwrap();
+            StoredCompactions::create(
+                compactions_store.clone(),
+                manifest.manifest().compactor_epoch,
+            )
+            .await
+            .unwrap();
+        }
+
         // Pretend a compaction job has already run with the specified start time
         if let Some(compaction_low_watermark_dt) = compaction_low_watermark_dt {
+            let mut stored_compactions = StoredCompactions::try_load(compactions_store.clone())
+                .await
+                .unwrap()
+                .expect("compactions should exist after initialization");
+            let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
+            compactions_dirty.value.insert(Compaction::new(
+                ulid::Ulid::from_parts(compaction_low_watermark_dt.timestamp_millis() as u64, 0),
+                CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+            ));
+            stored_compactions.update(compactions_dirty).await.unwrap();
+
             let barrier = Arc::new(Gauge::<u64>::default());
             barrier.set(
                 compaction_low_watermark_dt
@@ -1087,6 +1201,7 @@ mod tests {
 
         let gc = GarbageCollector::new(
             manifest_store.clone(),
+            compactions_store.clone(),
             table_store.clone(),
             gc_opts,
             stats.clone(),
@@ -1103,7 +1218,7 @@ mod tests {
     async fn test_handle_should_only_run_one_task_per_message() {
         use crate::dispatcher::MessageHandler;
 
-        let (manifest_store, table_store, local_object_store) = build_objects();
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
 
         // Create two manifests where the first is old enough to GC
         let mut stored_manifest = StoredManifest::create_new_db(
@@ -1148,6 +1263,7 @@ mod tests {
 
         let mut gc = GarbageCollector::new(
             manifest_store.clone(),
+            compactions_store.clone(),
             table_store.clone(),
             gc_opts,
             stats.clone(),
@@ -1170,7 +1286,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_gc_shutdown() {
-        let (manifest_store, table_store, _) = build_objects();
+        let (manifest_store, compactions_store, table_store, _) = build_objects();
         let stats = Arc::new(StatRegistry::new());
 
         let gc_opts = GarbageCollectorOptions {
@@ -1190,6 +1306,7 @@ mod tests {
 
         let gc = GarbageCollector::new(
             manifest_store.clone(),
+            compactions_store.clone(),
             table_store.clone(),
             gc_opts,
             stats.clone(),

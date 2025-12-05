@@ -1,7 +1,7 @@
-use crate::manifest::Manifest;
 use crate::{
-    config::GarbageCollectorDirectoryOptions, db_state::SsTableId, error::SlateDBError,
-    manifest::store::ManifestStore, stats::StatRegistry, tablestore::TableStore,
+    compactions_store::CompactionsStore, config::GarbageCollectorDirectoryOptions,
+    db_state::SsTableId, error::SlateDBError, manifest::store::ManifestStore, manifest::Manifest,
+    stats::StatRegistry, tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
 use log::error;
@@ -14,6 +14,7 @@ use crate::compactor::stats::COMPACTION_LOW_WATERMARK_TS;
 
 pub(crate) struct CompactedGcTask {
     manifest_store: Arc<ManifestStore>,
+    compactions_store: Arc<CompactionsStore>,
     table_store: Arc<TableStore>,
     stats: Arc<GcStats>,
     compacted_options: Option<GarbageCollectorDirectoryOptions>,
@@ -28,9 +29,16 @@ impl std::fmt::Debug for CompactedGcTask {
     }
 }
 
+enum PersistedCompactionLowWatermark {
+    Missing,
+    Empty,
+    Active(DateTime<Utc>),
+}
+
 impl CompactedGcTask {
     pub fn new(
         manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,
         compacted_options: Option<GarbageCollectorDirectoryOptions>,
@@ -38,6 +46,7 @@ impl CompactedGcTask {
     ) -> Self {
         CompactedGcTask {
             manifest_store,
+            compactions_store,
             table_store,
             stats,
             compacted_options,
@@ -100,28 +109,70 @@ impl CompactedGcTask {
         Ok(max_l0_ts)
     }
 
-    /// Returns a `DateTime<Utc>` barrier based on the compactor's oldest running compaction start.
+    /// Attempts to load the oldest active compaction start time from the persisted
+    /// compactions state in object storage.
+    async fn persisted_compaction_low_watermark_dt(
+        &self,
+    ) -> Result<PersistedCompactionLowWatermark, SlateDBError> {
+        let Some((_, compactions)) = self.compactions_store.try_read_latest_compactions().await?
+        else {
+            return Ok(PersistedCompactionLowWatermark::Missing);
+        };
+
+        let watermark = compactions
+            .iter()
+            .map(|c| DateTime::<Utc>::from(c.id().datetime()))
+            .min();
+
+        Ok(match watermark {
+            Some(dt) => PersistedCompactionLowWatermark::Active(dt),
+            None => PersistedCompactionLowWatermark::Empty,
+        })
+    }
+
+    /// Returns the process-local compaction low watermark from the shared stat registry.
     ///
-    /// When compactions are active (compactor/running_compactions > 0), we read
-    /// compactor/compaction_low_watermark_ts and convert it into a
-    /// `DateTime<Utc>` value. GC should not delete any compacted SST whose ULID timestamp
-    /// is greater than or equal to this barrier time.
-    ///
-    /// This is a process-local coordination mechanism that only works when the compactor
-    /// and garbage collector run in the same process and share the same StatRegistry. It's
-    /// a hack until we have proper compactor persistence (so GC can retrieve the compactor
-    /// state from the object store). See #604 for details.
-    fn compaction_low_watermark_dt(&self) -> DateTime<Utc> {
-        let low_watermark_ts = self
-            .stat_registry
+    /// This is a fallback for older deployments or when persisted compaction state is
+    /// unavailable.
+    fn stat_compaction_low_watermark_dt(&self) -> Option<DateTime<Utc>> {
+        self.stat_registry
             .lookup(COMPACTION_LOW_WATERMARK_TS)
             .map(|s| s.get())
-            // If no compaction has ever run since the start of this process, then set
-            // `compaction_low_watermark_ts` to 0 (UNIX_EPOCH) to prevent the GC from deleting
-            // _anything_. Once a job kicks in, the low watermark will always be set, and will
-            // only increase as new jobs start and old ones finish.
-            .unwrap_or(0);
-        DateTime::<Utc>::from_timestamp_millis(low_watermark_ts).expect("out of bounds timestamp")
+            .and_then(|ts| {
+                if ts == 0 {
+                    None
+                } else {
+                    DateTime::<Utc>::from_timestamp_millis(ts as i64)
+                }
+            })
+    }
+
+    /// Returns the oldest active compaction start time from persisted state, falling back
+    /// to the process-local stat registry when no persisted state is available. If neither
+    /// source is reachable, default to the Unix epoch to prevent deletions.
+    async fn compaction_low_watermark_dt(&self) -> Option<DateTime<Utc>> {
+        match self.persisted_compaction_low_watermark_dt().await {
+            Ok(PersistedCompactionLowWatermark::Active(dt)) => Some(dt),
+            Ok(PersistedCompactionLowWatermark::Empty) => None,
+            Ok(PersistedCompactionLowWatermark::Missing) => {
+                self.stat_compaction_low_watermark_dt().or_else(|| {
+                    Some(
+                        DateTime::<Utc>::from_timestamp_millis(0).expect("out of bounds timestamp"),
+                    )
+                })
+            }
+            Err(err) => {
+                log::warn!(
+                    "failed to read persisted compaction state for GC [error={}]",
+                    err
+                );
+                self.stat_compaction_low_watermark_dt().or_else(|| {
+                    Some(
+                        DateTime::<Utc>::from_timestamp_millis(0).expect("out of bounds timestamp"),
+                    )
+                })
+            }
+        }
     }
 }
 
@@ -139,7 +190,7 @@ impl GcTask for CompactedGcTask {
         // manifest) and the compaction low watermark _after_ the SSTs are added to the manifest.
         // This would allow the GC to delete the latest compaction job output SST since they would
         // not be active, and would be older than the low watermark.
-        let compaction_low_watermark_dt = self.compaction_low_watermark_dt();
+        let compaction_low_watermark_dt = self.compaction_low_watermark_dt().await;
         let active_manifests = self.manifest_store.read_active_manifests().await?;
         let active_ssts = self
             .list_active_l0_and_compacted_ssts(&active_manifests)
@@ -150,11 +201,12 @@ impl GcTask for CompactedGcTask {
         // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
         // manifest to object storage).
         let newest_l0_dt = self.newest_l0_dt(&active_manifests).await?;
-        // Take the minimum of the configured min age, the compaction low watermark, and the most
-        // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
-        let cutoff_dt = configured_min_age_dt
-            .min(compaction_low_watermark_dt)
-            .min(newest_l0_dt);
+        // Take the minimum of the configured min age, the compaction low watermark (if any), and the
+        // most recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
+        let mut cutoff_dt = configured_min_age_dt.min(newest_l0_dt);
+        if let Some(compaction_low_watermark_dt) = compaction_low_watermark_dt {
+            cutoff_dt = cutoff_dt.min(compaction_low_watermark_dt);
+        }
         log::debug!(
             "calculated compacted SST GC cutoff [cutoff_dt={:?}, configured_min_age_dt={:?}, compaction_low_watermark_dt={:?}, most_recent_sst_dt={:?}]",
             cutoff_dt,
@@ -198,12 +250,12 @@ mod tests {
 
     use super::*;
     use crate::clock::DefaultSystemClock;
-    use crate::compactor_stats::RUNNING_COMPACTIONS;
+    use crate::compactions_store::{CompactionsStore, StoredCompactions};
+    use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::db_state::{CoreDbState, SsTableId};
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
-    use crate::stats::Gauge;
     use crate::test_utils::build_test_sst;
     use object_store::{memory::InMemory, path::Path};
 
@@ -226,6 +278,16 @@ mod tests {
             manifest_store.clone(),
             CoreDbState::new(),
             Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from("/root"),
+            main_store.clone(),
+        ));
+        StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
         )
         .await
         .unwrap();
@@ -258,14 +320,7 @@ mod tests {
         dirty.value.core.l0.push_back(active_handle);
         stored_manifest.update(dirty).await.unwrap();
 
-        // Register barrier metrics to be more recent than id_active_recent so it doesn't get in the way
         let stat_registry = Arc::new(StatRegistry::new());
-        let running = Arc::new(Gauge::<i64>::default());
-        running.set(1);
-        stat_registry.register(RUNNING_COMPACTIONS, running);
-        let barrier = Arc::new(Gauge::<u64>::default());
-        barrier.set(10_000);
-        stat_registry.register(COMPACTION_LOW_WATERMARK_TS, barrier);
 
         // GC task with min_age = 5 seconds. Using utc_now at 10 seconds after the epoch
         // yields a configured_min_age_dt of 5 seconds.
@@ -276,6 +331,7 @@ mod tests {
         let stats = Arc::new(GcStats::new(stat_registry.clone()));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
+            compactions_store.clone(),
             table_store.clone(),
             stats,
             opts,
@@ -319,6 +375,16 @@ mod tests {
         )
         .await
         .unwrap();
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from("/root"),
+            main_store.clone(),
+        ));
+        StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
 
         // Three SSTs with distinct ULID timestamps
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
@@ -348,14 +414,7 @@ mod tests {
         dirty.value.core.l0.push_back(manifest_handle);
         stored_manifest.update(dirty).await.unwrap();
 
-        // Register barrier metric to be more recent than id_newer so it doesn't get in the way
         let stat_registry = Arc::new(StatRegistry::new());
-        let running = Arc::new(Gauge::<i64>::default());
-        running.set(1);
-        stat_registry.register(RUNNING_COMPACTIONS, running);
-        let barrier = Arc::new(Gauge::<u64>::default());
-        barrier.set(10_000);
-        stat_registry.register(COMPACTION_LOW_WATERMARK_TS, barrier);
 
         // min_age = 0, so configured_min_age_dt == utc_now (10 seconds after epoch).
         // The manifest's most recent SST (3 seconds) is the smallest cutoff, so only
@@ -367,6 +426,7 @@ mod tests {
         let stats = Arc::new(GcStats::new(stat_registry.clone()));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
+            compactions_store.clone(),
             table_store.clone(),
             stats,
             opts,
@@ -404,6 +464,10 @@ mod tests {
 
         // Manifest store with empty DB
         let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from("/root"),
+            main_store.clone(),
+        ));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             CoreDbState::new(),
@@ -411,6 +475,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let compactor_epoch = stored_manifest.manifest().compactor_epoch;
 
         // Three SSTs with distinct ULID timestamps
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0)); // job 1
@@ -439,23 +504,28 @@ mod tests {
         dirty.value.core.l0.push_back(active_handle);
         stored_manifest.update(dirty).await.unwrap();
 
-        // Register barrier metrics
-        let stat_registry = Arc::new(StatRegistry::new());
-        let running = Arc::new(Gauge::<i64>::default());
-        running.set(1);
-        stat_registry.register(RUNNING_COMPACTIONS, running);
-        let barrier = Arc::new(Gauge::<u64>::default());
-        barrier.set(2_000);
-        stat_registry.register(COMPACTION_LOW_WATERMARK_TS, barrier);
+        // Persist a running compaction with a start time at 2_000ms to act as the GC barrier.
+        let mut stored_compactions =
+            StoredCompactions::create(compactions_store.clone(), compactor_epoch)
+                .await
+                .unwrap();
+        let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
+        compactions_dirty.value.insert(Compaction::new(
+            ulid::Ulid::from_parts(2_000, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        ));
+        stored_compactions.update(compactions_dirty).await.unwrap();
 
         // GC task with min_age = 0
         let opts = Some(GarbageCollectorDirectoryOptions {
             interval: None,
             min_age: Duration::from_secs(0),
         });
+        let stat_registry = Arc::new(StatRegistry::new());
         let stats = Arc::new(GcStats::new(stat_registry.clone()));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
+            compactions_store.clone(),
             table_store.clone(),
             stats,
             opts,
