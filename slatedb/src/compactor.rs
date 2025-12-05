@@ -634,6 +634,8 @@ impl CompactorEventHandler {
                 }
                 Err(SlateDBError::TransactionalObjectVersionExists) => {
                     // Retry with a refreshed view. Refresh will surface fencing if the epoch advanced.
+                    // If another process modified the compactions file legally (such as an external
+                    // compaction request triggered from the CLI), this will pick up those changes.
                     self.compactions.refresh().await?;
                 }
                 Err(err) => return Err(err),
@@ -806,7 +808,6 @@ impl CompactorEventHandler {
         tracing::Span::current().record("id", tracing::field::display(&job_id));
         if let Err(err) = self.start_compaction(job_id, compaction).await {
             self.state.remove_compaction(&job_id);
-            // Best effort to persist the removal; prefer fencing errors for visibility.
             self.write_compactions_safely().await?;
             return Err(err);
         }
