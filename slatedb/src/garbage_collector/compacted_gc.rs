@@ -104,10 +104,13 @@ impl CompactedGcTask {
     /// prevent unsafe deletions.
     async fn compaction_low_watermark_dt(&self) -> Option<DateTime<Utc>> {
         match self.compactions_store.try_read_latest_compactions().await {
-            Ok(Some((_, compactions))) => compactions
-                .iter()
-                .map(|c| DateTime::<Utc>::from(c.id().datetime()))
-                .min(),
+            Ok(Some((_, compactions))) => Some(
+                compactions
+                    .iter()
+                    .map(|c| DateTime::<Utc>::from(c.id().datetime()))
+                    .min()
+                    .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+            ),
             Ok(None) => Some(DateTime::<Utc>::UNIX_EPOCH),
             Err(err) => {
                 warn!(
@@ -230,12 +233,20 @@ mod tests {
             &Path::from("/root"),
             main_store.clone(),
         ));
-        StoredCompactions::create(
+        let mut stored_compactions = StoredCompactions::create(
             compactions_store.clone(),
             stored_manifest.manifest().compactor_epoch,
         )
         .await
         .unwrap();
+
+        // Set a compaction newer than id_to_delete so that it doesn't affect the cutoff.
+        let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
+        compactions_dirty.value.insert(Compaction::new(
+            ulid::Ulid::from_parts(9_000, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        ));
+        stored_compactions.update(compactions_dirty).await.unwrap();
 
         // Three SSTs with distinct ULID timestamps
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
@@ -323,12 +334,20 @@ mod tests {
             &Path::from("/root"),
             main_store.clone(),
         ));
-        StoredCompactions::create(
+        let mut stored_compactions = StoredCompactions::create(
             compactions_store.clone(),
             stored_manifest.manifest().compactor_epoch,
         )
         .await
         .unwrap();
+
+        // Set a compaction newer than id_to_delete so that it doesn't affect the cutoff.
+        let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
+        compactions_dirty.value.insert(Compaction::new(
+            ulid::Ulid::from_parts(5_000, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        ));
+        stored_compactions.update(compactions_dirty).await.unwrap();
 
         // Three SSTs with distinct ULID timestamps
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
@@ -493,7 +512,7 @@ mod tests {
     /// Reproduces the race where GC reads an empty compaction state and deletes the
     /// output of a compaction that starts afterward but hasn't yet updated the manifest.
     #[tokio::test]
-    async fn test_compacted_gc_drops_running_compaction_output_without_watermark() {
+    async fn test_compacted_gc_skips_running_compaction_output_without_watermark() {
         let main_store = Arc::new(InMemory::new());
         let object_stores = ObjectStores::new(main_store.clone(), None);
         let format = SsTableFormat::default();

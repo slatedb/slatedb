@@ -345,8 +345,10 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 id,
                 bytes_processed,
             } => {
-                self.state
-                    .update_compaction(&id, |c| c.set_bytes_processed(bytes_processed));
+                self.state.update_compaction(&id, |c| {
+                    c.mark_running();
+                    c.set_bytes_processed(bytes_processed);
+                });
             }
         }
         Ok(())
@@ -405,8 +407,9 @@ impl CompactorEventHandler {
         .await?;
         let compactions = fenceable_compactions;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // TODO(criccomini): Always start with no jobs for now. Remove this when we add job resume support.
-        dirty_compactions.value.clear();
+        // We don't resume old jobs, but keep the latest finished entry for GC safety.
+        dirty_compactions.value.mark_all_finished();
+        dirty_compactions.value.trim();
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
@@ -622,7 +625,8 @@ impl CompactorEventHandler {
     /// Persists the current compactions state to the compactions store and refreshes the
     /// local dirty object with the latest version.
     async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
-        let desired_value = self.state.compactions_dirty().value.clone();
+        let mut desired_value = self.state.compactions_dirty().value.clone();
+        desired_value.trim();
         loop {
             let mut dirty_compactions = self.compactions.prepare_dirty()?;
             dirty_compactions.value = desired_value.clone();
@@ -916,6 +920,7 @@ mod tests {
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
     use crate::compactor_executor::{CompactionExecutor, TokioCompactionExecutor};
+    use crate::compactor_state::CompactionStatus;
     use crate::compactor_state::{CompactorState, SourceId};
     use crate::compactor_stats::LAST_COMPACTION_TS_SEC;
     use crate::config::{
@@ -1868,7 +1873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compactor_starts_with_empty_compactions() {
+    async fn test_compactor_saves_latest_compaction_on_restart() {
         let os = Arc::new(InMemory::new());
         let (manifest_store, compactions_store, _table_store) = build_test_stores(os);
         let clock = Arc::new(DefaultSystemClock::new());
@@ -1934,16 +1939,21 @@ mod tests {
             "compactor epoch should advance on restart"
         );
 
-        // Persisting after restart should clear the stored compactions as well.
+        // Persisting after restart should keep only the retained finished compaction for GC.
         handler.write_compactions_safely().await.unwrap();
-        let (_, persisted_after_clear) = compactions_store
+        let (_, persisted_after_trim) = compactions_store
             .try_read_latest_compactions()
             .await
             .unwrap()
             .expect("compactions should exist after clearing");
-        assert!(
-            persisted_after_clear.iter().next().is_none(),
-            "stored compactions should be cleared after restart"
+        assert_eq!(
+            persisted_after_trim
+                .iter()
+                .next()
+                .expect("expected one retained compaction after restart")
+                .id(),
+            compaction_id,
+            "stored compactions should retain the latest finished compaction after restart"
         );
     }
 
@@ -2366,9 +2376,17 @@ mod tests {
             .read_latest_compactions()
             .await
             .unwrap();
+        let mut stored_compactions_iter = stored_compactions.iter();
+        assert_eq!(
+            stored_compactions_iter
+                .next()
+                .expect("compactions should not be empty after finish")
+                .id(),
+            running_id,
+        );
         assert!(
-            stored_compactions.iter().next().is_none(),
-            "compactions should be cleared after finish"
+            stored_compactions_iter.next().is_none(),
+            "expected only one retained finished compaction for GC"
         );
     }
 
@@ -2400,7 +2418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_persist_failed_compaction_removal() {
+    async fn test_should_update_failed_compaction_status() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0().await;
@@ -2430,8 +2448,14 @@ mod tests {
             .read_latest_compactions()
             .await
             .unwrap();
-        assert!(
-            stored_after.iter().next().is_none(),
+        assert_eq!(
+            stored_after
+                .iter()
+                .next()
+                .expect("compactions should be empty after failure")
+                .status(),
+            // TODO(criccomini): change to Failed once we track status in the flatbuffers
+            CompactionStatus::Submitted,
             "compactions should be removed after failure"
         );
     }
