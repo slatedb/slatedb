@@ -320,12 +320,9 @@ impl FlatBufferCompactionsCodec {
 
     fn compaction(compaction: &FbCompaction) -> Result<CompactorCompaction, SlateDBError> {
         let spec = Self::compaction_spec(compaction)?;
-        Ok(CompactorCompaction::new_with_status(
-            compaction.id().ulid(),
-            spec,
-            // TODO(criccomini): actually encode status in flatbuffer
-            CompactionStatus::Submitted,
-        ))
+        Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
+            // TODO(criccomini): use actual status when we encode it in flatbuffer
+            .with_status(CompactionStatus::Submitted))
     }
 
     fn compaction_spec(compaction: &FbCompaction) -> Result<CompactorCompactionSpec, SlateDBError> {

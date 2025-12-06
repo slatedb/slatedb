@@ -121,14 +121,14 @@ pub(crate) enum CompactionStatus {
 }
 
 impl CompactionStatus {
-    fn is_active(self) -> bool {
+    fn active(self) -> bool {
         matches!(
             self,
             CompactionStatus::Submitted | CompactionStatus::Running
         )
     }
 
-    fn is_finished(self) -> bool {
+    fn finished(self) -> bool {
         matches!(self, CompactionStatus::Finished)
     }
 }
@@ -145,26 +145,25 @@ pub(crate) struct Compaction {
     spec: CompactionSpec,
     /// Total number of bytes processed so far for this compaction.
     bytes_processed: u64,
-    /// Current lifecycle status for this compaction.
+    /// Current status for this compaction.
+    ///
+    /// This is tracked only in memory at the moment.
     status: CompactionStatus,
 }
 
 impl Compaction {
     pub(crate) fn new(id: Ulid, spec: CompactionSpec) -> Self {
-        Self::new_with_status(id, spec, CompactionStatus::Submitted)
-    }
-
-    pub(crate) fn new_with_status(
-        id: Ulid,
-        spec: CompactionSpec,
-        status: CompactionStatus,
-    ) -> Self {
         Self {
             id,
             spec,
             bytes_processed: 0,
-            status,
+            status: CompactionStatus::Submitted,
         }
+    }
+
+    pub(crate) fn with_status(mut self, status: CompactionStatus) -> Self {
+        self.status = status;
+        self
     }
 
     /// Returns all sorted run sources for this compaction.
@@ -234,8 +233,8 @@ impl Compaction {
         self.status = CompactionStatus::Finished;
     }
 
-    pub(crate) fn is_active(&self) -> bool {
-        self.status.is_active()
+    pub(crate) fn active(&self) -> bool {
+        self.status.active()
     }
 }
 
@@ -309,7 +308,7 @@ impl Compactions {
 
     /// Returns an iterator over all active (submitted or running) compactions.
     pub(crate) fn active_iter(&self) -> impl Iterator<Item = &Compaction> {
-        self.recent_compactions.values().filter(|c| c.is_active())
+        self.recent_compactions.values().filter(|c| c.active())
     }
 
     /// Keeps the most recently finished compaction and any active compactions, and removes others.
@@ -318,12 +317,11 @@ impl Compactions {
             .recent_compactions
             .iter()
             .rev()
-            .find(|(_, c)| c.status().is_finished())
+            .find(|(_, c)| c.status().finished())
             .map(|(id, _)| *id);
 
-        self.recent_compactions.retain(|id, compaction| {
-            compaction.is_active() || Some(id) == latest_finished.as_ref()
-        });
+        self.recent_compactions
+            .retain(|id, compaction| compaction.active() || Some(id) == latest_finished.as_ref());
     }
 
     /// Marks all tracked compactions as finished.
@@ -579,7 +577,7 @@ impl CompactorState {
             compaction.mark_finished();
         } else {
             error!(
-                "finished compaction not found [compaction_id={}]",
+                "compaction finished but not found [compaction_id={}]",
                 compaction_id
             );
         }

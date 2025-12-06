@@ -407,7 +407,7 @@ impl CompactorEventHandler {
         .await?;
         let compactions = fenceable_compactions;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // We don't resume old jobs, but keep the latest finished entry for GC safety.
+        // We don't resume old jobs, but keep the latest finished entry for GC safety (#1044).
         dirty_compactions.value.mark_all_finished();
         dirty_compactions.value.trim();
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
@@ -2454,7 +2454,7 @@ mod tests {
                 .next()
                 .expect("compactions should be empty after failure")
                 .status(),
-            // TODO(criccomini): change to Failed once we track status in the flatbuffers
+            // TODO(criccomini): change to Failed or Finished once we track status in the flatbuffers
             CompactionStatus::Submitted,
             "compactions should be removed after failure"
         );
