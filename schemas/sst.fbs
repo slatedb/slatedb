@@ -25,6 +25,8 @@ table SsTableInfo {
 
     // Type of compression algorithm used.
     compression_format: CompressionFormat;
+
+    last_key: [ubyte];
 }
 
 table BlockMeta {

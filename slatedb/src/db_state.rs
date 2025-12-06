@@ -213,6 +213,7 @@ pub(crate) struct SsTableInfo {
     pub(crate) filter_offset: u64,
     pub(crate) filter_len: u64,
     pub(crate) compression_codec: Option<CompressionCodec>,
+    pub(crate) last_key: Option<Bytes>,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -249,6 +250,15 @@ impl SortedRun {
             .ssts
             .partition_point(|sst| sst.compacted_effective_start_key() <= key);
         if first_sst > 0 {
+            if first_sst == self.ssts.len() && first_sst > 0 {
+                // the last sst matched. check the end bound
+                if let Some(last_key) = self.ssts.last().expect("unreachable").info.last_key.as_ref() {
+                    if key > last_key.as_ref() {
+                        // key is after the end of the sr. skip
+                        return None;
+                    }
+                }
+            }
             return Some(first_sst - 1);
         }
         // all ssts have a range greater than the key
@@ -596,6 +606,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;
+    use ulid::Ulid;
 
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
@@ -668,7 +679,7 @@ mod tests {
     }
 
     fn add_l0s_to_dbstate(db_state: &mut DbState, n: u32) {
-        let dummy_info = create_sst_info(None);
+        let dummy_info = create_sst_info(None, None);
         for i in 0..n {
             db_state
                 .freeze_memtable(i as u64)
@@ -726,6 +737,65 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_should_find_key_in_range() {
+        let t1 = create_sst_info(
+            Some(Bytes::copy_from_slice(b"aaa")),
+            Some(Bytes::copy_from_slice(b"bbb"))
+        );
+        let t1 = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), t1);
+        let t2 = create_sst_info(
+            Some(Bytes::copy_from_slice(b"ccc")),
+            Some(Bytes::copy_from_slice(b"ddd"))
+        );
+        let t2 = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), t2);
+        let t3 = create_sst_info(
+            Some(Bytes::copy_from_slice(b"eee")),
+            Some(Bytes::copy_from_slice(b"fff"))
+        );
+        let t3 = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), t3);
+        let sr = SortedRun {
+            id: 0,
+            ssts: vec![t1.clone(), t2.clone(), t3.clone()],
+        };
+
+        assert_eq!(sr.find_sst_with_range_covering_key(b"a"), None);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"ab").unwrap().id, t1.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"bbc").unwrap().id, t1.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"cd").unwrap().id, t2.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"de").unwrap().id, t2.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"ef").unwrap().id, t3.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"fg"), None);
+
+        let t1 = create_sst_info(
+            Some(Bytes::copy_from_slice(b"aaa")),
+            Some(Bytes::copy_from_slice(b"bbb"))
+        );
+        let t1 = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), t1);
+        let t2 = create_sst_info(
+            Some(Bytes::copy_from_slice(b"ccc")),
+            Some(Bytes::copy_from_slice(b"ddd"))
+        );
+        let t2 = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), t2);
+        let t3 = create_sst_info(
+            Some(Bytes::copy_from_slice(b"eee")),
+            None,
+        );
+        let t3 = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), t3);
+        let sr = SortedRun {
+            id: 0,
+            ssts: vec![t1.clone(), t2.clone(), t3.clone()],
+        };
+
+        assert_eq!(sr.find_sst_with_range_covering_key(b"a"), None);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"ab").unwrap().id, t1.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"bbc").unwrap().id, t1.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"cd").unwrap().id, t2.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"de").unwrap().id, t2.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"ef").unwrap().id, t3.id);
+        assert_eq!(sr.find_sst_with_range_covering_key(b"fg").unwrap().id, t3.id);
+    }
+
     fn create_sorted_run(id: u32, first_keys: &BTreeSet<Bytes>) -> SortedRun {
         let mut ssts = Vec::new();
         for first_key in first_keys {
@@ -735,12 +805,12 @@ mod tests {
     }
 
     fn create_compacted_sst_handle(first_key: Option<Bytes>) -> SsTableHandle {
-        let sst_info = create_sst_info(first_key);
+        let sst_info = create_sst_info(first_key, None);
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
         SsTableHandle::new(sst_id, sst_info.clone())
     }
 
-    fn create_sst_info(first_key: Option<Bytes>) -> SsTableInfo {
+    fn create_sst_info(first_key: Option<Bytes>, last_key: Option<Bytes>) -> SsTableInfo {
         SsTableInfo {
             first_key,
             index_offset: 0,
@@ -748,6 +818,7 @@ mod tests {
             filter_offset: 0,
             filter_len: 0,
             compression_codec: None,
+            last_key,
         }
     }
 }

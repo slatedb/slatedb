@@ -110,6 +110,7 @@ impl Reader {
 
         let (l0_iters, sr_iters) = if let Some(point_key) = range.as_point().cloned() {
             let l0 = self.build_point_l0_iters(
+                &point_key,
                 range,
                 db_state,
                 sst_iter_options,
@@ -142,6 +143,7 @@ impl Reader {
 
     fn build_point_l0_iters<'a>(
         &self,
+        point_key: &[u8],
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
         sst_iter_options: SstIteratorOptions,
@@ -149,6 +151,16 @@ impl Reader {
     ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sst in &db_state.core().l0 {
+            if let Some(first_key) = sst.info.first_key.as_ref() {
+                if point_key < first_key.as_ref() {
+                    continue;
+                }
+            }
+            if let Some(last_key) = sst.info.last_key.as_ref() {
+                if point_key > last_key.as_ref() {
+                    continue;
+                }
+            }
             let iterator = SstIterator::new_owned_with_stats(
                 range.clone(),
                 sst.clone(),
