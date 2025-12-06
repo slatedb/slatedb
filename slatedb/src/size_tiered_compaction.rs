@@ -184,6 +184,14 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
 
         let sr_ids: Vec<_> = db_state.compacted.iter().map(|sr| sr.id).collect();
         if sr_ids == vec![23u32, 22u32, 0u32] || sr_ids == vec![24u32, 23u32, 22u32, 0u32] {
+            let ongoing = state
+                .compactions()
+                .map(|j| j.spec().clone())
+                .collect::<Vec<_>>()
+                .len();
+            if ongoing > 0 {
+                return vec![];
+            }
             println!("DO DUMMY COMPACTION");
             if db_state.l0.is_empty() {
                 let mut sources = Vec::new();
