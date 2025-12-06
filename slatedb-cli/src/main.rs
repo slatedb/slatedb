@@ -68,6 +68,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         CliCommands::TsToSeq { ts_secs, round } => {
             exec_ts_to_seq(&admin, ts_secs, matches!(round, FindOption::RoundUp)).await?
+        },
+        CliCommands::RewriteLastKeys {} => {
+            admin.set_last_keys().await?;
         }
     }
 

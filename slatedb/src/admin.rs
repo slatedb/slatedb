@@ -21,11 +21,16 @@ use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
+use bytes::Bytes;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-
+use crate::block_iterator::BlockIterator;
 pub use crate::db::builder::AdminBuilder;
+use crate::db_state::SsTableHandle;
+use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::sst::SsTableFormat;
+use crate::tablestore::TableStore;
 use crate::transactional_object::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
@@ -320,6 +325,49 @@ impl Admin {
             FindOption::RoundDown
         };
         Ok(manifest.core.sequence_tracker.find_ts(seq, opt))
+    }
+
+    async fn last_key(
+        table_store: &TableStore,
+        sst: &SsTableHandle
+    ) -> Option<Bytes> {
+        let index = table_store.read_index(&sst).await.unwrap();
+        let last_blk = index.borrow().block_meta().len() - 1;
+        let mut blocks = table_store.read_blocks_using_index(&sst, index.clone(), (last_blk..last_blk + 1), false).await.unwrap();
+        assert_eq!(blocks.len(), 1);
+        let mut key: Option<Bytes> = None;
+        if let Some(block) = blocks.pop_front() {
+            let mut iter = BlockIterator::new(block, IterationOrder::Descending);
+            if let Some(e) = iter.next().await.unwrap() {
+                key = Some(e.key.clone());
+            }
+        }
+        key
+    }
+
+    pub async fn set_last_keys(
+        &self
+    ) -> Result<(), crate::Error> {
+        let table_store = TableStore::new(
+            self.object_stores.clone(),
+            SsTableFormat::default(),
+            self.path.clone(),
+            None,
+        );
+        let manifest_store = Arc::new(self.manifest_store());
+        let mut manifest = StoredManifest::load(manifest_store.clone()).await?;
+        let mut dirty = manifest.prepare_dirty()?;
+        for sst in dirty.value.core.l0.iter_mut() {
+            println!("SET FOR SST: {:?}", sst.id);
+            sst.info.last_key = Self::last_key(&table_store, &sst).await;
+        }
+        for sr in dirty.value.core.compacted.iter_mut() {
+            let sst = sr.ssts.last_mut().expect("must exist");
+            println!("SET FOR SST: {:?}/{:?}", sr.id, sst.id);
+            sst.info.last_key = Self::last_key(&table_store, &sst).await;
+        }
+        manifest.update(dirty).await?;
+        Ok(())
     }
 
     /// Returns the sequence for a given timestamp from the latest manifest's sequence tracker.

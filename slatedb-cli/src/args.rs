@@ -163,6 +163,7 @@ pub(crate) enum CliCommands {
         #[arg(long, value_parser = parse_gc_schedule)]
         compacted: Option<GcSchedule>,
     },
+    RewriteLastKeys {}
 }
 
 #[derive(Debug, Clone, ValueEnum)]
