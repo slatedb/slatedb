@@ -166,7 +166,6 @@ impl GarbageCollector {
             table_store.clone(),
             stats.clone(),
             options.compacted_options,
-            stat_registry.clone(),
         );
         let manifest_gc_task = ManifestGcTask::new(
             manifest_store.clone(),
@@ -271,13 +270,11 @@ mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::compactions_store::StoredCompactions;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-    use crate::compactor_stats::COMPACTION_LOW_WATERMARK_TS;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
-    use crate::stats::Gauge;
     use crate::types::RowEntry;
 
     use crate::utils::WatchableOnceCell;
@@ -1173,15 +1170,6 @@ mod tests {
                 CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
             ));
             stored_compactions.update(compactions_dirty).await.unwrap();
-
-            let barrier = Arc::new(Gauge::<u64>::default());
-            barrier.set(
-                compaction_low_watermark_dt
-                    .timestamp_millis()
-                    .try_into()
-                    .expect("out of bounds timestamp"),
-            );
-            stats.register(COMPACTION_LOW_WATERMARK_TS, barrier);
         }
 
         let gc_opts = GarbageCollectorOptions {

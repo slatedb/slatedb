@@ -764,7 +764,6 @@ impl CompactorEventHandler {
     async fn finish_failed_compaction(&mut self, id: Ulid) -> Result<(), SlateDBError> {
         self.state.remove_compaction(&id);
         self.write_compactions_safely().await?;
-        self.update_compaction_low_watermark();
         Ok(())
     }
 
@@ -780,7 +779,6 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         self.write_manifest_safely().await?;
         self.write_compactions_safely().await?;
-        self.update_compaction_low_watermark();
         self.maybe_schedule_compactions().await?;
         self.stats
             .last_compaction_ts
@@ -837,34 +835,6 @@ impl CompactorEventHandler {
             }
         }
     }
-
-    /// Updates the [`stats::COMPACTION_LOW_WATERMARK_TS`] gauge with the earliest
-    /// (oldest) ULID timestamp among active compactions. If there are no active compactions,
-    /// the gauge is left unchanged.
-    ///
-    /// This serves as a GC safety barrier: the GC should not delete any compacted SST
-    /// whose ULID timestamp is greater than or equal to this value.
-    ///
-    /// This is a process-local coordination mechanism that only works when the compactor
-    /// and garbage collector run in the same process and share the same StatRegistry. It's
-    /// a hack until we have proper compactor persistence (so GC can retrieve the compactor
-    /// state from the object store). See #604 for details.
-    fn update_compaction_low_watermark(&self) {
-        let min_ts = self
-            .state
-            .compactions()
-            .map(|c| {
-                c.id()
-                    .datetime()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("invalid duration")
-                    .as_millis() as u64
-            })
-            .min();
-        if let Some(min_ts) = min_ts {
-            self.stats.compaction_low_watermark_ts.set(min_ts);
-        }
-    }
 }
 
 pub mod stats {
@@ -880,10 +850,6 @@ pub mod stats {
     pub const BYTES_COMPACTED: &str = compactor_stat_name!("bytes_compacted");
     pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
     pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
-    /// The earliest (oldest) ULID timestamp among active compactions. See
-    /// [super::CompactorEventHandler::update_longest_running_start_metric] for details.
-    pub const COMPACTION_LOW_WATERMARK_TS: &str =
-        compactor_stat_name!("compaction_low_watermark_ts");
     pub const TOTAL_BYTES_BEING_COMPACTED: &str =
         compactor_stat_name!("total_bytes_being_compacted");
     pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
@@ -893,7 +859,6 @@ pub mod stats {
         pub(crate) last_compaction_ts: Arc<Gauge<u64>>,
         pub(crate) running_compactions: Arc<Gauge<i64>>,
         pub(crate) bytes_compacted: Arc<Counter>,
-        pub(crate) compaction_low_watermark_ts: Arc<Gauge<u64>>,
         pub(crate) total_bytes_being_compacted: Arc<Gauge<u64>>,
         pub(crate) total_throughput: Arc<Gauge<u64>>,
     }
@@ -905,7 +870,6 @@ pub mod stats {
         /// - `last_compaction_timestamp_sec`: Unix timestamp of the last completed compaction.
         /// - `running_compactions`: Gauge tracking active compaction attempts.
         /// - `bytes_compacted`: Counter of bytes written by the executor.
-        /// - `compaction_low_watermark_ts`: Earliest ULID timestamp among active compactions (GC hint).
         /// - `total_bytes_being_compacted`: Total bytes across all running compactions.
         /// - `total_throughput_bytes_per_sec`: Combined throughput across all running compactions.
         pub(crate) fn new(stat_registry: Arc<StatRegistry>) -> Self {
@@ -913,17 +877,12 @@ pub mod stats {
                 last_compaction_ts: Arc::new(Gauge::default()),
                 running_compactions: Arc::new(Gauge::default()),
                 bytes_compacted: Arc::new(Counter::default()),
-                compaction_low_watermark_ts: Arc::new(Gauge::default()),
                 total_bytes_being_compacted: Arc::new(Gauge::default()),
                 total_throughput: Arc::new(Gauge::default()),
             };
             stat_registry.register(LAST_COMPACTION_TS_SEC, stats.last_compaction_ts.clone());
             stat_registry.register(RUNNING_COMPACTIONS, stats.running_compactions.clone());
             stat_registry.register(BYTES_COMPACTED, stats.bytes_compacted.clone());
-            stat_registry.register(
-                COMPACTION_LOW_WATERMARK_TS,
-                stats.compaction_low_watermark_ts.clone(),
-            );
             stat_registry.register(
                 TOTAL_BYTES_BEING_COMPACTED,
                 stats.total_bytes_being_compacted.clone(),
@@ -1906,41 +1865,6 @@ mod tests {
             ],
         )
         .await;
-    }
-
-    #[tokio::test]
-    async fn test_compaction_low_watermark_uses_min_ulid_time() {
-        let mut fixture = CompactorEventHandlerTestFixture::new().await;
-
-        // Two artificial compactions with known ULID timestamps
-        let older_ts_ms: u64 = 1_000;
-        let newer_ts_ms: u64 = 2_000;
-        let compaction_old = Compaction::new(
-            Ulid::from_parts(older_ts_ms, 0),
-            CompactionSpec::new(vec![], 10),
-        );
-        let compaction_new = Compaction::new(
-            Ulid::from_parts(newer_ts_ms, 0),
-            CompactionSpec::new(vec![], 11),
-        );
-
-        fixture
-            .handler
-            .state
-            .add_compaction(compaction_old)
-            .expect("failed to add old compaction");
-        fixture
-            .handler
-            .state
-            .add_compaction(compaction_new)
-            .expect("failed to add new compaction");
-
-        // Update the metric and verify it matches the oldest compaction's ULID time
-        fixture.handler.update_compaction_low_watermark();
-        assert_eq!(
-            fixture.handler.stats.compaction_low_watermark_ts.value(),
-            older_ts_ms
-        );
     }
 
     #[tokio::test]

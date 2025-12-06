@@ -1,16 +1,15 @@
 use crate::{
     compactions_store::CompactionsStore, config::GarbageCollectorDirectoryOptions,
     db_state::SsTableId, error::SlateDBError, manifest::store::ManifestStore, manifest::Manifest,
-    stats::StatRegistry, tablestore::TableStore,
+    tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
-use log::error;
+use log::{error, warn};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{GcStats, GcTask, DEFAULT_MIN_AGE};
-use crate::compactor::stats::COMPACTION_LOW_WATERMARK_TS;
 
 pub(crate) struct CompactedGcTask {
     manifest_store: Arc<ManifestStore>,
@@ -18,7 +17,6 @@ pub(crate) struct CompactedGcTask {
     table_store: Arc<TableStore>,
     stats: Arc<GcStats>,
     compacted_options: Option<GarbageCollectorDirectoryOptions>,
-    stat_registry: Arc<StatRegistry>,
 }
 
 impl std::fmt::Debug for CompactedGcTask {
@@ -42,7 +40,6 @@ impl CompactedGcTask {
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,
         compacted_options: Option<GarbageCollectorDirectoryOptions>,
-        stat_registry: Arc<StatRegistry>,
     ) -> Self {
         CompactedGcTask {
             manifest_store,
@@ -50,7 +47,6 @@ impl CompactedGcTask {
             table_store,
             stats,
             compacted_options,
-            stat_registry,
         }
     }
 
@@ -130,47 +126,22 @@ impl CompactedGcTask {
         })
     }
 
-    /// Returns the process-local compaction low watermark from the shared stat registry.
-    ///
-    /// This is a fallback for older deployments or when persisted compaction state is
-    /// unavailable.
-    fn stat_compaction_low_watermark_dt(&self) -> Option<DateTime<Utc>> {
-        self.stat_registry
-            .lookup(COMPACTION_LOW_WATERMARK_TS)
-            .map(|s| s.get())
-            .and_then(|ts| {
-                if ts == 0 {
-                    None
-                } else {
-                    DateTime::<Utc>::from_timestamp_millis(ts as i64)
-                }
-            })
-    }
-
-    /// Returns the oldest active compaction start time from persisted state, falling back
-    /// to the process-local stat registry when no persisted state is available. If neither
-    /// source is reachable, default to the Unix epoch to prevent deletions.
+    /// Returns the oldest active compaction start time from persisted state. If the
+    /// compactions file is missing or cannot be read, default to the Unix epoch to
+    /// prevent unsafe deletions.
     async fn compaction_low_watermark_dt(&self) -> Option<DateTime<Utc>> {
         match self.persisted_compaction_low_watermark_dt().await {
             Ok(PersistedCompactionLowWatermark::Active(dt)) => Some(dt),
             Ok(PersistedCompactionLowWatermark::Empty) => None,
             Ok(PersistedCompactionLowWatermark::Missing) => {
-                self.stat_compaction_low_watermark_dt().or_else(|| {
-                    Some(
-                        DateTime::<Utc>::from_timestamp_millis(0).expect("out of bounds timestamp"),
-                    )
-                })
+                Some(DateTime::<Utc>::from_timestamp_millis(0).expect("out of bounds timestamp"))
             }
             Err(err) => {
-                log::warn!(
+                warn!(
                     "failed to read persisted compaction state for GC [error={}]",
                     err
                 );
-                self.stat_compaction_low_watermark_dt().or_else(|| {
-                    Some(
-                        DateTime::<Utc>::from_timestamp_millis(0).expect("out of bounds timestamp"),
-                    )
-                })
+                Some(DateTime::<Utc>::from_timestamp_millis(0).expect("out of bounds timestamp"))
             }
         }
     }
@@ -256,6 +227,7 @@ mod tests {
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
+    use crate::stats::StatRegistry;
     use crate::test_utils::build_test_sst;
     use object_store::{memory::InMemory, path::Path};
 
@@ -335,7 +307,6 @@ mod tests {
             table_store.clone(),
             stats,
             opts,
-            stat_registry.clone(),
         );
 
         let utc_now = DateTime::<Utc>::from_timestamp_millis(10_000).unwrap();
@@ -430,7 +401,6 @@ mod tests {
             table_store.clone(),
             stats,
             opts,
-            stat_registry.clone(),
         );
 
         let utc_now = DateTime::<Utc>::from_timestamp_millis(10_000).unwrap();
@@ -529,7 +499,6 @@ mod tests {
             table_store.clone(),
             stats,
             opts,
-            stat_registry.clone(),
         );
 
         // Run GC at a fixed time and verify only the SST strictly
