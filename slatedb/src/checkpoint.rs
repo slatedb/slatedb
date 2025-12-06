@@ -319,6 +319,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_restore_checkpoint() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings::default())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"key", b"val").await.unwrap();
+        let CheckpointCreateResult { id, manifest_id: _ } = db
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
+        let (manifest_to_restore_id, manifest_to_restore) =
+            manifest_store.read_latest_manifest().await.unwrap();
+
+        db.put(b"key", b"new_val").await.unwrap();
+        db.close().await.unwrap();
+
+        admin.restore_checkpoint(id).await.unwrap();
+
+        let (latest_manifest_id, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(manifest_to_restore, manifest);
+        assert!(manifest_to_restore_id < latest_manifest_id);
+
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings::default())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            Some(Bytes::from_static(b"val")), // previous value should be restored
+            db.get(b"key").await.unwrap(),
+        );
+    }
+
+    #[tokio::test]
     async fn test_checkpoint_scope_with_force_flush() {
         let db_options = Settings {
             flush_interval: Some(Duration::from_millis(5000)),

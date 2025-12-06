@@ -6,6 +6,8 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::sst::SsTableFormat;
+use crate::tablestore::TableStore;
 
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
@@ -16,6 +18,7 @@ use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use std::collections::HashSet;
 use std::env;
 use std::error::Error;
 use std::ops::RangeBounds;
@@ -295,6 +298,70 @@ impl Admin {
             })
             .await
             .map_err(Into::into)
+    }
+
+    /// Restores the checkpoint by duplicating the checkpointed manifest as the latest and deleting
+    /// WALs later than the specified checkpoint's manifest.
+    ///
+    /// Fails with SlateDBError::InvalidDeletion if there are any active checkpoints that will be
+    /// lost after the restore.
+    pub async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
+        let manifest_store = Arc::new(ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        ));
+        let mut current_manifest =
+            StoredManifest::load(manifest_store.clone(), self.system_clock.clone()).await?;
+
+        let checkpoint = match current_manifest.db_state().find_checkpoint(id) {
+            Some(found_checkpoint) => found_checkpoint.clone(),
+            None => return Err(SlateDBError::CheckpointMissing(id).into()),
+        };
+
+        let manifest_to_restore = manifest_store.read_manifest(checkpoint.manifest_id).await?;
+
+        let retained_checkpoint_ids: HashSet<_> = manifest_to_restore
+            .core
+            .checkpoints
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        current_manifest
+            .maybe_apply_update(|stored_manifest| {
+                // Ensure there are no other active checkpoints before deleting
+                for c in stored_manifest.object().core.checkpoints.iter() {
+                    match c.expire_time {
+                        Some(expire_time) if self.system_clock.now() >= expire_time => continue,
+                        _ => {}
+                    }
+                    if !retained_checkpoint_ids.contains(&id) {
+                        return Err(SlateDBError::InvalidDeletion);
+                    }
+                }
+
+                let mut dirty = stored_manifest.prepare_dirty()?;
+                dirty.value = manifest_to_restore.clone();
+
+                Ok(Some(dirty))
+            })
+            .await?;
+
+        // delete WALs later than referenced in manifest
+        let wal_store = TableStore::new(
+            self.object_stores.clone(),
+            SsTableFormat::default(),
+            self.path.clone(),
+            None,
+        );
+        let wal_ssts_to_delete = wal_store
+            .list_wal_ssts(manifest_to_restore.core.next_wal_sst_id..)
+            .await?;
+
+        for wal in wal_ssts_to_delete {
+            wal_store.delete_sst(&wal.id).await?;
+        }
+
+        Ok(())
     }
 
     /// Returns the timestamp or sequence from the latest manifest's sequence tracker.

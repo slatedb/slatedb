@@ -2241,6 +2241,29 @@ impl PySlateDBAdmin {
         })
     }
 
+    #[pyo3(signature = (id))]
+    fn restore_checkpoint(&self, id: String) -> PyResult<()> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        let uuid = Uuid::parse_str(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
+        rt.block_on(async move { admin.restore_checkpoint(uuid).await.map_err(map_error) })
+    }
+
+    #[pyo3(signature = (id))]
+    fn restore_checkpoint_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let uuid = Uuid::parse_str(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
+        future_into_py(py, async move {
+            admin.restore_checkpoint(uuid).await.map_err(map_error)
+        })
+    }
+
     #[pyo3(signature = (seq, *, round_up = false))]
     fn get_timestamp_for_sequence(&self, seq: u64, round_up: bool) -> PyResult<Option<i64>> {
         let admin = self.inner.clone();

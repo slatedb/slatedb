@@ -108,6 +108,14 @@ pub(crate) enum CliCommands {
         name: Option<String>,
     },
 
+    /// Restore the database's state to a previous state referenced by the checkpoint.
+    RestoreCheckpoint {
+        /// The id of the checkpoint (e.g. 01740ee5-6459-44af-9a45-85deb6e468e3) to restore to.
+        #[arg(short, long)]
+        #[clap(value_parser = uuid::Uuid::parse_str)]
+        id: Uuid,
+    },
+
     /// Runs a garbage collection for a specific resource type once
     RunGarbageCollection {
         /// the type of resource to clean up (manifest, wal, compacted)
