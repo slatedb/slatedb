@@ -70,7 +70,9 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
 };
-use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
+use crate::compactor_state::{
+    Compaction, CompactionSpec, CompactionStatus, CompactorState, SourceId,
+};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -346,7 +348,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 bytes_processed,
             } => {
                 self.state.update_compaction(&id, |c| {
-                    c.mark_running();
+                    c.set_status(CompactionStatus::Running);
                     c.set_bytes_processed(bytes_processed);
                 });
             }
@@ -1946,14 +1948,18 @@ mod tests {
             .await
             .unwrap()
             .expect("compactions should exist after clearing");
+        let mut persisted_after_trim_iter = persisted_after_trim.iter();
         assert_eq!(
-            persisted_after_trim
-                .iter()
+            persisted_after_trim_iter
                 .next()
                 .expect("expected one retained compaction after restart")
                 .id(),
             compaction_id,
             "stored compactions should retain the latest finished compaction after restart"
+        );
+        assert!(
+            persisted_after_trim_iter.next().is_none(),
+            "no additional compactions should be retained beyond the latest finished one"
         );
     }
 

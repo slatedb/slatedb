@@ -225,12 +225,8 @@ impl Compaction {
         self.status
     }
 
-    pub(crate) fn mark_running(&mut self) {
-        self.status = CompactionStatus::Running;
-    }
-
-    pub(crate) fn mark_finished(&mut self) {
-        self.status = CompactionStatus::Finished;
+    pub(crate) fn set_status(&mut self, status: CompactionStatus) {
+        self.status = status;
     }
 
     pub(crate) fn active(&self) -> bool {
@@ -327,7 +323,7 @@ impl Compactions {
     /// Marks all tracked compactions as finished.
     pub(crate) fn mark_all_finished(&mut self) {
         for compaction in self.recent_compactions.values_mut() {
-            compaction.mark_finished();
+            compaction.set_status(CompactionStatus::Finished);
         }
     }
 }
@@ -479,7 +475,7 @@ impl CompactorState {
             .recent_compactions
             .get_mut(compaction_id)
         {
-            compaction.mark_finished();
+            compaction.set_status(CompactionStatus::Finished);
         }
         self.compactions.value.trim();
     }
@@ -574,7 +570,7 @@ impl CompactorState {
             .recent_compactions
             .get_mut(&compaction_id)
         {
-            compaction.mark_finished();
+            compaction.set_status(CompactionStatus::Finished);
         } else {
             error!(
                 "compaction finished but not found [compaction_id={}]",
