@@ -99,25 +99,35 @@ impl CompactedGcTask {
         Ok(max_l0_ts)
     }
 
-    /// Returns the oldest active compaction start time from persisted state. If the
-    /// compactions file is missing or cannot be read, default to the Unix epoch to
-    /// prevent unsafe deletions.
-    async fn compaction_low_watermark_dt(&self) -> Option<DateTime<Utc>> {
+    /// Returns the oldest active compaction start time from persisted state.
+    ///
+    /// The Unix epoch is returned if any of the following occur:
+    ///
+    /// 1. There is no compactions file
+    /// 2. The compactions file exists but there are no compactions
+    /// 3. There is an error reading the compactions file
+    ///
+    /// (1) should only occur on fresh Dbs.
+    /// (2) should only occur if the Db has never run a compaction (including previous instances).
+    /// (3) should only occur if there are object store faults.
+    ///
+    /// In all of these cases, we want to be conservative and avoid deleting any SSTs that
+    /// might be in use by a running compaction, so we return the Unix epoch to effectively
+    /// disable deletion based on compaction state.
+    async fn compaction_low_watermark_dt(&self) -> DateTime<Utc> {
         match self.compactions_store.try_read_latest_compactions().await {
-            Ok(Some((_, compactions))) => Some(
-                compactions
-                    .iter()
-                    .map(|c| DateTime::<Utc>::from(c.id().datetime()))
-                    .min()
-                    .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-            ),
-            Ok(None) => Some(DateTime::<Utc>::UNIX_EPOCH),
+            Ok(Some((_, compactions))) => compactions
+                .iter()
+                .map(|c| DateTime::<Utc>::from(c.id().datetime()))
+                .min()
+                .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+            Ok(None) => DateTime::<Utc>::UNIX_EPOCH,
             Err(err) => {
                 warn!(
                     "failed to read persisted compaction state for GC, so disabling deletes [error={}]",
                     err
                 );
-                Some(DateTime::<Utc>::UNIX_EPOCH)
+                DateTime::<Utc>::UNIX_EPOCH
             }
         }
     }
@@ -148,12 +158,11 @@ impl GcTask for CompactedGcTask {
         // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
         // manifest to object storage).
         let newest_l0_dt = self.newest_l0_dt(&active_manifests).await?;
-        // Take the minimum of the configured min age, the compaction low watermark (if any), and the
-        // most recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
-        let mut cutoff_dt = configured_min_age_dt.min(newest_l0_dt);
-        if let Some(compaction_low_watermark_dt) = compaction_low_watermark_dt {
-            cutoff_dt = cutoff_dt.min(compaction_low_watermark_dt);
-        }
+        // Take the minimum of the configured min age, the compaction low watermark, and the most
+        // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
+        let cutoff_dt = configured_min_age_dt
+            .min(compaction_low_watermark_dt)
+            .min(newest_l0_dt);
         log::debug!(
             "calculated compacted SST GC cutoff [cutoff_dt={:?}, configured_min_age_dt={:?}, compaction_low_watermark_dt={:?}, most_recent_sst_dt={:?}]",
             cutoff_dt,
