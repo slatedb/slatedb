@@ -489,4 +489,90 @@ mod tests {
         // Only the barrier and newer SSTs should remain
         assert_eq!(remaining, vec![id_barrier, id_to_newer]);
     }
+
+    /// Reproduces the race where GC reads an empty compaction state and deletes the
+    /// output of a compaction that starts afterward but hasn't yet updated the manifest.
+    #[tokio::test]
+    async fn test_compacted_gc_drops_running_compaction_output_without_watermark() {
+        let main_store = Arc::new(InMemory::new());
+        let object_stores = ObjectStores::new(main_store.clone(), None);
+        let format = SsTableFormat::default();
+        let table_store = Arc::new(TableStore::new(
+            object_stores,
+            format.clone(),
+            Path::from("/root"),
+            None,
+        ));
+
+        // Manifest with an L0 newer than the compaction output.
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from("/root"),
+            main_store.clone(),
+        ));
+        // Persist an empty compactions file so GC sees no active compactions.
+        StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
+
+        // Newest L0 in the manifest has a later timestamp (9_000ms).
+        let l0_id = SsTableId::Compacted(ulid::Ulid::from_parts(9_000, 0));
+        let l0_handle = table_store
+            .write_sst(&l0_id, build_test_sst(&format, 1), false)
+            .await
+            .unwrap();
+        let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
+        dirty_manifest.value.core.l0.push_back(l0_handle);
+        stored_manifest.update(dirty_manifest).await.unwrap();
+
+        // Simulate a compaction that starts after GC reads compaction state, writes an
+        // output SST (6_000ms), but hasn't updated the manifest yet.
+        let compaction_output_id = SsTableId::Compacted(ulid::Ulid::from_parts(6_000, 0));
+        table_store
+            .write_sst(&compaction_output_id, build_test_sst(&format, 1), false)
+            .await
+            .unwrap();
+
+        // With min_age=2s and newest_l0=9s, the cutoff becomes 8s; without a watermark
+        // this incorrectly allows deleting the compaction output.
+        let opts = Some(GarbageCollectorDirectoryOptions {
+            interval: None,
+            min_age: Duration::from_secs(2),
+        });
+        let stats = Arc::new(GcStats::new(Arc::new(StatRegistry::new())));
+        let task = CompactedGcTask::new(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            stats,
+            opts,
+        );
+
+        let utc_now = DateTime::<Utc>::from_timestamp_millis(10_000).unwrap();
+        task.collect(utc_now).await.unwrap();
+
+        let remaining: Vec<_> = table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+
+        assert!(
+            remaining.contains(&compaction_output_id),
+            "expected GC to retain compacted SST output from a running compaction when the watermark is missing"
+        );
+    }
 }
