@@ -240,7 +240,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Set a compaction newer than id_to_delete so that it doesn't affect the cutoff.
+        // Set a compaction newer than id_within_min_age so that it doesn't affect the cutoff.
         let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
         compactions_dirty.value.insert(Compaction::new(
             ulid::Ulid::from_parts(9_000, 0),
@@ -341,7 +341,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Set a compaction newer than id_to_delete so that it doesn't affect the cutoff.
+        // Set a compaction newer than id_newer so that it doesn't affect the cutoff.
         let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
         compactions_dirty.value.insert(Compaction::new(
             ulid::Ulid::from_parts(5_000, 0),

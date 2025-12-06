@@ -1138,32 +1138,30 @@ mod tests {
         // Start the garbage collector
         let stats = Arc::new(StatRegistry::new());
 
-        // Ensure there is a compactions state file so GC can read persisted compaction hints.
-        if StoredCompactions::try_load(compactions_store.clone())
-            .await
-            .unwrap()
-            .is_none()
-        {
-            let manifest = StoredManifest::load(
-                manifest_store.clone(),
-                Arc::new(DefaultSystemClock::default()),
-            )
-            .await
-            .unwrap();
-            StoredCompactions::create(
-                compactions_store.clone(),
-                manifest.manifest().compactor_epoch,
-            )
-            .await
-            .unwrap();
-        }
-
         // Pretend a compaction job has already run with the specified start time
         if let Some(compaction_low_watermark_dt) = compaction_low_watermark_dt {
-            let mut stored_compactions = StoredCompactions::try_load(compactions_store.clone())
+            // Start by creating an empty .compactions file if it doesn't exist
+            let mut stored_compactions = if let Some(stored_compactions) =
+                StoredCompactions::try_load(compactions_store.clone())
+                    .await
+                    .expect("load failed")
+            {
+                stored_compactions
+            } else {
+                let manifest = StoredManifest::load(
+                    manifest_store.clone(),
+                    Arc::new(DefaultSystemClock::default()),
+                )
                 .await
-                .unwrap()
-                .expect("compactions should exist after initialization");
+                .expect("manifest load failed");
+                StoredCompactions::create(
+                    compactions_store.clone(),
+                    manifest.manifest().compactor_epoch,
+                )
+                .await
+                .expect("compactions creation failed")
+            };
+            // Now insert a compaction with the specified start time
             let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
             compactions_dirty.value.insert(Compaction::new(
                 ulid::Ulid::from_parts(compaction_low_watermark_dt.timestamp_millis() as u64, 0),
