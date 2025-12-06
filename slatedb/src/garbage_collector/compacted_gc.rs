@@ -27,12 +27,6 @@ impl std::fmt::Debug for CompactedGcTask {
     }
 }
 
-enum PersistedCompactionLowWatermark {
-    Missing,
-    Empty,
-    Active(DateTime<Utc>),
-}
-
 impl CompactedGcTask {
     pub fn new(
         manifest_store: Arc<ManifestStore>,
@@ -105,43 +99,22 @@ impl CompactedGcTask {
         Ok(max_l0_ts)
     }
 
-    /// Attempts to load the oldest active compaction start time from the persisted
-    /// compactions state in object storage.
-    async fn persisted_compaction_low_watermark_dt(
-        &self,
-    ) -> Result<PersistedCompactionLowWatermark, SlateDBError> {
-        let Some((_, compactions)) = self.compactions_store.try_read_latest_compactions().await?
-        else {
-            return Ok(PersistedCompactionLowWatermark::Missing);
-        };
-
-        let watermark = compactions
-            .iter()
-            .map(|c| DateTime::<Utc>::from(c.id().datetime()))
-            .min();
-
-        Ok(match watermark {
-            Some(dt) => PersistedCompactionLowWatermark::Active(dt),
-            None => PersistedCompactionLowWatermark::Empty,
-        })
-    }
-
     /// Returns the oldest active compaction start time from persisted state. If the
     /// compactions file is missing or cannot be read, default to the Unix epoch to
     /// prevent unsafe deletions.
     async fn compaction_low_watermark_dt(&self) -> Option<DateTime<Utc>> {
-        match self.persisted_compaction_low_watermark_dt().await {
-            Ok(PersistedCompactionLowWatermark::Active(dt)) => Some(dt),
-            Ok(PersistedCompactionLowWatermark::Empty) => None,
-            Ok(PersistedCompactionLowWatermark::Missing) => {
-                Some(DateTime::<Utc>::from_timestamp_millis(0).expect("out of bounds timestamp"))
-            }
+        match self.compactions_store.try_read_latest_compactions().await {
+            Ok(Some((_, compactions))) => compactions
+                .iter()
+                .map(|c| DateTime::<Utc>::from(c.id().datetime()))
+                .min(),
+            Ok(None) => Some(DateTime::<Utc>::UNIX_EPOCH),
             Err(err) => {
                 warn!(
-                    "failed to read persisted compaction state for GC [error={}]",
+                    "failed to read persisted compaction state for GC, so disabling deletes [error={}]",
                     err
                 );
-                Some(DateTime::<Utc>::from_timestamp_millis(0).expect("out of bounds timestamp"))
+                Some(DateTime::<Utc>::UNIX_EPOCH)
             }
         }
     }

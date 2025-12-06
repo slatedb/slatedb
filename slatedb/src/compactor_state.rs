@@ -489,7 +489,7 @@ impl CompactorState {
                 .is_none()
             {
                 error!(
-                    "scheduled compaction not found [compaction_id={}]",
+                    "finished compaction not found [compaction_id={}]",
                     compaction_id
                 );
             }
