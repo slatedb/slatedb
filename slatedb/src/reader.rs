@@ -18,6 +18,7 @@ use bytes::Bytes;
 use futures::future::join;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use log::debug;
 
 pub(crate) trait DbStateReader {
     fn memtable(&self) -> Arc<KVTable>;
@@ -151,6 +152,7 @@ impl Reader {
     ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sst in &db_state.core().l0 {
+            debug!("checking l0 iter: {:?}", sst.id);
             if let Some(first_key) = sst.info.first_key.as_ref() {
                 if point_key < first_key.as_ref() {
                     continue;
@@ -161,6 +163,7 @@ impl Reader {
                     continue;
                 }
             }
+            debug!("open l0 iterator");
             let iterator = SstIterator::new_owned_with_stats(
                 range.clone(),
                 sst.clone(),
@@ -185,6 +188,7 @@ impl Reader {
     ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
         for sr in &db_state.core().compacted {
+            debug!("checking sr iter: {:?}", sr.id);
             if let Some(handle) = sr.find_sst_with_range_covering_key(key.as_ref()) {
                 let iterator = SstIterator::new_owned_with_stats(
                     range.clone(),
@@ -193,7 +197,9 @@ impl Reader {
                     sst_iter_options,
                     db_stats.clone(),
                 )?;
+                debug!("found sr covering key");
                 if let Some(iterator) = iterator {
+                    debug!("open sr iterator");
                     iters.push_back(Box::new(iterator) as Box<dyn KeyValueIterator + 'a>);
                 }
             }
