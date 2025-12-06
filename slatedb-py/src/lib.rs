@@ -19,7 +19,6 @@ use ::slatedb::config::{
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
     ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
-use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::DBTransaction;
 use ::slatedb::Db;
@@ -96,11 +95,7 @@ fn resolve_object_store_py(
     if let Some(u) = url {
         return Db::resolve_object_store(u).map_err(map_error);
     }
-    if let Some(env) = env_file {
-        return load_object_store_from_env(Some(env))
-            .map_err(|e| InvalidError::new_err(e.to_string()));
-    }
-    Ok(Arc::new(InMemory::new()))
+    load_object_store_from_env(env_file).map_err(|e| InvalidError::new_err(e.to_string()))
 }
 
 fn build_gc_options_from_kwargs(

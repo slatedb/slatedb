@@ -60,7 +60,7 @@ impl CSdbReaderHandle {
 pub struct CSdbReaderOptions {
     /// How often to poll for manifest updates (in milliseconds)
     pub manifest_poll_interval_ms: u64,
-    /// How long checkpoints should live (in milliseconds)  
+    /// How long checkpoints should live (in milliseconds)
     pub checkpoint_lifetime_ms: u64,
     /// Max size of in-memory table for WAL buffering
     pub max_memtable_bytes: u64,
