@@ -8,7 +8,8 @@ use crate::config::{
     convert_write_options,
 };
 use crate::error::{
-    create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
+    create_error_result, create_handle_error_result, create_handle_success_result,
+    create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError, CSdbHandleResult,
     CSdbResult,
 };
 use crate::object_store::create_object_store;
@@ -27,16 +28,16 @@ pub extern "C" fn slatedb_open(
     path: *const c_char,
     url: *const c_char,
     env_file: *const c_char,
-) -> CSdbHandle {
+) -> CSdbHandleResult {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s,
-        Err(_) => return CSdbHandle::null(),
+        Err(err) => return create_handle_error_result(err, "Invalid path"),
     };
 
     // Create a dedicated runtime for this DB instance
     let rt = match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
-        Err(_) => return CSdbHandle::null(),
+        Err(err) => return create_handle_error_result(CSdbError::InternalError, &err.to_string()),
     };
 
     let url_str: Option<&str> = if url.is_null() {
@@ -44,7 +45,7 @@ pub extern "C" fn slatedb_open(
     } else {
         match safe_str_from_ptr(url) {
             Ok(s) => Some(s),
-            Err(_) => return CSdbHandle::null(),
+            Err(err) => return create_handle_error_result(err, "Invalid pointer for config"),
         }
     };
     let env_file_str = if env_file.is_null() {
@@ -52,12 +53,14 @@ pub extern "C" fn slatedb_open(
     } else {
         match safe_str_from_ptr(env_file) {
             Ok(s) => Some(s.to_string()),
-            Err(_) => return CSdbHandle::null(),
+            Err(err) => return create_handle_error_result(err, "Invalid pointer for env file"),
         }
     };
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
-        Err(_) => return CSdbHandle::null(),
+        Err(err) => {
+            return create_handle_error_result(CSdbError::InvalidProvider, &err.to_string())
+        }
     };
 
     match rt.block_on(async {
@@ -66,9 +69,9 @@ pub extern "C" fn slatedb_open(
     }) {
         Ok(db) => {
             let ffi = Box::new(SlateDbFFI { rt, db });
-            CSdbHandle(Box::into_raw(ffi))
+            create_handle_success_result(CSdbHandle(Box::into_raw(ffi)))
         }
-        Err(_) => CSdbHandle::null(),
+        Err(err) => create_handle_error_result(CSdbError::InternalError, &err.to_string()),
     }
 }
 
