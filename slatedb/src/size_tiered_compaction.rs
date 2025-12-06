@@ -181,6 +181,18 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
     fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactionSpec> {
         let mut compactions = Vec::new();
         let db_state = state.db_state();
+
+        let sr_ids: Vec<_> = db_state.compacted.iter().map(|sr| sr.id).collect();
+        if sr_ids == vec![23u32, 22u32, 0u32] {
+            println!("DO DUMMY COMPACTION");
+            let mut sources: Vec<_> = db_state.l0.iter().map(|id| SourceId::Sst(id.id.unwrap_compacted_id())).collect();
+            for sr in sr_ids {
+                sources.push(SourceId::SortedRun(sr));
+            }
+            let spec = CompactionSpec::new(sources, 0);
+            return vec![spec];
+        }
+
         let (l0, srs) = self.compaction_sources(db_state);
         let conflict_checker = ConflictChecker::new(
             state
