@@ -334,7 +334,7 @@ impl Admin {
                         Some(expire_time) if self.system_clock.now() >= expire_time => continue,
                         _ => {}
                     }
-                    if !retained_checkpoint_ids.contains(&id) {
+                    if !retained_checkpoint_ids.contains(&c.id) {
                         return Err(SlateDBError::InvalidDeletion);
                     }
                 }

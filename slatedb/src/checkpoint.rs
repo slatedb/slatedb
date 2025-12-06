@@ -62,6 +62,7 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
     use crate::clock::DefaultSystemClock;
+    use crate::clock::MockSystemClock;
     use crate::clock::SystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
@@ -356,6 +357,41 @@ mod tests {
             Some(Bytes::from_static(b"val")), // previous value should be restored
             db.get(b"key").await.unwrap(),
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_fail_restore_checkpoint_if_other_checkpoints_active() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let system_clock = Arc::new(MockSystemClock::new());
+        let admin = AdminBuilder::new(path.clone(), object_store.clone())
+            .with_system_clock(system_clock.clone())
+            .build();
+        let _ = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings::default())
+            .build()
+            .await
+            .unwrap();
+        let CheckpointCreateResult { id, manifest_id: _ } = admin
+            .create_detached_checkpoint(&CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let expiry_duration = Duration::from_secs(1);
+        admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                lifetime: Some(expiry_duration),
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
+        let result = admin.restore_checkpoint(id).await.unwrap_err();
+        assert_eq!(result.to_string(), "Invalid error: invalid deletion");
+
+        // expire the other checkpoint and check that it does not fail anymore
+        system_clock.advance(expiry_duration).await;
+        admin.restore_checkpoint(id).await.unwrap();
     }
 
     #[tokio::test]
