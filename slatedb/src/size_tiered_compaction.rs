@@ -183,14 +183,20 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         let db_state = state.db_state();
 
         let sr_ids: Vec<_> = db_state.compacted.iter().map(|sr| sr.id).collect();
-        if sr_ids == vec![23u32, 22u32, 0u32] {
+        if sr_ids == vec![23u32, 22u32, 0u32] || sr_ids == vec![24u32, 23u32, 22u32, 0u32] {
             println!("DO DUMMY COMPACTION");
-            let mut sources: Vec<_> = db_state.l0.iter().map(|id| SourceId::Sst(id.id.unwrap_compacted_id())).collect();
-            for sr in sr_ids {
-                sources.push(SourceId::SortedRun(sr));
+            if db_state.l0.is_empty() {
+                let mut sources = Vec::new();
+                for sr in sr_ids {
+                    sources.push(SourceId::SortedRun(sr));
+                }
+                let spec = CompactionSpec::new(sources, 0);
+                return vec![spec];
+            } else {
+                let sources: Vec<_> = db_state.l0.iter().map(|id| SourceId::Sst(id.id.unwrap_compacted_id())).collect();
+                let spec = CompactionSpec::new(sources, 24u32);
+                return vec![spec];
             }
-            let spec = CompactionSpec::new(sources, 0);
-            return vec![spec];
         }
 
         let (l0, srs) = self.compaction_sources(db_state);
