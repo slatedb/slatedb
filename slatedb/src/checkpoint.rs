@@ -62,7 +62,6 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
     use crate::clock::DefaultSystemClock;
-    use crate::clock::MockSystemClock;
     use crate::clock::SystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
@@ -360,7 +359,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-util")]
     async fn test_should_fail_restore_checkpoint_if_other_checkpoints_active() {
+        use crate::clock::MockSystemClock;
+
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let system_clock = Arc::new(MockSystemClock::new());
