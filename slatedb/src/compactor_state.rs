@@ -196,7 +196,9 @@ impl Display for Compaction {
             .collect();
         write!(f, "{:?} -> {}", displayed_sources, self.spec.destination(),)?;
         if self.bytes_processed > 0 {
-            write!(f, " ({} bytes processed)", self.bytes_processed)?;
+            let human_bytes_processed = bytesize::ByteSize::b(self.bytes_processed).display().si();
+
+            write!(f, " ({} bytes processed)", human_bytes_processed)?;
         }
         Ok(())
     }
