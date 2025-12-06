@@ -53,7 +53,6 @@ impl Admin {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         );
         let id_manifest = if let Some(id) = maybe_id {
             manifest_store
@@ -78,7 +77,6 @@ impl Admin {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         );
         let manifests = manifest_store.list_manifests(range).await?;
         Ok(serde_json::to_string(&manifests)?)
@@ -97,7 +95,6 @@ impl Admin {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         );
         let (_, manifest) = manifest_store.read_latest_manifest().await?;
 
@@ -225,12 +222,12 @@ impl Admin {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         ));
         manifest_store
             .validate_no_wal_object_store_configured()
             .await?;
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         let checkpoint_id = self.rand.rng().gen_uuid();
         let checkpoint = stored_manifest
             .write_checkpoint(checkpoint_id, options)
@@ -253,9 +250,9 @@ impl Admin {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
@@ -280,9 +277,9 @@ impl Admin {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
@@ -348,7 +345,6 @@ impl Admin {
         ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         )
     }
 

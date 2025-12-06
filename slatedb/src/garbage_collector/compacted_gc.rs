@@ -221,15 +221,14 @@ mod tests {
         ));
 
         // Manifest store and initial manifest
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from("/root"),
-            main_store.clone(),
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
             Arc::new(DefaultSystemClock::new()),
-        ));
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
-                .await
-                .unwrap();
+        )
+        .await
+        .unwrap();
 
         // Three SSTs with distinct ULID timestamps
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
@@ -312,15 +311,14 @@ mod tests {
         ));
 
         // Manifest store and initial manifest
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from("/root"),
-            main_store.clone(),
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
             Arc::new(DefaultSystemClock::new()),
-        ));
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
-                .await
-                .unwrap();
+        )
+        .await
+        .unwrap();
 
         // Three SSTs with distinct ULID timestamps
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
@@ -405,15 +403,14 @@ mod tests {
         ));
 
         // Manifest store with empty DB
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from("/root"),
-            main_store.clone(),
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
             Arc::new(DefaultSystemClock::new()),
-        ));
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
-                .await
-                .unwrap();
+        )
+        .await
+        .unwrap();
 
         // Three SSTs with distinct ULID timestamps
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0)); // job 1

@@ -371,7 +371,8 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await?;
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
         let manifest = FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
@@ -394,6 +395,107 @@ impl CompactorEventHandler {
     /// Emits the current compaction state and per-job progress.
     fn handle_log_ticker(&self) {
         self.log_compaction_state();
+        self.log_compaction_throughput();
+    }
+
+    /// Logs per-job compaction progress and updates aggregate throughput metrics.
+    fn log_compaction_throughput(&self) {
+        let current_time = self.system_clock.now();
+        let current_time_ms = current_time.timestamp_millis() as u64;
+        let db_state = self.state.db_state();
+        let mut total_estimated_bytes = 0u64;
+        let mut total_bytes_processed = 0u64;
+        let mut total_elapsed_secs = 0.0f64;
+
+        for compaction in self.state.compactions() {
+            let estimated_source_bytes =
+                Self::calculate_estimated_source_bytes(compaction, db_state);
+            total_estimated_bytes += estimated_source_bytes;
+            total_bytes_processed += compaction.bytes_processed();
+
+            // Calculate elapsed time using ULID timestamp
+            let start_time_ms = compaction
+                .id()
+                .datetime()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("invalid duration")
+                .as_millis() as u64;
+            let elapsed_secs = if start_time_ms > 0 {
+                (current_time_ms as f64 - start_time_ms as f64) / 1000.0
+            } else {
+                0.0
+            };
+            total_elapsed_secs += elapsed_secs;
+
+            // Per-job throughput for logging
+            let throughput = if elapsed_secs > 0.0 {
+                compaction.bytes_processed() as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+
+            let percentage = if estimated_source_bytes > 0 {
+                (compaction.bytes_processed() * 100 / estimated_source_bytes) as u32
+            } else {
+                0
+            };
+            debug!(
+                "compaction progress [id={}, progress={}%, processed_bytes={}, estimated_source_bytes={}, elapsed={:.2}s, throughput={:.2} bytes/sec]",
+                compaction.id(),
+                percentage,
+                compaction.bytes_processed(),
+                estimated_source_bytes,
+                elapsed_secs,
+                throughput,
+            );
+        }
+
+        let total_throughput = if total_elapsed_secs > 0.0 {
+            total_bytes_processed as f64 / total_elapsed_secs
+        } else {
+            0.0
+        };
+
+        self.stats
+            .total_bytes_being_compacted
+            .set(total_estimated_bytes);
+        self.stats.total_throughput.set(total_throughput as u64);
+    }
+
+    /// Calculates the estimated total source bytes for a compaction.
+    fn calculate_estimated_source_bytes(
+        compaction: &Compaction,
+        db_state: &crate::db_state::CoreDbState,
+    ) -> u64 {
+        use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+        use std::collections::HashMap;
+
+        let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
+            .l0
+            .iter()
+            .map(|sst| match sst.id {
+                SsTableId::Compacted(id) => (id, sst),
+                SsTableId::Wal(_) => unreachable!("L0 SSTs should never have SsTableId::Wal"),
+            })
+            .collect();
+        let srs_by_id: HashMap<u32, &SortedRun> =
+            db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
+
+        compaction
+            .spec()
+            .sources()
+            .iter()
+            .map(|source| match source {
+                SourceId::Sst(id) => ssts_by_id
+                    .get(id)
+                    .expect("compaction source SST not found in L0")
+                    .estimate_size(),
+                SourceId::SortedRun(id) => srs_by_id
+                    .get(id)
+                    .expect("compaction source sorted run not found")
+                    .estimate_size(),
+            })
+            .sum()
     }
 
     /// Handles a polling tick by refreshing the manifest and possibly scheduling compactions.
@@ -577,6 +679,7 @@ impl CompactorEventHandler {
             compaction_logical_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
+            estimated_source_bytes: Self::calculate_estimated_source_bytes(&compaction, db_state),
         };
 
         // TODO(sujeetsawala): Add job attempt to compaction
@@ -721,12 +824,18 @@ pub mod stats {
     /// [super::CompactorEventHandler::update_longest_running_start_metric] for details.
     pub const COMPACTION_LOW_WATERMARK_TS: &str =
         compactor_stat_name!("compaction_low_watermark_ts");
+    pub const TOTAL_BYTES_BEING_COMPACTED: &str =
+        compactor_stat_name!("total_bytes_being_compacted");
+    pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
+        compactor_stat_name!("total_throughput_bytes_per_sec");
 
     pub(crate) struct CompactionStats {
         pub(crate) last_compaction_ts: Arc<Gauge<u64>>,
         pub(crate) running_compactions: Arc<Gauge<i64>>,
         pub(crate) bytes_compacted: Arc<Counter>,
         pub(crate) compaction_low_watermark_ts: Arc<Gauge<u64>>,
+        pub(crate) total_bytes_being_compacted: Arc<Gauge<u64>>,
+        pub(crate) total_throughput: Arc<Gauge<u64>>,
     }
 
     impl CompactionStats {
@@ -737,12 +846,16 @@ pub mod stats {
         /// - `running_compactions`: Gauge tracking active compaction attempts.
         /// - `bytes_compacted`: Counter of bytes written by the executor.
         /// - `compaction_low_watermark_ts`: Earliest ULID timestamp among active compactions (GC hint).
+        /// - `total_bytes_being_compacted`: Total bytes across all running compactions.
+        /// - `total_throughput_bytes_per_sec`: Combined throughput across all running compactions.
         pub(crate) fn new(stat_registry: Arc<StatRegistry>) -> Self {
             let stats = Self {
                 last_compaction_ts: Arc::new(Gauge::default()),
                 running_compactions: Arc::new(Gauge::default()),
                 bytes_compacted: Arc::new(Counter::default()),
                 compaction_low_watermark_ts: Arc::new(Gauge::default()),
+                total_bytes_being_compacted: Arc::new(Gauge::default()),
+                total_throughput: Arc::new(Gauge::default()),
             };
             stat_registry.register(LAST_COMPACTION_TS_SEC, stats.last_compaction_ts.clone());
             stat_registry.register(RUNNING_COMPACTIONS, stats.running_compactions.clone());
@@ -750,6 +863,14 @@ pub mod stats {
             stat_registry.register(
                 COMPACTION_LOW_WATERMARK_TS,
                 stats.compaction_low_watermark_ts.clone(),
+            );
+            stat_registry.register(
+                TOTAL_BYTES_BEING_COMPACTED,
+                stats.total_bytes_being_compacted.clone(),
+            );
+            stat_registry.register(
+                TOTAL_THROUGHPUT_BYTES_PER_SEC,
+                stats.total_throughput.clone(),
             );
             stats
         }
@@ -1493,7 +1614,10 @@ mod tests {
         assert_eq!(result, Some(Bytes::from("new_value")));
 
         // verify the compacted state in manifest
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         assert!(
             !db_state.compacted.is_empty(),
@@ -1557,7 +1681,10 @@ mod tests {
 
         // then: verify that merges with different expire times are NOT merged together
         // Reading should get only the latest merge since they weren't combined
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         let db_state = stored_manifest.db_state();
         assert!(
             !db_state.compacted.is_empty(),
@@ -1755,6 +1882,118 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_should_track_total_bytes_and_throughput() {
+        use crate::compactor::stats::{
+            TOTAL_BYTES_BEING_COMPACTED, TOTAL_THROUGHPUT_BYTES_PER_SEC,
+        };
+        use chrono::DateTime;
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+
+        let current_time = fixture.handler.system_clock.now();
+        let current_time_ms = current_time.timestamp_millis() as u64;
+        let start_time_1 =
+            DateTime::from_timestamp_millis((current_time_ms - 2000) as i64).unwrap();
+        let start_time_2 =
+            DateTime::from_timestamp_millis((current_time_ms - 1000) as i64).unwrap();
+
+        let mut compaction_1 = Compaction::new(
+            Ulid::from_parts(start_time_1.timestamp_millis() as u64, 0),
+            CompactionSpec::new(vec![], 10),
+        );
+        compaction_1.set_bytes_processed(500);
+
+        let mut compaction_2 = Compaction::new(
+            Ulid::from_parts(start_time_2.timestamp_millis() as u64, 0),
+            CompactionSpec::new(vec![], 11),
+        );
+        compaction_2.set_bytes_processed(1000);
+
+        fixture
+            .handler
+            .state
+            .add_compaction(compaction_1)
+            .expect("failed to add compaction 1");
+        fixture
+            .handler
+            .state
+            .add_compaction(compaction_2)
+            .expect("failed to add compaction 2");
+
+        fixture.handler.handle_log_ticker();
+
+        let total_bytes = fixture
+            .stats_registry
+            .lookup(TOTAL_BYTES_BEING_COMPACTED)
+            .unwrap()
+            .get();
+        assert_eq!(total_bytes, 0);
+
+        let throughput = fixture
+            .stats_registry
+            .lookup(TOTAL_THROUGHPUT_BYTES_PER_SEC)
+            .unwrap()
+            .get();
+        assert!(
+            throughput > 0,
+            "Expected throughput > 0, got {}",
+            throughput
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_track_per_job_throughput() {
+        let start_time_ms = 1000u64;
+        let current_time_ms = 3000u64;
+        let processed_bytes = 1000u64;
+
+        let mut compaction = Compaction::new(
+            Ulid::from_parts(start_time_ms, 0),
+            CompactionSpec::new(vec![], 10),
+        );
+        compaction.set_bytes_processed(processed_bytes);
+
+        // Calculate throughput manually using ULID timestamp
+        let elapsed_secs = (current_time_ms as f64 - start_time_ms as f64) / 1000.0;
+        let throughput = processed_bytes as f64 / elapsed_secs;
+        assert_eq!(throughput, 500.0);
+
+        // At start time, throughput should be 0
+        let elapsed_zero = (start_time_ms as f64 - start_time_ms as f64) / 1000.0;
+        let throughput_zero = if elapsed_zero > 0.0 {
+            processed_bytes as f64 / elapsed_zero
+        } else {
+            0.0
+        };
+        assert_eq!(throughput_zero, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_should_track_running_compactions_count() {
+        use crate::compactor::stats::RUNNING_COMPACTIONS;
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+
+        assert_eq!(
+            fixture
+                .stats_registry
+                .lookup(RUNNING_COMPACTIONS)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        let compaction = Compaction::new(Ulid::new(), CompactionSpec::new(vec![], 10));
+        fixture
+            .handler
+            .state
+            .add_compaction(compaction)
+            .expect("failed to add compaction");
+
+        assert_eq!(fixture.handler.state.compactions().count(), 1);
+    }
+
     struct CompactorEventHandlerTestFixture {
         manifest: StoredManifest,
         manifest_store: Arc<ManifestStore>,
@@ -1809,7 +2048,10 @@ mod tests {
             )
             .await
             .unwrap();
-            let manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+            let manifest =
+                StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                    .await
+                    .unwrap();
             Self {
                 manifest,
                 manifest_store,
@@ -2220,11 +2462,7 @@ mod tests {
             min_filter_keys: 10,
             ..SsTableFormat::default()
         };
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(PATH),
-            os.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
             sst_format,
@@ -2274,7 +2512,10 @@ mod tests {
     }
 
     async fn get_db_state(manifest_store: Arc<ManifestStore>) -> CoreDbState {
-        let stored_manifest = StoredManifest::load(manifest_store.clone()).await.unwrap();
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
         stored_manifest.db_state().clone()
     }
 

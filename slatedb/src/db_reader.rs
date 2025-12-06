@@ -100,7 +100,8 @@ impl DbReaderInner {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
-        let mut manifest = StoredManifest::load(Arc::clone(&manifest_store)).await?;
+        let mut manifest =
+            StoredManifest::load(Arc::clone(&manifest_store), system_clock.clone()).await?;
         if !manifest.db_state().initialized {
             return Err(SlateDBError::InvalidDBState);
         }
@@ -475,7 +476,11 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
         assert!(matches!(message, DbReaderMessage::PollManifest));
-        let mut manifest = StoredManifest::load(Arc::clone(&self.inner.manifest_store)).await?;
+        let mut manifest = StoredManifest::load(
+            Arc::clone(&self.inner.manifest_store),
+            self.inner.system_clock.clone(),
+        )
+        .await?;
 
         let latest_manifest = manifest.manifest();
         if self
@@ -496,7 +501,11 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
         _messages: BoxStream<'async_trait, DbReaderMessage>,
         _result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        let mut manifest = StoredManifest::load(Arc::clone(&self.inner.manifest_store)).await?;
+        let mut manifest = StoredManifest::load(
+            Arc::clone(&self.inner.manifest_store),
+            self.inner.system_clock.clone(),
+        )
+        .await?;
         let checkpoint_id = self.inner.state.read().checkpoint.id;
         if Some(checkpoint_id) != self.inner.user_checkpoint_id {
             info!(
@@ -547,7 +556,6 @@ impl DbReader {
             path,
             object_store,
             block_cache: options.block_cache.clone(),
-            system_clock: clock.clone(),
         };
 
         Self::open_internal(
@@ -1015,6 +1023,7 @@ mod tests {
             parent_path,
             source_checkpoint_id,
             Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
         )
         .await
         .unwrap();
@@ -1260,7 +1269,6 @@ mod tests {
             Arc::new(ManifestStore::new(
                 &self.path,
                 Arc::clone(&self.object_store),
-                self.system_clock.clone(),
             ))
         }
     }

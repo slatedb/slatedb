@@ -7,9 +7,9 @@
 //! Each iteration, or step, in the simulation runs a single action to perform
 //! on the database. The action is determined by a [DstDistribution] implementation.
 //! If the action is a read (get or scan), the simulation verifies the result
-//! against an in-memory [BTreeMap] copy of the database ([Dst::state]). If the action
-//! is a write (put or delete), the simulation updates both the database and the
-//! in-memory copy.
+//! against a SQLite-backed copy of the database (stored in memory by default)
+//! ([Dst::state]). If the action is a write (put or delete), the simulation updates
+//! both the database and the SQLite-backed copy.
 //!
 //! [DstAction] contains the (currently) supported actions:
 //!

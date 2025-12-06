@@ -401,9 +401,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             maybe_cached_main_object_store.clone(),
-            system_clock.clone(),
         ));
-        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
+        let latest_manifest =
+            StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
 
         // Validate WAL object store configuration
         if let Some(latest_manifest) = &latest_manifest {
@@ -457,7 +457,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             Some(manifest) => manifest,
             None => {
                 let state = CoreDbState::new_with_wal_object_store(wal_object_store_uri);
-                StoredManifest::create_new_db(manifest_store.clone(), state).await?
+                StoredManifest::create_new_db(manifest_store.clone(), state, system_clock.clone())
+                    .await?
             }
         };
         let mut manifest = FenceableManifest::init_writer(
@@ -727,7 +728,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
-            self.system_clock.clone(),
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
@@ -835,7 +835,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
-            self.system_clock.clone(),
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store.clone(), None),

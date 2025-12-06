@@ -179,6 +179,11 @@ impl Compaction {
     pub(crate) fn set_bytes_processed(&mut self, bytes: u64) {
         self.bytes_processed = bytes;
     }
+
+    /// Gets the bytes processed so far.
+    pub(crate) fn bytes_processed(&self) -> u64 {
+        self.bytes_processed
+    }
 }
 
 impl Display for Compaction {
@@ -867,13 +872,12 @@ mod tests {
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand: Arc<DbRand> = Arc::new(DbRand::default());
 
-        let manifest_store = Arc::new(ManifestStore::new(
-            &Path::from(PATH),
-            os.clone(),
-            system_clock.clone(),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let stored_manifest = tokio_handle
-            .block_on(StoredManifest::load(manifest_store))
+            .block_on(StoredManifest::load(
+                manifest_store,
+                Arc::new(DefaultSystemClock::new()),
+            ))
             .unwrap();
         let state = CompactorState::new(stored_manifest.prepare_dirty().unwrap());
         (os, stored_manifest, state, system_clock, rand)

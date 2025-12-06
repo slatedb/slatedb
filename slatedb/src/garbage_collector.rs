@@ -206,7 +206,9 @@ impl GarbageCollector {
     }
 
     async fn remove_expired_checkpoints(&self) -> Result<(), SlateDBError> {
-        let mut stored_manifest = StoredManifest::load(Arc::clone(&self.manifest_store)).await?;
+        let mut stored_manifest =
+            StoredManifest::load(Arc::clone(&self.manifest_store), self.system_clock.clone())
+                .await?;
 
         stored_manifest
             .maybe_apply_update(|manifest| self.filter_expired_checkpoints(manifest))
@@ -287,10 +289,13 @@ mod tests {
 
         // Create a manifest
         let state = CoreDbState::new();
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
 
         // Add a second manifest
         stored_manifest
@@ -326,10 +331,13 @@ mod tests {
         let (manifest_store, table_store, _) = build_objects();
 
         // Create a manifest
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
 
         // Add a second manifest
         stored_manifest
@@ -398,10 +406,13 @@ mod tests {
 
         // Manifest 1
         let state = CoreDbState::new();
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
 
         // Manifest 2 (expired_checkpoint_id -> 1)
         let one_day_ago = DefaultSystemClock::default()
@@ -460,10 +471,13 @@ mod tests {
 
         // Manifest 1
         let state = CoreDbState::new();
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
         // Manifest 2 (active_checkpoint_id -> 1)
         let active_checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
             .await
@@ -514,10 +528,13 @@ mod tests {
         let (manifest_store, table_store, local_object_store) = build_objects();
 
         // Create a manifest
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
 
         // Add a second manifest
         stored_manifest
@@ -587,9 +604,13 @@ mod tests {
         // Create a manifest
         let mut state = CoreDbState::new();
         state.replay_after_wal_id = id2.unwrap_wal_id();
-        StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-            .await
-            .unwrap();
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
 
         // Verify that the WAL SST is there as expected
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -632,10 +653,13 @@ mod tests {
         let mut state = CoreDbState::new();
         state.replay_after_wal_id = 1;
         state.next_wal_sst_id = 4;
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
         assert_eq!(1, stored_manifest.id());
 
         // Manifest 2 with checkpoint referencing Manifest 1
@@ -700,9 +724,13 @@ mod tests {
         // Create a manifest
         let mut state = CoreDbState::new();
         state.replay_after_wal_id = id2.unwrap_wal_id();
-        StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-            .await
-            .unwrap();
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
 
         // Verify that the WAL SST is there as expected
         let wal_ssts = table_store.list_wal_ssts(..).await.unwrap();
@@ -771,9 +799,13 @@ mod tests {
             // Don't add inactive_expired_sst_handle
             ssts: vec![active_sst_handle.clone(), active_expired_sst_handle.clone()],
         });
-        StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-            .await
-            .unwrap();
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
 
         // Verify that the compacted SSTs are there as expected
         let compacted_ssts = table_store.list_compacted_ssts(..).await.unwrap();
@@ -865,10 +897,13 @@ mod tests {
             id: 2,
             ssts: vec![active_checkpoint_sst_handle.clone()],
         });
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), state.clone())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
 
         let checkpoint_id = checkpoint_current_manifest(&mut stored_manifest, None)
             .await
@@ -927,11 +962,7 @@ mod tests {
                 .with_automatic_cleanup(true),
         );
         let path = Path::from("/");
-        let manifest_store = Arc::new(ManifestStore::new(
-            &path,
-            local_object_store.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        ));
+        let manifest_store = Arc::new(ManifestStore::new(&path, local_object_store.clone()));
         let sst_format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(local_object_store.clone(), None),
@@ -1075,10 +1106,13 @@ mod tests {
         let (manifest_store, table_store, local_object_store) = build_objects();
 
         // Create two manifests where the first is old enough to GC
-        let mut stored_manifest =
-            StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new())
-                .await
-                .unwrap();
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
         stored_manifest
             .update(stored_manifest.prepare_dirty().unwrap())
             .await
