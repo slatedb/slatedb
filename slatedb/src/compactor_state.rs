@@ -285,10 +285,14 @@ impl Compactions {
         self.recent_compactions.insert(compaction.id, compaction);
     }
 
-    /// Returns the tracked compaction for the specified id, if any.
     #[cfg(test)]
+    /// Returns the tracked compaction for the specified id, if any.
     pub(crate) fn get(&self, compaction_id: &Ulid) -> Option<&Compaction> {
         self.recent_compactions.get(compaction_id)
+    }
+
+    pub(crate) fn get_mut(&mut self, compaction_id: &Ulid) -> Option<&mut Compaction> {
+        self.recent_compactions.get_mut(compaction_id)
     }
 
     /// Returns true if the specified compaction id is being tracked.
@@ -497,85 +501,67 @@ impl CompactorState {
     ///
     /// This removes compacted L0 SSTs and source SRs, inserts the output SR in id-descending
     /// order, updates `l0_last_compacted`, and marks the compaction finished (retaining the most
-    /// recent finished compaction for GC).
+    /// recent finished compaction for GC; see #1044).
     pub(crate) fn finish_compaction(&mut self, compaction_id: Ulid, output_sr: SortedRun) {
-        let Some(compaction) = self
-            .compactions
-            .value
-            .recent_compactions
-            .get(&compaction_id)
-            .cloned()
-        else {
-            error!("compaction not found [compaction_id={}]", compaction_id);
-            return;
-        };
-        let spec = compaction.spec().clone();
-        info!("finished compaction [spec={}]", spec);
-        // reconstruct l0
-        let compaction_l0s: HashSet<Ulid> = spec
-            .sources()
-            .iter()
-            .filter_map(|id| id.maybe_unwrap_sst())
-            .collect();
-        let compaction_srs: HashSet<u32> = spec
-            .sources()
-            .iter()
-            .chain(std::iter::once(&SourceId::SortedRun(spec.destination())))
-            .filter_map(|id| id.maybe_unwrap_sorted_run())
-            .collect();
         let mut db_state = self.db_state().clone();
-        let new_l0: VecDeque<SsTableHandle> = db_state
-            .l0
-            .iter()
-            .filter_map(|l0| {
-                let l0_id = l0.id.unwrap_compacted_id();
-                if compaction_l0s.contains(&l0_id) {
-                    return None;
+        if let Some(compaction) = self.compactions.value.get_mut(&compaction_id) {
+            let spec = compaction.spec();
+            info!("finished compaction [spec={}]", spec);
+            // reconstruct l0
+            let compaction_l0s: HashSet<Ulid> = spec
+                .sources()
+                .iter()
+                .filter_map(|id| id.maybe_unwrap_sst())
+                .collect();
+            let compaction_srs: HashSet<u32> = spec
+                .sources()
+                .iter()
+                .chain(std::iter::once(&SourceId::SortedRun(spec.destination())))
+                .filter_map(|id| id.maybe_unwrap_sorted_run())
+                .collect();
+            let new_l0: VecDeque<SsTableHandle> = db_state
+                .l0
+                .iter()
+                .filter_map(|l0| {
+                    let l0_id = l0.id.unwrap_compacted_id();
+                    if compaction_l0s.contains(&l0_id) {
+                        return None;
+                    }
+                    Some(l0.clone())
+                })
+                .collect();
+            let mut new_compacted = Vec::new();
+            let mut inserted = false;
+            for compacted in db_state.compacted.iter() {
+                if !inserted && output_sr.id >= compacted.id {
+                    new_compacted.push(output_sr.clone());
+                    inserted = true;
                 }
-                Some(l0.clone())
-            })
-            .collect();
-        let mut new_compacted = Vec::new();
-        let mut inserted = false;
-        for compacted in db_state.compacted.iter() {
-            if !inserted && output_sr.id >= compacted.id {
+                if !compaction_srs.contains(&compacted.id) {
+                    new_compacted.push(compacted.clone());
+                }
+            }
+            if !inserted {
                 new_compacted.push(output_sr.clone());
-                inserted = true;
             }
-            if !compaction_srs.contains(&compacted.id) {
-                new_compacted.push(compacted.clone());
+            Self::assert_compacted_srs_in_id_order(&new_compacted);
+            let first_source = spec
+                .sources()
+                .first()
+                .expect("illegal: empty compaction spec");
+            if let Some(compacted_l0) = first_source.maybe_unwrap_sst() {
+                // if there are l0s, the newest must be the first entry in sources
+                // TODO: validate that this is the case
+                db_state.l0_last_compacted = Some(compacted_l0)
             }
-        }
-        if !inserted {
-            new_compacted.push(output_sr.clone());
-        }
-        Self::assert_compacted_srs_in_id_order(&new_compacted);
-        let first_source = spec
-            .sources()
-            .first()
-            .expect("illegal: empty compaction spec");
-        if let Some(compacted_l0) = first_source.maybe_unwrap_sst() {
-            // if there are l0s, the newest must be the first entry in sources
-            // TODO: validate that this is the case
-            db_state.l0_last_compacted = Some(compacted_l0)
-        }
-        db_state.l0 = new_l0;
-        db_state.compacted = new_compacted;
-        self.manifest.value.core = db_state;
-        if let Some(compaction) = self
-            .compactions
-            .value
-            .recent_compactions
-            .get_mut(&compaction_id)
-        {
+            db_state.l0 = new_l0;
+            db_state.compacted = new_compacted;
+            self.manifest.value.core = db_state;
             compaction.set_status(CompactionStatus::Finished);
+            self.compactions.value.trim();
         } else {
-            error!(
-                "compaction finished but not found [compaction_id={}]",
-                compaction_id
-            );
+            error!("compaction not found [compaction_id={}]", compaction_id);
         }
-        self.compactions.value.trim();
     }
 
     /// Debug assertion that compacted sorted runs are kept in strictly descending id order.
