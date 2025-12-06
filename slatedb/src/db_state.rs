@@ -246,6 +246,7 @@ impl SortedRun {
 
     pub(crate) fn find_sst_with_range_covering_key_idx(&self, key: &[u8]) -> Option<usize> {
         // returns the sst after the one whose range includes the key
+        debug!("NUM SSTS: {}", self.ssts.len());
         let first_sst = self
             .ssts
             .partition_point(|sst| sst.compacted_effective_start_key() <= key);
@@ -253,12 +254,14 @@ impl SortedRun {
             if first_sst == self.ssts.len() && first_sst > 0 {
                 // the last sst matched. check the end bound
                 if let Some(last_key) = self.ssts.last().expect("unreachable").info.last_key.as_ref() {
+                    debug!("check last key: {:?}", last_key);
                     if key > last_key.as_ref() {
                         // key is after the end of the sr. skip
                         return None;
                     }
                 }
             }
+            debug!("RETURN {}", first_sst - 1);
             return Some(first_sst - 1);
         }
         // all ssts have a range greater than the key

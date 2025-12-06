@@ -151,14 +151,17 @@ impl Reader {
         db_stats: Option<DbStats>,
     ) -> Result<VecDeque<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
         let mut iters = VecDeque::new();
+        debug!("point key: {:?}", point_key);
         for sst in &db_state.core().l0 {
             debug!("checking l0 iter: {:?}", sst.id);
             if let Some(first_key) = sst.info.first_key.as_ref() {
+                debug!("l0 first key: {:?}", first_key);
                 if point_key < first_key.as_ref() {
                     continue;
                 }
             }
             if let Some(last_key) = sst.info.last_key.as_ref() {
+                debug!("l0 last key: {:?}", last_key);
                 if point_key > last_key.as_ref() {
                     continue;
                 }
