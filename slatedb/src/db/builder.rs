@@ -586,6 +586,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
             let gc = GarbageCollector::new(
                 manifest_store.clone(),
+                compactions_store.clone(),
                 uncached_table_store.clone(),
                 gc_options,
                 inner.stat_registry.clone(),
@@ -735,6 +736,10 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
                 retrying_main_object_store.clone(),
@@ -746,6 +751,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         ));
         GarbageCollector::new(
             manifest_store,
+            compactions_store,
             table_store,
             self.options,
             self.stat_registry,
