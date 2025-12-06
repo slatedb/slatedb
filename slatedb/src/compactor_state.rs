@@ -302,8 +302,13 @@ impl Compactions {
         self.recent_compactions.values()
     }
 
+    /// Returns an iterator over mutable compactions.
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Compaction> {
+        self.recent_compactions.values_mut()
+    }
+
     /// Returns an iterator over all active (submitted or running) compactions.
-    pub(crate) fn active_iter(&self) -> impl Iterator<Item = &Compaction> {
+    pub(crate) fn iter_active(&self) -> impl Iterator<Item = &Compaction> {
         self.recent_compactions.values().filter(|c| c.active())
     }
 
@@ -318,13 +323,6 @@ impl Compactions {
 
         self.recent_compactions
             .retain(|id, compaction| compaction.active() || Some(id) == latest_finished.as_ref());
-    }
-
-    /// Marks all tracked compactions as finished.
-    pub(crate) fn mark_all_finished(&mut self) {
-        for compaction in self.recent_compactions.values_mut() {
-            compaction.set_status(CompactionStatus::Finished);
-        }
     }
 }
 
@@ -366,7 +364,7 @@ impl CompactorState {
 
     /// Returns an iterator over all in-flight compactions.
     pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
-        self.compactions.value.active_iter()
+        self.compactions.value.iter_active()
     }
 
     /// Returns the dirty compactions tracked by this state.
@@ -438,7 +436,7 @@ impl CompactorState {
         if self
             .compactions
             .value
-            .active_iter()
+            .iter_active()
             .map(|c| c.spec())
             .any(|c| c.destination() == spec.destination())
         {
