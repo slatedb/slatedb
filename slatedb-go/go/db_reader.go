@@ -219,6 +219,42 @@ func (r *DbReader) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Itera
 	}, nil
 }
 
+// ScanPrefix creates a streaming iterator for all keys that start with the provided prefix with default options.
+func (r *DbReader) ScanPrefix(prefix []byte) (*Iterator, error) {
+	return r.ScanPrefixWithOptions(prefix, nil)
+}
+
+// ScanPrefixWithOptions creates a streaming iterator for all keys that start with the provided prefix with custom scan options.
+func (r *DbReader) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator, error) {
+	var prefixPtr *C.uint8_t
+	var prefixLen C.uintptr_t
+	if len(prefix) > 0 {
+		prefixPtr = (*C.uint8_t)(unsafe.Pointer(&prefix[0]))
+		prefixLen = C.uintptr_t(len(prefix))
+	}
+
+	cOpts := convertToCScanOptions(opts)
+
+	var iterPtr *C.CSdbIterator
+	result := C.slatedb_reader_scan_prefix_with_options(
+		r.handle,
+		prefixPtr,
+		prefixLen,
+		cOpts,
+		&iterPtr,
+	)
+	defer C.slatedb_free_result(result)
+
+	if result.error != C.Success {
+		return nil, resultToError(result)
+	}
+
+	return &Iterator{
+		ptr:    iterPtr,
+		closed: false,
+	}, nil
+}
+
 // Close closes the database reader and releases all resources
 // After calling Close, the DbReader instance should not be used
 func (r *DbReader) Close() error {

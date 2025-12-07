@@ -1,6 +1,7 @@
 package slatedb_test
 
 import (
+	"io"
 	"os"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -13,6 +14,7 @@ var _ = Describe("DbReader", func() {
 		db       *slatedb.DB
 		dbReader *slatedb.DbReader
 		tmpDir   string
+		envFile  string
 	)
 
 	BeforeEach(func() {
@@ -20,7 +22,7 @@ var _ = Describe("DbReader", func() {
 		tmpDir, err = os.MkdirTemp("", "slatedb_db_test_*")
 		Expect(err).NotTo(HaveOccurred())
 
-		envFile, err := createEnvFile(tmpDir)
+		envFile, err = createEnvFile(tmpDir)
 		Expect(err).NotTo(HaveOccurred())
 
 		db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
@@ -76,5 +78,34 @@ var _ = Describe("DbReader", func() {
 			Entry("remote not dirty", &slatedb.ReadOptions{DurabilityFilter: slatedb.DurabilityRemote}),
 			Entry("remote dirty", &slatedb.ReadOptions{DurabilityFilter: slatedb.DurabilityRemote, Dirty: true}),
 		)
+	})
+
+	Describe("Scan Operations", func() {
+		It("should scan prefix including trailing 0xff", func() {
+			Expect(db.Put([]byte("pref\xff"), []byte("v1"))).NotTo(HaveOccurred())
+			Expect(db.Put([]byte("pref\xff\x00"), []byte("v2"))).NotTo(HaveOccurred())
+			Expect(db.Put([]byte("pref\x01"), []byte("skip"))).NotTo(HaveOccurred())
+			Expect(db.Flush()).NotTo(HaveOccurred())
+
+			Expect(dbReader.Close()).NotTo(HaveOccurred())
+			var err error
+			dbReader, err = slatedb.OpenReader(tmpDir, slatedb.WithEnvFile[slatedb.DbReaderConfig](envFile))
+			Expect(err).NotTo(HaveOccurred())
+
+			iter, err := dbReader.ScanPrefix([]byte("pref\xff"))
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
+
+			var keys []string
+			for {
+				kv, err := iter.Next()
+				if err == io.EOF {
+					break
+				}
+				Expect(err).NotTo(HaveOccurred())
+				keys = append(keys, string(kv.Key))
+			}
+			Expect(keys).To(Equal([]string{"pref\xff", "pref\xff\x00"}))
+		})
 	})
 })

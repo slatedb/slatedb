@@ -194,6 +194,27 @@ var _ = Describe("DB", func() {
 			}
 			Expect(count).To(Equal(3))
 		})
+
+		It("should scan prefix including trailing 0xff", func() {
+			Expect(db.Put([]byte("pref\xff"), []byte("v1"))).NotTo(HaveOccurred())
+			Expect(db.Put([]byte("pref\xff\x00"), []byte("v2"))).NotTo(HaveOccurred())
+			Expect(db.Put([]byte("pref\x01"), []byte("skip"))).NotTo(HaveOccurred())
+
+			iter, err := db.ScanPrefix([]byte("pref\xff"))
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
+
+			var keys []string
+			for {
+				kv, err := iter.Next()
+				if err == io.EOF {
+					break
+				}
+				Expect(err).NotTo(HaveOccurred())
+				keys = append(keys, string(kv.Key))
+			}
+			Expect(keys).To(Equal([]string{"pref\xff", "pref\xff\x00"}))
+		})
 	})
 
 	Describe("Database Management", func() {
