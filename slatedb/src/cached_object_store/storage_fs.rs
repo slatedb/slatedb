@@ -470,7 +470,6 @@ struct CacheState {
 #[derive(Debug)]
 struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
-    batch_factor: usize,
     max_cache_size_bytes: usize,
     track_lock: Mutex<()>,
     cache_state: Mutex<CacheState>,
@@ -488,7 +487,6 @@ impl FsCacheEvictorInner {
     ) -> Self {
         Self {
             root_folder,
-            batch_factor: 10,
             max_cache_size_bytes,
             track_lock: Mutex::new(()),
             cache_state: Mutex::new(CacheState::default()),
@@ -580,30 +578,7 @@ impl FsCacheEvictorInner {
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
 
-        if !evict {
-            return 0;
-        }
-
-        // if the cache size is still below the limit, do nothing
-        if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
-            return 0;
-        }
-        // TODO: check the disk space ratio here, if the disk space is low, also triggers evict.
-
-        // if the cache size exceeds the limit, evict the cache files in batch with the batch_factor,
-        // this may help to avoid the cases like triggering the evictor too frequently when the cache
-        // size is just slightly above the limit.
-        let mut total_bytes: usize = 0;
-        for _ in 0..self.batch_factor {
-            let evicted_bytes = self.maybe_evict_once().await;
-            if evicted_bytes == 0 {
-                return total_bytes;
-            }
-
-            total_bytes += evicted_bytes;
-        }
-
-        total_bytes
+        evicted_bytes
     }
 
     // find a file, and evict it from disk. return the bytes of the evicted file. if no file is evicted or
@@ -726,13 +701,12 @@ mod tests {
             .unwrap();
         let registry = StatRegistry::new();
 
-        let mut evictor = FsCacheEvictorInner::new(
+        let evictor = FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
             Arc::new(DbRand::default()),
         );
-        evictor.batch_factor = 2;
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
         let evicted = evictor
@@ -750,7 +724,7 @@ mod tests {
         let evicted = evictor
             .track_entry_accessed(path2, 1024, DefaultSystemClock::default().now(), true)
             .await;
-        assert_eq!(evicted, 2048);
+        assert_eq!(evicted, 1024);
 
         let file_paths = walkdir::WalkDir::new(temp_dir.path())
             .into_iter()
