@@ -439,7 +439,7 @@ fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
         },
         VarError::NotUnicode(not_unicode_value) => SlateDBError::InvalidEnvironmentVariable {
             key: name.to_string(),
-            value: Some(format!("{:?}", not_unicode_value)),
+            value: format!("{:?}", not_unicode_value),
         },
     })
 }
@@ -470,7 +470,7 @@ pub fn load_object_store_from_env(
         "opendal" => load_opendal(),
         invalid_value => Err(SlateDBError::InvalidEnvironmentVariable {
             key: "CLOUD_PROVIDER".to_string(),
-            value: Some(invalid_value.to_string()),
+            value: invalid_value.to_string(),
         }
         .into()),
     }
@@ -602,7 +602,15 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use crate::admin::load_object_store_from_env;
-    // use crate::error::{SlateDBError};
+    use std::io::{Result, Write};
+    use tempfile::NamedTempFile;
+
+    fn create_temp_env_file(content: &str) -> Result<NamedTempFile> {
+        let mut temp_file = NamedTempFile::new()?;
+        temp_file.write_all(content.as_bytes())?;
+        temp_file.flush()?;
+        Ok(temp_file)
+    }
 
     #[test]
     fn test_load_object_store_from_env() {
@@ -612,6 +620,19 @@ mod tests {
         assert_eq!(
             r.unwrap_err().to_string(),
             "undefined environment variable CLOUD_PROVIDER"
+        );
+
+        let temp_env_file =
+            create_temp_env_file("CLOUD_PROVIDER=invalid").expect("failed to create temp env file");
+        let r =
+            load_object_store_from_env(Some(temp_env_file.path().to_str().unwrap().to_string()));
+        temp_env_file
+            .close()
+            .expect("failed to close temp env file");
+        assert!(r.is_err());
+        assert_eq!(
+            r.unwrap_err().to_string(),
+            "invalid environment variable CLOUD_PROVIDER value `invalid`"
         );
     }
 }

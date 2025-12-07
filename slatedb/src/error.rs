@@ -214,8 +214,8 @@ pub(crate) enum SlateDBError {
     #[error("undefined environment variable {key}")]
     UndefinedEnvironmentVariable { key: String },
 
-    #[error("invalid environment variable {key}=`{value:?}` value")]
-    InvalidEnvironmentVariable { key: String, value: Option<String> },
+    #[error("invalid environment variable {key} value `{value}`")]
+    InvalidEnvironmentVariable { key: String, value: String },
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
