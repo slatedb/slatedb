@@ -213,6 +213,7 @@ pub(crate) mod rng {
 #[cfg(test)]
 pub(crate) mod sample {
     use crate::bytes_range::BytesRange;
+    use crate::utils::increment_lex;
     use crate::{bytes_range, test_utils};
     use bytes::{BufMut, Bytes, BytesMut};
     use proptest::test_runner::TestRng;
@@ -297,19 +298,6 @@ pub(crate) mod sample {
         res
     }
 
-    fn increment_lex(b: &Bytes) -> Bytes {
-        let mut res = BytesMut::from(b.as_ref());
-        for i in (0..res.len()).rev() {
-            if res[i] < u8::MAX {
-                res[i] += 1;
-                return res.freeze();
-            } else {
-                res[i] = u8::MIN;
-            }
-        }
-        panic!("Overflow when incrementing bytes {b:?}")
-    }
-
     fn decrement_lex(b: &Bytes) -> Bytes {
         let mut res = BytesMut::from(b.as_ref());
         for i in (0..res.len()).rev() {
@@ -382,6 +370,7 @@ pub(crate) mod sample {
                     padded
                 } else {
                     increment_lex(&padded)
+                        .unwrap_or_else(|| panic!("Overflow when incrementing bytes {padded:?}"))
                 }
             }
         }

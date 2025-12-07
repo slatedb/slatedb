@@ -18,7 +18,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::store_provider::{DefaultStoreProvider, StoreProvider};
 use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, MonotonicSeq, WatchableOnceCell};
+use crate::utils::{prefix_range, IdGenerator, MonotonicSeq, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
 use async_trait::async_trait;
@@ -761,6 +761,25 @@ impl DbReader {
         self.scan_with_options(range, &ScanOptions::default()).await
     }
 
+    /// Scan all keys that start with the provided prefix using default scan options.
+    pub async fn scan_prefix<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+    ) -> Result<DbIterator, crate::Error> {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that start with the provided prefix with the provided options.
+    pub async fn scan_prefix_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
+        let range = prefix_range(prefix.as_ref());
+        self.scan_bytes_range(range, options).await
+    }
+
     /// Scan a range of keys with the provided options.
     ///
     /// returns a `DbIterator`
@@ -805,6 +824,7 @@ impl DbReader {
     ///     assert_eq!(None, iter.next().await?);
     ///     Ok(())
     /// }
+    /// ```
     pub async fn scan_with_options<K, T>(
         &self,
         range: T,
@@ -821,6 +841,14 @@ impl DbReader {
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let range = BytesRange::from((start, end));
+        self.scan_bytes_range(range, options).await
+    }
+
+    async fn scan_bytes_range(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
         self.inner
             .scan_with_options(range, options)
             .await
@@ -878,6 +906,14 @@ impl DbRead for DbReader {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+
+    async fn scan_prefix_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
+        self.scan_prefix_with_options(prefix, options).await
     }
 }
 
@@ -1066,6 +1102,36 @@ mod tests {
         );
 
         test_utils::assert_ranged_db_scan(&table, .., &mut db_iter).await;
+    }
+
+    #[tokio::test]
+    async fn should_scan_prefix_for_reader() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        db.put(b"a\xff", b"v1").await.unwrap();
+        db.put(b"a\xff\x00", b"v2").await.unwrap();
+        db.put(b"b", b"other").await.unwrap();
+        db.flush().await.unwrap();
+
+        let reader = DbReader::open(
+            path,
+            Arc::clone(&object_store),
+            None,
+            DbReaderOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut iter = reader.scan_prefix(b"a\xff").await.unwrap();
+        assert_eq!(Some((b"a\xff", b"v1").into()), iter.next().await.unwrap());
+        assert_eq!(
+            Some((b"a\xff\x00", b"v2").into()),
+            iter.next().await.unwrap()
+        );
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     #[tokio::test(start_paused = true)]

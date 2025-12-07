@@ -65,7 +65,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{MonotonicSeq, SendSafely};
+use crate::utils::{prefix_range, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use log::{info, trace, warn};
@@ -808,6 +808,77 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Scan all keys that start with the provided prefix using the provided options.
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error scanning the range of keys
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, config::ScanOptions, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"user:1", b"a_value").await?;
+    ///     db.put(b"user:2", b"b_value").await?;
+    ///     db.put(b"post:1", b"c_value").await?;
+    ///
+    ///     let mut iter = db.scan_prefix("user").await?;
+    ///     assert_eq!(Some((b"user:1", b"a_value").into()), iter.next().await?);
+    ///     assert_eq!(Some((b"user:2", b"b_value").into()), iter.next().await?);
+    ///     assert_eq!(None, iter.next().await?);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix<K: AsRef<[u8]>>(&self, prefix: K) -> Result<DbIterator, crate::Error> {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that start with the provided prefix using the provided options.
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error scanning the range of keys
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, config::ScanOptions, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"user:1", b"a_value").await?;
+    ///     db.put(b"user:2", b"b_value").await?;
+    ///     db.put(b"post:1", b"c_value").await?;
+    ///
+    ///     let mut iter = db.scan_prefix_with_options("user", &ScanOptions::default()).await?;
+    ///     assert_eq!(Some((b"user:1", b"a_value").into()), iter.next().await?);
+    ///     assert_eq!(Some((b"user:2", b"b_value").into()), iter.next().await?);
+    ///     assert_eq!(None, iter.next().await?);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix_with_options<K: AsRef<[u8]>>(
+        &self,
+        prefix: K,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
+        let range = prefix_range(prefix.as_ref());
+        self.inner
+            .scan_with_options(range, options)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Scan a range of keys using the default scan options.
     ///
     /// returns a `DbIterator`
@@ -1403,6 +1474,14 @@ impl DbRead for Db {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+
+    async fn scan_prefix_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
+        self.scan_prefix_with_options(prefix, options).await
     }
 }
 
@@ -2482,6 +2561,30 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_handles_trailing_ff() {
+        let db_options = test_db_options(0, 1024, None);
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_scan_prefix", object_store)
+            .with_settings(db_options)
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"a\xff", b"v1").await.unwrap();
+        db.put(b"a\xff\x00", b"v2").await.unwrap();
+        db.put(b"b", b"other").await.unwrap();
+
+        let mut iter = db.scan_prefix(b"a\xff").await.unwrap();
+
+        assert_eq!(Some((b"a\xff", b"v1").into()), iter.next().await.unwrap());
+        assert_eq!(
+            Some((b"a\xff\x00", b"v2").into()),
+            iter.next().await.unwrap()
+        );
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     fn new_proptest_runner(rng_seed: Option<[u8; 32]>) -> TestRunner {

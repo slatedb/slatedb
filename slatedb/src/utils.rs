@@ -1,15 +1,17 @@
+use crate::bytes_range::BytesRange;
 use crate::clock::{MonotonicClock, SystemClock};
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
 use crate::error::SlateDBError;
 use crate::types::RowEntry;
-use bytes::{BufMut, Bytes};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::FutureExt;
 use log::error;
 use rand::{Rng, RngCore};
 use std::any::Any;
 use std::future::Future;
+use std::ops::Bound;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
@@ -167,6 +169,53 @@ fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
 
 pub(crate) fn clamp_allocated_size_bytes(bytes: &Bytes) -> Bytes {
     bytes_into_minimal_vec(bytes).into()
+}
+
+/// Returns the next lexicographical byte sequence after `bytes`, if one exists.
+/// This keeps the length the same as the input and returns `None` on overflow.
+pub(crate) fn increment_lex(bytes: &[u8]) -> Option<Bytes> {
+    let mut res = BytesMut::from(bytes);
+    for i in (0..res.len()).rev() {
+        if res[i] < u8::MAX {
+            res[i] += 1;
+            return Some(res.freeze());
+        }
+        res[i] = u8::MIN;
+    }
+    None
+}
+
+/// Compute the smallest lexicographical prefix that comes after `prefix`.
+///
+/// For example:
+/// - `next_prefix_after(b"abc")` returns `Some(b"abd")`
+/// - `next_prefix_after(b"a\xff")` returns `Some(b"b")`
+/// - `next_prefix_after(&[0xff, 0xff])` returns `None`
+pub(crate) fn next_prefix_after(prefix: &[u8]) -> Option<Bytes> {
+    increment_lex(prefix).map(|next| {
+        let mut vec = next.to_vec();
+        while vec.last().is_some_and(|b| *b == u8::MIN) {
+            vec.pop();
+        }
+        Bytes::from(vec)
+    })
+}
+
+/// Build a [`BytesRange`] that covers all keys starting with `prefix`.
+///
+/// If `prefix` is empty, the range is unbounded (`..`).
+/// If there is no greater prefix (e.g. `prefix == [0xff; n]`), the end
+/// bound is unbounded.
+pub(crate) fn prefix_range(prefix: &[u8]) -> BytesRange {
+    if prefix.is_empty() {
+        return BytesRange::new(Bound::Unbounded, Bound::Unbounded);
+    }
+
+    let start = Bytes::copy_from_slice(prefix);
+    let end_bound = next_prefix_after(prefix)
+        .map(Bound::Excluded)
+        .unwrap_or(Bound::Unbounded);
+    BytesRange::new(Bound::Included(start), end_bound)
 }
 
 /// Computes the "index key" (lowest bound) for an SST index block, ie a key that's greater
@@ -616,12 +665,14 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
+        compute_max_parallel, increment_lex, next_prefix_after, panic_string, prefix_range,
+        spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
     use std::any::Any;
     use std::collections::VecDeque;
+    use std::ops::{Bound, RangeBounds};
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -689,6 +740,41 @@ mod tests {
             prev_block_last_key.map(|s| Bytes::from(s.to_string())),
             &Bytes::from(this_block_first_key.to_string()),
         );
+    }
+
+    #[test]
+    fn test_increment_lex_handles_overflow() {
+        assert_eq!(
+            increment_lex(&[0x00, 0x01]),
+            Some(Bytes::from_static(&[0x00, 0x02]))
+        );
+        assert!(increment_lex(&[0xff, 0xff]).is_none());
+    }
+
+    #[test]
+    fn test_next_prefix_after_truncates() {
+        assert_eq!(
+            next_prefix_after(&[0x12, 0xff]),
+            Some(Bytes::from_static(&[0x13]))
+        );
+        assert_eq!(
+            next_prefix_after(&[0x12, 0x34, 0x7f]),
+            Some(Bytes::from_static(&[0x12, 0x34, 0x80]))
+        );
+        assert!(next_prefix_after(&[0xff, 0xff]).is_none());
+    }
+
+    #[test]
+    fn test_prefix_range_bounds() {
+        let range = prefix_range(b"ab");
+        assert!(matches!(range.start_bound(), Bound::Included(b) if b.as_ref() == b"ab"));
+        assert!(matches!(
+            range.end_bound(),
+            Bound::Excluded(b) if b.as_ref() == b"ac"
+        ));
+
+        let max_range = prefix_range(&[0xff]);
+        assert!(matches!(max_range.end_bound(), Bound::Unbounded));
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOpt
 use crate::db::DbInner;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
+use crate::utils::prefix_range;
 use crate::DbRead;
 
 /// A database transaction that provides atomic read-write operations with
@@ -142,6 +143,25 @@ impl DBTransaction {
             .map_err(Into::into)
     }
 
+    /// Scan all keys that start with the provided prefix using the default scan options.
+    pub async fn scan_prefix<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+    ) -> Result<DbIterator, crate::Error> {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that start with the provided prefix using the provided options.
+    pub async fn scan_prefix_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
+        let range = prefix_range(prefix.as_ref());
+        self.scan_bytes_range(range, options).await
+    }
+
     /// Scan a range of keys using the default scan options.
     /// This operation will track the read range for conflict detection in SSI mode.
     ///
@@ -176,23 +196,32 @@ impl DBTransaction {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        // TODO: this range conversion logic can be extract to an util
         let start = range
             .start_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let end = range
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let range = (start, end);
+        self.scan_bytes_range(BytesRange::from((start, end)), options)
+            .await
+    }
 
-        // Track read range for SSI conflict detection if needed
-        let range_tracker = if self.isolation_level == IsolationLevel::SerializableSnapshot {
+    fn prepare_range_tracker(&self) -> Option<Arc<DbIteratorRangeTracker>> {
+        if self.isolation_level == IsolationLevel::SerializableSnapshot {
             let tracker = Arc::new(DbIteratorRangeTracker::new());
             self.range_trackers.lock().push(tracker.clone());
             Some(tracker)
         } else {
             None
-        };
+        }
+    }
+
+    async fn scan_bytes_range(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
+        let range_tracker = self.prepare_range_tracker();
 
         self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
@@ -201,11 +230,10 @@ impl DBTransaction {
         // sees a consistent view of the current writes.
         let write_batch_cloned = self.write_batch.read().clone();
 
-        // For now, delegate to the underlying reader
         self.db_inner
             .reader
             .scan_with_options(
-                BytesRange::from(range),
+                range,
                 options,
                 &db_state,
                 Some(write_batch_cloned),
@@ -394,6 +422,14 @@ impl DbRead for DBTransaction {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+
+    async fn scan_prefix_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
+        self.scan_prefix_with_options(prefix, options).await
     }
 }
 

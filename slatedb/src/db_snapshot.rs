@@ -9,6 +9,7 @@ use crate::db_iter::DbIterator;
 
 use crate::db::DbInner;
 use crate::transaction_manager::TransactionManager;
+use crate::utils::prefix_range;
 use crate::DbRead;
 
 pub struct DbSnapshot {
@@ -76,6 +77,25 @@ impl DbSnapshot {
             .map_err(Into::into)
     }
 
+    /// Scan all keys that start with the provided prefix using the default scan options.
+    pub async fn scan_prefix<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+    ) -> Result<DbIterator, crate::Error> {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that start with the provided prefix using the provided options.
+    pub async fn scan_prefix_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
+        let range = prefix_range(prefix.as_ref());
+        self.scan_bytes_range(range, options).await
+    }
+
     /// Scan a range of keys using the default scan options.
     ///
     /// ## Arguments
@@ -108,20 +128,27 @@ impl DbSnapshot {
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send,
     {
-        // TODO: this range conversion logic can be extract to an util
         let start = range
             .start_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
         let end = range
             .end_bound()
             .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let range = (start, end);
+        self.scan_bytes_range(BytesRange::from((start, end)), options)
+            .await
+    }
+
+    async fn scan_bytes_range(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
         self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader
             .scan_with_options(
-                BytesRange::from(range),
+                range,
                 options,
                 &db_state,
                 None,
@@ -153,6 +180,14 @@ impl DbRead for DbSnapshot {
         T: RangeBounds<K> + Send,
     {
         self.scan_with_options(range, options).await
+    }
+
+    async fn scan_prefix_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error> {
+        self.scan_prefix_with_options(prefix, options).await
     }
 }
 

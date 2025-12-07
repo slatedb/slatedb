@@ -101,4 +101,39 @@ pub trait DbRead {
     where
         K: AsRef<[u8]> + Send,
         T: RangeBounds<K> + Send;
+
+    /// Scan all keys that share the provided prefix using default scan options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the byte prefix to match
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error scanning the prefix
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
+    async fn scan_prefix<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+    ) -> Result<DbIterator, crate::Error> {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that share the provided prefix with custom scan options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the byte prefix to match
+    /// - `options`: the scan options to use
+    ///
+    /// ## Errors
+    /// - `Error`: if there was an error scanning the prefix
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
+    async fn scan_prefix_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        prefix: K,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>;
 }
