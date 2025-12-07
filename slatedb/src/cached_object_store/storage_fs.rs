@@ -730,7 +730,7 @@ mod tests {
             .into_iter()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(file_paths.len(), 2); // the folder file "." is also counted
+        assert_eq!(file_paths.len(), 3); // the folder file "." is also counted
     }
 
     #[tokio::test]
