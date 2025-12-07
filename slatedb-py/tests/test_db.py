@@ -308,6 +308,20 @@ async def test_db_iterator_async_for_and_seek_async(db_path, env_file):
     finally:
         db.close()
 
+def test_scan_prefix_handles_ff(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"a\xff", b"v1")
+        db.put(b"a\xff\x00", b"v2")
+        db.put(b"b", b"skip")
+
+        assert list(db.scan_prefix(b"a\xff")) == [
+            (b"a\xff", b"v1"),
+            (b"a\xff\x00", b"v2"),
+        ]
+    finally:
+        db.close()
+
 
 def test_snapshot_iterator_seek(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)

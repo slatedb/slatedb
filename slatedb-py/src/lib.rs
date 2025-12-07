@@ -562,20 +562,107 @@ impl PySlateDB {
         Ok(res.map(|b| PyBytes::new(py, &b)))
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async { db.scan_prefix(&prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = db.scan_prefix(&prefix).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            db.scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = db
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (start, end = None))]
     fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
-
         let db = self.inner.clone();
         let rt = get_runtime();
-        let iter = rt.block_on(async { db.scan(start..end).await.map_err(map_error) })?;
+        let start_clone = start.clone();
+        let iter = if let Some(end) = end {
+            rt.block_on(async { db.scan(start_clone..end).await.map_err(map_error) })?
+        } else {
+            rt.block_on(async { db.scan_prefix(&start).await.map_err(map_error) })?
+        };
         Ok(PyDbIterator::from_iter(iter))
     }
 
@@ -589,14 +676,14 @@ impl PySlateDB {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let db = self.inner.clone();
+        let start_clone = start.clone();
         future_into_py(py, async move {
-            let iter = db.scan(start..end).await.map_err(map_error)?;
+            let iter = if let Some(end) = end {
+                db.scan(start_clone..end).await.map_err(map_error)?
+            } else {
+                db.scan_prefix(&start).await.map_err(map_error)?
+            };
             Ok(PyDbIterator::from_iter(iter))
         })
     }
@@ -626,11 +713,6 @@ impl PySlateDB {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -640,11 +722,20 @@ impl PySlateDB {
         )?;
         let db = self.inner.clone();
         let rt = get_runtime();
-        let iter = rt.block_on(async {
-            db.scan_with_options(start..end, &opts)
-                .await
-                .map_err(map_error)
-        })?;
+        let start_clone = start.clone();
+        let iter = if let Some(end) = end {
+            rt.block_on(async {
+                db.scan_with_options(start_clone..end, &opts)
+                    .await
+                    .map_err(map_error)
+            })?
+        } else {
+            rt.block_on(async {
+                db.scan_prefix_with_options(&start, &opts)
+                    .await
+                    .map_err(map_error)
+            })?
+        };
         Ok(PyDbIterator::from_iter(iter))
     }
 
@@ -663,11 +754,6 @@ impl PySlateDB {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -676,11 +762,17 @@ impl PySlateDB {
             max_fetch_tasks,
         )?;
         let db = self.inner.clone();
+        let start_clone = start.clone();
         future_into_py(py, async move {
-            let iter = db
-                .scan_with_options(start..end, &opts)
-                .await
-                .map_err(map_error)?;
+            let iter = if let Some(end) = end {
+                db.scan_with_options(start_clone..end, &opts)
+                    .await
+                    .map_err(map_error)?
+            } else {
+                db.scan_prefix_with_options(&start, &opts)
+                    .await
+                    .map_err(map_error)?
+            };
             Ok(PyDbIterator::from_iter(iter))
         })
     }
@@ -1169,19 +1261,108 @@ impl PySlateDBSnapshot {
         })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async { snapshot.scan_prefix(&prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let snapshot = self.inner_ref()?;
+        future_into_py(py, async move {
+            let iter = snapshot.scan_prefix(&prefix).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            snapshot
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let snapshot = self.inner_ref()?;
+        future_into_py(py, async move {
+            let iter = snapshot
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (start, end = None))]
     fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let snapshot = self.inner_ref()?;
         let rt = get_runtime();
-        let iter = rt.block_on(async { snapshot.scan(start..end).await.map_err(map_error) })?;
+        let start_clone = start.clone();
+        let iter = if let Some(end) = end {
+            rt.block_on(async { snapshot.scan(start_clone..end).await.map_err(map_error) })?
+        } else {
+            rt.block_on(async { snapshot.scan_prefix(&start).await.map_err(map_error) })?
+        };
         Ok(PyDbIterator::from_iter(iter))
     }
 
@@ -1195,14 +1376,14 @@ impl PySlateDBSnapshot {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let snapshot = self.inner_ref()?;
+        let start_clone = start.clone();
         future_into_py(py, async move {
-            let iter = snapshot.scan(start..end).await.map_err(map_error)?;
+            let iter = if let Some(end) = end {
+                snapshot.scan(start_clone..end).await.map_err(map_error)?
+            } else {
+                snapshot.scan_prefix(&start).await.map_err(map_error)?
+            };
             Ok(PyDbIterator::from_iter(iter))
         })
     }
@@ -1221,11 +1402,6 @@ impl PySlateDBSnapshot {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1235,12 +1411,22 @@ impl PySlateDBSnapshot {
         )?;
         let snapshot = self.inner_ref()?;
         let rt = get_runtime();
-        let iter = rt.block_on(async {
-            snapshot
-                .scan_with_options(start..end, &opts)
-                .await
-                .map_err(map_error)
-        })?;
+        let start_clone = start.clone();
+        let iter = if let Some(end) = end {
+            rt.block_on(async {
+                snapshot
+                    .scan_with_options(start_clone..end, &opts)
+                    .await
+                    .map_err(map_error)
+            })?
+        } else {
+            rt.block_on(async {
+                snapshot
+                    .scan_prefix_with_options(&start, &opts)
+                    .await
+                    .map_err(map_error)
+            })?
+        };
         Ok(PyDbIterator::from_iter(iter))
     }
 
@@ -1259,11 +1445,6 @@ impl PySlateDBSnapshot {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1272,11 +1453,19 @@ impl PySlateDBSnapshot {
             max_fetch_tasks,
         )?;
         let snapshot = self.inner_ref()?;
+        let start_clone = start.clone();
         future_into_py(py, async move {
-            let iter = snapshot
-                .scan_with_options(start..end, &opts)
-                .await
-                .map_err(map_error)?;
+            let iter = if let Some(end) = end {
+                snapshot
+                    .scan_with_options(start_clone..end, &opts)
+                    .await
+                    .map_err(map_error)?
+            } else {
+                snapshot
+                    .scan_prefix_with_options(&start, &opts)
+                    .await
+                    .map_err(map_error)?
+            };
             Ok(PyDbIterator::from_iter(iter))
         })
     }
@@ -1467,19 +1656,113 @@ impl PySlateDBTransaction {
         future_into_py(py, async move { Ok(res) })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async { txn.scan_prefix(&prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let prefix_clone = prefix.clone();
+        let iter = py.allow_threads(|| {
+            rt.block_on(async { txn.scan_prefix(&prefix_clone).await.map_err(map_error) })
+        })?;
+        future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            txn.scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let prefix_clone = prefix.clone();
+        let opts_clone = opts.clone();
+        let iter = py.allow_threads(|| {
+            rt.block_on(async {
+                txn.scan_prefix_with_options(&prefix_clone, &opts_clone)
+                    .await
+                    .map_err(map_error)
+            })
+        })?;
+        future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
+    }
+
     #[pyo3(signature = (start, end = None))]
     fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let txn = self.inner_ref()?;
         let rt = get_runtime();
-        let iter = rt.block_on(async { txn.scan(start..end).await.map_err(map_error) })?;
+        let start_clone = start.clone();
+        let iter = if let Some(end) = end {
+            rt.block_on(async { txn.scan(start_clone..end).await.map_err(map_error) })?
+        } else {
+            rt.block_on(async { txn.scan_prefix(&start).await.map_err(map_error) })?
+        };
         Ok(PyDbIterator::from_iter(iter))
     }
 
@@ -1493,15 +1776,17 @@ impl PySlateDBTransaction {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let txn = self.inner_ref()?;
         let rt = get_runtime();
+        let start_clone = start.clone();
         let iter = py.allow_threads(|| {
-            rt.block_on(async { txn.scan(start..end).await.map_err(map_error) })
+            rt.block_on(async {
+                if let Some(end) = end {
+                    txn.scan(start_clone..end).await.map_err(map_error)
+                } else {
+                    txn.scan_prefix(&start).await.map_err(map_error)
+                }
+            })
         })?;
         future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
     }
@@ -1520,11 +1805,6 @@ impl PySlateDBTransaction {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1534,10 +1814,17 @@ impl PySlateDBTransaction {
         )?;
         let txn = self.inner_ref()?;
         let rt = get_runtime();
+        let start_clone = start.clone();
         let iter = rt.block_on(async {
-            txn.scan_with_options(start..end, &opts)
-                .await
-                .map_err(map_error)
+            if let Some(end) = end {
+                txn.scan_with_options(start_clone..end, &opts)
+                    .await
+                    .map_err(map_error)
+            } else {
+                txn.scan_prefix_with_options(&start, &opts)
+                    .await
+                    .map_err(map_error)
+            }
         })?;
         Ok(PyDbIterator::from_iter(iter))
     }
@@ -1557,11 +1844,6 @@ impl PySlateDBTransaction {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1571,11 +1853,18 @@ impl PySlateDBTransaction {
         )?;
         let txn = self.inner_ref()?;
         let rt = get_runtime();
+        let start_clone = start.clone();
         let iter = py.allow_threads(|| {
             rt.block_on(async {
-                txn.scan_with_options(start..end, &opts)
-                    .await
-                    .map_err(map_error)
+                if let Some(end) = end {
+                    txn.scan_with_options(start_clone..end, &opts)
+                        .await
+                        .map_err(map_error)
+                } else {
+                    txn.scan_prefix_with_options(&start, &opts)
+                        .await
+                        .map_err(map_error)
+                }
             })
         })?;
         future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
@@ -1839,20 +2128,109 @@ impl PySlateDBReader {
         })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+
+        let reader = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async { reader.scan_prefix(&prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let reader = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = reader.scan_prefix(&prefix).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let reader = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            reader
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if prefix.is_empty() {
+            return Err(InvalidError::new_err("prefix cannot be empty"));
+        }
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let reader = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = reader
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (start, end = None))]
     fn scan(&self, start: Vec<u8>, end: Option<Vec<u8>>) -> PyResult<PyDbIterator> {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
-
         let reader = self.inner.clone();
         let rt = get_runtime();
-        let iter = rt.block_on(async { reader.scan(start..end).await.map_err(map_error) })?;
+        let start_clone = start.clone();
+        let iter = if let Some(end) = end {
+            rt.block_on(async { reader.scan(start_clone..end).await.map_err(map_error) })?
+        } else {
+            rt.block_on(async { reader.scan_prefix(&start).await.map_err(map_error) })?
+        };
         Ok(PyDbIterator::from_iter(iter))
     }
 
@@ -1866,14 +2244,14 @@ impl PySlateDBReader {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let reader = self.inner.clone();
+        let start_clone = start.clone();
         future_into_py(py, async move {
-            let iter = reader.scan(start..end).await.map_err(map_error)?;
+            let iter = if let Some(end) = end {
+                reader.scan(start_clone..end).await.map_err(map_error)?
+            } else {
+                reader.scan_prefix(&start).await.map_err(map_error)?
+            };
             Ok(PyDbIterator::from_iter(iter))
         })
     }
@@ -1892,11 +2270,6 @@ impl PySlateDBReader {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1906,11 +2279,19 @@ impl PySlateDBReader {
         )?;
         let reader = self.inner.clone();
         let rt = get_runtime();
+        let start_clone = start.clone();
         let iter = rt.block_on(async {
-            reader
-                .scan_with_options(start..end, &opts)
-                .await
-                .map_err(map_error)
+            if let Some(end) = end {
+                reader
+                    .scan_with_options(start_clone..end, &opts)
+                    .await
+                    .map_err(map_error)
+            } else {
+                reader
+                    .scan_prefix_with_options(&start, &opts)
+                    .await
+                    .map_err(map_error)
+            }
         })?;
         Ok(PyDbIterator::from_iter(iter))
     }
@@ -1930,11 +2311,6 @@ impl PySlateDBReader {
         if start.is_empty() {
             return Err(InvalidError::new_err("start cannot be empty"));
         }
-        let end = end.unwrap_or_else(|| {
-            let mut end = start.clone();
-            end.push(0xff);
-            end
-        });
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1943,11 +2319,19 @@ impl PySlateDBReader {
             max_fetch_tasks,
         )?;
         let reader = self.inner.clone();
+        let start_clone = start.clone();
         future_into_py(py, async move {
-            let iter = reader
-                .scan_with_options(start..end, &opts)
-                .await
-                .map_err(map_error)?;
+            let iter = if let Some(end) = end {
+                reader
+                    .scan_with_options(start_clone..end, &opts)
+                    .await
+                    .map_err(map_error)?
+            } else {
+                reader
+                    .scan_prefix_with_options(&start, &opts)
+                    .await
+                    .map_err(map_error)?
+            };
             Ok(PyDbIterator::from_iter(iter))
         })
     }

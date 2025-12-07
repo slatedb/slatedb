@@ -83,6 +83,21 @@ def test_scan_operations(db_path, env_file, populated_db):
 
     reader.close()
 
+def test_scan_prefix_handles_ff(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"a\xff", b"v1")
+    db.put(b"a\xff\x00", b"v2")
+    db.put(b"b", b"skip")
+    db.flush()
+
+    reader = SlateDBReader(db_path, env_file=env_file)
+    assert list(reader.scan_prefix(b"a\xff")) == [
+        (b"a\xff", b"v1"),
+        (b"a\xff\x00", b"v2"),
+    ]
+    reader.close()
+    db.close()
+
 @pytest.mark.asyncio
 async def test_reader_scan_async(db_path, env_file, populated_db):
     reader = SlateDBReader(db_path, env_file=env_file)
