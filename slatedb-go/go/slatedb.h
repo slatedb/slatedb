@@ -38,7 +38,6 @@ typedef struct CSdbWriteBatch CSdbWriteBatch;
 typedef struct DbBuilder_String DbBuilder_String;
 
 // Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
-// Similar to SlateDbFFI but for read-only operations.
 typedef struct DbReaderFFI DbReaderFFI;
 
 // Internal struct that owns a Tokio runtime and a SlateDB instance.

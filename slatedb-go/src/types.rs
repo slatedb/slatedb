@@ -1,5 +1,5 @@
 use slatedb::DbIterator;
-use slatedb::{Db, WriteBatch};
+use slatedb::{Db, DbReader, WriteBatch};
 use std::ptr;
 use tokio::runtime::Runtime;
 
@@ -12,6 +12,18 @@ pub struct SlateDbFFI {
 
 impl SlateDbFFI {
     /// Convenience helper to run an async block on the internal runtime.
+    pub fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
+        self.rt.block_on(f)
+    }
+}
+
+/// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
+pub struct DbReaderFFI {
+    pub rt: Runtime,
+    pub reader: DbReader,
+}
+
+impl DbReaderFFI {
     pub fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
         self.rt.block_on(f)
     }
@@ -106,14 +118,30 @@ pub struct CSdbScanOptions {
 /// Internal struct for managing database iterators in FFI
 /// Contains the iterator and a reference to the database to ensure proper lifetime management
 pub struct CSdbIterator {
-    pub db_ptr: *mut SlateDbFFI, // Keep DB alive via pointer reference
+    pub owner: IteratorOwner,
     pub iter: DbIterator,
 }
 
+pub enum IteratorOwner {
+    Db(*mut SlateDbFFI),
+    Reader(*mut DbReaderFFI),
+}
+
 impl CSdbIterator {
-    /// Create a new iterator FFI wrapper
-    pub fn new(db_ptr: *mut SlateDbFFI, iter: DbIterator) -> Box<Self> {
-        Box::new(CSdbIterator { db_ptr, iter })
+    /// Create a new iterator FFI wrapper for DB
+    pub fn new_db(db_ptr: *mut SlateDbFFI, iter: DbIterator) -> Box<Self> {
+        Box::new(CSdbIterator {
+            owner: IteratorOwner::Db(db_ptr),
+            iter,
+        })
+    }
+
+    /// Create a new iterator FFI wrapper for DbReader
+    pub fn new_reader(reader_ptr: *mut DbReaderFFI, iter: DbIterator) -> Box<Self> {
+        Box::new(CSdbIterator {
+            owner: IteratorOwner::Reader(reader_ptr),
+            iter,
+        })
     }
 }
 

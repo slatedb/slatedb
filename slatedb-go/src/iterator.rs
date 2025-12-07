@@ -1,7 +1,7 @@
 use crate::error::{
     create_error_result, create_success_result, slate_error_to_code, CSdbError, CSdbResult,
 };
-use crate::types::{CSdbIterator, CSdbKeyValue};
+use crate::types::{CSdbIterator, CSdbKeyValue, IteratorOwner};
 
 // ============================================================================
 // Iterator Functions
@@ -26,14 +26,24 @@ pub unsafe extern "C" fn slatedb_iterator_next(
 
     let iter_ffi = unsafe { &mut *iter };
 
-    // Validate DB pointer is still alive (basic check)
-    if iter_ffi.db_ptr.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
-    }
+    let result = match iter_ffi.owner {
+        IteratorOwner::Db(ptr) => {
+            if ptr.is_null() {
+                return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+            }
+            let db_ffi = unsafe { &*ptr };
+            db_ffi.block_on(iter_ffi.iter.next())
+        }
+        IteratorOwner::Reader(ptr) => {
+            if ptr.is_null() {
+                return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
+            }
+            let reader_ffi = unsafe { &*ptr };
+            reader_ffi.block_on(iter_ffi.iter.next())
+        }
+    };
 
-    let db_ffi = unsafe { &*iter_ffi.db_ptr };
-
-    match db_ffi.block_on(iter_ffi.iter.next()) {
+    match result {
         Ok(Some(kv)) => {
             // Allocate memory for key and value using Box
             let key_len = kv.key.len();
@@ -89,15 +99,25 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
 
     let iter_ffi = unsafe { &mut *iter };
 
-    // Validate DB pointer is still alive (basic check)
-    if iter_ffi.db_ptr.is_null() {
-        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
-    }
-
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
-    let db_ffi = unsafe { &*iter_ffi.db_ptr };
+    let result = match iter_ffi.owner {
+        IteratorOwner::Db(ptr) => {
+            if ptr.is_null() {
+                return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+            }
+            let db_ffi = unsafe { &*ptr };
+            db_ffi.block_on(iter_ffi.iter.seek(key_slice))
+        }
+        IteratorOwner::Reader(ptr) => {
+            if ptr.is_null() {
+                return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
+            }
+            let reader_ffi = unsafe { &*ptr };
+            reader_ffi.block_on(iter_ffi.iter.seek(key_slice))
+        }
+    };
 
-    match db_ffi.block_on(iter_ffi.iter.seek(key_slice)) {
+    match result {
         Ok(_) => create_success_result(),
         Err(e) => {
             let error_code = slate_error_to_code(&e);

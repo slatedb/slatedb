@@ -3,7 +3,7 @@ use std::ptr;
 
 use slatedb::config::DbReaderOptions;
 use slatedb::DbReader;
-use tokio::runtime::{Builder, Runtime};
+use tokio::runtime::Builder;
 use uuid::Uuid;
 
 // Import our shared modules
@@ -15,21 +15,7 @@ use crate::error::{
     CSdbResult,
 };
 use crate::object_store::create_object_store;
-use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue, SlateDbFFI};
-
-/// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
-/// Similar to SlateDbFFI but for read-only operations.
-pub struct DbReaderFFI {
-    pub rt: Runtime,
-    pub reader: DbReader,
-}
-
-impl DbReaderFFI {
-    /// Convenience helper to run an async block on the internal runtime.
-    pub fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
-        self.rt.block_on(f)
-    }
-}
+use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue, DbReaderFFI};
 
 /// Type-safe wrapper around a pointer to DbReaderFFI.
 /// This provides better type safety than raw pointers.
@@ -257,13 +243,11 @@ pub unsafe extern "C" fn slatedb_reader_scan_with_options(
     let rust_scan_opts = convert_scan_options(scan_options);
 
     // Extract raw pointer before borrowing handle
-    let handle_ptr = handle.0 as *mut SlateDbFFI;
+    let handle_ptr = handle.0;
     let inner = handle.as_inner();
     match inner.block_on(inner.reader.scan_with_options(range, &rust_scan_opts)) {
         Ok(iter) => {
-            // Create iterator FFI wrapper - we'll use a dummy SlateDbFFI pointer since
-            // CSdbIterator was designed for DB, but DbReader iterators work similarly
-            let iter_box = CSdbIterator::new(handle_ptr, iter);
+            let iter_box = CSdbIterator::new_reader(handle_ptr, iter);
             unsafe {
                 *iterator_ptr = Box::into_raw(iter_box);
             }
@@ -309,7 +293,7 @@ pub unsafe extern "C" fn slatedb_reader_scan_prefix_with_options(
         std::slice::from_raw_parts(prefix, prefix_len)
     };
 
-    let handle_ptr = handle.0 as *mut SlateDbFFI;
+    let handle_ptr = handle.0;
     let inner = handle.as_inner();
     match inner.block_on(
         inner
@@ -317,7 +301,7 @@ pub unsafe extern "C" fn slatedb_reader_scan_prefix_with_options(
             .scan_prefix_with_options(prefix_slice, &rust_scan_opts),
     ) {
         Ok(iter) => {
-            let iter_box = CSdbIterator::new(handle_ptr, iter);
+            let iter_box = CSdbIterator::new_reader(handle_ptr, iter);
             *iterator_ptr = Box::into_raw(iter_box);
             create_success_result()
         }

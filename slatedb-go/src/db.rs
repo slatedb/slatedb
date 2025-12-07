@@ -294,7 +294,7 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
     ) {
         Ok(iter) => {
             // Create FFI wrapper
-            let iter_ffi = CSdbIterator::new(handle_ptr, iter);
+            let iter_ffi = CSdbIterator::new_db(handle_ptr, iter);
             unsafe {
                 *iterator_ptr = Box::into_raw(iter_ffi);
             }
@@ -346,7 +346,7 @@ pub unsafe extern "C" fn slatedb_scan_prefix_with_options(
 
     match db_ffi.block_on(db_ffi.db.scan_prefix_with_options(prefix_slice, &scan_opts)) {
         Ok(iter) => {
-            let iter_ffi = CSdbIterator::new(handle_ptr, iter);
+            let iter_ffi = CSdbIterator::new_db(handle_ptr, iter);
             *iterator_ptr = Box::into_raw(iter_ffi);
             create_success_result()
         }
