@@ -210,6 +210,12 @@ pub(crate) enum SlateDBError {
 
     #[error("invalid sequence number ordering during merge. expected sequence numbers in descending order, but found {current_seq} followed by {next_seq}")]
     InvalidSequenceOrder { current_seq: u64, next_seq: u64 },
+
+    #[error("undefined environment variable {key}")]
+    UndefinedEnvironmentVariable { key: String },
+
+    #[error("invalid environment variable {key}=`{value:?}` value")]
+    InvalidEnvironmentVariable { key: String, value: Option<String> },
 }
 
 impl From<TransactionalObjectError> for SlateDBError {
@@ -474,6 +480,8 @@ impl From<SlateDBError> for Error {
             SlateDBError::MergeOperatorMissing => Error::invalid(msg),
             SlateDBError::IteratorNotInitialized => Error::invalid(msg),
             SlateDBError::InvalidSequenceOrder { .. } => Error::data(msg),
+            SlateDBError::UndefinedEnvironmentVariable { .. } => Error::invalid(msg),
+            SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),

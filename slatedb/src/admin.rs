@@ -17,6 +17,7 @@ use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::env;
+use std::env::VarError;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -431,6 +432,18 @@ impl Admin {
     }
 }
 
+fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
+    env::var(name).map_err(|e| match e {
+        VarError::NotPresent => SlateDBError::UndefinedEnvironmentVariable {
+            key: name.to_string(),
+        },
+        VarError::NotUnicode(not_unicode_value) => SlateDBError::InvalidEnvironmentVariable {
+            key: name.to_string(),
+            value: Some(format!("{:?}", not_unicode_value)),
+        },
+    })
+}
+
 /// Loads an object store from configured environment variables.
 /// The provider is specified using the CLOUD_PROVIDER variable.
 /// For specific provider configurations, see the corresponding
@@ -446,12 +459,8 @@ pub fn load_object_store_from_env(
     env_file: Option<String>,
 ) -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     dotenvy::from_filename(env_file.unwrap_or(String::from(".env"))).ok();
-
-    let provider = &*env::var("CLOUD_PROVIDER")
-        .expect("CLOUD_PROVIDER must be set")
-        .to_lowercase();
-
-    match provider {
+    let cloud_provider = get_env_variable("CLOUD_PROVIDER")?;
+    match cloud_provider.to_lowercase().as_str() {
         "local" => load_local(),
         #[cfg(feature = "aws")]
         "aws" => load_aws(),
@@ -459,7 +468,11 @@ pub fn load_object_store_from_env(
         "azure" => load_azure(),
         #[cfg(feature = "opendal")]
         "opendal" => load_opendal(),
-        _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
+        invalid_value => Err(SlateDBError::InvalidEnvironmentVariable {
+            key: "CLOUD_PROVIDER".to_string(),
+            value: Some(invalid_value.to_string()),
+        }
+        .into()),
     }
 }
 
@@ -469,7 +482,7 @@ pub fn load_object_store_from_env(
 /// |--------------|-----|----------|
 /// | LOCAL_PATH | The path to the local directory where all data will be stored | Yes |
 pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    let local_path = env::var("LOCAL_PATH").expect("LOCAL_PATH must be set");
+    let local_path = get_env_variable("LOCAL_PATH")?;
     let lfs = object_store::local::LocalFileSystem::new_with_prefix(local_path)?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
@@ -584,4 +597,21 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 
     let op = Operator::via_iter(scheme, iter)?;
     Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::admin::load_object_store_from_env;
+    // use crate::error::{SlateDBError};
+
+    #[test]
+    fn test_load_object_store_from_env() {
+        // creating an object store without CLOUD_PROVIDER env variable
+        let r = load_object_store_from_env(None);
+        assert!(r.is_err());
+        assert_eq!(
+            r.unwrap_err().to_string(),
+            "undefined environment variable CLOUD_PROVIDER"
+        );
+    }
 }
