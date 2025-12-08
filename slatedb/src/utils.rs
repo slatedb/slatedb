@@ -765,6 +765,24 @@ mod tests {
     }
 
     #[test]
+    fn test_next_prefix_after_doc_simple_increment() {
+        assert_eq!(
+            next_prefix_after(b"abc"),
+            Some(Bytes::from_static(b"abd"))
+        );
+    }
+
+    #[test]
+    fn test_next_prefix_after_doc_truncation() {
+        assert_eq!(next_prefix_after(b"a\xff"), Some(Bytes::from_static(b"b")));
+    }
+
+    #[test]
+    fn test_next_prefix_after_doc_overflow() {
+        assert!(next_prefix_after(&[0xff, 0xff]).is_none());
+    }
+
+    #[test]
     fn test_prefix_range_bounds() {
         let range = prefix_range(b"ab");
         assert!(matches!(range.start_bound(), Bound::Included(b) if b.as_ref() == b"ab"));
