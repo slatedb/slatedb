@@ -26,6 +26,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
+use object_store::prefix::PrefixStore;
 use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 
@@ -1378,7 +1379,12 @@ impl Db {
         let url = url
             .try_into()
             .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
-        let (object_store, _) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        let (object_store, path) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        let object_store: Arc<dyn ObjectStore> = if path.as_ref().is_empty() {
+            object_store
+        } else {
+            Arc::new(PrefixStore::new(object_store, path))
+        };
         Ok(object_store)
     }
 }
