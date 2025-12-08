@@ -16,7 +16,7 @@ impl DbInner {
         write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
-        let mut iter = self.load_iterators(imm_table.clone()).await?;
+        let mut iter = self.iter_imm_table(imm_table.clone()).await?;
         while let Some(entry) = iter.next_entry().await? {
             sst_builder.add(entry)?;
         }
@@ -33,7 +33,7 @@ impl DbInner {
         Ok(handle)
     }
 
-    async fn load_iterators(
+    async fn iter_imm_table(
         &self,
         imm_table: Arc<KVTable>,
     ) -> Result<RetentionIterator<MemTableIterator>, SlateDBError> {
@@ -203,14 +203,16 @@ mod tests {
             RowEntry::new_tombstone(&Bytes::from("key2"), 3),
             RowEntry::new_tombstone(&Bytes::from("key3"), 4),
             RowEntry::new_value(&Bytes::from("key3"), b"value3", 5),
+            RowEntry::new_tombstone(&Bytes::from("key2"), 6),
         ],
         expected_entries: vec![
             (Bytes::from("key1"), 2, ValueDeletable::Tombstone),
+            (Bytes::from("key2"), 6, ValueDeletable::Tombstone),
             (Bytes::from("key2"), 3, ValueDeletable::Tombstone),
             (Bytes::from("key3"), 5, ValueDeletable::Value(Bytes::from("value3"))),
         ],
     })]
-    #[case::flush_tombstones(FlushImmTableTestCase {
+    #[case::flush_merges(FlushImmTableTestCase {
         min_active_seq: 0,
         row_entries: vec![
             RowEntry::new_merge(&Bytes::from("key1"), b"value1", 1),
@@ -227,6 +229,29 @@ mod tests {
             (Bytes::from("key2"), 2, ValueDeletable::Value(Bytes::from("value2"))),
             (Bytes::from("key3"), 6, ValueDeletable::Value(Bytes::from("value6"))),
             (Bytes::from("key3"), 4, ValueDeletable::Merge(Bytes::from("value4"))),
+        ],
+    })]
+    #[case::flush_merges_and_tombstones(FlushImmTableTestCase {
+        min_active_seq: 0,
+        row_entries: vec![
+            RowEntry::new_merge(&Bytes::from("key1"), b"value1", 1),
+            RowEntry::new_value(&Bytes::from("key2"), b"value2", 2),
+            RowEntry::new_merge(&Bytes::from("key1"), b"value3", 3),
+            RowEntry::new_tombstone(&Bytes::from("key1"), 4),
+            RowEntry::new_merge(&Bytes::from("key3"), b"value4", 5),
+            RowEntry::new_merge(&Bytes::from("key2"), b"value5", 6),
+            RowEntry::new_value(&Bytes::from("key3"), b"value6", 7),
+            RowEntry::new_tombstone(&Bytes::from("key3"), 8),
+        ],
+        expected_entries: vec![
+            (Bytes::from("key1"), 4, ValueDeletable::Tombstone),
+            (Bytes::from("key1"), 3, ValueDeletable::Merge(Bytes::from("value3"))),
+            (Bytes::from("key1"), 1, ValueDeletable::Merge(Bytes::from("value1"))),
+            (Bytes::from("key2"), 6, ValueDeletable::Merge(Bytes::from("value5"))),
+            (Bytes::from("key2"), 2, ValueDeletable::Value(Bytes::from("value2"))),
+            (Bytes::from("key3"), 8, ValueDeletable::Tombstone),
+            (Bytes::from("key3"), 7, ValueDeletable::Value(Bytes::from("value6"))),
+            (Bytes::from("key3"), 5, ValueDeletable::Merge(Bytes::from("value4"))),
         ],
     })]
     #[tokio::test]
