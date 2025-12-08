@@ -99,12 +99,16 @@ func Open(path string, opts ...Option[DbConfig]) (*DB, error) {
 
 	handle := C.slatedb_open(cPath, cURL, cEnvFile)
 
+	if handle._1.error != C.Success {
+		return nil, resultToError(handle._1)
+	}
+
 	// Check if handle is null (indicates error)
-	if handle._0 == nil {
+	if handle._0._0 == nil {
 		return nil, errors.New("failed to open database")
 	}
 
-	return &DB{handle: handle}, nil
+	return &DB{handle: handle._0}, nil
 }
 
 // Put stores a key-value pair in the database
