@@ -179,7 +179,7 @@ pub(crate) mod tests {
     use crate::proptest_util::sample;
 
     use bytes::Bytes;
-    use proptest::proptest;
+    use proptest::{prop_assert, proptest};
     use std::ops::Bound;
     use std::ops::Bound::Unbounded;
     use std::ops::RangeBounds;
@@ -222,6 +222,50 @@ pub(crate) mod tests {
         let range = BytesRange::from_prefix(b"");
         assert_eq!(range.start_bound(), Bound::Unbounded);
         assert_eq!(range.end_bound(), Bound::Unbounded);
+    }
+
+    #[test]
+    fn test_from_prefix_contains_all_prefixed_keys() {
+        proptest!(|(
+            prefix in arbitrary::nonempty_bytes(8),
+            suffix in arbitrary::bytes(8)
+        )| {
+            let range = BytesRange::from_prefix(&prefix);
+            let mut combined = prefix.clone().to_vec();
+            combined.extend_from_slice(&suffix);
+            let key = Bytes::from(combined);
+            prop_assert!(range.contains(&key));
+        });
+    }
+
+    #[test]
+    fn test_from_prefix_unbounded_for_empty_prefix() {
+        proptest!(|(key in arbitrary::bytes(12))| {
+            let range = BytesRange::from_prefix(b"");
+            prop_assert!(range.contains(&key));
+        });
+    }
+
+    #[test]
+    fn test_from_prefix_filters_keys_by_prefix() {
+        proptest!(|(
+            prefix in arbitrary::nonempty_bytes(8),
+            suffix in arbitrary::bytes(8)
+        )| {
+            let range = BytesRange::from_prefix(&prefix);
+
+            // Any key starting with the prefix should be contained.
+            let mut prefixed = prefix.clone().to_vec();
+            prefixed.extend_from_slice(&suffix);
+            let prefixed = Bytes::from(prefixed);
+            prop_assert!(range.contains(&prefixed));
+
+            // A key with a different first byte should be rejected.
+            let mut non_prefixed = prefix.clone().to_vec();
+            non_prefixed[0] = non_prefixed[0].wrapping_add(1);
+            let non_prefixed = Bytes::from(non_prefixed);
+            prop_assert!(!range.contains(&non_prefixed));
+        });
     }
 
     #[test]
