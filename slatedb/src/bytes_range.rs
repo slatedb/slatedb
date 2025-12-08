@@ -88,6 +88,39 @@ impl BytesRange {
         )
     }
 
+    /// Build a half-open range `[prefix, prefix+1)` covering all keys that start with
+    /// `prefix`.
+    ///
+    /// - Empty prefix returns `(..)` so callers can scan the entire keyspace.
+    /// - If the prefix is all `0xff`, the end bound is unbounded rather than overflowing.
+    pub(crate) fn from_prefix(prefix: &[u8]) -> Self {
+        if prefix.is_empty() {
+            return Self::new(Unbounded, Unbounded);
+        }
+
+        let start = Bytes::copy_from_slice(prefix);
+        let end = Self::increment_prefix(prefix)
+            .map(Excluded)
+            .unwrap_or(Unbounded);
+        Self::new(Included(start), end)
+    }
+
+    /// Compute the smallest byte string that is lexicographically greater than any key
+    /// starting with `prefix`. Returns `None` when `prefix` is all `0xff`.
+    fn increment_prefix(prefix: &[u8]) -> Option<Bytes> {
+        let mut upper_bound = prefix.to_vec();
+
+        for i in (0..upper_bound.len()).rev() {
+            if upper_bound[i] != u8::MAX {
+                upper_bound[i] += 1;
+                upper_bound.truncate(i + 1);
+                return Some(Bytes::from(upper_bound));
+            }
+        }
+
+        None
+    }
+
     #[cfg(test)]
     pub(crate) fn from_ref<K, T>(range: T) -> Self
     where
@@ -164,6 +197,31 @@ pub(crate) mod tests {
         proptest!(|(range in arbitrary::empty_range(10))| {
             assert!(range.empty());
         });
+    }
+
+    #[test]
+    fn test_from_prefix_builds_half_open_range() {
+        let range = BytesRange::from_prefix(b"ab");
+        let start = Bytes::from("ab");
+        let end = Bytes::from("ac");
+        assert_eq!(range.start_bound(), Bound::Included(&start));
+        assert_eq!(range.end_bound(), Bound::Excluded(&end));
+    }
+
+    #[test]
+    fn test_from_prefix_handles_all_ff_prefix() {
+        let prefix = vec![0xff, 0xff];
+        let range = BytesRange::from_prefix(&prefix);
+        let start = Bytes::from(prefix);
+        assert_eq!(range.start_bound(), Bound::Included(&start));
+        assert_eq!(range.end_bound(), Bound::Unbounded);
+    }
+
+    #[test]
+    fn test_from_prefix_allows_empty_prefix() {
+        let range = BytesRange::from_prefix(b"");
+        assert_eq!(range.start_bound(), Bound::Unbounded);
+        assert_eq!(range.end_bound(), Bound::Unbounded);
     }
 
     #[test]
