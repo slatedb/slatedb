@@ -275,7 +275,6 @@ impl Compactions {
             .map(|c| (c.id(), c))
             .collect::<BTreeMap<Ulid, Compaction>>();
         self.recent_compactions = recent_compactions;
-        self.trim();
         self
     }
 
