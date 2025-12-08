@@ -2005,14 +2005,20 @@ mod tests {
             .await
             .unwrap()
             .expect("compactions should exist after first write");
+        let mut persisted_iter = persisted.iter();
         assert!(
-            persisted.iter().next().is_some(),
+            persisted_iter.next().is_some(),
             "expected stored compactions to include the seeded compaction"
+        );
+        assert!(
+            persisted_iter.next().is_none(),
+            "expected only one stored compaction"
         );
 
         drop(handler);
 
-        // Restart compactor (new epoch) and ensure state starts empty.
+        // Restart compactor (new epoch) and ensure state starts with no active compactions
+        // and only one retained finished compaction for GC.
         let mut handler = CompactorEventHandler::new(
             manifest_store.clone(),
             compactions_store.clone(),
@@ -2026,22 +2032,33 @@ mod tests {
         .await
         .unwrap();
 
+        // Ensure no active compactions.
         assert!(handler.state.compactions().next().is_none());
         assert!(
             handler.state.manifest().value.compactor_epoch > first_epoch,
             "compactor epoch should advance on restart"
         );
 
-        // Persisting after restart should clear the stored compactions as well.
+        // Ensure one compaction (marked as finished) is retained.
         handler.write_compactions_safely().await.unwrap();
-        let (_, persisted_after_clear) = compactions_store
-            .try_read_latest_compactions()
-            .await
-            .unwrap()
-            .expect("compactions should exist after clearing");
+        let compactions = handler.state.compactions_dirty().clone().into_value();
+        let mut all_compactions = compactions.iter();
+        let finished_compaction = all_compactions
+            .next()
+            .expect("expected one retained compaction after restart");
+        assert_eq!(
+            finished_compaction.id(),
+            compaction_id,
+            "stored compactions should retain the latest finished compaction after restart"
+        );
+        assert_eq!(
+            finished_compaction.status(),
+            CompactionStatus::Finished,
+            "retained compaction should be marked as finished"
+        );
         assert!(
-            persisted_after_clear.iter().next().is_none(),
-            "stored compactions should be cleared after restart"
+            all_compactions.next().is_none(),
+            "no additional compactions should be retained beyond the latest finished one"
         );
     }
 
