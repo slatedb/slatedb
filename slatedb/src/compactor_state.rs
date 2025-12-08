@@ -309,6 +309,11 @@ impl CompactorState {
         self.compactions = compactions;
     }
 
+    /// Clears the current set of compactions. Currently used at startup to remove old compactions
+    pub(crate) fn clear_compactions(&mut self) {
+        self.compactions.value.recent_compactions.clear();
+    }
+
     /// Merges the remote (writer) manifest view into the compactor's local state.
     ///
     /// This preserves local knowledge about compactions already applied (e.g., L0 last
