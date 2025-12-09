@@ -525,6 +525,33 @@ def test_txn_scan_with_options_sync(db_path, env_file):
     finally:
         db.close()
 
+def test_txn_scan_prefix_variants(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"tp0", b"v0")
+        txn = db.begin("si")
+        txn.put(b"tp1", b"v1")
+        txn.put(b"tp2", b"v2")
+        txn.put(b"other", b"v3")
+
+        assert list(txn.scan_prefix(b"tp")) == [
+            (b"tp0", b"v0"),
+            (b"tp1", b"v1"),
+            (b"tp2", b"v2"),
+        ]
+        it = txn.scan_prefix_with_options(
+            b"tp",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=256,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it) == [(b"tp0", b"v0"), (b"tp1", b"v1"), (b"tp2", b"v2")]
+        txn.rollback()
+    finally:
+        db.close()
+
 
 def test_txn_get_with_options(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
@@ -736,6 +763,50 @@ async def test_async_put_delete_merge_with_options(db_path, env_file):
     finally:
         await db.close_async()
 
+def test_db_scan_prefix_variants(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"pp1", b"v1")
+        db.put(b"pp2", b"v2")
+        db.put(b"pq1", b"v3")
+
+        assert list(db.scan_prefix(b"pp")) == [(b"pp1", b"v1"), (b"pp2", b"v2")]
+
+        it = db.scan_prefix_with_options(
+            b"pp",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=64,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it) == [(b"pp1", b"v1"), (b"pp2", b"v2")]
+    finally:
+        db.close()
+
+@pytest.mark.asyncio
+async def test_db_scan_prefix_async_variants(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"pa1", b"v1")
+        db.put(b"pa2", b"v2")
+        db.put(b"pb1", b"v3")
+
+        it = await db.scan_prefix_async(b"pa")
+        assert list(it) == [(b"pa1", b"v1"), (b"pa2", b"v2")]
+
+        it2 = await db.scan_prefix_with_options_async(
+            b"pa",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=64,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it2) == [(b"pa1", b"v1"), (b"pa2", b"v2")]
+    finally:
+        await db.close_async()
+
 @pytest.mark.asyncio
 async def test_db_scan_async_and_scan_with_options_variants(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
@@ -819,6 +890,30 @@ async def test_snapshot_scan_async_and_with_options(db_path, env_file):
             max_fetch_tasks=1,
         )
         assert list(it3) == [(b"ps1", b"v1"), (b"ps2", b"v2")]
+    finally:
+        db.close()
+
+def test_snapshot_scan_prefix_variants(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    try:
+        db.put(b"sp1", b"v1")
+        db.put(b"sp2", b"v2")
+        snap = db.snapshot()
+        # mutate after snapshot to ensure isolation
+        db.put(b"sp3", b"v3")
+
+        assert list(snap.scan_prefix(b"sp")) == [(b"sp1", b"v1"), (b"sp2", b"v2")]
+
+        it = snap.scan_prefix_with_options(
+            b"sp",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=64,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it) == [(b"sp1", b"v1"), (b"sp2", b"v2")]
+        snap.close()
     finally:
         db.close()
 
