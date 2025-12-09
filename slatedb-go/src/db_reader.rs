@@ -257,7 +257,7 @@ pub unsafe extern "C" fn slatedb_reader_scan_with_options(
     let rust_scan_opts = convert_scan_options(scan_options);
 
     // Extract raw pointer before borrowing handle
-    let handle_ptr = handle.0 as *mut SlateDbReaderFFI;
+    let handle_ptr = handle.0;
     let inner = handle.as_inner();
     match inner.block_on(inner.reader.scan_with_options(range, &rust_scan_opts)) {
         Ok(iter) => {
@@ -310,9 +310,13 @@ pub unsafe extern "C" fn slatedb_reader_scan_prefix_with_options(
     let rust_scan_opts = convert_scan_options(scan_options);
 
     // Extract raw pointer before borrowing handle
-    let handle_ptr = handle.0 as *mut SlateDbReaderFFI;
+    let handle_ptr = handle.0;
     let inner = handle.as_inner();
-    match inner.block_on(inner.reader.scan_prefix_with_options(prefix_slice, &rust_scan_opts)) {
+    match inner.block_on(
+        inner
+            .reader
+            .scan_prefix_with_options(prefix_slice, &rust_scan_opts),
+    ) {
         Ok(iter) => {
             let iter_box = CSdbIterator::new_reader(handle_ptr, iter);
             unsafe {

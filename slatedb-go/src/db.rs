@@ -349,9 +349,7 @@ pub unsafe extern "C" fn slatedb_scan_prefix_with_options(
 
     let scan_opts = convert_scan_options(scan_options);
 
-    match db_ffi
-        .block_on(db_ffi.db.scan_prefix_with_options(prefix_slice, &scan_opts))
-    {
+    match db_ffi.block_on(db_ffi.db.scan_prefix_with_options(prefix_slice, &scan_opts)) {
         Ok(iter) => {
             let iter_ffi = CSdbIterator::new_db(handle_ptr, iter);
             unsafe {

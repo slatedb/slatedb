@@ -106,13 +106,13 @@ pub struct CSdbScanOptions {
 }
 
 /// Internal struct for managing database iterators in FFI
-/// Contains the iterator and a reference to the owner to ensure proper lifetime management
 #[derive(Clone, Copy)]
 pub enum IteratorOwner {
     Db(*mut SlateDbFFI),
     Reader(*mut SlateDbReaderFFI),
 }
 
+/// Contains the iterator and a reference to the owner to ensure proper lifetime management
 pub struct CSdbIterator {
     owner: IteratorOwner,
     pub iter: DbIterator,

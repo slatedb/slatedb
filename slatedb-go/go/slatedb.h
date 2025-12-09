@@ -24,6 +24,7 @@ typedef enum CSdbError {
     InvalidProvider = 8,
 } CSdbError;
 
+// Contains the iterator and a reference to the owner to ensure proper lifetime management
 typedef struct CSdbIterator CSdbIterator;
 
 // Internal struct for managing WriteBatch operations in FFI
