@@ -256,11 +256,17 @@ impl TokioCompactionExecutorInner {
                 // component. They can do what they want. If the send fails (e.g., during
                 // DB shutdown), we log it and continue with the compaction work.
                 #[allow(clippy::disallowed_methods)]
-                if let Err(e) = self.worker_tx.send(CompactorMessage::CompactionJobProgress {
-                    id: args.id,
-                    bytes_processed: all_iter.total_bytes_processed(),
-                }) {
-                    debug!("failed to send compaction progress (likely DB shutdown) [error={:?}]", e);
+                if let Err(e) = self
+                    .worker_tx
+                    .send(CompactorMessage::CompactionJobProgress {
+                        id: args.id,
+                        bytes_processed: all_iter.total_bytes_processed(),
+                    })
+                {
+                    debug!(
+                        "failed to send compaction progress (likely DB shutdown) [error={:?}]",
+                        e
+                    );
                 }
                 last_progress_report = self.clock.now();
             }
@@ -330,7 +336,10 @@ impl TokioCompactionExecutorInner {
                     .worker_tx
                     .send(CompactionJobFinished { id, result })
                 {
-                    debug!("failed to send compaction finished msg (likely DB shutdown) [error={:?}]", e);
+                    debug!(
+                        "failed to send compaction finished msg (likely DB shutdown) [error={:?}]",
+                        e
+                    );
                 }
                 this_cleanup.stats.running_compactions.dec();
             },
