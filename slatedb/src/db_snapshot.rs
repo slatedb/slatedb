@@ -131,6 +131,41 @@ impl DbSnapshot {
             .await
             .map_err(Into::into)
     }
+
+    /// Scan all keys that share the provided prefix using the default scan options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
+    pub async fn scan_prefix<P>(&self, prefix: P) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that share the provided prefix with custom options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    /// - `options`: the scan options to use
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, SlateDBError>`: An iterator with the results of the scan
+    pub async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_with_options(BytesRange::from_prefix(prefix.as_ref()), options)
+            .await
+    }
 }
 
 #[async_trait::async_trait]

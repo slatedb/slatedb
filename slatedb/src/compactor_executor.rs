@@ -253,16 +253,21 @@ impl TokioCompactionExecutorInner {
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
                 // Allow send() because we are treating the executor like an external
-                // component. They can do what they want. The send().expect() will raise
-                // a SendErr, which will be caught in the cleanup_fn and set if there's
-                // not already an error (i.e. if the DB is not already shut down).
+                // component. They can do what they want. If the send fails (e.g., during
+                // DB shutdown), we log it and continue with the compaction work.
                 #[allow(clippy::disallowed_methods)]
-                self.worker_tx
+                if let Err(e) = self
+                    .worker_tx
                     .send(CompactorMessage::CompactionJobProgress {
                         id: args.id,
                         bytes_processed: all_iter.total_bytes_processed(),
                     })
-                    .expect("failed to send compaction progress");
+                {
+                    debug!(
+                        "failed to send compaction progress (likely DB shutdown) [error={:?}]",
+                        e
+                    );
+                }
                 last_progress_report = self.clock.now();
             }
 
@@ -324,14 +329,18 @@ impl TokioCompactionExecutorInner {
                     tasks.remove(&dst);
                 }
                 // Allow send() because we are treating the executor like an external
-                // component. They can do what they want. The send().expect() will raise
-                // a SendErr, which will be caught in the cleanup_fn and set if there's
-                // not already an error (i.e. if the DB is not already shut down).
+                // component. They can do what they want. If the send fails (e.g., during
+                // DB shutdown), we log it and continue with cleanup.
                 #[allow(clippy::disallowed_methods)]
-                this_cleanup
+                if let Err(e) = this_cleanup
                     .worker_tx
                     .send(CompactionJobFinished { id, result })
-                    .expect("failed to send compaction finished msg");
+                {
+                    debug!(
+                        "failed to send compaction finished msg (likely DB shutdown) [error={:?}]",
+                        e
+                    );
+                }
                 this_cleanup.stats.running_compactions.dec();
             },
             async move { this.execute_compaction_job(args).await },

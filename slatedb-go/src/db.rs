@@ -1,5 +1,6 @@
 use serde_json;
 use slatedb::Db;
+use std::collections::HashMap;
 use std::os::raw::c_char;
 use tokio::runtime::Builder;
 
@@ -307,6 +308,47 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
             let error_code = slate_error_to_code(&e);
             create_error_result(error_code, &format!("Scan operation failed: {}", e))
         }
+    }
+}
+
+/// # Safety
+///
+/// - `handle` must contain a valid database handle pointer
+/// - `value_out` must be a valid pointer to a location where a value can be stored
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_metrics(
+    mut handle: CSdbHandle,
+    value_out: *mut CSdbValue,
+) -> CSdbResult {
+    if handle.is_null() {
+        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+    }
+    if value_out.is_null() {
+        return create_error_result(CSdbError::NullPointer, "value_out is null");
+    }
+    let inner = handle.as_inner();
+    let metrics = inner.db.metrics();
+    let mut metrics_map: HashMap<String, i64> = HashMap::new();
+    for name in metrics.names() {
+        if let Some(value) = metrics.lookup(name) {
+            metrics_map.insert(name.to_string(), value.get());
+        }
+    }
+    match serde_json::to_vec(&metrics_map) {
+        Ok(json_vec) => {
+            let len = json_vec.len();
+            let boxed_slice = json_vec.into_boxed_slice();
+            let ptr = Box::into_raw(boxed_slice) as *mut u8;
+            unsafe {
+                (*value_out).data = ptr;
+                (*value_out).len = len;
+            }
+            create_success_result()
+        }
+        Err(e) => create_error_result(
+            CSdbError::InternalError,
+            &format!("Metrics serialization failed: {}", e),
+        ),
     }
 }
 

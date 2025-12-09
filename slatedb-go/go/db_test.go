@@ -207,6 +207,14 @@ var _ = Describe("DB", func() {
 			})
 		})
 
+		Describe("Metrics", func() {
+			It("should get metrics", func() {
+				metrics, err := db.Metrics()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(metrics).NotTo(BeEmpty())
+			})
+		})
+
 		Describe("Database Management", func() {
 			It("should open and close database successfully", func() {
 				err := db.Put([]byte("lifecycle_test"), []byte("test"))
