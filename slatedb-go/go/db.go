@@ -454,6 +454,34 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 	}, nil
 }
 
+// Metrics returns snapshot of current database metrics.
+func (db *DB) Metrics() (map[string]int64, error) {
+	var value C.CSdbValue
+
+	result := C.slatedb_metrics(db.handle, &value)
+	defer C.slatedb_free_result(result)
+
+	if result.error != C.Success {
+		return nil, resultToError(result)
+	}
+
+	stats := make(map[string]int64)
+	if value.data == nil || value.len == 0 {
+		return stats, nil
+	}
+
+	// Copy the data to Go memory
+	goValue := C.GoBytes(unsafe.Pointer(value.data), C.int(value.len))
+
+	// Free the C memory
+	C.slatedb_free_value(value)
+
+	if err := json.Unmarshal(goValue, &stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
+}
+
 // Builder represents a database builder that mirrors Rust's DbBuilder
 type Builder struct {
 	path         string
