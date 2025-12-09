@@ -620,6 +620,7 @@ pub struct AdminBuilder<P: Into<Path>> {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
+    fp_registry: Option<Arc<FailPointRegistry>>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
@@ -631,6 +632,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             wal_object_store: None,
             system_clock: Arc::new(DefaultSystemClock::new()),
             rand: Arc::new(DbRand::default()),
+            fp_registry: None,
         }
     }
 
@@ -656,6 +658,12 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
+    /// Sets the fail point registry to use for injecting failures in tests
+    pub fn with_fp_registry(mut self, fp_registry: Arc<FailPointRegistry>) -> Self {
+        self.fp_registry = Some(fp_registry);
+        self
+    }
+
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
         // No retrying object stores here, since we don't want to retry admin operations
@@ -664,6 +672,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             object_stores: ObjectStores::new(self.main_object_store, self.wal_object_store),
             system_clock: self.system_clock,
             rand: self.rand,
+            fp_registry: self.fp_registry,
         }
     }
 }

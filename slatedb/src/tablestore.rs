@@ -6,7 +6,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
-use log::{debug, warn};
+use log::{debug, error, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::{ObjectStore, PutMode, PutOptions};
@@ -239,6 +239,80 @@ impl TableStore {
         let path = self.path(id);
         debug!("deleting SST [path={}]", path);
         object_store.delete(&path).await.map_err(SlateDBError::from)
+    }
+
+    /// Copy an SSTable from the object store to a new id in the object_store.
+    /// Returns an error if an SSTable with the same ID already exists.
+    pub(crate) async fn copy_sst(
+        &self,
+        src_id: &SsTableId,
+        dst_id: &SsTableId,
+    ) -> Result<(), SlateDBError> {
+        fail_point!(self.fp_registry.clone(), "copy-wal-ssts-io-error", |_| {
+            Result::Err(slatedb_io_error())
+        });
+
+        assert_eq!(
+            std::mem::discriminant(src_id),
+            std::mem::discriminant(dst_id),
+            "src_id and dst_id don't have the same SsTableId type"
+        );
+
+        let object_store = self.object_stores.store_for(src_id);
+        let src_path = self.path(src_id);
+        let dst_path = self.path(dst_id);
+        debug!(
+            "copying SST [src_path={}, dest_path={}]",
+            src_path, dst_path
+        );
+        object_store
+            .copy_if_not_exists(&src_path, &dst_path)
+            .await
+            .map_err(|e| match e {
+                object_store::Error::AlreadyExists { path: _, source: _ } => match src_id {
+                    SsTableId::Wal(_) => {
+                        debug!("path already exists [path={}]", dst_path);
+                        SlateDBError::Fenced
+                    }
+                    SsTableId::Compacted(_) => SlateDBError::from(e),
+                },
+                _ => SlateDBError::from(e),
+            })
+    }
+
+    // Copy WALs corrensponding to the specified id range and rename them starting with dest_id_start.
+    // If there is an error at any point while copying, rollback by deleting all copied WALs and return
+    // the error.
+    // This does not overwrite existing WALs.
+    pub(crate) async fn copy_wal_ssts<R: RangeBounds<u64>>(
+        &self,
+        src_id_range: R,
+        dest_id_start: u64,
+    ) -> Result<(), SlateDBError> {
+        let wals_to_copy = self.list_wal_ssts(src_id_range).await?;
+
+        for (i, wal_to_copy) in wals_to_copy.iter().enumerate() {
+            let new_id = dest_id_start + i as u64;
+
+            if let Err(e) = self
+                .copy_sst(&wal_to_copy.id, &SsTableId::Wal(new_id))
+                .await
+            {
+                // delete copied wals so that failed copy does not leave remnant WALs
+                for id_to_delete in dest_id_start..new_id {
+                    if let Err(delete_err) = self.delete_sst(&SsTableId::Wal(id_to_delete)).await {
+                        error!(
+                            "failed to delete WAL SST [id={:?}, error={:?}]",
+                            id_to_delete, delete_err
+                        );
+                    }
+                }
+
+                return Err(e);
+            }
+        }
+
+        Ok(())
     }
 
     /// List all SSTables in the compacted directory.

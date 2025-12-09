@@ -2,10 +2,12 @@ use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
+use crate::db_state::SsTableId;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::paths::PathResolver;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 
@@ -16,6 +18,7 @@ use crate::seq_tracker::FindOption;
 use crate::utils::{IdGenerator, WatchableOnceCell};
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
+use log::error;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::collections::HashSet;
@@ -45,6 +48,8 @@ pub struct Admin {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
     pub(crate) rand: Arc<DbRand>,
+    /// The fail point registry to use to inject failures in tests
+    pub(crate) fp_registry: Option<Arc<FailPointRegistry>>,
 }
 
 impl Admin {
@@ -306,13 +311,12 @@ impl Admin {
     /// Fails with SlateDBError::InvalidDeletion if there are any active checkpoints that will be
     /// lost after the restore.
     pub async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
-        let manifest_store = Arc::new(ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        ));
+        let manifest_store = Arc::new(self.manifest_store());
+        let wal_store = self.table_store();
+        let fencing_wal = self.fence_writers(&wal_store).await?;
+
         let mut current_manifest =
             StoredManifest::load(manifest_store.clone(), self.system_clock.clone()).await?;
-
         let checkpoint = match current_manifest.db_state().find_checkpoint(id) {
             Some(found_checkpoint) => found_checkpoint.clone(),
             None => return Err(SlateDBError::CheckpointMissing(id).into()),
@@ -326,6 +330,7 @@ impl Admin {
             .iter()
             .map(|c| c.id)
             .collect();
+
         current_manifest
             .maybe_apply_update(|stored_manifest| {
                 // Ensure there are no other active checkpoints before deleting
@@ -342,23 +347,38 @@ impl Admin {
                 let mut dirty = stored_manifest.prepare_dirty()?;
                 dirty.value = manifest_to_restore.clone();
 
+                dirty.value.core.replay_after_wal_id = fencing_wal;
+
+                // advance epochs to fence any other clients that might still be running
+                dirty.value.writer_epoch = stored_manifest.object().writer_epoch;
+                dirty.value.compactor_epoch = stored_manifest.object().compactor_epoch;
+
                 Ok(Some(dirty))
             })
             .await?;
 
-        // delete WALs later than referenced in manifest
-        let wal_store = TableStore::new(
-            self.object_stores.clone(),
-            SsTableFormat::default(),
-            self.path.clone(),
-            None,
-        );
-        let wal_ssts_to_delete = wal_store
-            .list_wal_ssts(manifest_to_restore.core.next_wal_sst_id..)
-            .await?;
-
-        for wal in wal_ssts_to_delete {
-            wal_store.delete_sst(&wal.id).await?;
+        // copy the expected wals of the restoring manifest, and rollback the newly restored manifest if
+        // this fails
+        if let Err(e) = wal_store
+            .copy_wal_ssts(
+                manifest_to_restore.core.replay_after_wal_id
+                    ..manifest_to_restore.core.next_wal_sst_id,
+                fencing_wal + 1,
+            )
+            .await
+        {
+            if let Err(delete_err) = manifest_store
+                .delete_manifest_unchecked(current_manifest.id())
+                .await
+            // we have to use the _unchecked version to delete latest manifest
+            {
+                error!(
+                    "error deleting manifest [id={:?}, error={}]",
+                    current_manifest.id(),
+                    delete_err
+                );
+            }
+            return Err(e.into());
         }
 
         Ok(())
@@ -413,6 +433,42 @@ impl Admin {
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
+    }
+
+    fn table_store(&self) -> TableStore {
+        match self.fp_registry.as_ref() {
+            Some(fp_registry) => TableStore::new_with_fp_registry(
+                self.object_stores.clone(),
+                SsTableFormat::default(),
+                PathResolver::new(self.path.clone()),
+                fp_registry.clone(),
+                None,
+            ),
+            None => TableStore::new(
+                self.object_stores.clone(),
+                SsTableFormat::default(),
+                self.path.clone(),
+                None,
+            ),
+        }
+    }
+
+    // Writes an empty WAL SST to storage to fence other writers. Returns the id of the WAL
+    // uploaded.
+    async fn fence_writers(&self, wal_store: &TableStore) -> Result<u64, SlateDBError> {
+        let mut empty_wal_id = wal_store.last_seen_wal_id().await?;
+
+        loop {
+            let empty_sst = wal_store.table_builder().build()?;
+            match wal_store
+                .write_sst(&SsTableId::Wal(empty_wal_id), empty_sst, false)
+                .await
+            {
+                Ok(_) => return Ok(empty_wal_id),
+                Err(SlateDBError::Fenced) => empty_wal_id += 1,
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Clone a database. If no db already exists at the specified path, then this will create
@@ -651,4 +707,35 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 
     let op = Operator::via_iter(scheme, iter)?;
     Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::admin::Admin;
+    use crate::Db;
+    use object_store::memory::InMemory;
+    use object_store::ObjectStore;
+
+    #[tokio::test]
+    async fn test_admin_fence_writers() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+
+        // open db and assert that it can write.
+        let db = Db::builder(path, object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"1", b"1").await.unwrap();
+
+        let admin = Admin::builder(path, object_store).build();
+
+        admin.fence_writers(&admin.table_store()).await.unwrap();
+
+        // assert that db can no longer write.
+        let err = db.put(b"1", b"1").await.unwrap_err();
+        assert_eq!(err.to_string(), "Closed error: detected newer DB client");
+    }
 }
