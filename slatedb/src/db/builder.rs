@@ -121,6 +121,7 @@ use crate::clock::DefaultLogicalClock;
 use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
 use crate::clock::SystemClock;
+use crate::compactions_store::CompactionsStore;
 use crate::compactor::CompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
@@ -402,6 +403,10 @@ impl<P: Into<Path>> DbBuilder<P> {
             &path,
             maybe_cached_main_object_store.clone(),
         ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            maybe_cached_main_object_store.clone(),
+        ));
         let latest_manifest =
             StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
 
@@ -558,6 +563,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),
+                compactions_store.clone(),
                 compactor_options.clone(),
                 scheduler,
                 executor,
@@ -845,6 +851,10 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store.clone(), None),
             SsTableFormat::default(), // read only SSTs can use default
@@ -858,6 +868,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
         Compactor::new(
             manifest_store,
+            compactions_store,
             table_store,
             self.options,
             scheduler_supplier,
