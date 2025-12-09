@@ -24,8 +24,6 @@ typedef enum CSdbError {
     InvalidProvider = 8,
 } CSdbError;
 
-// Internal struct for managing database iterators in FFI
-// Contains the iterator and a reference to the database to ensure proper lifetime management
 typedef struct CSdbIterator CSdbIterator;
 
 // Internal struct for managing WriteBatch operations in FFI
@@ -38,13 +36,13 @@ typedef struct CSdbWriteBatch CSdbWriteBatch;
 // It separates the concerns of configuration options (settings) and components.
 typedef struct DbBuilder_String DbBuilder_String;
 
-// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
-// Similar to SlateDbFFI but for read-only operations.
-typedef struct DbReaderFFI DbReaderFFI;
-
 // Internal struct that owns a Tokio runtime and a SlateDB instance.
 // This eliminates the need for a global handle map and shared runtime.
 typedef struct SlateDbFFI SlateDbFFI;
+
+// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
+// Similar to SlateDbFFI but for read-only operations.
+typedef struct SlateDbReaderFFI SlateDbReaderFFI;
 
 typedef struct CSdbResult {
     enum CSdbError error;
@@ -98,7 +96,7 @@ typedef struct CSdbScanOptions {
 // Type-safe wrapper around a pointer to DbReaderFFI.
 // This provides better type safety than raw pointers.
 typedef struct CSdbReaderHandle {
-    struct DbReaderFFI *_0;
+    struct SlateDbReaderFFI *_0;
 } CSdbReaderHandle;
 
 // DbReader options for FFI

@@ -298,7 +298,7 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
     ) {
         Ok(iter) => {
             // Create FFI wrapper
-            let iter_ffi = CSdbIterator::new(handle_ptr, iter);
+            let iter_ffi = CSdbIterator::new_db(handle_ptr, iter);
             unsafe {
                 *iterator_ptr = Box::into_raw(iter_ffi);
             }
