@@ -347,7 +347,7 @@ pub unsafe extern "C" fn slatedb_metrics(
         }
         Err(e) => create_error_result(
             CSdbError::InternalError,
-            &format!("Stats serialization failed: {}", e),
+            &format!("Metrics serialization failed: {}", e),
         ),
     }
 }
