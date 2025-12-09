@@ -348,6 +348,12 @@ struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
                                             const struct CSdbScanOptions *scan_options,
                                             struct CSdbIterator **iterator_ptr);
 
+// # Safety
+//
+// - `handle` must contain a valid database handle pointer
+// - `value_out` must be a valid pointer to a location where a value can be stored
+struct CSdbResult slatedb_metrics(struct CSdbHandle handle, struct CSdbValue *value_out);
+
 // Create a new DbBuilder
 struct DbBuilder_String *slatedb_builder_new(const char *path,
                                              const char *url,
