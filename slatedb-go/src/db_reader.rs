@@ -275,6 +275,58 @@ pub unsafe extern "C" fn slatedb_reader_scan_with_options(
     }
 }
 
+/// # Safety
+///
+/// - `handle` must contain a valid reader handle pointer
+/// - `prefix` must point to valid memory of at least `prefix_len` bytes (unless prefix_len is 0)
+/// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+/// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_reader_scan_prefix_with_options(
+    mut handle: CSdbReaderHandle,
+    prefix: *const u8,
+    prefix_len: usize,
+    scan_options: *const CSdbScanOptions,
+    iterator_ptr: *mut *mut CSdbIterator,
+) -> CSdbResult {
+    if handle.is_null() {
+        return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
+    }
+
+    if iterator_ptr.is_null() {
+        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+    }
+
+    if prefix.is_null() && prefix_len > 0 {
+        return create_error_result(CSdbError::NullPointer, "Prefix pointer is null");
+    }
+
+    let prefix_slice = if prefix_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(prefix, prefix_len) }
+    };
+
+    let rust_scan_opts = convert_scan_options(scan_options);
+
+    // Extract raw pointer before borrowing handle
+    let handle_ptr = handle.0 as *mut SlateDbReaderFFI;
+    let inner = handle.as_inner();
+    match inner.block_on(inner.reader.scan_prefix_with_options(prefix_slice, &rust_scan_opts)) {
+        Ok(iter) => {
+            let iter_box = CSdbIterator::new_reader(handle_ptr, iter);
+            unsafe {
+                *iterator_ptr = Box::into_raw(iter_box);
+            }
+            create_success_result()
+        }
+        Err(e) => {
+            let error_code = slate_error_to_code(&e);
+            create_error_result(error_code, &format!("Scan prefix operation failed: {}", e))
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn slatedb_reader_close(handle: CSdbReaderHandle) -> CSdbResult {
     if handle.is_null() {

@@ -349,6 +349,18 @@ struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
 // # Safety
 //
 // - `handle` must contain a valid database handle pointer
+// - `prefix` must point to valid memory of at least `prefix_len` bytes (unless prefix_len is 0)
+// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
+struct CSdbResult slatedb_scan_prefix_with_options(struct CSdbHandle handle,
+                                                   const uint8_t *prefix,
+                                                   uintptr_t prefix_len,
+                                                   const struct CSdbScanOptions *scan_options,
+                                                   struct CSdbIterator **iterator_ptr);
+
+// # Safety
+//
+// - `handle` must contain a valid database handle pointer
 // - `value_out` must be a valid pointer to a location where a value can be stored
 struct CSdbResult slatedb_metrics(struct CSdbHandle handle, struct CSdbValue *value_out);
 
@@ -418,6 +430,18 @@ struct CSdbResult slatedb_reader_scan_with_options(struct CSdbReaderHandle handl
                                                    uintptr_t end_key_len,
                                                    const struct CSdbScanOptions *scan_options,
                                                    struct CSdbIterator **iterator_ptr);
+
+// # Safety
+//
+// - `handle` must contain a valid reader handle pointer
+// - `prefix` must point to valid memory of at least `prefix_len` bytes (unless prefix_len is 0)
+// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
+struct CSdbResult slatedb_reader_scan_prefix_with_options(struct CSdbReaderHandle handle,
+                                                          const uint8_t *prefix,
+                                                          uintptr_t prefix_len,
+                                                          const struct CSdbScanOptions *scan_options,
+                                                          struct CSdbIterator **iterator_ptr);
 
 struct CSdbResult slatedb_reader_close(struct CSdbReaderHandle handle);
 

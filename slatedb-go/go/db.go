@@ -454,6 +454,88 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 	}, nil
 }
 
+// ScanPrefix creates a streaming iterator for all keys with the given prefix using default scan options.
+//
+// Returns an iterator that yields key-value pairs whose keys start with `prefix`.
+// The iterator MUST be closed after use to prevent resource leaks.
+//
+// ## Arguments
+// - `prefix`: key prefix to match (empty or nil scans all keys)
+//
+// ## Returns
+// - `*Iterator`: streaming iterator over matching keys
+// - `error`: if there was an error creating the iterator
+//
+// ## Examples
+//
+//	iter, err := db.ScanPrefix([]byte("user:"))
+//	if err != nil { return err }
+//	defer iter.Close()  // Essential!
+//
+//	for {
+//	    kv, err := iter.Next()
+//	    if err == io.EOF { break }
+//	    if err != nil { return err }
+//	    // process kv
+//	}
+func (db *DB) ScanPrefix(prefix []byte) (*Iterator, error) {
+	return db.ScanPrefixWithOptions(prefix, nil)
+}
+
+// ScanPrefixWithOptions creates a streaming iterator for all keys with the given prefix and custom scan options.
+//
+// Returns an iterator that yields key-value pairs whose keys start with `prefix`.
+// The iterator MUST be closed after use to prevent resource leaks.
+//
+// ## Arguments
+// - `prefix`: key prefix to match (empty or nil scans all keys)
+// - `opts`: scan options for durability, caching, read-ahead behavior
+//
+// ## Returns
+// - `*Iterator`: streaming iterator over matching keys
+// - `error`: if there was an error creating the iterator
+//
+// ## Examples
+//
+//	opts := &ScanOptions{DurabilityFilter: DurabilityRemote, Dirty: false}
+//	iter, err := db.ScanPrefixWithOptions([]byte("user:"), opts)
+//	if err != nil { return err }
+//	defer iter.Close()  // Essential!
+//
+//	for {
+//	    kv, err := iter.Next()
+//	    if err == io.EOF { break }
+//	    if err != nil { return err }
+//	    // process kv
+//	}
+func (db *DB) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator, error) {
+	var prefixPtr *C.uint8_t
+	if len(prefix) > 0 {
+		prefixPtr = (*C.uint8_t)(unsafe.Pointer(&prefix[0]))
+	}
+
+	cOpts := convertToCScanOptions(opts)
+
+	var iterPtr *C.CSdbIterator
+	result := C.slatedb_scan_prefix_with_options(
+		db.handle,
+		prefixPtr,
+		C.uintptr_t(len(prefix)),
+		cOpts,
+		&iterPtr,
+	)
+	defer C.slatedb_free_result(result)
+
+	if result.error != C.Success {
+		return nil, resultToError(result)
+	}
+
+	return &Iterator{
+		ptr:    iterPtr,
+		closed: false,
+	}, nil
+}
+
 // Metrics returns snapshot of current database metrics.
 func (db *DB) Metrics() (map[string]int64, error) {
 	var value C.CSdbValue

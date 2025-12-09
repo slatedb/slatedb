@@ -151,5 +151,49 @@ var _ = Describe("DbReader", func() {
 			}
 			Expect(count).To(Equal(3))
 		})
+
+		It("should scan by prefix", func() {
+			iter, err := dbReader.ScanPrefix([]byte("item:"))
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
+
+			count := 0
+			for {
+				kv, err := iter.Next()
+				if err == io.EOF {
+					break
+				}
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(kv.Key)).To(HavePrefix("item:"))
+				count++
+			}
+			Expect(count).To(Equal(3))
+		})
+
+		It("should scan by prefix with custom options", func() {
+			opts := &slatedb.ScanOptions{
+				DurabilityFilter: slatedb.DurabilityRemote,
+				Dirty:            false,
+				ReadAheadBytes:   1024,
+				CacheBlocks:      true,
+				MaxFetchTasks:    2,
+			}
+
+			iter, err := dbReader.ScanPrefixWithOptions([]byte("item:"), opts)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
+
+			count := 0
+			for {
+				kv, err := iter.Next()
+				if err == io.EOF {
+					break
+				}
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(kv.Key)).To(HavePrefix("item:"))
+				count++
+			}
+			Expect(count).To(Equal(3))
+		})
 	})
 })
