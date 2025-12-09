@@ -548,6 +548,28 @@ def test_txn_scan_prefix_variants(db_path, env_file):
             max_fetch_tasks=1,
         )
         assert list(it) == [(b"tp0", b"v0"), (b"tp1", b"v1"), (b"tp2", b"v2")]
+
+        assert list(txn.scan_prefix(b"")) == [
+            (b"other", b"v3"),
+            (b"tp0", b"v0"),
+            (b"tp1", b"v1"),
+            (b"tp2", b"v2"),
+        ]
+
+        it_all = txn.scan_prefix_with_options(
+            b"",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=256,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it_all) == [
+            (b"other", b"v3"),
+            (b"tp0", b"v0"),
+            (b"tp1", b"v1"),
+            (b"tp2", b"v2"),
+        ]
         txn.rollback()
     finally:
         db.close()
@@ -781,6 +803,26 @@ def test_db_scan_prefix_variants(db_path, env_file):
             max_fetch_tasks=1,
         )
         assert list(it) == [(b"pp1", b"v1"), (b"pp2", b"v2")]
+
+        assert list(db.scan_prefix(b"")) == [
+            (b"pp1", b"v1"),
+            (b"pp2", b"v2"),
+            (b"pq1", b"v3"),
+        ]
+
+        it_all = db.scan_prefix_with_options(
+            b"",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=64,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it_all) == [
+            (b"pp1", b"v1"),
+            (b"pp2", b"v2"),
+            (b"pq1", b"v3"),
+        ]
     finally:
         db.close()
 
@@ -804,6 +846,19 @@ async def test_db_scan_prefix_async_variants(db_path, env_file):
             max_fetch_tasks=1,
         )
         assert list(it2) == [(b"pa1", b"v1"), (b"pa2", b"v2")]
+
+        it_all = await db.scan_prefix_async(b"")
+        assert list(it_all) == [(b"pa1", b"v1"), (b"pa2", b"v2"), (b"pb1", b"v3")]
+
+        it_all2 = await db.scan_prefix_with_options_async(
+            b"",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=64,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it_all2) == [(b"pa1", b"v1"), (b"pa2", b"v2"), (b"pb1", b"v3")]
     finally:
         await db.close_async()
 
@@ -913,6 +968,18 @@ def test_snapshot_scan_prefix_variants(db_path, env_file):
             max_fetch_tasks=1,
         )
         assert list(it) == [(b"sp1", b"v1"), (b"sp2", b"v2")]
+
+        assert list(snap.scan_prefix(b"")) == [(b"sp1", b"v1"), (b"sp2", b"v2")]
+
+        it_all = snap.scan_prefix_with_options(
+            b"",
+            durability_filter="memory",
+            dirty=False,
+            read_ahead_bytes=64,
+            cache_blocks=True,
+            max_fetch_tasks=1,
+        )
+        assert list(it_all) == [(b"sp1", b"v1"), (b"sp2", b"v2")]
         snap.close()
     finally:
         db.close()

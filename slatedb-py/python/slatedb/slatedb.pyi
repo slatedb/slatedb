@@ -374,7 +374,7 @@ class SlateDB:
         Iterate over keys sharing a prefix using default scan options.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
 
         Returns:
             :class:`DbIterator` yielding ``(key, value)`` pairs for the prefix.
@@ -392,7 +392,7 @@ class SlateDB:
         Async variant of ``scan_prefix``.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
 
         Returns:
             :class:`DbIterator` suitable for ``async for``.
@@ -452,7 +452,7 @@ class SlateDB:
         Iterate over a prefix with custom scan options.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
             durability_filter: Restrict sources ("remote" or "memory").
             dirty: Include unflushed data if ``True``.
             read_ahead_bytes: Read-ahead size hint.
@@ -519,7 +519,7 @@ class SlateDB:
         Async variant of ``scan_prefix_with_options``.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
             durability_filter: Restrict sources ("remote" or "memory").
             dirty: Include unflushed data if ``True``.
             read_ahead_bytes: Read-ahead size hint.
@@ -944,7 +944,7 @@ class SlateDBSnapshot:
         Iterate over keys with a shared prefix in the snapshot.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
 
         Returns:
             :class:`DbIterator` over ``(key, value)`` pairs at the snapshot.
@@ -962,7 +962,7 @@ class SlateDBSnapshot:
         Async variant of ``scan_prefix``.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
 
         Returns:
             :class:`DbIterator` for async iteration at the snapshot.
@@ -1023,7 +1023,7 @@ class SlateDBSnapshot:
         Iterate over a prefix with custom scan options in the snapshot.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
             durability_filter: Restrict sources ("remote" or "memory").
             dirty: Ignored for snapshots (reads are committed-only).
             read_ahead_bytes: Read-ahead size hint.
@@ -1088,7 +1088,7 @@ class SlateDBSnapshot:
         Async variant of ``scan_prefix_with_options``.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
             durability_filter: Restrict sources ("remote" or "memory").
             dirty: Ignored for snapshots (reads are committed-only).
             read_ahead_bytes: Read-ahead size hint.
@@ -1257,7 +1257,7 @@ class SlateDBTransaction:
         Iterate over keys with a shared prefix within the transaction.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
 
         Returns:
             :class:`DbIterator` over ``(key, value)`` pairs reflecting in-transaction writes.
@@ -1273,7 +1273,7 @@ class SlateDBTransaction:
         Async variant of ``scan_prefix`` for transactions.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
 
         Returns:
             :class:`DbIterator` suitable for ``async for`` and reflecting in-transaction writes.
@@ -1335,7 +1335,7 @@ class SlateDBTransaction:
         Iterate over a prefix with custom scan options within the transaction.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
             durability_filter: Restrict sources ("remote" or "memory").
             dirty: Include unflushed data if ``True``.
             read_ahead_bytes: Read-ahead size hint.
@@ -1401,7 +1401,7 @@ class SlateDBTransaction:
         Async variant of ``scan_prefix_with_options`` within the transaction.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
             durability_filter: Restrict sources ("remote" or "memory").
             dirty: Include unflushed data if ``True``.
             read_ahead_bytes: Read-ahead size hint.
@@ -1717,7 +1717,7 @@ class SlateDBReader:
         Iterate over keys with a shared prefix using the reader.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
 
         Returns:
             :class:`DbIterator` yielding ``(key, value)`` pairs.
@@ -1733,7 +1733,7 @@ class SlateDBReader:
         Async variant of ``scan_prefix``.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
 
         Returns:
             :class:`DbIterator` suitable for ``async for``.
@@ -1794,7 +1794,7 @@ class SlateDBReader:
         Iterate over a prefix with custom scan options using the reader.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
             durability_filter: Restrict sources ("remote" or "memory").
             dirty: Ignored by readers; reads are committed-only.
             read_ahead_bytes: Read-ahead size hint.
@@ -1859,7 +1859,7 @@ class SlateDBReader:
         Async variant of ``scan_prefix_with_options`` using the reader.
 
         Args:
-            prefix: Non-empty prefix to match.
+            prefix: Prefix to match; empty scans all keys.
             durability_filter: Restrict sources ("remote" or "memory").
             dirty: Ignored by readers.
             read_ahead_bytes: Read-ahead size hint.

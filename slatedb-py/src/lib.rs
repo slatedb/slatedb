@@ -598,9 +598,6 @@ impl PySlateDB {
 
     #[pyo3(signature = (prefix))]
     fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let db = self.inner.clone();
         let rt = get_runtime();
         let iter = rt.block_on(async { db.scan_prefix(prefix).await.map_err(map_error) })?;
@@ -613,9 +610,6 @@ impl PySlateDB {
         py: Python<'py>,
         prefix: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let db = self.inner.clone();
         future_into_py(py, async move {
             let iter = db.scan_prefix(prefix).await.map_err(map_error)?;
@@ -717,9 +711,6 @@ impl PySlateDB {
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
     ) -> PyResult<PyDbIterator> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -748,9 +739,6 @@ impl PySlateDB {
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1292,9 +1280,6 @@ impl PySlateDBSnapshot {
 
     #[pyo3(signature = (prefix))]
     fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let snapshot = self.inner_ref()?;
         let rt = get_runtime();
         let iter = rt.block_on(async { snapshot.scan_prefix(prefix).await.map_err(map_error) })?;
@@ -1307,9 +1292,6 @@ impl PySlateDBSnapshot {
         py: Python<'py>,
         prefix: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let snapshot = self.inner_ref()?;
         future_into_py(py, async move {
             let iter = snapshot.scan_prefix(prefix).await.map_err(map_error)?;
@@ -1401,9 +1383,6 @@ impl PySlateDBSnapshot {
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
     ) -> PyResult<PyDbIterator> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1433,9 +1412,6 @@ impl PySlateDBSnapshot {
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1680,9 +1656,6 @@ impl PySlateDBTransaction {
 
     #[pyo3(signature = (prefix))]
     fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let txn = self.inner_ref()?;
         let rt = get_runtime();
         let iter = rt.block_on(async { txn.scan_prefix(prefix).await.map_err(map_error) })?;
@@ -1695,9 +1668,6 @@ impl PySlateDBTransaction {
         py: Python<'py>,
         prefix: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let txn = self.inner_ref()?;
         let rt = get_runtime();
         let iter = py.allow_threads(|| {
@@ -1791,9 +1761,6 @@ impl PySlateDBTransaction {
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
     ) -> PyResult<PyDbIterator> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -1822,9 +1789,6 @@ impl PySlateDBTransaction {
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -2143,9 +2107,6 @@ impl PySlateDBReader {
 
     #[pyo3(signature = (prefix))]
     fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let reader = self.inner.clone();
         let rt = get_runtime();
         let iter = rt.block_on(async { reader.scan_prefix(prefix).await.map_err(map_error) })?;
@@ -2158,9 +2119,6 @@ impl PySlateDBReader {
         py: Python<'py>,
         prefix: Vec<u8>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let reader = self.inner.clone();
         future_into_py(py, async move {
             let iter = reader.scan_prefix(prefix).await.map_err(map_error)?;
@@ -2252,9 +2210,6 @@ impl PySlateDBReader {
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
     ) -> PyResult<PyDbIterator> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let opts = build_scan_options(
             durability_filter,
             dirty,
@@ -2284,9 +2239,6 @@ impl PySlateDBReader {
         cache_blocks: Option<bool>,
         max_fetch_tasks: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if prefix.is_empty() {
-            return Err(InvalidError::new_err("prefix cannot be empty"));
-        }
         let opts = build_scan_options(
             durability_filter,
             dirty,
