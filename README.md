@@ -114,6 +114,12 @@ SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_sto
 
 Visit [slatedb.io](https://slatedb.io) to learn more.
 
+## Bindings
+
+- [Go](https://github.com/slatedb/slatedb/tree/main/slatedb-go) (official)
+- [Python](https://github.com/slatedb/slatedb/tree/main/slatedb-py) (official)
+- [Ruby](https://github.com/catkins/slatedb-rb)
+
 ## Features
 
 - [x] Basic API (get, put, delete)
