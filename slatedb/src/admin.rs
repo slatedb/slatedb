@@ -364,14 +364,13 @@ impl Admin {
             .copy_wal_ssts(
                 manifest_to_restore.core.replay_after_wal_id
                     ..manifest_to_restore.core.next_wal_sst_id,
-                fencing_wal + 1,
+                &SsTableId::Wal(fencing_wal + 1),
             )
             .await
         {
             if let Err(delete_err) = manifest_store
                 .delete_manifest_unchecked(current_manifest.id())
                 .await
-            // we have to use the _unchecked version to delete latest manifest
             {
                 error!(
                     "error deleting manifest [id={:?}, error={}]",

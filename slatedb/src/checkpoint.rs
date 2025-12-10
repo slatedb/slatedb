@@ -379,7 +379,7 @@ mod tests {
         let manifest_store = ManifestStore::new(&path, object_store.clone());
         let manifest_before_restore_command = manifest_store.read_latest_manifest().await.unwrap();
 
-        fail_parallel::cfg(fp_registry, "copy-wal-ssts-io-error", "return").unwrap();
+        fail_parallel::cfg(fp_registry, "copy-wal-sst-io-error", "return").unwrap();
         admin.restore_checkpoint(checkpoint.id).await.unwrap_err();
 
         assert_eq!(
