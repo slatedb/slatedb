@@ -72,7 +72,8 @@ pub extern "C" fn slatedb_init_logging(level: *const c_char) -> error::CSdbResul
 // Database functions
 pub use db::{
     slatedb_close, slatedb_delete_with_options, slatedb_flush, slatedb_get_with_options,
-    slatedb_open, slatedb_put_with_options, slatedb_scan_with_options,
+    slatedb_open, slatedb_put_with_options, slatedb_scan_prefix_with_options,
+    slatedb_scan_with_options,
 };
 
 // Iterator functions
@@ -90,5 +91,5 @@ pub use memory::{slatedb_free_result, slatedb_free_scan_result, slatedb_free_val
 // DbReader functions (already in db_reader module)
 pub use db_reader::{
     slatedb_reader_close, slatedb_reader_get_with_options, slatedb_reader_open,
-    slatedb_reader_scan_with_options,
+    slatedb_reader_scan_prefix_with_options, slatedb_reader_scan_with_options,
 };
