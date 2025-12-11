@@ -1,3 +1,14 @@
+//! Protocols for reading and writing compactor state safely.
+//!
+//! This module isolates the ordering rules for compactor state persistence:
+//! - **Reads**: fetch compactions before manifests so GC sees a consistent view of
+//!   in-flight/finished compactions alongside the active manifests.
+//! - **Writes**: persist manifest updates before compactions so new SSTs are visible
+//!   before trimming input references. Checkpoints are written first to keep inputs
+//!   GC-safe during the update.
+//!
+//! Keeping these rules in one place makes it harder to regress GC safety or
+//! compactor fencing logic elsewhere in the codebase.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,12 +25,23 @@ use crate::manifest::Manifest;
 use crate::utils::IdGenerator;
 use crate::DbRand;
 
+/// Reader that enforces compactions-first ordering when fetching GC state.
 pub(crate) struct ManifestAndCompactionsReader {
+    /// Shared manifest store to read active manifests.
     manifest_store: Arc<ManifestStore>,
+    /// Shared compactions store to fetch the latest compaction state first.
     compactions_store: Arc<CompactionsStore>,
 }
 
 impl ManifestAndCompactionsReader {
+    /// Creates a reader that returns a consistent view of compactions and active manifests.
+    ///
+    /// ## Arguments
+    /// - `manifest_store`: Manifest store handle to read from.
+    /// - `compactions_store`: Compactions store handle to read from.
+    ///
+    /// ## Returns
+    /// - New reader instance that always fetches compactions before manifests.
     pub(crate) fn new(
         manifest_store: &Arc<ManifestStore>,
         compactions_store: &Arc<CompactionsStore>,
@@ -30,6 +52,12 @@ impl ManifestAndCompactionsReader {
         }
     }
 
+    /// Reads compactions then active manifests to keep GC from observing an inconsistent view.
+    ///
+    /// ## Returns
+    /// - `Ok((compactions, manifests))` where `compactions` is the latest state if present and
+    ///   `manifests` is the active manifest set.
+    /// - Propagates `SlateDBError` on read failures.
     pub(crate) async fn read_active_manifests_and_compactions(
         &self,
     ) -> Result<(Option<(u64, Compactions)>, BTreeMap<u64, Manifest>), SlateDBError> {
@@ -40,14 +68,30 @@ impl ManifestAndCompactionsReader {
     }
 }
 
+/// Writer that fences and persists manifest-before-compactions with checkpointing.
 pub(crate) struct CompactorStateWriter {
+    /// Current in-memory compactor state (dirty manifest + compactions).
     pub(crate) state: CompactorState,
+    /// Fenceable manifest handle used for refresh/update with fencing.
     manifest: FenceableManifest,
+    /// Fenceable compactions handle used for refresh/update with fencing.
     compactions: FenceableCompactions,
+    /// RNG for checkpoint ids.
     rand: Arc<DbRand>,
 }
 
 impl CompactorStateWriter {
+    /// Initializes a fenced compactor state writer with manifest-first ordering.
+    ///
+    /// ## Arguments
+    /// - `manifest_store`: Manifest store backing the writer.
+    /// - `compactions_store`: Compactions store backing the writer.
+    /// - `system_clock`: Clock for fencing/timeouts.
+    /// - `options`: Compactor options containing timeouts.
+    /// - `rand`: RNG for checkpoint ids.
+    ///
+    /// ## Returns
+    /// - A new writer seeded with dirty manifest/compactions and finished compactions trimmed.
     pub(crate) async fn new(
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
@@ -118,6 +162,9 @@ impl CompactorStateWriter {
 
     /// Refreshes the manifest and updates the local compactor state with any remote
     /// changes.
+    ///
+    /// ## Returns
+    /// - `Ok(())` after state is refreshed, or `SlateDBError` on failure.
     pub(crate) async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
         self.manifest.refresh().await?;
         self.state
@@ -157,6 +204,10 @@ impl CompactorStateWriter {
     }
 
     /// Writes the manifest, retrying on version conflicts by reloading and retrying.
+    ///
+    /// ## Returns
+    /// - `Ok(())` when the manifest is successfully persisted.
+    /// - `SlateDBError` if non-retryable errors occur.
     pub(crate) async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             self.load_manifest().await?;
@@ -172,6 +223,10 @@ impl CompactorStateWriter {
 
     /// Persists the current compactions state to the compactions store and refreshes the
     /// local dirty object with the latest version.
+    ///
+    /// ## Returns
+    /// - `Ok(())` when compactions are successfully written.
+    /// - `SlateDBError` if an unrecoverable error occurs.
     pub(crate) async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
         let mut desired_value = self.state.compactions_dirty().value.clone();
         desired_value.trim();
@@ -195,6 +250,11 @@ impl CompactorStateWriter {
         }
     }
 
+    /// Writes manifest first, then compactions, retrying manifest conflicts.
+    ///
+    /// ## Returns
+    /// - `Ok(())` when both manifest and compactions are persisted in order.
+    /// - `SlateDBError` on unrecoverable failures.
     pub(crate) async fn write_state_safely(&mut self) -> Result<(), SlateDBError> {
         // Writes are always manifest-first
         self.write_manifest_safely().await?;
