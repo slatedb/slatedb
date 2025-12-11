@@ -11,7 +11,7 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter;
+use crate::filter::{self, BloomFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::{
     block::Block,
@@ -161,17 +161,16 @@ impl BloomFilterEvaluator {
 }
 
 impl BloomFilterEvaluator {
-    async fn evaluate(
-        &mut self,
-        view: &SstView<'_>,
-        table_store: &Arc<TableStore>,
-    ) -> Result<(), SlateDBError> {
+    /// Evaluate the bloom filter against the key.
+    ///
+    /// ## Arguments
+    /// - `maybe_filter`: An optional bloom filter to evaluate against.
+    async fn evaluate(&mut self, maybe_filter: Option<Arc<BloomFilter>>) {
         if self.state != FilterState::NotChecked {
-            return Ok(());
+            return;
         }
 
         let key_hash = filter::filter_hash(self.key.as_ref());
-        let maybe_filter = table_store.read_filter(view.table_as_ref()).await?;
 
         match maybe_filter {
             Some(filter) => {
@@ -191,8 +190,6 @@ impl BloomFilterEvaluator {
                 self.state = FilterState::NoFilter;
             }
         }
-
-        Ok(())
     }
 
     fn is_filtered_out(&self) -> bool {
@@ -462,7 +459,7 @@ impl<'a> InternalSstIterator<'a> {
         if self.index.is_none() {
             let index = self
                 .table_store
-                .read_index(self.view.table_as_ref())
+                .read_index(self.view.table_as_ref(), self.options.cache_blocks)
                 .await?;
             let block_idx_range =
                 InternalSstIterator::blocks_covering_view(&index.borrow(), &self.view);
@@ -588,9 +585,15 @@ impl<'a> BloomFilterIterator<'a> {
 impl KeyValueIterator for BloomFilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
-            self.filter
-                .evaluate(self.inner.view(), self.inner.table_store())
+            let maybe_filter = self
+                .inner
+                .table_store()
+                .read_filter(
+                    self.inner.view().table_as_ref(),
+                    self.inner.options.cache_blocks,
+                )
                 .await?;
+            self.filter.evaluate(maybe_filter).await;
 
             if self.is_filtered_out() {
                 return Ok(());
@@ -870,7 +873,7 @@ mod tests {
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle).await.unwrap();
+        let index = table_store.read_index(&sst_handle, true).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
 
         // TODO: Need to verify argument types
@@ -975,7 +978,7 @@ mod tests {
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
         let filter = table_store
-            .read_filter(&sst_handle)
+            .read_filter(&sst_handle, true)
             .await
             .expect("filter read should succeed")
             .expect("filter should exist");
@@ -1072,7 +1075,7 @@ mod tests {
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle).await.unwrap();
+        let index = table_store.read_index(&sst_handle, true).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 10);
 
         // TODO: verify cache_blocks=true is intended
