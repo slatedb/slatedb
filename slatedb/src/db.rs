@@ -26,6 +26,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
+use object_store::prefix::PrefixStore;
 use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 
@@ -311,6 +312,9 @@ impl DbInner {
                 (wal_size_bytes, imm_memtable_size_bytes)
             };
             let total_mem_size_bytes = wal_size_bytes + imm_memtable_size_bytes;
+            self.db_stats
+                .total_mem_size_bytes
+                .set(total_mem_size_bytes as i64);
 
             trace!(
                 "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
@@ -898,6 +902,95 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Scan all keys that share the provided prefix using the default scan options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"ab", b"v0").await?;
+    ///     db.put(b"aba", b"v1").await?;
+    ///     db.put(b"b", b"v2").await?;
+    ///
+    ///     let mut iter = db.scan_prefix(b"ab").await?;
+    ///     assert_eq!(Some((b"ab", b"v0").into()), iter.next().await?);
+    ///     assert_eq!(Some((b"aba", b"v1").into()), iter.next().await?);
+    ///     assert_eq!(None, iter.next().await?);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix<P>(&self, prefix: P) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        self.scan_prefix_with_options(prefix, &ScanOptions::default())
+            .await
+    }
+
+    /// Scan all keys that share the provided prefix with custom options.
+    ///
+    /// ## Arguments
+    /// - `prefix`: the key prefix to scan
+    /// - `options`: the scan options to use
+    ///
+    /// ## Returns
+    /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::config::ScanOptions;
+    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    ///     let db = Db::open("test_db", object_store).await?;
+    ///     db.put(b"x1", b"v1").await?;
+    ///     db.put(b"x2", b"v2").await?;
+    ///     db.put(b"y", b"v3").await?;
+    ///
+    ///     let options = ScanOptions {
+    ///         cache_blocks: false,
+    ///         ..ScanOptions::default()
+    ///     };
+    ///     let mut iter = db.scan_prefix_with_options(b"x", &options).await?;
+    ///     assert_eq!(Some((b"x1", b"v1").into()), iter.next().await?);
+    ///     assert_eq!(Some((b"x2", b"v2").into()), iter.next().await?);
+    ///     assert_eq!(None, iter.next().await?);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn scan_prefix_with_options<P>(
+        &self,
+        prefix: P,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+    {
+        let range = BytesRange::from_prefix(prefix.as_ref());
+        self.inner
+            .scan_with_options(range, options)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Write a value into the database with default `WriteOptions`.
     ///
     /// ## Arguments
@@ -1378,7 +1471,12 @@ impl Db {
         let url = url
             .try_into()
             .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
-        let (object_store, _) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        let (object_store, path) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        let object_store: Arc<dyn ObjectStore> = if path.as_ref().is_empty() {
+            object_store
+        } else {
+            Arc::new(PrefixStore::new(object_store, path))
+        };
         Ok(object_store)
     }
 }
@@ -1479,6 +1577,93 @@ mod tests {
         kv_store.delete(key).await.unwrap();
         assert_eq!(None, kv_store.get(key).await.unwrap());
         kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_returns_matching_keys() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_scan_prefix", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"ab", b"v0").await.unwrap();
+        kv_store.put(b"aba", b"v1").await.unwrap();
+        kv_store.put(b"abb", b"v2").await.unwrap();
+        kv_store.put(b"ac", b"v3").await.unwrap();
+
+        let mut iter = kv_store.scan_prefix(b"ab").await.unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"ab");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"aba");
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"abb");
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_with_options_handles_unbounded_end() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_scan_prefix_unbounded", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(&[0xff, 0xff], b"v0").await.unwrap();
+        kv_store.put(&[0xff, 0xff, 0x00], b"v1").await.unwrap();
+        kv_store.put(&[0xff, 0xff, 0x10], b"v2").await.unwrap();
+        kv_store.put(&[0xff, 0xff, 0xff], b"v4").await.unwrap();
+        kv_store.put(&[0xff, 0xfe], b"v3").await.unwrap();
+
+        let scan_options = ScanOptions {
+            cache_blocks: false,
+            ..ScanOptions::default()
+        };
+        let mut iter = kv_store
+            .scan_prefix_with_options(&[0xff, 0xff], &scan_options)
+            .await
+            .unwrap();
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            &[0xff, 0xff]
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            &[0xff, 0xff, 0x00]
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            &[0xff, 0xff, 0x10]
+        );
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().key.as_ref(),
+            &[0xff, 0xff, 0xff]
+        );
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resolve_object_store_local_prefix_store_writes_to_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let prefix_path = temp_dir.path().join("prefix-store");
+        let url = format!("file://{}", prefix_path.display());
+
+        let object_store = Db::resolve_object_store(&url).unwrap();
+        let location = object_store::path::Path::from("nested/file.txt");
+        let payload = Bytes::from_static(b"local prefix payload");
+
+        object_store
+            .put(&location, payload.clone().into())
+            .await
+            .unwrap();
+
+        let expected_path = prefix_path.join("nested").join("file.txt");
+        let stored = tokio::fs::read(&expected_path).await.unwrap();
+        assert_eq!(stored, payload.to_vec());
     }
 
     #[test]
@@ -1814,8 +1999,8 @@ mod tests {
         let state = db.inner.state.read().view();
         assert_eq!(1, state.state.manifest.core().l0.len());
         let sst = state.state.manifest.core().l0.front().unwrap();
-        let index = db.inner.table_store.read_index(sst).await.unwrap();
-        assert!(index.borrow().block_meta().len() >= 3);
+        let index = db.inner.table_store.read_index(sst, true).await.unwrap();
+        assert!(!index.borrow().block_meta().is_empty());
         assert_eq!(
             Some(Bytes::copy_from_slice(last_val.as_bytes())),
             db.get(b"key").await.unwrap()

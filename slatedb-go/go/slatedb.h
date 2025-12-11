@@ -24,8 +24,7 @@ typedef enum CSdbError {
     InvalidProvider = 8,
 } CSdbError;
 
-// Internal struct for managing database iterators in FFI
-// Contains the iterator and a reference to the database to ensure proper lifetime management
+// Contains the iterator and a reference to the owner to ensure proper lifetime management
 typedef struct CSdbIterator CSdbIterator;
 
 // Internal struct for managing WriteBatch operations in FFI
@@ -38,13 +37,13 @@ typedef struct CSdbWriteBatch CSdbWriteBatch;
 // It separates the concerns of configuration options (settings) and components.
 typedef struct DbBuilder_String DbBuilder_String;
 
-// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
-// Similar to SlateDbFFI but for read-only operations.
-typedef struct DbReaderFFI DbReaderFFI;
-
 // Internal struct that owns a Tokio runtime and a SlateDB instance.
 // This eliminates the need for a global handle map and shared runtime.
 typedef struct SlateDbFFI SlateDbFFI;
+
+// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
+// Similar to SlateDbFFI but for read-only operations.
+typedef struct SlateDbReaderFFI SlateDbReaderFFI;
 
 typedef struct CSdbResult {
     enum CSdbError error;
@@ -98,7 +97,7 @@ typedef struct CSdbScanOptions {
 // Type-safe wrapper around a pointer to DbReaderFFI.
 // This provides better type safety than raw pointers.
 typedef struct CSdbReaderHandle {
-    struct DbReaderFFI *_0;
+    struct SlateDbReaderFFI *_0;
 } CSdbReaderHandle;
 
 // DbReader options for FFI
@@ -348,6 +347,24 @@ struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
                                             const struct CSdbScanOptions *scan_options,
                                             struct CSdbIterator **iterator_ptr);
 
+// # Safety
+//
+// - `handle` must contain a valid database handle pointer
+// - `prefix` must point to valid memory of at least `prefix_len` bytes (unless prefix_len is 0)
+// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
+struct CSdbResult slatedb_scan_prefix_with_options(struct CSdbHandle handle,
+                                                   const uint8_t *prefix,
+                                                   uintptr_t prefix_len,
+                                                   const struct CSdbScanOptions *scan_options,
+                                                   struct CSdbIterator **iterator_ptr);
+
+// # Safety
+//
+// - `handle` must contain a valid database handle pointer
+// - `value_out` must be a valid pointer to a location where a value can be stored
+struct CSdbResult slatedb_metrics(struct CSdbHandle handle, struct CSdbValue *value_out);
+
 // Create a new DbBuilder
 struct DbBuilder_String *slatedb_builder_new(const char *path,
                                              const char *url,
@@ -414,6 +431,18 @@ struct CSdbResult slatedb_reader_scan_with_options(struct CSdbReaderHandle handl
                                                    uintptr_t end_key_len,
                                                    const struct CSdbScanOptions *scan_options,
                                                    struct CSdbIterator **iterator_ptr);
+
+// # Safety
+//
+// - `handle` must contain a valid reader handle pointer
+// - `prefix` must point to valid memory of at least `prefix_len` bytes (unless prefix_len is 0)
+// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
+struct CSdbResult slatedb_reader_scan_prefix_with_options(struct CSdbReaderHandle handle,
+                                                          const uint8_t *prefix,
+                                                          uintptr_t prefix_len,
+                                                          const struct CSdbScanOptions *scan_options,
+                                                          struct CSdbIterator **iterator_ptr);
 
 struct CSdbResult slatedb_reader_close(struct CSdbReaderHandle handle);
 
