@@ -43,19 +43,29 @@ impl From<SsTableId> for SerializedSsTableId {
 #[derive(Serialize, Deserialize)]
 enum SerializedCachedKey {
     V1(SerializedSsTableId, u64),
+    V2(u64, SerializedSsTableId, u64),
 }
 
 impl From<SerializedCachedKey> for CachedKey {
     fn from(value: SerializedCachedKey) -> Self {
         match value {
-            SerializedCachedKey::V1(sst_id, block_id) => CachedKey(sst_id.into(), block_id),
+            SerializedCachedKey::V1(sst_id, block_id) => CachedKey {
+                scope_id: 0,
+                sst_id: sst_id.into(),
+                block_id,
+            },
+            SerializedCachedKey::V2(scope_id, sst_id, block_id) => CachedKey {
+                scope_id,
+                sst_id: sst_id.into(),
+                block_id,
+            },
         }
     }
 }
 
 impl From<CachedKey> for SerializedCachedKey {
     fn from(value: CachedKey) -> Self {
-        SerializedCachedKey::V1(value.0.into(), value.1)
+        SerializedCachedKey::V2(value.scope_id, value.sst_id.into(), value.block_id)
     }
 }
 
@@ -180,7 +190,11 @@ mod tests {
 
     #[test]
     fn test_should_serialize_deserialize_compacted_sst_key() {
-        let key = CachedKey(SsTableId::Compacted(Ulid::from((123, 456))), 99);
+        let key = CachedKey {
+            scope_id: 0,
+            sst_id: SsTableId::Compacted(Ulid::from((123, 456))),
+            block_id: 99,
+        };
 
         let encoded = bincode::serialize(&key).unwrap();
         let decoded: CachedKey = bincode::deserialize(&encoded).unwrap();
@@ -190,7 +204,11 @@ mod tests {
 
     #[test]
     fn test_should_serialize_deserialize_wal_sst_key() {
-        let key = CachedKey(SsTableId::Wal(123), 99);
+        let key = CachedKey {
+            scope_id: 5,
+            sst_id: SsTableId::Wal(123),
+            block_id: 99,
+        };
 
         let encoded = bincode::serialize(&key).unwrap();
         let decoded: CachedKey = bincode::deserialize(&encoded).unwrap();
