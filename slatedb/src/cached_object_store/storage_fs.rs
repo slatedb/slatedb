@@ -488,31 +488,31 @@ impl FsCacheEvictorInner {
         }
     }
 
-    // scan the cache folder, and load the cache entries into the in memory trie cache_entries.
+    // scan the cache folder, and load the cache entries into memory.
     // this function is only called on start up, and it's expected to run interleavely with
     // maybe_evict is being called.
     pub async fn scan_entries(self: Arc<Self>, evict: bool) {
-        // walk the cache folder, record the files and their last access time into the cache_entries
-        let iter = WalkDir::new(&self.root_folder).into_iter();
-        for entry in iter {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) => {
-                    warn!("evictor failed to walk the cache folder [error={}]", err);
-                    continue;
-                }
-            };
-            if entry.file_type().is_dir() {
-                continue;
-            }
+        let root_folder = self.root_folder.clone();
 
-            let metadata = match tokio::fs::metadata(entry.path()).await {
+        #[allow(clippy::disallowed_methods)]
+        let paths = tokio::task::spawn_blocking(move || {
+            WalkDir::new(&root_folder)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .map(|e| e.path().to_path_buf())
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+
+        for path in paths {
+            let metadata = match tokio::fs::metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) => {
                     warn!(
                         "evictor failed to get the metadata of the cache file [path={:?}, error={}]",
-                        entry.path(),
-                        err
+                        path, err
                     );
                     continue;
                 }
@@ -522,7 +522,6 @@ impl FsCacheEvictorInner {
                 .accessed()
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
                 .into();
-            let path = entry.path().to_path_buf();
             let bytes = metadata.len() as usize;
 
             self.track_entry_accessed(path, bytes, atime, evict).await;
