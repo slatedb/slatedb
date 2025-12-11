@@ -25,7 +25,7 @@ use crate::manifest::Manifest;
 use crate::utils::IdGenerator;
 use crate::DbRand;
 
-/// Reader that enforces compactions-first ordering when fetching GC state.
+/// Reader that enforces compactions-first ordering when fetching compactions.
 pub(crate) struct ManifestAndCompactionsReader {
     /// Shared manifest store to read active manifests.
     manifest_store: Arc<ManifestStore>,
@@ -259,5 +259,70 @@ impl CompactorStateWriter {
         // Writes are always manifest-first
         self.write_manifest_safely().await?;
         self.write_compactions_safely().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::{DefaultSystemClock, SystemClock};
+    use crate::compactions_store::CompactionsStore;
+    use crate::db_state::CoreDbState;
+    use crate::error::SlateDBError;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use std::sync::Arc;
+
+    const ROOT: &str = "/compactor-state";
+
+    #[tokio::test]
+    async fn compactor_state_writer_new_fences_manifest_and_compactions() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store =
+            Arc::new(CompactionsStore::new(&Path::from(ROOT), Arc::clone(&object_store)));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let options = CompactorOptions::default();
+        let rand = Arc::new(DbRand::new(7));
+
+        let mut first_writer = CompactorStateWriter::new(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            system_clock.clone(),
+            &options,
+            Arc::clone(&rand),
+        )
+        .await
+        .unwrap();
+
+        let _second_writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store,
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        let manifest_result = first_writer.manifest.refresh().await;
+        assert!(matches!(manifest_result, Err(SlateDBError::Fenced)));
+
+        let compactions_result = first_writer.compactions.refresh().await;
+        assert!(matches!(compactions_result, Err(SlateDBError::Fenced)));
     }
 }
