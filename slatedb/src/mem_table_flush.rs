@@ -103,7 +103,9 @@ impl MemtableFlusher {
     async fn flush_imm_memtables_to_l0(&mut self) -> Result<(), SlateDBError> {
         while let Some(imm_memtable) = {
             let rguard = self.db_inner.state.read();
-            if rguard.state().core().l0.len() >= self.db_inner.settings.l0_max_ssts {
+            let l0_sst_count = rguard.state().core().l0.len();
+            self.db_inner.db_stats.l0_sst_count.set(l0_sst_count as i64);
+            if l0_sst_count >= self.db_inner.settings.l0_max_ssts {
                 warn!(
                     "won't flush imm to l0 because too many l0 files [l0_len={}, l0_max_ssts={}]",
                     rguard.state().core().l0.len(),
