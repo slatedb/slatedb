@@ -1,4 +1,5 @@
-use std::ops::{DerefMut, Range};
+use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +13,6 @@ use chrono::{DateTime, Utc};
 use log::{debug, warn};
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
-use radix_trie::{Trie, TrieCommon};
-use rand::seq::IteratorRandom;
 use rand::{distr::Alphanumeric, Rng};
 use tokio::fs::File;
 use tokio::{
@@ -377,7 +376,6 @@ impl FsCacheEvictor {
         let guard = self.rx.lock();
         let rx = guard.await.take().expect("evictor already started");
 
-        // Mark as started before spawning tasks so that track_entry_accessed can send messages
         self.started.store(true, Ordering::Release);
 
         // scan the cache folder (defaults as every 1 hour) to keep the in-memory cache_entries eventually
@@ -449,20 +447,22 @@ impl FsCacheEvictor {
     }
 }
 
-/// FsCacheEvictorInner manages the cache entries in an in-memory trie, and evict the cache entries
-/// when the cache size exceeds the limit. it uses a pick-of-2 strategy to approximate LRU, and evict
-/// the older file when the cache size exceeds the limit.
-///
-/// On start up, FsCacheEvictorInner will scan the cache folder to load the cache files into the in-memory
-/// trie cache_entries. This loading process is interleaved with the maybe_evict is being called, so the
-/// cache entries should be wrapped with Mutex<_>.
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    access_time: DateTime<Utc>,
+    size_bytes: usize,
+    key_index: usize,
+}
+
+/// Manages cache entries and evicts them when size exceeds the limit using pick-of-2 LRU approximation.
 #[derive(Debug)]
 struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
     batch_factor: usize,
     max_cache_size_bytes: usize,
     track_lock: Mutex<()>,
-    cache_entries: Mutex<Trie<std::path::PathBuf, (DateTime<Utc>, usize)>>,
+    cache_entries: Mutex<HashMap<std::path::PathBuf, CacheEntry>>,
+    cache_keys: Mutex<Vec<std::path::PathBuf>>,
     cache_size_bytes: AtomicU64,
     stats: Arc<CachedObjectStoreStats>,
     rand: Arc<DbRand>,
@@ -480,7 +480,8 @@ impl FsCacheEvictorInner {
             batch_factor: 10,
             max_cache_size_bytes,
             track_lock: Mutex::new(()),
-            cache_entries: Mutex::new(Trie::new()),
+            cache_entries: Mutex::new(HashMap::new()),
+            cache_keys: Mutex::new(Vec::new()),
             cache_size_bytes: AtomicU64::new(0_u64),
             stats,
             rand,
@@ -540,20 +541,33 @@ impl FsCacheEvictorInner {
     ) -> usize {
         let _track_guard = self.track_lock.lock().await;
 
-        // record the new cache entry into the cache_entries, and increase the cache_size_bytes.
-        // NOTE: only increase the cache_size_bytes if the entry is not already in the cache_entries.
-        {
-            let mut guard = self.cache_entries.lock().await;
-            if guard.insert(path.clone(), (accessed_time, bytes)).is_none() {
-                self.cache_size_bytes
-                    .fetch_add(bytes as u64, Ordering::SeqCst);
-            }
-        }
+        let entry_count = {
+            let mut entries = self.cache_entries.lock().await;
+            let mut keys = self.cache_keys.lock().await;
 
-        // record the metrics
-        self.stats
-            .object_store_cache_keys
-            .set(self.cache_entries.lock().await.len() as u64);
+            match entries.get_mut(&path) {
+                Some(entry) => {
+                    entry.access_time = accessed_time;
+                }
+                None => {
+                    let key_index = keys.len();
+                    keys.push(path.clone());
+                    entries.insert(
+                        path.clone(),
+                        CacheEntry {
+                            access_time: accessed_time,
+                            size_bytes: bytes,
+                            key_index,
+                        },
+                    );
+                    self.cache_size_bytes
+                        .fetch_add(bytes as u64, Ordering::SeqCst);
+                }
+            }
+            entries.len()
+        };
+
+        self.stats.object_store_cache_keys.set(entry_count as u64);
         self.stats
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
@@ -606,24 +620,31 @@ impl FsCacheEvictorInner {
             target, target_bytes
         );
 
-        // remove the entry from the cache_entries, and decrease the cache_size_bytes
+        // remove the entry from the cache_entries and cache_keys, and decrease the cache_size_bytes
         // NOTE: only decrease the cache_size_bytes if the entry is actually removed from the cache_entries.
-        {
-            let mut guard = self.cache_entries.lock().await;
-            if guard.remove(&target).is_some() {
+        let entry_count = {
+            let mut entries = self.cache_entries.lock().await;
+            let mut keys = self.cache_keys.lock().await;
+
+            if let Some(removed) = entries.remove(&target) {
+                keys.swap_remove(removed.key_index);
+                if removed.key_index < keys.len() {
+                    if let Some(swapped) = entries.get_mut(&keys[removed.key_index]) {
+                        swapped.key_index = removed.key_index;
+                    }
+                }
                 self.cache_size_bytes
                     .fetch_sub(target_bytes as u64, Ordering::SeqCst);
             }
-        }
+            entries.len()
+        };
 
         // sync the metrics after eviction
         self.stats
             .object_store_cache_evicted_bytes
             .add(target_bytes as u64);
         self.stats.object_store_cache_evicted_keys.inc();
-        self.stats
-            .object_store_cache_keys
-            .set(self.cache_entries.lock().await.len() as u64);
+        self.stats.object_store_cache_keys.set(entry_count as u64);
         self.stats
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
@@ -634,48 +655,31 @@ impl FsCacheEvictorInner {
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, which is an approximation
     // of LRU, it randomized pick two files, compare their last access time, and choose the older one to evict.
     async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, usize)> {
-        if self.cache_entries.lock().await.len() < 2 {
+        let entries = self.cache_entries.lock().await;
+        let keys = self.cache_keys.lock().await;
+
+        if keys.len() < 2 {
             return None;
         }
 
-        loop {
-            let ((path0, (atime0, bytes0)), (path1, (atime1, bytes1))) = match (
-                self.random_pick_entry().await,
-                self.random_pick_entry().await,
-            ) {
-                (Some(o0), Some(o1)) => (o0, o1),
-                _ => return None,
-            };
-
-            // random_pick_entry might return the same file, skip it.
-            if path0 == path1 {
-                continue;
-            }
-
-            if atime0 <= atime1 {
-                return Some((path0, bytes0));
-            } else {
-                return Some((path1, bytes1));
-            }
-        }
-    }
-
-    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (DateTime<Utc>, usize))> {
-        let cache_entries = self.cache_entries.lock().await;
         let mut rng = self.rand.rng();
 
-        let mut rand_child = match cache_entries.children().choose(rng.deref_mut()) {
-            None => return None,
-            Some(child) => child,
-        };
-        loop {
-            if rand_child.is_leaf() {
-                return rand_child.key().cloned().zip(rand_child.value().cloned());
-            }
-            rand_child = match rand_child.children().choose(rng.deref_mut()) {
-                None => return None,
-                Some(child) => child,
-            };
+        let idx0 = rng.random_range(0..keys.len());
+        let mut idx1 = rng.random_range(0..keys.len());
+        while idx1 == idx0 {
+            idx1 = rng.random_range(0..keys.len());
+        }
+
+        let path0 = &keys[idx0];
+        let path1 = &keys[idx1];
+
+        let entry0 = entries.get(path0)?;
+        let entry1 = entries.get(path1)?;
+
+        if entry0.access_time <= entry1.access_time {
+            Some((path0.clone(), entry0.size_bytes))
+        } else {
+            Some((path1.clone(), entry1.size_bytes))
         }
     }
 }
