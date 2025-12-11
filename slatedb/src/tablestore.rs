@@ -910,7 +910,7 @@ mod tests {
             ObjectStores::new(os.clone(), None),
             format,
             Path::from("/root"),
-            Some(wrapper),
+            Some(wrapper.clone()),
         ));
 
         // Create and write SST
@@ -945,12 +945,12 @@ mod tests {
         // Check that all blocks are now in cache
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
+            let cached = wrapper
+                .get_block(&(handle.id, offset).into())
+                .await
+                .unwrap_or(None);
             assert!(
-                block_cache
-                    .get_block(&(handle.id, offset).into())
-                    .await
-                    .unwrap_or(None)
-                    .is_some(),
+                cached.is_some(),
                 "Block with offset {} should be in cache",
                 offset
             );
@@ -959,11 +959,11 @@ mod tests {
         // Partially clear the cache (remove blocks 5..10 and 15..20)
         for i in 5..10 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove(&(handle.id, offset).into()).await;
+            wrapper.remove(&(handle.id, offset).into()).await;
         }
         for i in 15..20 {
             let offset = index.borrow().block_meta().get(i).offset();
-            block_cache.remove(&(handle.id, offset).into()).await;
+            wrapper.remove(&(handle.id, offset).into()).await;
         }
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
@@ -976,12 +976,12 @@ mod tests {
         // Check that all blocks are again in cache
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
+            let cached = wrapper
+                .get_block(&(handle.id, offset).into())
+                .await
+                .unwrap_or(None);
             assert!(
-                block_cache
-                    .get_block(&(handle.id, offset).into())
-                    .await
-                    .unwrap_or(None)
-                    .is_some(),
+                cached.is_some(),
                 "Block with offset {} should be in cache after partial hit",
                 offset
             );
@@ -1002,7 +1002,7 @@ mod tests {
         for i in 0..20 {
             let offset = index.borrow().block_meta().get(i).offset();
             assert!(
-                block_cache
+                wrapper
                     .get_block(&(handle.id, offset).into())
                     .await
                     .unwrap_or(None)
@@ -1049,7 +1049,7 @@ mod tests {
             ObjectStores::new(os.clone(), None),
             SsTableFormat::default(),
             Path::from("/root"),
-            Some(wrapper),
+            Some(wrapper.clone()),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3);
@@ -1066,7 +1066,7 @@ mod tests {
                 .sst_format
                 .read_block_raw(&sst_info, &index, i, &sst_bytes)
                 .unwrap();
-            let cached_block = block_cache
+            let cached_block = wrapper
                 .get_block(&(id, block_meta.offset()).into())
                 .await
                 .unwrap();
