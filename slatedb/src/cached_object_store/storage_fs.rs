@@ -1,5 +1,5 @@
 use std::ops::{DerefMut, Range};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt::Display, io::SeekFrom};
@@ -333,6 +333,7 @@ struct FsCacheEvictor {
     scan_interval: Option<Duration>,
     tx: tokio::sync::mpsc::Sender<FsCacheEvictorWork>,
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<FsCacheEvictorWork>>>,
+    started: AtomicBool,
     background_evict_handle: OnceCell<tokio::task::JoinHandle<()>>,
     background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
     stats: Arc<CachedObjectStoreStats>,
@@ -356,6 +357,7 @@ impl FsCacheEvictor {
             max_cache_size_bytes,
             tx,
             rx: Mutex::new(Some(rx)),
+            started: AtomicBool::new(false),
             background_evict_handle: OnceCell::new(),
             background_scan_handle: OnceCell::new(),
             stats,
@@ -374,6 +376,9 @@ impl FsCacheEvictor {
 
         let guard = self.rx.lock();
         let rx = guard.await.take().expect("evictor already started");
+
+        // Mark as started before spawning tasks so that track_entry_accessed can send messages
+        self.started.store(true, Ordering::Release);
 
         // scan the cache folder (defaults as every 1 hour) to keep the in-memory cache_entries eventually
         // consistent with the cache folder.
@@ -395,8 +400,8 @@ impl FsCacheEvictor {
             .ok();
     }
 
-    async fn started(&self) -> bool {
-        self.rx.lock().await.is_none()
+    fn started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
     }
 
     async fn background_evict(
@@ -436,7 +441,7 @@ impl FsCacheEvictor {
     // when the evictor is dropped.
     #[allow(clippy::disallowed_methods)]
     pub async fn track_entry_accessed(&self, path: std::path::PathBuf, bytes: usize, evict: bool) {
-        if !self.started().await {
+        if !self.started() {
             return;
         }
 
