@@ -836,6 +836,9 @@ impl KeyValueIterator for SstIterator<'_> {
 mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
+    use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::DbCache;
+    use crate::db_cache::SplitCache;
     use crate::db_state::SsTableId;
     use crate::db_stats::DbStats;
     use crate::filter;
@@ -1009,6 +1012,86 @@ mod tests {
         assert_eq!(db_stats.sst_filter_positives.get(), 1);
         assert_eq!(db_stats.sst_filter_false_positives.get(), 1);
         assert_eq!(db_stats.sst_filter_negatives.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_bloom_filter_iterator_honors_cache_blocks() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let writer = TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            format.clone(),
+            root_path.clone(),
+            None,
+        );
+        let mut builder = writer.table_builder();
+        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
+        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
+        let handle = writer
+            .write_sst(
+                &SsTableId::Compacted(ulid::Ulid::new()),
+                builder.build().unwrap(),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            Some(cache),
+        ));
+
+        let mut no_cache_options = SstIteratorOptions::default();
+        no_cache_options.cache_blocks = false;
+        let mut iter = SstIterator::for_key_with_stats_initialized(
+            &handle,
+            b"key1",
+            reader.clone(),
+            no_cache_options,
+            None,
+        )
+        .await
+        .expect("iterator construction should succeed")
+        .expect("expected iterator for present key");
+        let _ = iter.next_entry().await.unwrap();
+
+        assert!(meta_cache
+            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let mut cache_options = SstIteratorOptions::default();
+        cache_options.cache_blocks = true;
+        let mut iter = SstIterator::for_key_with_stats_initialized(
+            &handle,
+            b"key1",
+            reader,
+            cache_options,
+            None,
+        )
+        .await
+        .expect("iterator construction should succeed")
+        .expect("expected iterator for present key");
+        let _ = iter.next_entry().await.unwrap();
+
+        assert!(meta_cache
+            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_some());
     }
 
     fn bloom_filter_enabled_table_store(filter_bits_per_key: u32) -> Arc<TableStore> {
