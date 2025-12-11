@@ -390,6 +390,7 @@ mod tests {
     use crate::config::{FlushOptions, FlushType};
     use crate::sst_iter::SstView;
     use crate::stats::StatRegistry;
+    use crate::test_utils::StringConcatMergeOperator;
     use crate::types::ValueDeletable;
     use crate::{Db, MergeOperator, MergeOperatorError};
     use bytes::{Bytes, BytesMut};
@@ -423,6 +424,7 @@ mod tests {
         let clock = Arc::new(DefaultSystemClock::new());
         let db = Db::builder(path.clone(), os.clone())
             .with_system_clock(clock.clone())
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
             .unwrap();

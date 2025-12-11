@@ -1534,7 +1534,9 @@ mod tests {
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
+    use crate::test_utils::{
+        assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator, TestClock,
+    };
     use crate::types::RowEntry;
     use crate::{
         proptest_util, test_utils, CloseReason, KeyValue, MergeOperator, MergeOperatorError,
@@ -5351,27 +5353,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
-    }
-
-    // Merge operator test helpers
-    struct StringConcatMergeOperator;
-
-    impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
-        fn merge(
-            &self,
-            _key: &Bytes,
-            existing_value: Option<Bytes>,
-            value: Bytes,
-        ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {
-            match existing_value {
-                Some(existing) => {
-                    let mut merged = existing.to_vec();
-                    merged.extend_from_slice(&value);
-                    Ok(Bytes::from(merged))
-                }
-                None => Ok(value),
-            }
-        }
     }
 
     #[tokio::test]
