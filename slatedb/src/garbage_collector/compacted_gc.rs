@@ -99,7 +99,8 @@ impl CompactedGcTask {
         Ok(max_l0_ts)
     }
 
-    /// Returns the oldest active compaction start time from persisted state.
+    /// Returns the oldest recent compaction start time from persisted state. "Recent" currently
+    /// means all running compactions and the most recently finished compaction.
     ///
     /// The Unix epoch is returned if any of the following occur:
     ///

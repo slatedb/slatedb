@@ -599,6 +599,66 @@ mod tests {
     const PATH: &str = "/test/db";
 
     #[test]
+    fn test_trim_keeps_latest_finished_and_active_compactions() {
+        let mut compactions = Compactions::new(0);
+        let oldest_finished = Ulid::from_parts(1, 0);
+        let latest_finished = Ulid::from_parts(2, 0);
+        let active = Ulid::from_parts(3, 0);
+
+        compactions.insert(compaction_with_status(
+            oldest_finished,
+            CompactionStatus::Finished,
+        ));
+        compactions.insert(compaction_with_status(
+            latest_finished,
+            CompactionStatus::Finished,
+        ));
+        compactions.insert(compaction_with_status(active, CompactionStatus::Submitted));
+
+        compactions.trim();
+
+        assert!(compactions.contains(&active));
+        assert!(compactions.contains(&latest_finished));
+        assert!(!compactions.contains(&oldest_finished));
+    }
+
+    #[test]
+    fn test_trim_keeps_only_most_recent_finished_when_no_active() {
+        let mut compactions = Compactions::new(0);
+        let older = Ulid::from_parts(10, 0);
+        let middle = Ulid::from_parts(20, 0);
+        let newest = Ulid::from_parts(30, 0);
+
+        compactions.insert(compaction_with_status(older, CompactionStatus::Finished));
+        compactions.insert(compaction_with_status(middle, CompactionStatus::Finished));
+        compactions.insert(compaction_with_status(newest, CompactionStatus::Finished));
+
+        compactions.trim();
+
+        assert!(!compactions.contains(&older));
+        assert!(!compactions.contains(&middle));
+        assert!(compactions.contains(&newest));
+    }
+
+    #[test]
+    fn test_trim_preserves_all_active_when_no_finished() {
+        let mut compactions = Compactions::new(0);
+        let submitted = Ulid::from_parts(1, 0);
+        let running = Ulid::from_parts(2, 0);
+
+        compactions.insert(compaction_with_status(
+            submitted,
+            CompactionStatus::Submitted,
+        ));
+        compactions.insert(compaction_with_status(running, CompactionStatus::Running));
+
+        compactions.trim();
+
+        assert!(compactions.contains(&submitted));
+        assert!(compactions.contains(&running));
+    }
+
+    #[test]
     fn test_should_register_compaction() {
         // given:
         let rt = build_runtime();
@@ -931,6 +991,10 @@ mod tests {
 
     fn new_dirty_compactions(compactor_epoch: u64) -> DirtyObject<Compactions> {
         new_dirty_object(1u64, Compactions::new(compactor_epoch))
+    }
+
+    fn compaction_with_status(id: Ulid, status: CompactionStatus) -> Compaction {
+        Compaction::new(id, CompactionSpec::new(vec![], 0)).with_status(status)
     }
 
     fn run_for<T, F>(duration: Duration, mut f: F) -> Option<T>
