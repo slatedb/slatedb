@@ -1,0 +1,214 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use log::{debug, info};
+
+use crate::clock::SystemClock;
+use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
+use crate::compactor_state::{CompactionStatus, Compactions, CompactorState};
+use crate::config::{CheckpointOptions, CompactorOptions};
+use crate::error::SlateDBError;
+use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+use crate::manifest::Manifest;
+use crate::utils::IdGenerator;
+use crate::DbRand;
+
+#[allow(dead_code)]
+pub(crate) struct ManifestAndCompactionsReader {
+    manifest_store: Arc<ManifestStore>,
+    compactions_store: Arc<CompactionsStore>,
+}
+
+#[allow(dead_code)]
+pub(crate) struct ActiveManifestAndCompactions {
+    pub(crate) compactions: Option<(u64, Compactions)>,
+    pub(crate) active_manifests: BTreeMap<u64, Manifest>,
+}
+
+#[allow(dead_code)]
+impl ManifestAndCompactionsReader {
+    pub(crate) fn new(
+        manifest_store: &Arc<ManifestStore>,
+        compactions_store: &Arc<CompactionsStore>,
+    ) -> Self {
+        Self {
+            manifest_store: manifest_store.clone(),
+            compactions_store: compactions_store.clone(),
+        }
+    }
+
+    pub(crate) async fn read_active_manifests_and_compactions(
+        &self,
+    ) -> Result<ActiveManifestAndCompactions, SlateDBError> {
+        // always read latest compactions before reading latest manifest
+        let compactions = self.compactions_store.try_read_latest_compactions().await?;
+        let active_manifests = self.manifest_store.read_active_manifests().await?;
+        Ok(ActiveManifestAndCompactions {
+            compactions,
+            active_manifests,
+        })
+    }
+}
+
+pub(crate) struct CompactorStateWriter {
+    pub(crate) state: CompactorState,
+    manifest: FenceableManifest,
+    compactions: FenceableCompactions,
+    rand: Arc<DbRand>,
+}
+
+impl CompactorStateWriter {
+    pub(crate) async fn new(
+        manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
+        system_clock: Arc<dyn SystemClock>,
+        options: &CompactorOptions,
+        rand: Arc<DbRand>,
+    ) -> Result<Self, SlateDBError> {
+        let stored_manifest =
+            StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
+        let (manifest, compactions) = Self::fence(
+            stored_manifest,
+            compactions_store,
+            system_clock.clone(),
+            options,
+        )
+        .await?;
+        let dirty_manifest = manifest.prepare_dirty()?;
+        let mut dirty_compactions = compactions.prepare_dirty()?;
+        // Mark any persisted compactions as finished so we don't resume them after restart.
+        // Keep only the most recent finished compaction for GC safety (#1044).
+        dirty_compactions
+            .value
+            .iter_mut()
+            .for_each(|c| c.set_status(CompactionStatus::Finished));
+        dirty_compactions.value.trim();
+        let state = CompactorState::new(dirty_manifest, dirty_compactions);
+        Ok(Self {
+            state,
+            manifest,
+            compactions,
+            rand,
+        })
+    }
+
+    async fn fence(
+        stored_manifest: StoredManifest,
+        compactions_store: Arc<CompactionsStore>,
+        system_clock: Arc<dyn SystemClock>,
+        options: &CompactorOptions,
+    ) -> Result<(FenceableManifest, FenceableCompactions), SlateDBError> {
+        let manifest_compactor_epoch = stored_manifest.manifest().compactor_epoch;
+        let fenceable_manifest = FenceableManifest::init_compactor(
+            stored_manifest,
+            options.manifest_update_timeout,
+            system_clock.clone(),
+        )
+        .await?;
+        let stored_compactions =
+            match StoredCompactions::try_load(compactions_store.clone()).await? {
+                Some(compactions) => compactions,
+                None => {
+                    info!(
+                        "creating new compactions file [compactor_epoch={}]",
+                        manifest_compactor_epoch
+                    );
+                    StoredCompactions::create(compactions_store.clone(), manifest_compactor_epoch)
+                        .await?
+                }
+            };
+        let fenceable_compactions = FenceableCompactions::init(
+            stored_compactions,
+            options.manifest_update_timeout,
+            system_clock.clone(),
+        )
+        .await?;
+        Ok((fenceable_manifest, fenceable_compactions))
+    }
+
+    /// Refreshes the manifest and updates the local compactor state with any remote
+    /// changes.
+    pub(crate) async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
+        self.manifest.refresh().await?;
+        self.state
+            .merge_remote_manifest(self.manifest.prepare_dirty()?);
+        Ok(())
+    }
+
+    /// Persists the updated manifest after a compaction finishes.
+    ///
+    /// A checkpoint with a 15-minute lifetime is written first to prevent GC from
+    /// deleting SSTs that are about to be removed. This is to keep them around for a
+    /// while in case any in-flight operations (such as iterator scans) are still using
+    /// them.
+    async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
+        // write the checkpoint first so that it points to the manifest with the ssts
+        // being removed
+        let checkpoint_id = self.rand.rng().gen_uuid();
+        self.manifest
+            .write_checkpoint(
+                checkpoint_id,
+                &CheckpointOptions {
+                    // TODO(rohan): for now, just write a checkpoint with 15-minute expiry
+                    //              so that it's extremely unlikely for the gc to delete ssts
+                    //              out from underneath the writer. In a follow up, we'll write
+                    //              a checkpoint with no expiry and with metadata indicating its
+                    //              a compactor checkpoint. Then, the gc will delete the checkpoint
+                    //              based on a configurable timeout
+                    lifetime: Some(Duration::from_secs(900)),
+                    ..CheckpointOptions::default()
+                },
+            )
+            .await?;
+        self.state
+            .merge_remote_manifest(self.manifest.prepare_dirty()?);
+        let dirty = self.state.manifest().clone();
+        self.manifest.update(dirty).await
+    }
+
+    /// Writes the manifest, retrying on version conflicts by reloading and retrying.
+    pub(crate) async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
+        loop {
+            self.load_manifest().await?;
+            match self.write_manifest().await {
+                Ok(_) => return Ok(()),
+                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                    debug!("conflicting manifest version. updating and retrying write again.");
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Persists the current compactions state to the compactions store and refreshes the
+    /// local dirty object with the latest version.
+    pub(crate) async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
+        let mut desired_value = self.state.compactions_dirty().value.clone();
+        desired_value.trim();
+        loop {
+            let mut dirty_compactions = self.compactions.prepare_dirty()?;
+            dirty_compactions.value = desired_value.clone();
+            match self.compactions.update(dirty_compactions).await {
+                Ok(()) => {
+                    let refreshed = self.compactions.prepare_dirty()?;
+                    self.state.set_compactions(refreshed);
+                    return Ok(());
+                }
+                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                    // Retry with a refreshed view. Refresh will surface fencing if the epoch advanced.
+                    // If another process modified the compactions file legally (such as an external
+                    // compaction request triggered from the CLI), this will pick up those changes.
+                    self.compactions.refresh().await?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    pub(crate) async fn write_state_safely(&mut self) -> Result<(), SlateDBError> {
+        // Writes are always manifest-first
+        self.write_manifest_safely().await?;
+        self.write_compactions_safely().await
+    }
+}
