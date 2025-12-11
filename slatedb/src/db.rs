@@ -312,6 +312,9 @@ impl DbInner {
                 (wal_size_bytes, imm_memtable_size_bytes)
             };
             let total_mem_size_bytes = wal_size_bytes + imm_memtable_size_bytes;
+            self.db_stats
+                .total_mem_size_bytes
+                .set(total_mem_size_bytes as i64);
 
             trace!(
                 "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
