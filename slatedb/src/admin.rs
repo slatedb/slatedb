@@ -306,11 +306,17 @@ impl Admin {
             .map_err(Into::into)
     }
 
-    /// Restores the checkpoint by duplicating the checkpointed manifest as the latest and deleting
-    /// WALs later than the specified checkpoint's manifest.
+    /// Restores the checkpoint by duplicating the checkpointed manifest as the latest and copying
+    /// the necessary WALs to be the latest active WALs.
+    ///
+    /// Fences any writers through uploading a fencing WAL at the start of the operation. Fences
+    /// any other clients through advancing the new manifest's epochs.
     ///
     /// Fails with SlateDBError::InvalidDeletion if there are any active checkpoints that will be
     /// lost after the restore.
+    /// TODO: Add option flag to retain existing checkpoints after restore, instead of failing.
+    ///
+    /// Failing at any point should rollback by deleting the restored manifest, and any of the restored WALs.
     pub async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
         let manifest_store = Arc::new(self.manifest_store());
         let wal_store = self.table_store();
@@ -331,16 +337,15 @@ impl Admin {
             .iter()
             .map(|c| c.id)
             .collect();
-
         current_manifest
             .maybe_apply_update(|stored_manifest| {
                 // Ensure there are no other active checkpoints before deleting
-                for c in stored_manifest.object().core.checkpoints.iter() {
-                    match c.expire_time {
+                for cp in stored_manifest.object().core.checkpoints.iter() {
+                    match cp.expire_time {
                         Some(expire_time) if self.system_clock.now() >= expire_time => continue,
                         _ => {}
                     }
-                    if !retained_checkpoint_ids.contains(&c.id) {
+                    if !retained_checkpoint_ids.contains(&cp.id) {
                         return Err(SlateDBError::InvalidDeletion);
                     }
                 }
@@ -349,22 +354,19 @@ impl Admin {
                 dirty.value = manifest_to_restore.clone();
 
                 dirty.value.core.replay_after_wal_id = fencing_wal;
-
                 // advance epochs to fence any other clients that might still be running
-                dirty.value.writer_epoch = stored_manifest.object().writer_epoch;
-                dirty.value.compactor_epoch = stored_manifest.object().compactor_epoch;
+                dirty.value.writer_epoch = stored_manifest.object().writer_epoch + 1;
+                dirty.value.compactor_epoch = stored_manifest.object().compactor_epoch + 1;
 
                 Ok(Some(dirty))
             })
             .await?;
 
-        // copy the expected wals of the restoring manifest, and rollback the newly restored manifest if
-        // this fails
         if let Err(e) = wal_store
             .copy_wal_ssts(
                 manifest_to_restore.core.replay_after_wal_id
                     ..manifest_to_restore.core.next_wal_sst_id,
-                &SsTableId::Wal(fencing_wal + 1),
+                &SsTableId::Wal(fencing_wal),
             )
             .await
         {
@@ -621,7 +623,7 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// | AWS_ENDPOINT | The endpoint to use for S3 (disables https) | No |
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    use object_store::aws::S3ConditionalPut;
+    use object_store::aws::{S3ConditionalPut, S3CopyIfNotExists};
 
     // Mandatory environment variables
     let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
@@ -636,6 +638,10 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     // Start building the S3 object store builder with required params.
     let mut builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch)
+        .with_copy_if_not_exists(S3CopyIfNotExists::Header(
+            "If-None-Match".to_string(),
+            "*".to_string(),
+        ))
         .with_bucket_name(bucket)
         .with_region(region);
 
