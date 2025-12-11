@@ -320,9 +320,14 @@ impl Compactions {
         let latest_finished = self
             .recent_compactions
             .iter()
-            .rev()
-            .find(|(_, c)| c.status().finished())
-            .map(|(id, _)| *id);
+            .filter_map(|(_, c)| {
+                if c.status().finished() {
+                    Some(c.id())
+                } else {
+                    None
+                }
+            })
+            .max();
 
         self.recent_compactions
             .retain(|id, compaction| compaction.active() || Some(id) == latest_finished.as_ref());
