@@ -14,19 +14,11 @@ use crate::manifest::Manifest;
 use crate::utils::IdGenerator;
 use crate::DbRand;
 
-#[allow(dead_code)]
 pub(crate) struct ManifestAndCompactionsReader {
     manifest_store: Arc<ManifestStore>,
     compactions_store: Arc<CompactionsStore>,
 }
 
-#[allow(dead_code)]
-pub(crate) struct ActiveManifestAndCompactions {
-    pub(crate) compactions: Option<(u64, Compactions)>,
-    pub(crate) active_manifests: BTreeMap<u64, Manifest>,
-}
-
-#[allow(dead_code)]
 impl ManifestAndCompactionsReader {
     pub(crate) fn new(
         manifest_store: &Arc<ManifestStore>,
@@ -40,14 +32,11 @@ impl ManifestAndCompactionsReader {
 
     pub(crate) async fn read_active_manifests_and_compactions(
         &self,
-    ) -> Result<ActiveManifestAndCompactions, SlateDBError> {
+    ) -> Result<(Option<(u64, Compactions)>, BTreeMap<u64, Manifest>), SlateDBError> {
         // always read latest compactions before reading latest manifest
         let compactions = self.compactions_store.try_read_latest_compactions().await?;
         let active_manifests = self.manifest_store.read_active_manifests().await?;
-        Ok(ActiveManifestAndCompactions {
-            compactions,
-            active_manifests,
-        })
+        Ok((compactions, active_manifests))
     }
 }
 
