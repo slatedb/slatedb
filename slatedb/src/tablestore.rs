@@ -298,9 +298,15 @@ impl TableStore {
         Ok(SsTableHandle::new(*id, info))
     }
 
+    /// Reads the Bloom filter of an SSTable.
+    ///
+    /// ## Arguments
+    /// - `handle`: The handle of the SSTable to read the filter from.
+    /// - `cache_blocks`: Whether to cache the filter after reading it.
     pub(crate) async fn read_filter(
         &self,
         handle: &SsTableHandle,
+        cache_blocks: bool,
     ) -> Result<Option<Arc<BloomFilter>>, SlateDBError> {
         if let Some(ref cache) = self.cache {
             if let Some(filter) = cache
@@ -316,22 +322,30 @@ impl TableStore {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let filter = self.sst_format.read_filter(&handle.info, &obj).await?;
-        if let Some(ref cache) = self.cache {
-            if let Some(filter) = filter.as_ref() {
-                cache
-                    .insert(
-                        (handle.id, handle.info.filter_offset).into(),
-                        CachedEntry::with_bloom_filter(filter.clone()),
-                    )
-                    .await;
+        if cache_blocks {
+            if let Some(ref cache) = self.cache {
+                if let Some(filter) = filter.as_ref() {
+                    cache
+                        .insert(
+                            (handle.id, handle.info.filter_offset).into(),
+                            CachedEntry::with_bloom_filter(filter.clone()),
+                        )
+                        .await;
+                }
             }
         }
         Ok(filter)
     }
 
+    /// Reads the index of an SSTable.
+    ///
+    /// ## Arguments
+    /// - `handle`: The handle of the SSTable to read the index from.
+    /// - `cache_blocks`: Whether to cache the index blocks after reading them.
     pub(crate) async fn read_index(
         &self,
         handle: &SsTableHandle,
+        cache_blocks: bool,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         if let Some(ref cache) = self.cache {
             if let Some(index) = cache
@@ -347,13 +361,15 @@ impl TableStore {
         let path = self.path(&handle.id);
         let obj = ReadOnlyObject { object_store, path };
         let index = Arc::new(self.sst_format.read_index(&handle.info, &obj).await?);
-        if let Some(ref cache) = self.cache {
-            cache
-                .insert(
-                    (handle.id, handle.info.index_offset).into(),
-                    CachedEntry::with_sst_index(index.clone()),
-                )
-                .await;
+        if cache_blocks {
+            if let Some(ref cache) = self.cache {
+                cache
+                    .insert(
+                        (handle.id, handle.info.index_offset).into(),
+                        CachedEntry::with_sst_index(index.clone()),
+                    )
+                    .await;
+            }
         }
         Ok(index)
     }
@@ -858,7 +874,7 @@ mod tests {
         let handle = writer.close().await.unwrap();
 
         // Read the index
-        let index = ts.read_index(&handle).await.unwrap();
+        let index = ts.read_index(&handle, true).await.unwrap();
 
         // Test 1: SST hit
         let blocks = ts
@@ -950,6 +966,119 @@ mod tests {
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[15..20]).await;
+    }
+
+    #[tokio::test]
+    async fn test_read_index_honors_cache_blocks() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: u32::MAX,
+            ..SsTableFormat::default()
+        };
+        let writer = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        );
+
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key1", b"value1", 0))
+            .unwrap();
+        builder
+            .add(RowEntry::new_value(b"key2", b"value2", 0))
+            .unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, builder.build().unwrap(), false)
+            .await
+            .unwrap();
+
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format,
+            Path::from(ROOT),
+            Some(cache),
+        );
+        assert_eq!(meta_cache.entry_count(), 0);
+
+        let _ = reader.read_index(&handle, false).await.unwrap();
+        assert!(meta_cache
+            .get_index(&(handle.id, handle.info.index_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let _ = reader.read_index(&handle, true).await.unwrap();
+        assert!(meta_cache
+            .get_index(&(handle.id, handle.info.index_offset).into())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_read_filter_honors_cache_blocks() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let writer = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+        );
+
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key1", b"value1", 0))
+            .unwrap();
+        builder
+            .add(RowEntry::new_value(b"key2", b"value2", 0))
+            .unwrap();
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, builder.build().unwrap(), false)
+            .await
+            .unwrap();
+
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = TableStore::new(
+            ObjectStores::new(main_store.clone(), None),
+            format,
+            Path::from(ROOT),
+            Some(cache),
+        );
+        assert_eq!(meta_cache.entry_count(), 0);
+
+        let filter = reader.read_filter(&handle, false).await.unwrap();
+        assert!(filter.is_some());
+        assert!(meta_cache
+            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let _ = reader.read_filter(&handle, true).await.unwrap();
+        assert!(meta_cache
+            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
