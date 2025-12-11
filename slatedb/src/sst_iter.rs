@@ -1053,8 +1053,10 @@ mod tests {
             Some(cache),
         ));
 
-        let mut no_cache_options = SstIteratorOptions::default();
-        no_cache_options.cache_blocks = false;
+        let no_cache_options = SstIteratorOptions {
+            cache_blocks: false,
+            ..Default::default()
+        };
         let mut iter = SstIterator::for_key_with_stats_initialized(
             &handle,
             b"key1",
@@ -1073,8 +1075,10 @@ mod tests {
             .unwrap()
             .is_none());
 
-        let mut cache_options = SstIteratorOptions::default();
-        cache_options.cache_blocks = true;
+        let cache_options = SstIteratorOptions {
+            cache_blocks: true,
+            ..Default::default()
+        };
         let mut iter = SstIterator::for_key_with_stats_initialized(
             &handle,
             b"key1",
