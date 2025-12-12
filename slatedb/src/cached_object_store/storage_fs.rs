@@ -454,6 +454,12 @@ struct CacheEntry {
     key_index: usize,
 }
 
+#[derive(Debug, Default)]
+struct CacheState {
+    entries: HashMap<std::path::PathBuf, CacheEntry>,
+    keys: Vec<std::path::PathBuf>,
+}
+
 /// Manages cache entries and evicts them when size exceeds the limit using pick-of-2 LRU approximation.
 #[derive(Debug)]
 struct FsCacheEvictorInner {
@@ -461,8 +467,7 @@ struct FsCacheEvictorInner {
     batch_factor: usize,
     max_cache_size_bytes: usize,
     track_lock: Mutex<()>,
-    cache_entries: Mutex<HashMap<std::path::PathBuf, CacheEntry>>,
-    cache_keys: Mutex<Vec<std::path::PathBuf>>,
+    cache_state: Mutex<CacheState>,
     cache_size_bytes: AtomicU64,
     stats: Arc<CachedObjectStoreStats>,
     rand: Arc<DbRand>,
@@ -480,8 +485,7 @@ impl FsCacheEvictorInner {
             batch_factor: 10,
             max_cache_size_bytes,
             track_lock: Mutex::new(()),
-            cache_entries: Mutex::new(HashMap::new()),
-            cache_keys: Mutex::new(Vec::new()),
+            cache_state: Mutex::new(CacheState::default()),
             cache_size_bytes: AtomicU64::new(0_u64),
             stats,
             rand,
@@ -541,17 +545,16 @@ impl FsCacheEvictorInner {
         let _track_guard = self.track_lock.lock().await;
 
         let entry_count = {
-            let mut entries = self.cache_entries.lock().await;
-            let mut keys = self.cache_keys.lock().await;
+            let mut cache_state = self.cache_state.lock().await;
 
-            match entries.get_mut(&path) {
+            match cache_state.entries.get_mut(&path) {
                 Some(entry) => {
                     entry.access_time = accessed_time;
                 }
                 None => {
-                    let key_index = keys.len();
-                    keys.push(path.clone());
-                    entries.insert(
+                    let key_index = cache_state.keys.len();
+                    cache_state.keys.push(path.clone());
+                    cache_state.entries.insert(
                         path.clone(),
                         CacheEntry {
                             access_time: accessed_time,
@@ -563,7 +566,7 @@ impl FsCacheEvictorInner {
                         .fetch_add(bytes as u64, Ordering::SeqCst);
                 }
             }
-            entries.len()
+            cache_state.entries.len()
         };
 
         self.stats.object_store_cache_keys.set(entry_count as u64);
@@ -622,20 +625,20 @@ impl FsCacheEvictorInner {
         // remove the entry from the cache_entries and cache_keys, and decrease the cache_size_bytes
         // NOTE: only decrease the cache_size_bytes if the entry is actually removed from the cache_entries.
         let entry_count = {
-            let mut entries = self.cache_entries.lock().await;
-            let mut keys = self.cache_keys.lock().await;
+            let mut cache_state = self.cache_state.lock().await;
 
-            if let Some(removed) = entries.remove(&target) {
-                keys.swap_remove(removed.key_index);
-                if removed.key_index < keys.len() {
-                    if let Some(swapped) = entries.get_mut(&keys[removed.key_index]) {
+            if let Some(removed) = cache_state.entries.remove(&target) {
+                cache_state.keys.swap_remove(removed.key_index);
+                if removed.key_index < cache_state.keys.len() {
+                    let swapped_key = cache_state.keys[removed.key_index].clone();
+                    if let Some(swapped) = cache_state.entries.get_mut(&swapped_key) {
                         swapped.key_index = removed.key_index;
                     }
                 }
                 self.cache_size_bytes
                     .fetch_sub(target_bytes as u64, Ordering::SeqCst);
             }
-            entries.len()
+            cache_state.entries.len()
         };
 
         // sync the metrics after eviction
@@ -654,26 +657,25 @@ impl FsCacheEvictorInner {
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, which is an approximation
     // of LRU, it randomized pick two files, compare their last access time, and choose the older one to evict.
     async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, usize)> {
-        let entries = self.cache_entries.lock().await;
-        let keys = self.cache_keys.lock().await;
+        let cache_state = self.cache_state.lock().await;
 
-        if keys.len() < 2 {
+        if cache_state.keys.len() < 2 {
             return None;
         }
 
         let mut rng = self.rand.rng();
 
-        let idx0 = rng.random_range(0..keys.len());
-        let mut idx1 = rng.random_range(0..keys.len());
+        let idx0 = rng.random_range(0..cache_state.keys.len());
+        let mut idx1 = rng.random_range(0..cache_state.keys.len());
         while idx1 == idx0 {
-            idx1 = rng.random_range(0..keys.len());
+            idx1 = rng.random_range(0..cache_state.keys.len());
         }
 
-        let path0 = &keys[idx0];
-        let path1 = &keys[idx1];
+        let path0 = &cache_state.keys[idx0];
+        let path1 = &cache_state.keys[idx1];
 
-        let entry0 = entries.get(path0)?;
-        let entry1 = entries.get(path1)?;
+        let entry0 = cache_state.entries.get(path0)?;
+        let entry1 = cache_state.entries.get(path1)?;
 
         if entry0.access_time <= entry1.access_time {
             Some((path0.clone(), entry0.size_bytes))
