@@ -265,7 +265,7 @@ impl CompactorStateWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admin::{Admin, AdminBuilder};
+    use crate::admin::AdminBuilder;
     use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::db_state::CoreDbState;
@@ -436,6 +436,11 @@ mod tests {
         writer.write_manifest_safely().await.unwrap();
 
         let (final_id, _) = manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(final_id, start_id + 2);
+        // write_manifest_safely now bumps the manifest twice per successful call because write_manifest
+        // writes a checkpoint first:
+        // - write_manifest() calls self.manifest.write_checkpoint(...) to create the checkpoint, then
+        // - write_manifest() calls self.manifest.update(...) to update the manifest
+        // So we do +1 for the external update and +2 for the successful write_manifest_safely call.
+        assert_eq!(final_id, start_id + 3);
     }
 }
