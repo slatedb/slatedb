@@ -79,7 +79,12 @@ mod tests {
         sst_handle: &SsTableHandle,
         entries: &[(Bytes, u64, ValueDeletable)],
     ) {
-        let index = db.inner.table_store.read_index(sst_handle).await.unwrap();
+        let index = db
+            .inner
+            .table_store
+            .read_index(sst_handle, true)
+            .await
+            .unwrap();
         let block_count = index.borrow().block_meta().len();
         let blocks = db
             .inner
