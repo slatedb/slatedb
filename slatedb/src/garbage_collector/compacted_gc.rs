@@ -1,8 +1,8 @@
 use crate::{
     compactions_store::CompactionsStore, compactor_state::Compactions,
-    compactor_state_protocols::ManifestAndCompactionsReader,
-    config::GarbageCollectorDirectoryOptions, db_state::SsTableId, error::SlateDBError,
-    manifest::store::ManifestStore, manifest::Manifest, tablestore::TableStore,
+    compactor_state_protocols::CompactorStateReader, config::GarbageCollectorDirectoryOptions,
+    db_state::SsTableId, error::SlateDBError, manifest::store::ManifestStore, manifest::Manifest,
+    tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
 use log::error;
@@ -142,11 +142,10 @@ impl GcTask for CompactedGcTask {
         // manifest) and the compaction low watermark _after_ the SSTs are added to the manifest.
         // This would allow the GC to delete the latest compaction job output SST since they would
         // not be active, and would be older than the low watermark.
-        let manifest_reader =
-            ManifestAndCompactionsReader::new(&self.manifest_store, &self.compactions_store);
-        let (compactions, active_manifests) = manifest_reader
-            .read_active_manifests_and_compactions()
-            .await?;
+        let state_reader = CompactorStateReader::new(&self.manifest_store, &self.compactions_store);
+        let view = state_reader.read_view().await?;
+        let compactions = view.compactions;
+        let active_manifests = view.active_manifests;
         let compaction_low_watermark_dt = Self::compaction_low_watermark_dt(&compactions);
         let active_ssts = self
             .list_active_l0_and_compacted_ssts(&active_manifests)

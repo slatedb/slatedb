@@ -25,15 +25,26 @@ use crate::manifest::Manifest;
 use crate::utils::IdGenerator;
 use crate::DbRand;
 
-/// Reader that enforces compactions-first ordering when fetching compactions.
-pub(crate) struct ManifestAndCompactionsReader {
+/// A read-only view of compactor state suitable for consumers like GC.
+///
+/// This view intentionally avoids `DirtyObject` because reads should not create or mutate
+/// remote state (e.g., a missing `.compactions` file on a fresh DB).
+pub(crate) struct CompactorStateView {
+    /// The latest compactions state if present.
+    pub(crate) compactions: Option<(u64, Compactions)>,
+    /// The active manifest set (latest manifest plus checkpoint-referenced manifests).
+    pub(crate) active_manifests: BTreeMap<u64, Manifest>,
+}
+
+/// Reader that enforces compactions-first ordering when fetching state.
+pub(crate) struct CompactorStateReader {
     /// Shared manifest store to read active manifests.
     manifest_store: Arc<ManifestStore>,
     /// Shared compactions store to fetch the latest compaction state first.
     compactions_store: Arc<CompactionsStore>,
 }
 
-impl ManifestAndCompactionsReader {
+impl CompactorStateReader {
     /// Creates a reader that returns a consistent view of compactions and active manifests.
     ///
     /// ## Arguments
@@ -52,19 +63,15 @@ impl ManifestAndCompactionsReader {
         }
     }
 
-    /// Reads compactions then active manifests to keep GC from observing an inconsistent view.
-    ///
-    /// ## Returns
-    /// - `Ok((compactions, manifests))` where `compactions` is the latest state if present and
-    ///   `manifests` is the active manifest set.
-    /// - Propagates `SlateDBError` on read failures.
-    pub(crate) async fn read_active_manifests_and_compactions(
-        &self,
-    ) -> Result<(Option<(u64, Compactions)>, BTreeMap<u64, Manifest>), SlateDBError> {
-        // always read latest compactions before reading latest manifest
+    /// Reads compactions then active manifests to keep consumers from observing an inconsistent view.
+    pub(crate) async fn read_view(&self) -> Result<CompactorStateView, SlateDBError> {
+        // Always read latest compactions before reading latest manifest.
         let compactions = self.compactions_store.try_read_latest_compactions().await?;
         let active_manifests = self.manifest_store.read_active_manifests().await?;
-        Ok((compactions, active_manifests))
+        Ok(CompactorStateView {
+            compactions,
+            active_manifests,
+        })
     }
 }
 
