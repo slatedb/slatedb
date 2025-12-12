@@ -11,6 +11,9 @@ const websiteRoot = path.resolve(__dirname, '..');
 const wrappersDir = path.join(websiteRoot, 'src/content/docs/rfcs');
 const repoRfcsDir = path.resolve(websiteRoot, '..', 'rfcs');
 
+// Files in `rfcs/` that are useful in-repo but should not render on the website.
+const excludedRfcFiles = new Set(['0000-template.md']);
+
 function yamlEscape(str) {
   return JSON.stringify(str);
 }
@@ -59,6 +62,7 @@ export async function generateRfcWrappers() {
     const rfcFiles = entries
       .filter((e) => e.isFile() && e.name.endsWith('.md'))
       .map((e) => e.name)
+      .filter((name) => !excludedRfcFiles.has(name))
       .sort();
 
     // Remove wrappers that no longer have a source.
@@ -111,7 +115,8 @@ export async function generateRfcWrappers() {
 }
 
 // Allow running directly: `node ./scripts/generate-rfcs.js`
-if (import.meta.url === pathToFileUrl(process.argv[1]).href) {
+const argv1 = process.argv[1];
+if (argv1 && import.meta.url === pathToFileUrl(argv1).href) {
   generateRfcWrappers();
 }
 
