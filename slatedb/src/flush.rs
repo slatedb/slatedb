@@ -287,6 +287,22 @@ mod tests {
             (Bytes::from("key3"), 5, ValueDeletable::Merge(Bytes::from("value4"))),
         ],
     })]
+    #[case::flush_merges_with_recent_active_seqs(FlushImmTableTestCase {
+        min_active_seq: 6,
+        row_entries: vec![
+            RowEntry::new_merge(&Bytes::from("key1"), b"value1", 1),
+            RowEntry::new_value(&Bytes::from("key2"), b"value2", 2),
+            RowEntry::new_merge(&Bytes::from("key1"), b"value3", 3),
+            RowEntry::new_merge(&Bytes::from("key3"), b"value4", 4),
+            RowEntry::new_merge(&Bytes::from("key2"), b"value5", 5),
+            RowEntry::new_value(&Bytes::from("key3"), b"value6", 6),
+        ],
+        expected_entries: vec![
+            (Bytes::from("key1"), 3, ValueDeletable::Merge(Bytes::from("value1value3"))),
+            (Bytes::from("key2"), 5, ValueDeletable::Value(Bytes::from("value2value5"))),
+            (Bytes::from("key3"), 6, ValueDeletable::Value(Bytes::from("value6"))),
+        ],
+    })]
     #[tokio::test]
     async fn test_flush(#[case] test_case: FlushImmTableTestCase) {
         // Given
