@@ -265,8 +265,9 @@ impl CompactorStateWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::{Admin, AdminBuilder};
     use crate::clock::{DefaultSystemClock, SystemClock};
-    use crate::compactions_store::CompactionsStore;
+    use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::db_state::CoreDbState;
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -278,14 +279,16 @@ mod tests {
     const ROOT: &str = "/compactor-state";
 
     #[tokio::test]
-    async fn compactor_state_writer_new_fences_manifest_and_compactions() {
+    async fn test_new_fences_manifest_and_compactions() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
             Arc::clone(&object_store),
         ));
-        let compactions_store =
-            Arc::new(CompactionsStore::new(&Path::from(ROOT), Arc::clone(&object_store)));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         StoredManifest::create_new_db(
@@ -324,5 +327,115 @@ mod tests {
 
         let compactions_result = first_writer.compactions.refresh().await;
         assert!(matches!(compactions_result, Err(SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn test_write_compactions_safely_retries_on_version_conflict() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let options = CompactorOptions::default();
+        let rand = Arc::new(DbRand::new(7));
+
+        let mut writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store.clone(),
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        // Record the version after fencing.
+        let (start_id, _) = compactions_store.read_latest_compactions().await.unwrap();
+
+        // Simulate an external writer racing and creating the next version.
+        let mut external = StoredCompactions::load(compactions_store.clone())
+            .await
+            .unwrap();
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let (conflicting_id, _) = compactions_store.read_latest_compactions().await.unwrap();
+        assert_eq!(conflicting_id, start_id + 1);
+
+        // This should retry on conflict and succeed with a new version.
+        writer.write_compactions_safely().await.unwrap();
+
+        let (final_id, _) = compactions_store.read_latest_compactions().await.unwrap();
+        assert_eq!(final_id, start_id + 2);
+    }
+
+    #[tokio::test]
+    async fn write_manifest_safely_retries_on_version_conflict() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let options = CompactorOptions::default();
+        let rand = Arc::new(DbRand::new(7));
+
+        let mut writer = CompactorStateWriter::new(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        // Record the version after fencing.
+        let (start_id, _) = manifest_store.read_latest_manifest().await.unwrap();
+
+        // Simulate an external writer creating a checkpoint of the manifest and updating it.
+        let admin = AdminBuilder::new(ROOT, object_store.clone()).build();
+        admin
+            .create_detached_checkpoint(&CheckpointOptions::default())
+            .await
+            .expect("create checkpoint failed");
+
+        let (conflicting_id, _) = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(conflicting_id, start_id + 1);
+
+        // This should retry on conflict and succeed with a new version.
+        writer.write_manifest_safely().await.unwrap();
+
+        let (final_id, _) = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(final_id, start_id + 2);
     }
 }
