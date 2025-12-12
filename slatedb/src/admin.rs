@@ -354,6 +354,7 @@ impl Admin {
                 dirty.value = manifest_to_restore.clone();
 
                 dirty.value.core.replay_after_wal_id = fencing_wal;
+                dirty.value.core.next_wal_sst_id = fencing_wal + 1;
                 // advance epochs to fence any other clients that might still be running
                 dirty.value.writer_epoch = stored_manifest.object().writer_epoch + 1;
                 dirty.value.compactor_epoch = stored_manifest.object().compactor_epoch + 1;
