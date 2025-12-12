@@ -1538,11 +1538,8 @@ mod tests {
         assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator, TestClock,
     };
     use crate::types::RowEntry;
-    use crate::{
-        proptest_util, test_utils, CloseReason, KeyValue, MergeOperator, MergeOperatorError,
-    };
+    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use async_trait::async_trait;
-    use bytes::BytesMut;
     use chrono::TimeDelta;
     #[cfg(feature = "test-util")]
     use chrono::{TimeZone, Utc};
@@ -3950,22 +3947,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_merges_from_snapshot_across_compaction() {
-        struct TestMergeOperator {}
-
-        impl MergeOperator for TestMergeOperator {
-            fn merge(
-                &self,
-                _key: &Bytes,
-                existing_value: Option<Bytes>,
-                value: Bytes,
-            ) -> Result<Bytes, MergeOperatorError> {
-                let mut result = BytesMut::new();
-                existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
-                result.extend_from_slice(value.as_ref());
-                Ok(result.freeze())
-            }
-        }
-
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/testdb";
         let should_compact_l0 = Arc::new(AtomicBool::new(false));
@@ -3975,7 +3956,7 @@ mod tests {
         )));
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
-            .with_merge_operator(Arc::new(TestMergeOperator {}))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await

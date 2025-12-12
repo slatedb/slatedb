@@ -392,27 +392,11 @@ mod tests {
     use crate::stats::StatRegistry;
     use crate::test_utils::StringConcatMergeOperator;
     use crate::types::ValueDeletable;
-    use crate::{Db, MergeOperator, MergeOperatorError};
-    use bytes::{Bytes, BytesMut};
+    use crate::Db;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::time::Duration;
-
-    struct TestMergeOperator {}
-
-    impl MergeOperator for TestMergeOperator {
-        fn merge(
-            &self,
-            _key: &Bytes,
-            existing_value: Option<Bytes>,
-            value: Bytes,
-        ) -> Result<Bytes, MergeOperatorError> {
-            let mut result = BytesMut::new();
-            existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
-            result.extend_from_slice(value.as_ref());
-            Ok(result.freeze())
-        }
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compaction_job_should_retain_merges_newer_than_retention_min_seq_num() {
@@ -439,14 +423,15 @@ mod tests {
             Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
             clock,
             manifest_store.clone(),
-            Some(Arc::new(TestMergeOperator {})),
+            Some(Arc::new(StringConcatMergeOperator {})),
         );
 
         // write some merges and get the seq number after the second merge
+        db.snapshot().await.unwrap(); // this snapshot avoids merges during flushing
         db.merge(b"foo", b"0").await.unwrap();
         db.merge(b"foo", b"1").await.unwrap();
-        let snapshot = db.snapshot().await.unwrap();
-        let started_seq = snapshot.started_seq();
+        let second_snapshot = db.snapshot().await.unwrap();
+        let second_snapshot_seq = second_snapshot.started_seq();
         db.merge(b"foo", b"2").await.unwrap();
         db.merge(b"foo", b"3").await.unwrap();
         db.flush_with_options(FlushOptions {
@@ -466,7 +451,8 @@ mod tests {
             sorted_runs: vec![],
             compaction_logical_clock_tick: 0,
             is_dest_last_run: false,
-            retention_min_seq: Some(started_seq),
+            // compaction should only see the second snapshot
+            retention_min_seq: Some(second_snapshot_seq),
             estimated_source_bytes: 0,
         };
         executor.start_compaction_job(compaction);
@@ -499,21 +485,21 @@ mod tests {
             next.value,
             ValueDeletable::Merge(Bytes::from(b"3".as_slice()))
         );
-        assert_eq!(next.seq, started_seq + 2);
+        assert_eq!(next.seq, second_snapshot_seq + 2);
         let next = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"2".as_slice()))
         );
-        assert_eq!(next.seq, started_seq + 1);
+        assert_eq!(next.seq, second_snapshot_seq + 1);
         let next = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"01".as_slice()))
         );
-        assert_eq!(next.seq, started_seq);
+        assert_eq!(next.seq, second_snapshot_seq);
         assert!(iter.next_entry().await.unwrap().is_none());
     }
 }

@@ -667,8 +667,9 @@ impl MergeOperator for StringConcatMergeOperator {
         existing_value: Option<Bytes>,
         value: Bytes,
     ) -> Result<Bytes, MergeOperatorError> {
-        let mut result = existing_value.unwrap_or_default().as_ref().to_vec();
-        result.extend_from_slice(&value);
-        Ok(Bytes::from(result))
+        let mut result = BytesMut::new();
+        existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
+        result.extend_from_slice(value.as_ref());
+        Ok(result.freeze())
     }
 }
