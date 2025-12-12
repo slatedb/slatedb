@@ -77,6 +77,7 @@ mod compactions_store;
 mod compactor;
 mod compactor_executor;
 mod compactor_state;
+mod compactor_state_protocols;
 #[allow(dead_code)]
 mod comparable_range;
 mod db;
