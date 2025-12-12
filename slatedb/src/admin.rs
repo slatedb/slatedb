@@ -366,7 +366,7 @@ impl Admin {
             .copy_wal_ssts(
                 manifest_to_restore.core.replay_after_wal_id
                     ..manifest_to_restore.core.next_wal_sst_id,
-                &SsTableId::Wal(fencing_wal),
+                &SsTableId::Wal(fencing_wal + 1),
             )
             .await
         {
@@ -751,7 +751,10 @@ mod tests {
 
         let admin = Admin::builder(path, object_store).build();
 
-        admin.fence_writers(&admin.table_store()).await.unwrap();
+        let table_store = admin.table_store();
+        let wal_id = admin.fence_writers(&table_store).await.unwrap();
+
+        assert_eq!(table_store.last_seen_wal_id().await.unwrap(), wal_id);
 
         // assert that db can no longer write.
         let err = db.put(b"1", b"1").await.unwrap_err();
