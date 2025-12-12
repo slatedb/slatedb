@@ -460,7 +460,13 @@ struct CacheState {
     keys: Vec<std::path::PathBuf>,
 }
 
-/// Manages cache entries and evicts them when size exceeds the limit using pick-of-2 LRU approximation.
+/// FsCacheEvictorInner manages the cache entries in `CacheState`, and evict the cache entries
+/// when the cache size exceeds the limit. it uses a pick-of-2 strategy to approximate LRU, and evict
+/// the older file when the cache size exceeds the limit.
+///
+/// On start up, FsCacheEvictorInner will scan the cache folder to load the cache files into the in-memory
+/// trie cache_entries. This loading process is interleaved with the maybe_evict is being called, so the
+/// cache entries should be wrapped with Mutex<_>.
 #[derive(Debug)]
 struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
