@@ -33,17 +33,24 @@
 
 use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
+use sysinfo::{CpuRefreshKind, System};
 
 /// The options for the Foyer cache.
 #[derive(Clone, Copy, Debug)]
 pub struct FoyerCacheOptions {
     pub max_capacity: u64,
+    pub shards: usize,
 }
 
 impl Default for FoyerCacheOptions {
     fn default() -> Self {
         Self {
             max_capacity: DEFAULT_MAX_CAPACITY,
+            shards: {
+                let mut sys = System::new_all();
+                sys.refresh_cpu_specifics(CpuRefreshKind::nothing());
+                sys.cpus().len()
+            },
         }
     }
 }

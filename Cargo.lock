@@ -3328,6 +3328,7 @@ dependencies = [
  "serde_json",
  "siphasher",
  "snap",
+ "sysinfo",
  "tempfile",
  "thiserror 1.0.69",
  "thread_local",

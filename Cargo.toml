@@ -97,5 +97,5 @@ unexpected_cfgs = { level = "allow", check-cfg = [
     'cfg(slow)',
     # Enables tokio unstable features, which are required for DST
     # (see slatedb-dst/src/utils.rs for details)
-    'cfg(tokio_unstable)'
+    'cfg(tokio_unstable)',
 ] }

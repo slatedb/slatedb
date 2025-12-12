@@ -17,10 +17,14 @@ bitflags = { workspace = true }
 bytemuck = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 chrono = { workspace = true, features = ["serde"] }
+sysinfo = { workspace = true }
 crc32fast = { workspace = true }
 crossbeam-skiplist = { workspace = true }
 dotenvy = { workspace = true }
-duration-str = { workspace = true, features = ["serde", "time"], default-features = false }
+duration-str = { workspace = true, features = [
+    "serde",
+    "time",
+], default-features = false }
 fail-parallel = { workspace = true }
 figment = { workspace = true, features = ["env", "json", "toml", "yaml"] }
 flate2 = { workspace = true, optional = true }
@@ -44,13 +48,23 @@ serde_json = { workspace = true }
 siphasher = { workspace = true }
 snap = { workspace = true, optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = [
+    "fs",
+    "macros",
+    "sync",
+    "rt",
+    "rt-multi-thread",
+    "signal",
+] }
 tracing = { workspace = true, features = ["log"] }
 ulid = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 walkdir = { workspace = true }
 zstd = { workspace = true, optional = true }
-tokio-util = { workspace = true, default-features = false, features = ["rt", "join-map"] }
+tokio-util = { workspace = true, default-features = false, features = [
+    "rt",
+    "join-map",
+] }
 thread_local = { workspace = true }
 url = "2.5.4"
 
