@@ -9,7 +9,7 @@ use ulid::Ulid;
 use crate::bytes_range::BytesRange;
 use crate::checkpoint;
 use crate::compactor_state::{
-    Compaction as CompactorCompaction, CompactionSpec as CompactorCompactionSpec,
+    Compaction as CompactorCompaction, CompactionSpec as CompactorCompactionSpec, CompactionStatus,
     Compactions as CompactorCompactions, SourceId,
 };
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
@@ -320,7 +320,9 @@ impl FlatBufferCompactionsCodec {
 
     fn compaction(compaction: &FbCompaction) -> Result<CompactorCompaction, SlateDBError> {
         let spec = Self::compaction_spec(compaction)?;
-        Ok(CompactorCompaction::new(compaction.id().ulid(), spec))
+        Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
+            // TODO(criccomini): use actual status when we encode it in flatbuffer
+            .with_status(CompactionStatus::Submitted))
     }
 
     fn compaction_spec(compaction: &FbCompaction) -> Result<CompactorCompactionSpec, SlateDBError> {
