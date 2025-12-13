@@ -1534,13 +1534,12 @@ mod tests {
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
-    use crate::types::RowEntry;
-    use crate::{
-        proptest_util, test_utils, CloseReason, KeyValue, MergeOperator, MergeOperatorError,
+    use crate::test_utils::{
+        assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator, TestClock,
     };
+    use crate::types::RowEntry;
+    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use async_trait::async_trait;
-    use bytes::BytesMut;
     use chrono::TimeDelta;
     #[cfg(feature = "test-util")]
     use chrono::{TimeZone, Utc};
@@ -3948,22 +3947,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_merges_from_snapshot_across_compaction() {
-        struct TestMergeOperator {}
-
-        impl MergeOperator for TestMergeOperator {
-            fn merge(
-                &self,
-                _key: &Bytes,
-                existing_value: Option<Bytes>,
-                value: Bytes,
-            ) -> Result<Bytes, MergeOperatorError> {
-                let mut result = BytesMut::new();
-                existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
-                result.extend_from_slice(value.as_ref());
-                Ok(result.freeze())
-            }
-        }
-
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/testdb";
         let should_compact_l0 = Arc::new(AtomicBool::new(false));
@@ -3973,7 +3956,7 @@ mod tests {
         )));
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
-            .with_merge_operator(Arc::new(TestMergeOperator {}))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
@@ -5351,27 +5334,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
-    }
-
-    // Merge operator test helpers
-    struct StringConcatMergeOperator;
-
-    impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
-        fn merge(
-            &self,
-            _key: &Bytes,
-            existing_value: Option<Bytes>,
-            value: Bytes,
-        ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {
-            match existing_value {
-                Some(existing) => {
-                    let mut merged = existing.to_vec();
-                    merged.extend_from_slice(&value);
-                    Ok(Bytes::from(merged))
-                }
-                None => Ok(value),
-            }
-        }
     }
 
     #[tokio::test]

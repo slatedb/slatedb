@@ -3,7 +3,8 @@ use crate::db_state;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
-use crate::mem_table::{KVTable, MemTableIterator};
+use crate::mem_table::KVTable;
+use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
 use crate::reader::DbStateReader;
 use crate::retention_iterator::RetentionIterator;
 use std::sync::Arc;
@@ -36,10 +37,22 @@ impl DbInner {
     async fn iter_imm_table(
         &self,
         imm_table: Arc<KVTable>,
-    ) -> Result<RetentionIterator<MemTableIterator>, SlateDBError> {
+    ) -> Result<RetentionIterator<Box<dyn KeyValueIterator>>, SlateDBError> {
         let state = self.state.read().view();
+        let merge_iter = if let Some(merge_operator) = self.settings.merge_operator.clone() {
+            Box::new(MergeOperatorIterator::new(
+                merge_operator,
+                imm_table.iter(),
+                false,
+                imm_table.last_tick(),
+                self.txn_manager.min_active_seq(),
+            ))
+        } else {
+            Box::new(MergeOperatorRequiredIterator::new(imm_table.iter()))
+                as Box<dyn KeyValueIterator>
+        };
         let mut iter = RetentionIterator::new(
-            imm_table.iter(),
+            merge_iter,
             None,
             self.txn_manager.min_active_seq(),
             false,
@@ -58,20 +71,35 @@ mod tests {
     use crate::block_iterator::BlockIterator;
     use crate::db::Db;
     use crate::db_state::{SsTableHandle, SsTableId};
+    use crate::error::SlateDBError;
+    use crate::error::SlateDBError::MergeOperatorMissing;
     use crate::iter::KeyValueIterator;
     use crate::mem_table::WritableKVTable;
     use crate::object_store::memory::InMemory;
+    use crate::test_utils::StringConcatMergeOperator;
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use rstest::rstest;
     use std::sync::Arc;
     use ulid::Ulid;
 
-    async fn setup_test_db() -> Db {
+    async fn setup_test_db_with_merge_operator() -> Db {
+        setup_test_db(true).await
+    }
+
+    async fn setup_test_db_without_merge_operator() -> Db {
+        setup_test_db(false).await
+    }
+
+    async fn setup_test_db(set_merge_operator: bool) -> Db {
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        Db::open("/tmp/test_flush_imm_table", object_store)
-            .await
-            .unwrap()
+        let builder = Db::builder("/tmp/test_flush_imm_table", object_store);
+        let builder = if set_merge_operator {
+            builder.with_merge_operator(Arc::new(StringConcatMergeOperator))
+        } else {
+            builder
+        };
+        builder.build().await.unwrap()
     }
 
     async fn verify_sst(
@@ -217,7 +245,7 @@ mod tests {
             (Bytes::from("key3"), 5, ValueDeletable::Value(Bytes::from("value3"))),
         ],
     })]
-    #[case::flush_merges(FlushImmTableTestCase {
+    #[case::flush_merges_with_earlier_active_seqs(FlushImmTableTestCase {
         min_active_seq: 0,
         row_entries: vec![
             RowEntry::new_merge(&Bytes::from("key1"), b"value1", 1),
@@ -259,10 +287,26 @@ mod tests {
             (Bytes::from("key3"), 5, ValueDeletable::Merge(Bytes::from("value4"))),
         ],
     })]
+    #[case::flush_merges_with_recent_active_seqs(FlushImmTableTestCase {
+        min_active_seq: 6,
+        row_entries: vec![
+            RowEntry::new_merge(&Bytes::from("key1"), b"value1", 1),
+            RowEntry::new_value(&Bytes::from("key2"), b"value2", 2),
+            RowEntry::new_merge(&Bytes::from("key1"), b"value3", 3),
+            RowEntry::new_merge(&Bytes::from("key3"), b"value4", 4),
+            RowEntry::new_merge(&Bytes::from("key2"), b"value5", 5),
+            RowEntry::new_value(&Bytes::from("key3"), b"value6", 6),
+        ],
+        expected_entries: vec![
+            (Bytes::from("key1"), 3, ValueDeletable::Merge(Bytes::from("value1value3"))),
+            (Bytes::from("key2"), 5, ValueDeletable::Value(Bytes::from("value2value5"))),
+            (Bytes::from("key3"), 6, ValueDeletable::Value(Bytes::from("value6"))),
+        ],
+    })]
     #[tokio::test]
     async fn test_flush(#[case] test_case: FlushImmTableTestCase) {
         // Given
-        let db = setup_test_db().await;
+        let db = setup_test_db_with_merge_operator().await;
         db.inner.txn_manager.new_txn(test_case.min_active_seq, true);
         let table = WritableKVTable::new();
         let row_entries_length = test_case.row_entries.len();
@@ -283,5 +327,46 @@ mod tests {
         verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
 
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_err_when_merge_operator_not_set_and_merges_exist() {
+        // Given
+        let db = setup_test_db_without_merge_operator().await;
+        db.inner.txn_manager.new_txn(0, true);
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
+        table.put(RowEntry::new_merge(&Bytes::from("key"), b"value2", 2));
+        let id = SsTableId::Compacted(Ulid::new());
+
+        // When
+        db.inner
+            .flush_imm_table(&id, table.table().clone(), false)
+            .await
+            .map_or_else(
+                |err| match err {
+                    MergeOperatorMissing => Ok::<(), SlateDBError>(()),
+                    _ => panic!("Should return MergeOperatorMissing error"),
+                },
+                |_| panic!("Should return MergeOperatorMissing error"),
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_no_err_merge_operator_not_set_and_no_merges() {
+        // Given
+        let db = setup_test_db_without_merge_operator().await;
+        db.inner.txn_manager.new_txn(0, true);
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(&Bytes::from("key1"), b"value1", 1));
+        table.put(RowEntry::new_tombstone(&Bytes::from("key2"), 2));
+        let id = SsTableId::Compacted(Ulid::new());
+
+        // When
+        db.inner
+            .flush_imm_table(&id, table.table().clone(), false)
+            .await
+            .unwrap();
     }
 }

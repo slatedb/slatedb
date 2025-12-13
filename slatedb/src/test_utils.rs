@@ -171,6 +171,7 @@ use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
 use crate::sst::{EncodedSsTable, SsTableFormat};
+use crate::{MergeOperator, MergeOperatorError};
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -654,5 +655,21 @@ impl ObjectStore for FlakyObjectStore {
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         self.inner.rename_if_not_exists(from, to).await
+    }
+}
+
+pub(crate) struct StringConcatMergeOperator;
+
+impl MergeOperator for StringConcatMergeOperator {
+    fn merge(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        value: Bytes,
+    ) -> Result<Bytes, MergeOperatorError> {
+        let mut result = BytesMut::new();
+        existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
+        result.extend_from_slice(value.as_ref());
+        Ok(result.freeze())
     }
 }
