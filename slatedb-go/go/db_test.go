@@ -18,6 +18,7 @@ var _ = Describe("DB", func() {
 	It("should return error if CLOUD_PROVIDER is undefined", func() {
 		db, err := slatedb.Open("path/to/db")
 		Expect(err).To(HaveOccurred())
+		Expect(err).Should(MatchError(ContainSubstring("undefined environment variable")))
 		Expect(db).To(BeNil())
 	})
 
