@@ -15,7 +15,7 @@ table ExternalDb {
     final_checkpoint_id: Uuid;
 
     // Compacted SST IDs belonging to external DB that are currently being referenced.
-    sst_ids: [CompactedSstId] (required);
+    sst_ids: [Ulid] (required);
 }
 
 // Manifest to persist state of DB.
@@ -48,7 +48,7 @@ table ManifestV1 {
     wal_id_last_seen: ulong;
 
     // The last compacted l0
-    l0_last_compacted: CompactedSstId;
+    l0_last_compacted: Ulid;
 
     // A list of the L0 SSTs that are valid to read in the `compacted` folder.
     l0: [CompactedSsTable] (required);
@@ -103,4 +103,9 @@ table Checkpoint {
     // Optional metadata associated with the checkpoint. For example, the writer can use this to
     // clean up checkpoints from older writers.
     metadata: CheckpointMetadata;
+
+    // Optional name associated with the checkpoint. The name can be used to list the checkpoints.
+    // Note that name may not be unique and the list operation can return multiple checkpoints with
+    // the same name.
+    name: string;
 }

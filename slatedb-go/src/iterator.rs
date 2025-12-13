@@ -25,15 +25,14 @@ pub unsafe extern "C" fn slatedb_iterator_next(
     }
 
     let iter_ffi = unsafe { &mut *iter };
+    let owner = iter_ffi.owner();
 
-    // Validate DB pointer is still alive (basic check)
-    if iter_ffi.db_ptr.is_null() {
+    // Validate owner pointer is still alive (basic check)
+    if !iter_ffi.is_owner_valid() {
         return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
     }
 
-    let db_ffi = unsafe { &*iter_ffi.db_ptr };
-
-    match db_ffi.block_on(iter_ffi.iter.next()) {
+    match CSdbIterator::block_on_with_owner(owner, iter_ffi.iter.next()) {
         Ok(Some(kv)) => {
             // Allocate memory for key and value using Box
             let key_len = kv.key.len();
@@ -88,16 +87,16 @@ pub unsafe extern "C" fn slatedb_iterator_seek(
     }
 
     let iter_ffi = unsafe { &mut *iter };
+    let owner = iter_ffi.owner();
 
-    // Validate DB pointer is still alive (basic check)
-    if iter_ffi.db_ptr.is_null() {
+    // Validate owner pointer is still alive (basic check)
+    if !iter_ffi.is_owner_valid() {
         return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
     }
 
     let key_slice = unsafe { std::slice::from_raw_parts(key, key_len) };
-    let db_ffi = unsafe { &*iter_ffi.db_ptr };
 
-    match db_ffi.block_on(iter_ffi.iter.seek(key_slice)) {
+    match CSdbIterator::block_on_with_owner(owner, iter_ffi.iter.seek(key_slice)) {
         Ok(_) => create_success_result(),
         Err(e) => {
             let error_code = slate_error_to_code(&e);

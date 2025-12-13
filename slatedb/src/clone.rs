@@ -31,16 +31,8 @@ pub(crate) async fn create_clone<P: Into<Path>>(
         return Err(SlateDBError::IdenticalClonePaths(parent_path));
     }
 
-    let clone_manifest_store = Arc::new(ManifestStore::new(
-        &clone_path,
-        object_store.clone(),
-        system_clock.clone(),
-    ));
-    let parent_manifest_store = Arc::new(ManifestStore::new(
-        &parent_path,
-        object_store.clone(),
-        system_clock.clone(),
-    ));
+    let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
+    let parent_manifest_store = Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
     parent_manifest_store
         .validate_no_wal_object_store_configured()
         .await?;
@@ -67,9 +59,9 @@ pub(crate) async fn create_clone<P: Into<Path>>(
         )
         .await?;
 
-        let mut dirty = clone_manifest.prepare_dirty();
-        dirty.core.initialized = true;
-        clone_manifest.update_manifest(dirty).await?;
+        let mut dirty = clone_manifest.prepare_dirty()?;
+        dirty.value.core.initialized = true;
+        clone_manifest.update(dirty).await?;
     }
 
     Ok(())
@@ -85,54 +77,58 @@ async fn create_clone_manifest(
     rand: Arc<DbRand>,
     #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
 ) -> Result<StoredManifest, SlateDBError> {
-    let clone_manifest = match StoredManifest::try_load(clone_manifest_store.clone()).await? {
-        Some(initialized_clone_manifest) if initialized_clone_manifest.db_state().initialized => {
-            validate_attached_to_external_db(
-                parent_path.clone(),
-                parent_checkpoint_id,
-                &initialized_clone_manifest,
-            )?;
-            validate_external_dbs_contain_final_checkpoint(
-                parent_manifest_store,
-                parent_path.clone(),
-                &initialized_clone_manifest,
-                object_store.clone(),
-                system_clock.clone(),
-            )
-            .await?;
-            return Ok(initialized_clone_manifest);
-        }
-        Some(uninitialized_clone_manifest) => {
-            validate_attached_to_external_db(
-                parent_path.clone(),
-                parent_checkpoint_id,
-                &uninitialized_clone_manifest,
-            )?;
-            uninitialized_clone_manifest
-        }
-        None => {
-            let mut parent_manifest =
-                load_initialized_manifest(parent_manifest_store.clone()).await?;
-            let parent_checkpoint = get_or_create_parent_checkpoint(
-                &mut parent_manifest,
-                parent_checkpoint_id,
-                rand.clone(),
-            )
-            .await?;
-            let parent_manifest_at_checkpoint = parent_manifest_store
-                .read_manifest(parent_checkpoint.manifest_id)
+    let clone_manifest =
+        match StoredManifest::try_load(clone_manifest_store.clone(), system_clock.clone()).await? {
+            Some(initialized_clone_manifest)
+                if initialized_clone_manifest.db_state().initialized =>
+            {
+                validate_attached_to_external_db(
+                    parent_path.clone(),
+                    parent_checkpoint_id,
+                    &initialized_clone_manifest,
+                )?;
+                validate_external_dbs_contain_final_checkpoint(
+                    parent_manifest_store,
+                    parent_path.clone(),
+                    &initialized_clone_manifest,
+                    object_store.clone(),
+                )
                 .await?;
+                return Ok(initialized_clone_manifest);
+            }
+            Some(uninitialized_clone_manifest) => {
+                validate_attached_to_external_db(
+                    parent_path.clone(),
+                    parent_checkpoint_id,
+                    &uninitialized_clone_manifest,
+                )?;
+                uninitialized_clone_manifest
+            }
+            None => {
+                let mut parent_manifest =
+                    load_initialized_manifest(parent_manifest_store.clone(), system_clock.clone())
+                        .await?;
+                let parent_checkpoint = get_or_create_parent_checkpoint(
+                    &mut parent_manifest,
+                    parent_checkpoint_id,
+                    rand.clone(),
+                )
+                .await?;
+                let parent_manifest_at_checkpoint = parent_manifest_store
+                    .read_manifest(parent_checkpoint.manifest_id)
+                    .await?;
 
-            StoredManifest::create_uninitialized_clone(
-                clone_manifest_store,
-                &parent_manifest_at_checkpoint,
-                parent_path.clone(),
-                parent_checkpoint.id,
-                rand,
-            )
-            .await?
-        }
-    };
+                StoredManifest::create_uninitialized_clone(
+                    clone_manifest_store,
+                    &parent_manifest_at_checkpoint,
+                    parent_path.clone(),
+                    parent_checkpoint.id,
+                    rand,
+                    system_clock.clone(),
+                )
+                .await?
+            }
+        };
 
     fail_point!(fp_registry, "create-clone-manifest-io-error", |_| Err(
         SlateDBError::from(std::io::Error::other("oops"))
@@ -150,11 +146,10 @@ async fn create_clone_manifest(
             Arc::new(ManifestStore::new(
                 &external_db.path.clone().into(),
                 object_store.clone(),
-                system_clock.clone(),
             ))
         };
         let mut external_db_manifest =
-            load_initialized_manifest(external_db_manifest_store).await?;
+            load_initialized_manifest(external_db_manifest_store, system_clock.clone()).await?;
 
         if external_db_manifest
             .db_state()
@@ -167,6 +162,7 @@ async fn create_clone_manifest(
                     &CheckpointOptions {
                         lifetime: None,
                         source: Some(external_db.source_checkpoint_id),
+                        name: None,
                     },
                 )
                 .await?;
@@ -200,6 +196,7 @@ async fn get_or_create_parent_checkpoint(
                     &CheckpointOptions {
                         lifetime: Some(Duration::from_secs(300)),
                         source: None,
+                        name: None,
                     },
                 )
                 .await?
@@ -237,7 +234,6 @@ async fn validate_external_dbs_contain_final_checkpoint(
     parent_path: String,
     clone_manifest: &StoredManifest,
     object_store: Arc<dyn ObjectStore>,
-    system_clock: Arc<dyn SystemClock>,
 ) -> Result<(), SlateDBError> {
     // Validate external dbs all contain the final checkpoint
     for external_db in &clone_manifest.manifest().external_dbs {
@@ -251,7 +247,6 @@ async fn validate_external_dbs_contain_final_checkpoint(
             Arc::new(ManifestStore::new(
                 &external_db.path.clone().into(),
                 object_store.clone(),
-                system_clock.clone(),
             ))
         };
         let external_manifest = external_manifest_store.read_latest_manifest().await?.1;
@@ -272,9 +267,12 @@ async fn validate_external_dbs_contain_final_checkpoint(
 
 async fn load_initialized_manifest(
     manifest_store: Arc<ManifestStore>,
+    system_clock: Arc<dyn SystemClock>,
 ) -> Result<StoredManifest, SlateDBError> {
-    let Some(manifest) = StoredManifest::try_load(manifest_store.clone()).await? else {
-        return Err(SlateDBError::LatestManifestMissing);
+    let Some(manifest) =
+        StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?
+    else {
+        return Err(SlateDBError::LatestTransactionalObjectVersionMissing);
     };
 
     if !manifest.db_state().initialized {
@@ -452,11 +450,7 @@ mod tests {
         parent_db.close().await.unwrap();
 
         // Create an uninitialized manifest with an invalid checkpoint id
-        let clone_manifest_store = Arc::new(ManifestStore::new(
-            &clone_path,
-            object_store.clone(),
-            system_clock.clone(),
-        ));
+        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         let non_existent_source_checkpoint_id = uuid::Uuid::new_v4();
         StoredManifest::create_uninitialized_clone(
             clone_manifest_store,
@@ -464,6 +458,7 @@ mod tests {
             parent_path.to_string(),
             non_existent_source_checkpoint_id,
             rand.clone(),
+            system_clock.clone(),
         )
         .await
         .unwrap();
@@ -495,15 +490,15 @@ mod tests {
         let system_clock = Arc::new(DefaultSystemClock::new());
 
         // Create the parent with empty state
-        let parent_manifest_store = Arc::new(ManifestStore::new(
-            &parent_path,
-            object_store.clone(),
+        let parent_manifest_store =
+            Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
+        let mut parent_sm = StoredManifest::create_new_db(
+            parent_manifest_store,
+            CoreDbState::new(),
             system_clock.clone(),
-        ));
-        let mut parent_sm =
-            StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new())
-                .await
-                .unwrap();
+        )
+        .await
+        .unwrap();
         let uuid_1 = rand.rng().gen_uuid();
         let checkpoint_1 = parent_sm
             .write_checkpoint(uuid_1, &CheckpointOptions::default())
@@ -516,17 +511,14 @@ mod tests {
             .unwrap();
 
         // Create an uninitialized manifest referring to the first checkpoint
-        let clone_manifest_store = Arc::new(ManifestStore::new(
-            &clone_path,
-            object_store.clone(),
-            system_clock.clone(),
-        ));
+        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         StoredManifest::create_uninitialized_clone(
             clone_manifest_store,
             &Manifest::initial(CoreDbState::new()),
             parent_path.to_string(),
             checkpoint_1.id,
             rand.clone(),
+            system_clock.clone(),
         )
         .await
         .unwrap();
@@ -561,17 +553,14 @@ mod tests {
 
         // Setup an uninitialized manifest pointing to a different parent
         let parent_manifest = Manifest::initial(CoreDbState::new());
-        let clone_manifest_store = Arc::new(ManifestStore::new(
-            &clone_path,
-            object_store.clone(),
-            system_clock.clone(),
-        ));
+        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),
             &parent_manifest,
             original_parent_path.to_string(),
             uuid::Uuid::new_v4(),
             rand.clone(),
+            system_clock.clone(),
         )
         .await
         .unwrap();
@@ -624,11 +613,8 @@ mod tests {
         .await
         .unwrap();
 
-        let clone_manifest_store = ManifestStore::new(
-            &Path::from(clone_path),
-            object_store.clone(),
-            system_clock.clone(),
-        );
+        let clone_manifest_store =
+            ManifestStore::new(&Path::from(clone_path), object_store.clone());
         let (manifest_id, _) = clone_manifest_store.read_latest_manifest().await.unwrap();
 
         create_clone(
@@ -753,12 +739,10 @@ mod tests {
         .unwrap();
 
         // Delete the checkpoint from the parent database
-        let parent_manifest_store = Arc::new(ManifestStore::new(
-            &parent_path,
-            object_store.clone(),
-            system_clock.clone(),
-        ));
-        let mut parent_manifest = StoredManifest::load(parent_manifest_store).await?;
+        let parent_manifest_store =
+            Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
+        let mut parent_manifest =
+            StoredManifest::load(parent_manifest_store, system_clock.clone()).await?;
         parent_manifest.delete_checkpoint(checkpoint.id).await?;
 
         // Attempting to clone with a missing checkpoint should fail

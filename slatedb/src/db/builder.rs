@@ -121,6 +121,7 @@ use crate::clock::DefaultLogicalClock;
 use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
 use crate::clock::SystemClock;
+use crate::compactions_store::CompactionsStore;
 use crate::compactor::CompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
@@ -401,9 +402,13 @@ impl<P: Into<Path>> DbBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             maybe_cached_main_object_store.clone(),
-            system_clock.clone(),
         ));
-        let latest_manifest = StoredManifest::try_load(manifest_store.clone()).await?;
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            maybe_cached_main_object_store.clone(),
+        ));
+        let latest_manifest =
+            StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
 
         // Validate WAL object store configuration
         if let Some(latest_manifest) = &latest_manifest {
@@ -457,7 +462,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             Some(manifest) => manifest,
             None => {
                 let state = CoreDbState::new_with_wal_object_store(wal_object_store_uri);
-                StoredManifest::create_new_db(manifest_store.clone(), state).await?
+                StoredManifest::create_new_db(manifest_store.clone(), state, system_clock.clone())
+                    .await?
             }
         };
         let mut manifest = FenceableManifest::init_writer(
@@ -505,22 +511,18 @@ impl<P: Into<Path>> DbBuilder<P> {
         if inner.wal_enabled {
             inner.wal_buffer.init(task_executor.clone()).await?;
         };
-        task_executor
-            .add_handler(
-                MEMTABLE_FLUSHER_TASK_NAME.to_string(),
-                Box::new(MemtableFlusher::new(inner.clone(), manifest)),
-                memtable_flush_rx,
-                &tokio_handle,
-            )
-            .expect("failed to spawn memtable flusher task");
-        task_executor
-            .add_handler(
-                WRITE_BATCH_TASK_NAME.to_string(),
-                Box::new(WriteBatchEventHandler::new(inner.clone())),
-                write_rx,
-                &tokio_handle,
-            )
-            .expect("failed to spawn write batch event handler task");
+        task_executor.add_handler(
+            MEMTABLE_FLUSHER_TASK_NAME.to_string(),
+            Box::new(MemtableFlusher::new(inner.clone(), manifest)),
+            memtable_flush_rx,
+            &tokio_handle,
+        )?;
+        task_executor.add_handler(
+            WRITE_BATCH_TASK_NAME.to_string(),
+            Box::new(WriteBatchEventHandler::new(inner.clone())),
+            write_rx,
+            &tokio_handle,
+        )?;
 
         // Not to pollute the cache during compaction or GC
         let uncached_table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -561,6 +563,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),
+                compactions_store.clone(),
                 compactor_options.clone(),
                 scheduler,
                 executor,
@@ -568,16 +571,13 @@ impl<P: Into<Path>> DbBuilder<P> {
                 stats.clone(),
                 system_clock.clone(),
             )
-            .await
-            .expect("failed to create compactor");
-            task_executor
-                .add_handler(
-                    COMPACTOR_TASK_NAME.to_string(),
-                    Box::new(handler),
-                    rx,
-                    &tokio_handle,
-                )
-                .expect("failed to spawn compactor task");
+            .await?;
+            task_executor.add_handler(
+                COMPACTOR_TASK_NAME.to_string(),
+                Box::new(handler),
+                rx,
+                &tokio_handle,
+            )?;
         }
 
         // To keep backwards compatibility, check if the gc_runtime or garbage_collector_options are set.
@@ -593,9 +593,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
             // Garbage collector only uses tickers, so pass in a dummy rx channel
             let (_, rx) = mpsc::unbounded_channel();
-            task_executor
-                .add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)
-                .expect("failed to spawn garbage collector task");
+            task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, &tokio_handle)?;
         }
 
         // Monitor background tasks
@@ -736,7 +734,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
-            self.system_clock.clone(),
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
@@ -844,7 +841,10 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
-            self.system_clock.clone(),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            retrying_main_object_store.clone(),
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store.clone(), None),
@@ -859,6 +859,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
         Compactor::new(
             manifest_store,
+            compactions_store,
             table_store,
             self.options,
             scheduler_supplier,

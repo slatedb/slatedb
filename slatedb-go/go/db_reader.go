@@ -29,42 +29,44 @@ type DbReader struct {
 // Example for reading latest state:
 //
 //	// Read from latest state with auto-refreshing checkpoint
-//	reader, err := slatedb.OpenReader("/tmp/mydb", &slatedb.StoreConfig{
-//	    Provider: slatedb.ProviderLocal,
-//	}, nil, &slatedb.DbReaderOptions{
+//	reader, err := slatedb.OpenReader("/tmp/mydb", WithDbReaderOptions(slatedb.DbReaderOptions{
 //	    ManifestPollInterval: 5000,  // Poll every 5 seconds
 //	    CheckpointLifetime:   30000, // 30 second checkpoint lifetime
 //	    MaxMemtableBytes:     1024 * 1024, // 1MB memtable buffer
-//	})
+//	}))
 //
 // Example using all defaults:
 //
-//	// Pass nil to use all defaults
-//	reader, err := slatedb.OpenReader("/tmp/mydb", &slatedb.StoreConfig{
-//	    Provider: slatedb.ProviderLocal,
-//	}, nil, nil)
-func OpenReader(path string, storeConfig *StoreConfig, checkpointId *string, opts *DbReaderOptions) (*DbReader, error) {
+//	reader, err := slatedb.OpenReader("/tmp/mydb")
+func OpenReader(path string, opts ...Option[DbReaderConfig]) (*DbReader, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	// Convert Go structs to JSON strings (reuse existing functions)
-	storeConfigJSON, storeConfigPtr := convertStoreConfigToJSON(storeConfig)
-	defer func() {
-		if storeConfigPtr != nil {
-			C.free(storeConfigPtr)
-		}
-	}()
-
-	// Convert checkpoint ID
-	var cCheckpointId *C.char
-	if checkpointId != nil {
-		cCheckpointId = C.CString(*checkpointId)
+	cfg := &DbReaderConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	var (
+		cURL, cEnvFile, cCheckpointId *C.char
+		cOpts                         *C.CSdbReaderOptions
+	)
+	if cfg.url != nil {
+		cURL = C.CString(*cfg.url)
+		defer C.free(unsafe.Pointer(cURL))
+	}
+	if cfg.envFile != nil {
+		cEnvFile = C.CString(*cfg.envFile)
+		defer C.free(unsafe.Pointer(cEnvFile))
+	}
+	if cfg.checkpointId != nil {
+		cCheckpointId = C.CString(*cfg.checkpointId)
 		defer C.free(unsafe.Pointer(cCheckpointId))
 	}
+	if cfg.opts != nil {
+		cOpts = convertToCReaderOptions(cfg.opts)
+	}
 
-	cOpts := convertToCReaderOptions(opts)
-
-	handle := C.slatedb_reader_open(cPath, storeConfigJSON, cCheckpointId, cOpts)
+	handle := C.slatedb_reader_open(cPath, cURL, cEnvFile, cCheckpointId, cOpts)
 
 	// Check if handle is null (indicates error)
 	if unsafe.Pointer(handle._0) == unsafe.Pointer(uintptr(0)) {
@@ -202,6 +204,88 @@ func (r *DbReader) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Itera
 		startLen,
 		endPtr,
 		endLen,
+		cOpts,
+		&iterPtr,
+	)
+	defer C.slatedb_free_result(result)
+
+	if result.error != C.Success {
+		return nil, resultToError(result)
+	}
+
+	return &Iterator{
+		ptr:    iterPtr,
+		closed: false,
+	}, nil
+}
+
+// ScanPrefix creates a streaming iterator for all keys with the given prefix using default scan options.
+//
+// Returns an iterator that yields key-value pairs whose keys start with `prefix`.
+// The iterator MUST be closed after use to prevent resource leaks.
+//
+// ## Arguments
+// - `prefix`: key prefix to match (empty or nil scans all keys)
+//
+// ## Returns
+// - `*Iterator`: streaming iterator over matching keys
+// - `error`: if there was an error creating the iterator
+//
+// ## Examples
+//
+//	iter, err := reader.ScanPrefix([]byte("user:"))
+//	if err != nil { return err }
+//	defer iter.Close()  // Essential!
+//
+//	for {
+//	    kv, err := iter.Next()
+//	    if err == io.EOF { break }
+//	    if err != nil { return err }
+//	    // process kv
+//	}
+func (r *DbReader) ScanPrefix(prefix []byte) (*Iterator, error) {
+	return r.ScanPrefixWithOptions(prefix, nil)
+}
+
+// ScanPrefixWithOptions creates a streaming iterator for all keys with the given prefix and custom scan options.
+//
+// Returns an iterator that yields key-value pairs whose keys start with `prefix`.
+// The iterator MUST be closed after use to prevent resource leaks.
+//
+// ## Arguments
+// - `prefix`: key prefix to match (empty or nil scans all keys)
+// - `opts`: scan options for durability, caching, read-ahead behavior
+//
+// ## Returns
+// - `*Iterator`: streaming iterator over matching keys
+// - `error`: if there was an error creating the iterator
+//
+// ## Examples
+//
+//	opts := &ScanOptions{DurabilityFilter: DurabilityRemote, Dirty: false}
+//	iter, err := reader.ScanPrefixWithOptions([]byte("user:"), opts)
+//	if err != nil { return err }
+//	defer iter.Close()  // Essential!
+//
+//	for {
+//	    kv, err := iter.Next()
+//	    if err == io.EOF { break }
+//	    if err != nil { return err }
+//	    // process kv
+//	}
+func (r *DbReader) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator, error) {
+	var prefixPtr *C.uint8_t
+	if len(prefix) > 0 {
+		prefixPtr = (*C.uint8_t)(unsafe.Pointer(&prefix[0]))
+	}
+
+	cOpts := convertToCScanOptions(opts)
+
+	var iterPtr *C.CSdbIterator
+	result := C.slatedb_reader_scan_prefix_with_options(
+		r.handle,
+		prefixPtr,
+		C.uintptr_t(len(prefix)),
 		cOpts,
 		&iterPtr,
 	)

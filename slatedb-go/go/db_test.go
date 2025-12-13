@@ -11,229 +11,291 @@ import (
 )
 
 var _ = Describe("DB", func() {
-	var (
-		db     *slatedb.DB
-		tmpDir string
-	)
-
 	BeforeEach(func() {
-		var err error
-		tmpDir, err = os.MkdirTemp("", "slatedb_db_test_*")
-		Expect(err).NotTo(HaveOccurred())
-
-		db, err = slatedb.Open(tmpDir, &slatedb.StoreConfig{
-			Provider: slatedb.ProviderLocal,
-		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(db).NotTo(BeNil())
+		Expect(cleanupEnvVariables()).NotTo(HaveOccurred())
 	})
 
-	AfterEach(func() {
-		if db != nil {
-			err := db.Close()
-			Expect(err).NotTo(HaveOccurred())
-		}
-		os.RemoveAll(tmpDir)
+	It("should return error if CLOUD_PROVIDER is undefined", func() {
+		db, err := slatedb.Open("path/to/db")
+		Expect(err).To(HaveOccurred())
+		Expect(db).To(BeNil())
 	})
 
-	Describe("Core Operations", func() {
-		It("should put and get a key-value pair", func() {
-			key := []byte("test_key")
-			value := []byte("test_value")
+	Describe("Operations", func() {
+		var (
+			db     *slatedb.DB
+			tmpDir string
+		)
 
-			err := db.Put(key, value)
-			Expect(err).NotTo(HaveOccurred())
-
-			retrievedValue, err := db.Get(key)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(retrievedValue).To(Equal(value))
-		})
-
-		It("should return ErrNotFound for non-existent key", func() {
-			_, err := db.Get([]byte("non_existent"))
-			Expect(err).To(Equal(slatedb.ErrNotFound))
-		})
-
-		It("should delete a key successfully", func() {
-			key := []byte("delete_test")
-			value := []byte("delete_value")
-
-			err := db.Put(key, value)
-			Expect(err).NotTo(HaveOccurred())
-
-			err = db.Delete(key)
-			Expect(err).NotTo(HaveOccurred())
-
-			_, err = db.Get(key)
-			Expect(err).To(Equal(slatedb.ErrNotFound))
-		})
-	})
-
-	Describe("Operations with Options", func() {
-		It("should put with custom options", func() {
-			key := []byte("options_test")
-			value := []byte("options_value")
-
-			putOpts := &slatedb.PutOptions{TTLType: slatedb.TTLDefault}
-			writeOpts := &slatedb.WriteOptions{AwaitDurable: true}
-
-			err := db.PutWithOptions(key, value, putOpts, writeOpts)
-			Expect(err).NotTo(HaveOccurred())
-
-			retrievedValue, err := db.Get(key)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(retrievedValue).To(Equal(value))
-		})
-
-		It("should get with custom read options", func() {
-			key := []byte("read_options_test")
-			value := []byte("read_options_value")
-
-			err := db.Put(key, value)
-			Expect(err).NotTo(HaveOccurred())
-
-			readOpts := &slatedb.ReadOptions{
-				DurabilityFilter: slatedb.DurabilityRemote,
-				Dirty:            false,
-			}
-
-			retrievedValue, err := db.GetWithOptions(key, readOpts)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(retrievedValue).To(Equal(value))
-		})
-
-		It("should delete with custom options", func() {
-			key := []byte("delete_options_test")
-			value := []byte("delete_options_value")
-
-			err := db.Put(key, value)
-			Expect(err).NotTo(HaveOccurred())
-
-			writeOpts := &slatedb.WriteOptions{AwaitDurable: false}
-			err = db.DeleteWithOptions(key, writeOpts)
-			Expect(err).NotTo(HaveOccurred())
-
-			_, err = db.Get(key)
-			Expect(err).To(Equal(slatedb.ErrNotFound))
-		})
-	})
-
-	Describe("Scan Operations", func() {
 		BeforeEach(func() {
-			testData := []slatedb.KeyValue{
-				{Key: []byte("item:01"), Value: []byte("first")},
-				{Key: []byte("item:02"), Value: []byte("second")},
-				{Key: []byte("item:03"), Value: []byte("third")},
-				{Key: []byte("other:1"), Value: []byte("other")},
-			}
+			var err error
+			tmpDir, err = os.MkdirTemp("", "slatedb_db_test_*")
+			Expect(err).NotTo(HaveOccurred())
 
-			// Use individual Put calls to populate test data
-			for _, item := range testData {
-				err := db.Put(item.Key, item.Value)
-				Expect(err).NotTo(HaveOccurred())
-			}
+			envFile, err := createEnvFile(tmpDir)
+			Expect(err).NotTo(HaveOccurred())
+
+			db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(db).NotTo(BeNil())
 		})
 
-		It("should create iterator for full scan", func() {
-			iter, err := db.Scan(nil, nil)
-			Expect(err).NotTo(HaveOccurred())
-			defer iter.Close()
+		AfterEach(func() {
+			if db != nil {
+				err := db.Close()
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(os.RemoveAll(tmpDir)).NotTo(HaveOccurred())
+		})
 
-			count := 0
-			for {
-				_, err := iter.Next()
-				if err == io.EOF {
-					break
+		Describe("Core Operations", func() {
+			It("should put and get a key-value pair", func() {
+				key := []byte("test_key")
+				value := []byte("test_value")
+
+				err := db.Put(key, value)
+				Expect(err).NotTo(HaveOccurred())
+
+				retrievedValue, err := db.Get(key)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(retrievedValue).To(Equal(value))
+			})
+
+			It("should return ErrNotFound for non-existent key", func() {
+				_, err := db.Get([]byte("non_existent"))
+				Expect(err).To(Equal(slatedb.ErrNotFound))
+			})
+
+			It("should delete a key successfully", func() {
+				key := []byte("delete_test")
+				value := []byte("delete_value")
+
+				err := db.Put(key, value)
+				Expect(err).NotTo(HaveOccurred())
+
+				err = db.Delete(key)
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = db.Get(key)
+				Expect(err).To(Equal(slatedb.ErrNotFound))
+			})
+		})
+
+		Describe("Operations with Options", func() {
+			It("should put with custom options", func() {
+				key := []byte("options_test")
+				value := []byte("options_value")
+
+				putOpts := &slatedb.PutOptions{TTLType: slatedb.TTLDefault}
+				writeOpts := &slatedb.WriteOptions{AwaitDurable: true}
+
+				err := db.PutWithOptions(key, value, putOpts, writeOpts)
+				Expect(err).NotTo(HaveOccurred())
+
+				retrievedValue, err := db.Get(key)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(retrievedValue).To(Equal(value))
+			})
+
+			It("should get with custom read options", func() {
+				key := []byte("read_options_test")
+				value := []byte("read_options_value")
+
+				err := db.Put(key, value)
+				Expect(err).NotTo(HaveOccurred())
+
+				readOpts := &slatedb.ReadOptions{
+					DurabilityFilter: slatedb.DurabilityRemote,
+					Dirty:            false,
 				}
+
+				retrievedValue, err := db.GetWithOptions(key, readOpts)
 				Expect(err).NotTo(HaveOccurred())
-				count++
-			}
-			Expect(count).To(Equal(4))
+				Expect(retrievedValue).To(Equal(value))
+			})
+
+			It("should delete with custom options", func() {
+				key := []byte("delete_options_test")
+				value := []byte("delete_options_value")
+
+				err := db.Put(key, value)
+				Expect(err).NotTo(HaveOccurred())
+
+				writeOpts := &slatedb.WriteOptions{AwaitDurable: false}
+				err = db.DeleteWithOptions(key, writeOpts)
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = db.Get(key)
+				Expect(err).To(Equal(slatedb.ErrNotFound))
+			})
 		})
 
-		It("should create iterator for range scan", func() {
-			iter, err := db.Scan([]byte("item:"), []byte("item:99"))
-			Expect(err).NotTo(HaveOccurred())
-			defer iter.Close()
-
-			count := 0
-			for {
-				kv, err := iter.Next()
-				if err == io.EOF {
-					break
+		Describe("Scan Operations", func() {
+			BeforeEach(func() {
+				testData := []slatedb.KeyValue{
+					{Key: []byte("item:01"), Value: []byte("first")},
+					{Key: []byte("item:02"), Value: []byte("second")},
+					{Key: []byte("item:03"), Value: []byte("third")},
+					{Key: []byte("other:1"), Value: []byte("other")},
 				}
-				Expect(err).NotTo(HaveOccurred())
-				Expect(string(kv.Key)).To(HavePrefix("item:"))
-				count++
-			}
-			Expect(count).To(Equal(3))
-		})
 
-		It("should scan with custom options", func() {
-			opts := &slatedb.ScanOptions{
-				DurabilityFilter: slatedb.DurabilityRemote,
-				Dirty:            false,
-				ReadAheadBytes:   1024,
-				CacheBlocks:      true,
-			}
-
-			iter, err := db.ScanWithOptions([]byte("item:"), []byte("item:99"), opts)
-			Expect(err).NotTo(HaveOccurred())
-			defer iter.Close()
-
-			count := 0
-			for {
-				kv, err := iter.Next()
-				if err == io.EOF {
-					break
+				// Use individual Put calls to populate test data
+				for _, item := range testData {
+					err := db.Put(item.Key, item.Value)
+					Expect(err).NotTo(HaveOccurred())
 				}
+			})
+
+			It("should create iterator for full scan", func() {
+				iter, err := db.Scan(nil, nil)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(string(kv.Key)).To(HavePrefix("item:"))
-				count++
-			}
-			Expect(count).To(Equal(3))
+				defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
+
+				count := 0
+				for {
+					_, err := iter.Next()
+					if err == io.EOF {
+						break
+					}
+					Expect(err).NotTo(HaveOccurred())
+					count++
+				}
+				Expect(count).To(Equal(4))
+			})
+
+			It("should create iterator for range scan", func() {
+				iter, err := db.Scan([]byte("item:"), []byte("item:99"))
+				Expect(err).NotTo(HaveOccurred())
+				defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
+
+				count := 0
+				for {
+					kv, err := iter.Next()
+					if err == io.EOF {
+						break
+					}
+					Expect(err).NotTo(HaveOccurred())
+					Expect(string(kv.Key)).To(HavePrefix("item:"))
+					count++
+				}
+				Expect(count).To(Equal(3))
+			})
+
+			It("should scan with custom options", func() {
+				opts := &slatedb.ScanOptions{
+					DurabilityFilter: slatedb.DurabilityRemote,
+					Dirty:            false,
+					ReadAheadBytes:   1024,
+					CacheBlocks:      true,
+				}
+
+				iter, err := db.ScanWithOptions([]byte("item:"), []byte("item:99"), opts)
+				Expect(err).NotTo(HaveOccurred())
+				defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
+
+				count := 0
+				for {
+					kv, err := iter.Next()
+					if err == io.EOF {
+						break
+					}
+					Expect(err).NotTo(HaveOccurred())
+					Expect(string(kv.Key)).To(HavePrefix("item:"))
+					count++
+				}
+				Expect(count).To(Equal(3))
+			})
+
+			It("should scan by prefix", func() {
+				iter, err := db.ScanPrefix([]byte("item:"))
+				Expect(err).NotTo(HaveOccurred())
+				defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
+
+				count := 0
+				for {
+					kv, err := iter.Next()
+					if err == io.EOF {
+						break
+					}
+					Expect(err).NotTo(HaveOccurred())
+					Expect(string(kv.Key)).To(HavePrefix("item:"))
+					count++
+				}
+				Expect(count).To(Equal(3))
+			})
+
+			It("should scan by prefix with custom options", func() {
+				opts := &slatedb.ScanOptions{
+					DurabilityFilter: slatedb.DurabilityRemote,
+					Dirty:            false,
+					ReadAheadBytes:   1024,
+					CacheBlocks:      true,
+					MaxFetchTasks:    2,
+				}
+
+				iter, err := db.ScanPrefixWithOptions([]byte("item:"), opts)
+				Expect(err).NotTo(HaveOccurred())
+				defer func() { Expect(iter.Close()).NotTo(HaveOccurred()) }()
+
+				count := 0
+				for {
+					kv, err := iter.Next()
+					if err == io.EOF {
+						break
+					}
+					Expect(err).NotTo(HaveOccurred())
+					Expect(string(kv.Key)).To(HavePrefix("item:"))
+					count++
+				}
+				Expect(count).To(Equal(3))
+			})
 		})
-	})
 
-	Describe("Database Management", func() {
-		It("should open and close database successfully", func() {
-			err := db.Put([]byte("lifecycle_test"), []byte("test"))
-			Expect(err).NotTo(HaveOccurred())
+		Describe("Metrics", func() {
+			It("should get metrics", func() {
+				metrics, err := db.Metrics()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(metrics).NotTo(BeEmpty())
+			})
+		})
 
-			err = db.Close()
-			Expect(err).NotTo(HaveOccurred())
+		Describe("Database Management", func() {
+			It("should open and close database successfully", func() {
+				err := db.Put([]byte("lifecycle_test"), []byte("test"))
+				Expect(err).NotTo(HaveOccurred())
 
-			db = nil // Prevent double close in AfterEach
+				err = db.Close()
+				Expect(err).NotTo(HaveOccurred())
+
+				db = nil // Prevent double close in AfterEach
+			})
 		})
 	})
 })
 
 var _ = Describe("DB Builder", func() {
-	var tmpDir string
+	var (
+		tmpDir  string
+		envFile string
+	)
 
 	BeforeEach(func() {
 		var err error
 		tmpDir, err = os.MkdirTemp("", "slatedb_builder_test_*")
 		Expect(err).NotTo(HaveOccurred())
+		envFile, err = createEnvFile(tmpDir)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	AfterEach(func() {
-		os.RemoveAll(tmpDir)
+		Expect(os.RemoveAll(tmpDir)).NotTo(HaveOccurred())
 	})
 
 	Describe("NewBuilder", func() {
 		It("should create a new builder successfully", func() {
-			builder, err := slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err := slatedb.NewBuilder(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(builder).NotTo(BeNil())
-		})
-
-		It("should fail with invalid store config", func() {
-			builder, err := slatedb.NewBuilder(tmpDir, nil)
-			Expect(err).To(HaveOccurred())
-			Expect(builder).To(BeNil())
 		})
 	})
 
@@ -242,14 +304,12 @@ var _ = Describe("DB Builder", func() {
 
 		BeforeEach(func() {
 			var err error
-			builder, err = slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err = slatedb.NewBuilder(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("should work without any settings (use Rust defaults)", func() {
-			db, err := builder.Build()
+			db, err := builder.WithEnvFile(envFile).Build()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(db).NotTo(BeNil())
 
@@ -265,7 +325,10 @@ var _ = Describe("DB Builder", func() {
 		})
 
 		It("should handle nil settings", func() {
-			db, err := builder.WithSettings(nil).Build()
+			db, err := builder.
+				WithEnvFile(envFile).
+				WithSettings(nil).
+				Build()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(db).NotTo(BeNil())
 
@@ -283,7 +346,10 @@ var _ = Describe("DB Builder", func() {
 			customSettings.FlushInterval = "200ms" // Override flush interval
 			customSettings.MinFilterKeys = 1500    // Override min filter keys
 
-			db, err := builder.WithSettings(customSettings).Build()
+			db, err := builder.
+				WithEnvFile(envFile).
+				WithSettings(customSettings).
+				Build()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(db).NotTo(BeNil())
 
@@ -305,14 +371,15 @@ var _ = Describe("DB Builder", func() {
 
 		BeforeEach(func() {
 			var err error
-			builder, err = slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err = slatedb.NewBuilder(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("should accept SST block size configuration", func() {
-			db, err := builder.WithSstBlockSize(slatedb.SstBlockSize4Kib).Build()
+			db, err := builder.
+				WithEnvFile(envFile).
+				WithSstBlockSize(slatedb.SstBlockSize4Kib).
+				Build()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(db).NotTo(BeNil())
 
@@ -326,12 +393,11 @@ var _ = Describe("DB Builder", func() {
 
 	Describe("Method Chaining", func() {
 		It("should support method chaining", func() {
-			builder, err := slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err := slatedb.NewBuilder(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 
 			db, err := builder.
+				WithEnvFile(envFile).
 				WithSettings(nil).
 				WithSstBlockSize(slatedb.SstBlockSize8Kib).
 				Build()
@@ -354,12 +420,11 @@ var _ = Describe("DB Builder", func() {
 			customSettings.FlushInterval = "150ms"
 			customSettings.L0SstSizeBytes = 32 * 1024 * 1024 // 32MB
 
-			builder, err := slatedb.NewBuilder(tmpDir, &slatedb.StoreConfig{
-				Provider: slatedb.ProviderLocal,
-			})
+			builder, err := slatedb.NewBuilder(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 
 			db, err := builder.
+				WithEnvFile(envFile).
 				WithSettings(customSettings).
 				WithSstBlockSize(slatedb.SstBlockSize16Kib).
 				Build()
@@ -377,15 +442,5 @@ var _ = Describe("DB Builder", func() {
 			err = db.Close()
 			Expect(err).NotTo(HaveOccurred())
 		})
-
 	})
-
-	Describe("Error Handling", func() {
-		It("should handle invalid store config", func() {
-			_, err := slatedb.NewBuilder(tmpDir, nil)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("storeConfig cannot be nil"))
-		})
-	})
-
 })

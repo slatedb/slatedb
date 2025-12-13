@@ -179,6 +179,9 @@ pub(crate) struct MergeOperatorIterator<T: KeyValueIterator> {
     /// Whether to merge entries with different expire timestamps.
     merge_different_expire_ts: bool,
     now: i64,
+    /// A barrier sequence number that supports snapshot reads using this iterator. If not None,
+    /// the iterator will not merge entries with sequence number greater than this value.
+    snapshot_barrier_seq: Option<u64>,
 }
 
 /// Tracks metadata across multiple entries during merge operations.
@@ -240,6 +243,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
         delegate: T,
         merge_different_expire_ts: bool,
         now: i64,
+        snapshot_barrier_seq: Option<u64>,
     ) -> Self {
         Self {
             merge_operator,
@@ -247,6 +251,7 @@ impl<T: KeyValueIterator> MergeOperatorIterator<T> {
             buffered_entry: None,
             merge_different_expire_ts,
             now,
+            snapshot_barrier_seq,
         }
     }
 }
@@ -384,6 +389,11 @@ impl<T: KeyValueIterator> KeyValueIterator for MergeOperatorIterator<T> {
         if let Some(entry) = next_entry {
             match &entry.value {
                 ValueDeletable::Merge(_) => {
+                    if let Some(snapshot_barrier_seq) = self.snapshot_barrier_seq {
+                        if entry.seq > snapshot_barrier_seq {
+                            return Ok(Some(entry));
+                        }
+                    }
                     // A mergeable entry, we need to accumulate all mergeable entries
                     // ahead for the same key and merge them into a single value.
                     return self.merge_with_older_entries(entry).await;
@@ -502,6 +512,7 @@ mod tests {
             data.into(),
             true,
             0,
+            None,
         );
         assert_iterator(
             &mut iterator,
@@ -519,6 +530,7 @@ mod tests {
         unsorted_data: Vec<RowEntry>,
         expected: Vec<RowEntry>,
         merge_different_expire_ts: bool,
+        snapshot_barrier_seq: Option<u64>,
     }
 
     impl Default for TestCase {
@@ -527,6 +539,7 @@ mod tests {
                 unsorted_data: vec![],
                 expected: vec![],
                 merge_different_expire_ts: true,
+                snapshot_barrier_seq: None,
             }
         }
     }
@@ -569,7 +582,8 @@ mod tests {
         ],
         // On write path (compaction, memtable), we don't merge entries
         // with different expire timestamps to allow per-element expiration.
-        merge_different_expire_ts: false
+        merge_different_expire_ts: false,
+        ..TestCase::default()
     })]
     #[case::merge_with_tombstone(TestCase {
         unsorted_data: vec![
@@ -598,6 +612,22 @@ mod tests {
         ],
         ..TestCase::default()
     })]
+    #[case::merge_with_snapshot_barrier(TestCase {
+        unsorted_data: vec![
+            RowEntry::new_merge(b"key1", b"1", 1),
+            RowEntry::new_merge(b"key1", b"2", 2),
+            RowEntry::new_merge(b"key1", b"3", 3),
+            RowEntry::new_merge(b"key1", b"4", 4),
+            RowEntry::new_value(b"key1", b"5", 5)
+        ],
+        expected: vec![
+            RowEntry::new_value(b"key1", b"5", 5),
+            RowEntry::new_merge(b"key1", b"4", 4),
+            RowEntry::new_merge(b"key1", b"123", 3),
+        ],
+        snapshot_barrier_seq: Some(3),
+        ..TestCase::default()
+    })]
     #[tokio::test]
     async fn test(#[case] test_case: TestCase) {
         let merge_operator = Arc::new(MockMergeOperator {});
@@ -606,6 +636,7 @@ mod tests {
             test_case.unsorted_data.into(),
             test_case.merge_different_expire_ts,
             0,
+            test_case.snapshot_barrier_seq,
         );
         assert_iterator(&mut iterator, test_case.expected).await;
     }
@@ -748,6 +779,7 @@ mod tests {
             data.into(),
             true,
             0,
+            None,
         );
 
         // Expected: max should return 10, sum should return 15
@@ -778,6 +810,7 @@ mod tests {
             data.into(),
             true,
             0,
+            None,
         );
 
         let expected_bytes: Vec<u8> = (1..=250).map(|i| i as u8).collect();
@@ -801,6 +834,7 @@ mod tests {
             data.into(),
             true,
             0,
+            None,
         );
 
         let mut expected_bytes = b"BASE".to_vec();
@@ -825,6 +859,7 @@ mod tests {
             data.into(),
             true,
             0,
+            None,
         );
 
         let expected_bytes: Vec<u8> = (1..=250).map(|i| i as u8).collect();
@@ -856,6 +891,7 @@ mod tests {
             data.into(),
             true,
             0,
+            None,
         );
 
         let mut expected_bytes = b"BASE".to_vec();
@@ -894,6 +930,7 @@ mod tests {
             data.into(),
             true,
             100, // now = 100
+            None,
         );
 
         // Only non-expired entries (4, 2, 1) should be merged
@@ -933,7 +970,8 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            100, // now = 100
+            100, // now = 100,
+            None,
         );
 
         // Base value + non-expired entries (4, 2, 1) should be merged
@@ -965,7 +1003,8 @@ mod tests {
             merge_operator,
             data.into(),
             true,
-            100, // now = 100, all entries are expired
+            100, // now = 100, all entries are expired,
+            None,
         );
 
         // All entries are expired, so nothing should be returned

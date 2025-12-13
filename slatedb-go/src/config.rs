@@ -1,114 +1,14 @@
 use std::ffi::{c_char, CString};
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::db_reader::CSdbReaderOptions;
 use crate::error::safe_str_from_ptr;
 use crate::types::{CSdbPutOptions, CSdbReadOptions, CSdbScanOptions, CSdbWriteOptions};
-use serde::Deserialize;
 use slatedb::bytes::Bytes;
 use slatedb::config::{
     DbReaderOptions, DurabilityLevel, PutOptions, ReadOptions, ScanOptions, Ttl, WriteOptions,
 };
-use slatedb::object_store::ObjectStore;
 use std::ops::Bound;
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AwsConfigJson {
-    pub bucket: Option<String>,
-    pub region: Option<String>,
-    pub endpoint: Option<String>,
-    pub request_timeout: Option<u64>, // timeout in nanoseconds
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct StoreConfigJson {
-    pub provider: String, // "local", "aws"
-    pub aws: Option<AwsConfigJson>,
-}
-
-// Parsed configuration types
-
-#[derive(Debug, Clone)]
-pub struct ParsedStoreConfig {
-    pub provider: String,
-    pub aws_config: Option<AwsConfigJson>,
-}
-
-// Configuration parsing errors
-#[derive(Debug)]
-pub enum ConfigError {
-    JsonParseError(serde_json::Error),
-    InvalidProvider(String),
-}
-
-impl From<serde_json::Error> for ConfigError {
-    fn from(err: serde_json::Error) -> Self {
-        ConfigError::JsonParseError(err)
-    }
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigError::JsonParseError(e) => write!(f, "JSON parse error: {}", e),
-            ConfigError::InvalidProvider(p) => write!(f, "Invalid provider: {}", p),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ConfigError::JsonParseError(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-// Configuration parsing functions
-
-pub fn parse_store_config(json_str: &str) -> Result<ParsedStoreConfig, ConfigError> {
-    let config: StoreConfigJson = serde_json::from_str(json_str)?;
-
-    // Validate provider
-    match config.provider.as_str() {
-        "local" | "aws" => {}
-        _ => return Err(ConfigError::InvalidProvider(config.provider)),
-    }
-
-    Ok(ParsedStoreConfig {
-        provider: config.provider,
-        aws_config: config.aws,
-    })
-}
-
-// Object store creation helper
-
-pub fn create_object_store(
-    config: &ParsedStoreConfig,
-) -> Result<Arc<dyn ObjectStore>, crate::error::CSdbResult> {
-    use crate::error::{create_error_result, CSdbError};
-    use crate::object_store::{create_aws_store, create_inmemory_store};
-
-    match config.provider.as_str() {
-        "local" => create_inmemory_store(),
-        "aws" => {
-            if let Some(aws_cfg) = &config.aws_config {
-                create_aws_store(aws_cfg)
-            } else {
-                Err(create_error_result(
-                    CSdbError::InvalidArgument,
-                    "AWS config required for 'aws' provider",
-                ))
-            }
-        }
-        _ => Err(create_error_result(
-            CSdbError::InvalidArgument,
-            &format!("Unsupported provider: {}", config.provider),
-        )),
-    }
-}
 
 // Convert C options to Rust options
 
@@ -179,6 +79,7 @@ pub fn convert_read_options(c_opts: *const CSdbReadOptions) -> ReadOptions {
     ReadOptions {
         durability_filter,
         dirty: opts.dirty,
+        cache_blocks: opts.cache_blocks,
     }
 }
 

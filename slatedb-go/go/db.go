@@ -79,26 +79,36 @@ func resultToError(result C.struct_CSdbResult) error {
 
 // Open opens a SlateDB database with default settings
 // For more advanced configuration, use NewBuilder() instead
-func Open(path string, storeConfig *StoreConfig) (*DB, error) {
+func Open(path string, opts ...Option[DbConfig]) (*DB, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	// Convert Go structs to JSON strings
-	storeConfigJSON, storeConfigPtr := convertStoreConfigToJSON(storeConfig)
-	defer func() {
-		if storeConfigPtr != nil {
-			C.free(storeConfigPtr)
-		}
-	}()
+	cfg := &DbConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	var cURL, cEnvFile *C.char
+	if cfg.url != nil {
+		cURL = C.CString(*cfg.url)
+		defer C.free(unsafe.Pointer(cURL))
+	}
+	if cfg.envFile != nil {
+		cEnvFile = C.CString(*cfg.envFile)
+		defer C.free(unsafe.Pointer(cEnvFile))
+	}
 
-	handle := C.slatedb_open(cPath, storeConfigJSON)
+	handle := C.slatedb_open(cPath, cURL, cEnvFile)
+
+	if handle._1.error != C.Success {
+		return nil, resultToError(handle._1)
+	}
 
 	// Check if handle is null (indicates error)
-	if handle._0 == nil {
+	if handle._0._0 == nil {
 		return nil, errors.New("failed to open database")
 	}
 
-	return &DB{handle: handle}, nil
+	return &DB{handle: handle._0}, nil
 }
 
 // Put stores a key-value pair in the database
@@ -444,24 +454,140 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 	}, nil
 }
 
+// ScanPrefix creates a streaming iterator for all keys with the given prefix using default scan options.
+//
+// Returns an iterator that yields key-value pairs whose keys start with `prefix`.
+// The iterator MUST be closed after use to prevent resource leaks.
+//
+// ## Arguments
+// - `prefix`: key prefix to match (empty or nil scans all keys)
+//
+// ## Returns
+// - `*Iterator`: streaming iterator over matching keys
+// - `error`: if there was an error creating the iterator
+//
+// ## Examples
+//
+//	iter, err := db.ScanPrefix([]byte("user:"))
+//	if err != nil { return err }
+//	defer iter.Close()  // Essential!
+//
+//	for {
+//	    kv, err := iter.Next()
+//	    if err == io.EOF { break }
+//	    if err != nil { return err }
+//	    // process kv
+//	}
+func (db *DB) ScanPrefix(prefix []byte) (*Iterator, error) {
+	return db.ScanPrefixWithOptions(prefix, nil)
+}
+
+// ScanPrefixWithOptions creates a streaming iterator for all keys with the given prefix and custom scan options.
+//
+// Returns an iterator that yields key-value pairs whose keys start with `prefix`.
+// The iterator MUST be closed after use to prevent resource leaks.
+//
+// ## Arguments
+// - `prefix`: key prefix to match (empty or nil scans all keys)
+// - `opts`: scan options for durability, caching, read-ahead behavior
+//
+// ## Returns
+// - `*Iterator`: streaming iterator over matching keys
+// - `error`: if there was an error creating the iterator
+//
+// ## Examples
+//
+//	opts := &ScanOptions{DurabilityFilter: DurabilityRemote, Dirty: false}
+//	iter, err := db.ScanPrefixWithOptions([]byte("user:"), opts)
+//	if err != nil { return err }
+//	defer iter.Close()  // Essential!
+//
+//	for {
+//	    kv, err := iter.Next()
+//	    if err == io.EOF { break }
+//	    if err != nil { return err }
+//	    // process kv
+//	}
+func (db *DB) ScanPrefixWithOptions(prefix []byte, opts *ScanOptions) (*Iterator, error) {
+	var prefixPtr *C.uint8_t
+	if len(prefix) > 0 {
+		prefixPtr = (*C.uint8_t)(unsafe.Pointer(&prefix[0]))
+	}
+
+	cOpts := convertToCScanOptions(opts)
+
+	var iterPtr *C.CSdbIterator
+	result := C.slatedb_scan_prefix_with_options(
+		db.handle,
+		prefixPtr,
+		C.uintptr_t(len(prefix)),
+		cOpts,
+		&iterPtr,
+	)
+	defer C.slatedb_free_result(result)
+
+	if result.error != C.Success {
+		return nil, resultToError(result)
+	}
+
+	return &Iterator{
+		ptr:    iterPtr,
+		closed: false,
+	}, nil
+}
+
+// Metrics returns snapshot of current database metrics.
+func (db *DB) Metrics() (map[string]int64, error) {
+	var value C.CSdbValue
+
+	result := C.slatedb_metrics(db.handle, &value)
+	defer C.slatedb_free_result(result)
+
+	if result.error != C.Success {
+		return nil, resultToError(result)
+	}
+
+	stats := make(map[string]int64)
+	if value.data == nil || value.len == 0 {
+		return stats, nil
+	}
+
+	// Copy the data to Go memory
+	goValue := C.GoBytes(unsafe.Pointer(value.data), C.int(value.len))
+
+	// Free the C memory
+	C.slatedb_free_value(value)
+
+	if err := json.Unmarshal(goValue, &stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
+}
+
 // Builder represents a database builder that mirrors Rust's DbBuilder
 type Builder struct {
 	path         string
-	storeConfig  *StoreConfig
+	url          *string
+	envFile      *string
 	settings     *Settings
 	sstBlockSize *SstBlockSize
 }
 
 // NewBuilder creates a new database builder
-func NewBuilder(path string, storeConfig *StoreConfig) (*Builder, error) {
-	if storeConfig == nil {
-		return nil, errors.New("storeConfig cannot be nil")
-	}
+func NewBuilder(path string) (*Builder, error) {
+	return &Builder{path: path}, nil
+}
 
-	return &Builder{
-		path:        path,
-		storeConfig: storeConfig,
-	}, nil
+// WithUrl sets the URL for the database object store
+func (b *Builder) WithUrl(url string) *Builder {
+	b.url = &url
+	return b
+}
+
+// WithEnvFile sets the URL for the database object store
+func (b *Builder) WithEnvFile(envFile string) *Builder {
+	b.envFile = &envFile
+	return b
 }
 
 // WithSettings sets the Settings for the database
@@ -478,20 +604,21 @@ func (b *Builder) WithSstBlockSize(size SstBlockSize) *Builder {
 
 // Build creates the database using the configured options
 func (b *Builder) Build() (*DB, error) {
-	// Convert StoreConfig to JSON
-	storeConfigJSON, err := json.Marshal(b.storeConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal store config: %w", err)
-	}
-
 	// Create builder via FFI
 	cPath := C.CString(b.path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	cStoreConfigJSON := C.CString(string(storeConfigJSON))
-	defer C.free(unsafe.Pointer(cStoreConfigJSON))
+	var cURL, cEnvFile *C.char
+	if b.url != nil {
+		cURL = C.CString(*b.url)
+		defer C.free(unsafe.Pointer(cURL))
+	}
+	if b.envFile != nil {
+		cEnvFile = C.CString(*b.envFile)
+		defer C.free(unsafe.Pointer(cEnvFile))
+	}
 
-	builderPtr := C.slatedb_builder_new(cPath, cStoreConfigJSON)
+	builderPtr := C.slatedb_builder_new(cPath, cURL, cEnvFile)
 	if builderPtr == nil {
 		return nil, errors.New("failed to create database builder")
 	}

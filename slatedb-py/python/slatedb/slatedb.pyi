@@ -369,6 +369,41 @@ class SlateDB:
         """
         ...
 
+    def scan_prefix(self, prefix: bytes) -> DbIterator:
+        """
+        Iterate over keys sharing a prefix using default scan options.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` yielding ``(key, value)`` pairs for the prefix.
+
+        Examples:
+            >>> for k, v in db.scan_prefix(b"pre"):
+            ...     print((k, v))
+            (b'pre1', b'v1')
+            (b'pre2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_async(self, prefix: bytes) -> DbIterator:
+        """
+        Async variant of ``scan_prefix``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` suitable for ``async for``.
+
+        Example:
+            >>> it = await db.scan_prefix_async(b"pre")
+            >>> async for k, v in it:
+            ...     print((k, v))
+        """
+        ...
+
     def scan_with_options(
         self,
         start: bytes,
@@ -400,6 +435,38 @@ class SlateDB:
             ...     print((k, v))
             (b'a', b'v')
             (b'b', b'v2')
+        """
+        ...
+
+    def scan_prefix_with_options(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate over a prefix with custom scan options.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix.
+
+        Examples:
+            >>> for k, v in db.scan_prefix_with_options(b"pre", cache_blocks=True):
+            ...     print((k, v))
+            (b'pre1', b'v1')
+            (b'pre2', b'v2')
         """
         ...
 
@@ -435,6 +502,37 @@ class SlateDB:
             ...     print((k, v))
             (b'a', b'v')
             (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_with_options_async(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_prefix_with_options``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix for async iteration.
+
+        Example:
+            >>> it = await db.scan_prefix_with_options_async(b"pre", cache_blocks=True)
+            >>> async for k, v in it:
+            ...     print((k, v))
         """
         ...
 
@@ -699,6 +797,7 @@ class SlateDB:
         *,
         lifetime: int | None = None,
         source: str | None = None,
+        name: str | None = None,
     ) -> CheckpointCreateResult:
         """
         Create a writer checkpoint that includes data per the requested scope.
@@ -707,12 +806,13 @@ class SlateDB:
             scope: "all" to include recent writes, "durable" to include only durable data.
             lifetime: Optional lifetime in milliseconds.
             source: Optional existing checkpoint UUID to base from.
+            name: Optional checkpoint name.
 
         Returns:
             Dict with ``id`` (UUID string) and ``manifest_id`` (int).
 
         Examples:
-            >>> db.create_checkpoint()
+            >>> db.create_checkpoint(name="my_checkpoint")
             {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
         """
         ...
@@ -723,6 +823,7 @@ class SlateDB:
         *,
         lifetime: int | None = None,
         source: str | None = None,
+        name: str | None = None,
     ) -> CheckpointCreateResult:
         """
         Async variant of ``create_checkpoint``.
@@ -731,12 +832,13 @@ class SlateDB:
             scope: "all" or "durable".
             lifetime: Optional lifetime in milliseconds.
             source: Optional checkpoint id to base from.
+            name: Optional checkpoint name.
 
         Returns:
             A mapping with ``id`` and ``manifest_id``.
 
         Examples:
-            >>> await db.create_checkpoint_async()
+            >>> await db.create_checkpoint_async(name="my_checkpoint")
             {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
         """
         ...
@@ -837,6 +939,41 @@ class SlateDBSnapshot:
         """
         ...
 
+    def scan_prefix(self, prefix: bytes) -> DbIterator:
+        """
+        Iterate over keys with a shared prefix in the snapshot.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` over ``(key, value)`` pairs at the snapshot.
+
+        Examples:
+            >>> for k, v in snap.scan_prefix(b"sp"):
+            ...     print((k, v))
+            (b'sp1', b'v1')
+            (b'sp2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_async(self, prefix: bytes) -> DbIterator:
+        """
+        Async variant of ``scan_prefix``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` for async iteration at the snapshot.
+
+        Example:
+            >>> it = await snap.scan_prefix_async(b"sp")
+            >>> async for k, v in it:
+            ...     print((k, v))
+        """
+        ...
+
     def scan_with_options(
         self,
         start: bytes,
@@ -872,6 +1009,36 @@ class SlateDBSnapshot:
         """
         ...
 
+    def scan_prefix_with_options(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate over a prefix with custom scan options in the snapshot.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored for snapshots (reads are committed-only).
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix.
+
+        Examples:
+            >>> for k, v in snap.scan_prefix_with_options(b"sp", cache_blocks=True):
+            ...     print((k, v))
+        """
+        ...
+
     async def scan_with_options_async(
         self,
         start: bytes,
@@ -904,6 +1071,37 @@ class SlateDBSnapshot:
             ...     print((k, v))
             (b'a', b'v')
             (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_with_options_async(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_prefix_with_options``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored for snapshots (reads are committed-only).
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` for async iteration over the requested prefix.
+
+        Example:
+            >>> it = await snap.scan_prefix_with_options_async(b\"sp\", cache_blocks=True)
+            >>> async for k, v in it:
+            ...     print((k, v))
         """
         ...
 
@@ -1054,6 +1252,39 @@ class SlateDBTransaction:
         """
         ...
 
+    def scan_prefix(self, prefix: bytes) -> DbIterator:
+        """
+        Iterate over keys with a shared prefix within the transaction.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` over ``(key, value)`` pairs reflecting in-transaction writes.
+
+        Examples:
+            >>> for k, v in txn.scan_prefix(b"tp"):
+            ...     print((k, v))
+        """
+        ...
+
+    async def scan_prefix_async(self, prefix: bytes) -> DbIterator:
+        """
+        Async variant of ``scan_prefix`` for transactions.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` suitable for ``async for`` and reflecting in-transaction writes.
+
+        Example:
+            >>> it = await txn.scan_prefix_async(b"tp")
+            >>> async for k, v in it:
+            ...     print((k, v))
+        """
+        ...
+
     def scan_with_options(
         self,
         start: bytes,
@@ -1090,6 +1321,36 @@ class SlateDBTransaction:
         """
         ...
 
+    def scan_prefix_with_options(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate over a prefix with custom scan options within the transaction.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix reflecting in-transaction writes.
+
+        Examples:
+            >>> for k, v in txn.scan_prefix_with_options(b"tp", cache_blocks=True):
+            ...     print((k, v))
+        """
+        ...
+
     async def scan_with_options_async(
         self,
         start: bytes,
@@ -1123,6 +1384,37 @@ class SlateDBTransaction:
             ...     print((k, v))
             (b'a', b'v')
             (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_with_options_async(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_prefix_with_options`` within the transaction.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Include unflushed data if ``True``.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` for async iteration over the requested prefix reflecting in-transaction writes.
+
+        Example:
+            >>> it = await txn.scan_prefix_with_options_async(b\"tp\", cache_blocks=True)
+            >>> async for k, v in it:
+            ...     print((k, v))
         """
         ...
 
@@ -1420,6 +1712,39 @@ class SlateDBReader:
         """
         ...
 
+    def scan_prefix(self, prefix: bytes) -> DbIterator:
+        """
+        Iterate over keys with a shared prefix using the reader.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` yielding ``(key, value)`` pairs.
+
+        Examples:
+            >>> for k, v in reader.scan_prefix(b"pre"):
+            ...     print((k, v))
+        """
+        ...
+
+    async def scan_prefix_async(self, prefix: bytes) -> DbIterator:
+        """
+        Async variant of ``scan_prefix``.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+
+        Returns:
+            :class:`DbIterator` suitable for ``async for``.
+
+        Example:
+            >>> it = await reader.scan_prefix_async(b"pre")
+            >>> async for k, v in it:
+            ...     print((k, v))
+        """
+        ...
+
     def scan_with_options(
         self,
         start: bytes,
@@ -1455,6 +1780,36 @@ class SlateDBReader:
         """
         ...
 
+    def scan_prefix_with_options(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Iterate over a prefix with custom scan options using the reader.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored by readers; reads are committed-only.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` over the requested prefix.
+
+        Examples:
+            >>> for k, v in reader.scan_prefix_with_options(b"pre", cache_blocks=True):
+            ...     print((k, v))
+        """
+        ...
+
     async def scan_with_options_async(
         self,
         start: bytes,
@@ -1487,6 +1842,37 @@ class SlateDBReader:
             ...     print((k, v))
             (b'a', b'v')
             (b'a2', b'v2')
+        """
+        ...
+
+    async def scan_prefix_with_options_async(
+        self,
+        prefix: bytes,
+        *,
+        durability_filter: Literal["remote", "memory"] | None = None,
+        dirty: bool | None = None,
+        read_ahead_bytes: int | None = None,
+        cache_blocks: bool | None = None,
+        max_fetch_tasks: int | None = None,
+    ) -> DbIterator:
+        """
+        Async variant of ``scan_prefix_with_options`` using the reader.
+
+        Args:
+            prefix: Prefix to match; empty scans all keys.
+            durability_filter: Restrict sources ("remote" or "memory").
+            dirty: Ignored by readers.
+            read_ahead_bytes: Read-ahead size hint.
+            cache_blocks: Cache blocks during iteration if ``True``.
+            max_fetch_tasks: Limit background fetch task count.
+
+        Returns:
+            :class:`DbIterator` for async iteration over the requested prefix.
+
+        Example:
+            >>> it = await reader.scan_prefix_with_options_async(b\"pre\", cache_blocks=True)
+            >>> async for k, v in it:
+            ...     print((k, v))
         """
         ...
 
@@ -1798,6 +2184,7 @@ class SlateDBAdmin:
         *,
         lifetime: int | None = None,
         source: str | None = None,
+        name: str | None = None,
     ) -> CheckpointCreateResult:
         """
         Create a detached checkpoint.
@@ -1805,13 +2192,14 @@ class SlateDBAdmin:
         Args:
             lifetime: Optional checkpoint lifetime in milliseconds.
             source: Optional source checkpoint UUID string to extend/refresh.
+            name: Optional checkpoint name.
 
         Returns:
             Dict with ``id`` (UUID string) and ``manifest_id`` (int).
 
         Example:
             >>> admin = SlateDBAdmin("/tmp/mydb", env_file=".env")
-            >>> admin.create_checkpoint()
+            >>> admin.create_checkpoint(name="my_checkpoint")
             {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
         """
         ...
@@ -1821,6 +2209,7 @@ class SlateDBAdmin:
         *,
         lifetime: int | None = None,
         source: str | None = None,
+        name: str | None = None,
     ) -> CheckpointCreateResult:
         """
         Async variant of ``create_checkpoint``.
@@ -1828,19 +2217,23 @@ class SlateDBAdmin:
         Args:
             lifetime: Optional checkpoint lifetime in milliseconds.
             source: Optional source checkpoint UUID string to extend/refresh.
+            name: Optional checkpoint name.
 
         Returns:
             Dict with ``id`` (UUID string) and ``manifest_id`` (int).
 
         Examples:
-            >>> await admin.create_checkpoint_async()
+            >>> await admin.create_checkpoint_async(name="my_checkpoint")
             {'id': '00000000-0000-0000-0000-000000000000', 'manifest_id': 7}
         """
         ...
 
-    def list_checkpoints(self) -> list[Checkpoint]:
+    def list_checkpoints(self, name: str | None = None) -> list[Checkpoint]:
         """
         List known checkpoints for the database path/object store.
+
+        Args:
+            name: Optional checkpoint name. When present, only exact matches will be returned.
 
         Returns:
             A list of :class:`Checkpoint` metadata dicts.
@@ -1851,12 +2244,15 @@ class SlateDBAdmin:
         """
         ...
 
-    async def list_checkpoints_async(self) -> list[Checkpoint]:
+    async def list_checkpoints_async(self, name: str | None = None) -> list[Checkpoint]:
         """
         Async variant of ``list_checkpoints``.
 
         Returns:
             A list of :class:`Checkpoint` metadata dicts.
+
+        Args:
+            name: Optional checkpoint name. When present, only exact matches will be returned.
 
         Examples:
             >>> await admin.list_checkpoints_async()

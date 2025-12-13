@@ -1,17 +1,19 @@
 use serde_json;
-use slatedb::admin::load_object_store_from_env;
 use slatedb::Db;
+use std::collections::HashMap;
 use std::os::raw::c_char;
 use tokio::runtime::Builder;
 
 use crate::config::{
     convert_put_options, convert_range_bounds, convert_read_options, convert_scan_options,
-    convert_write_options, create_object_store, parse_store_config,
+    convert_write_options,
 };
 use crate::error::{
-    create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
+    create_error_result, create_handle_error_result, create_handle_success_result,
+    create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError, CSdbHandleResult,
     CSdbResult,
 };
+use crate::object_store::create_object_store;
 use crate::types::{
     CSdbHandle, CSdbIterator, CSdbPutOptions, CSdbReadOptions, CSdbScanOptions, CSdbValue,
     CSdbWriteOptions, SlateDbFFI,
@@ -25,39 +27,40 @@ use slatedb::config::{Settings, SstBlockSize};
 #[no_mangle]
 pub extern "C" fn slatedb_open(
     path: *const c_char,
-    store_config_json: *const c_char,
-) -> CSdbHandle {
+    url: *const c_char,
+    env_file: *const c_char,
+) -> CSdbHandleResult {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s,
-        Err(_) => return CSdbHandle::null(),
+        Err(err) => return create_handle_error_result(err, "Invalid path"),
     };
 
     // Create a dedicated runtime for this DB instance
     let rt = match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
-        Err(_) => return CSdbHandle::null(),
+        Err(err) => return create_handle_error_result(CSdbError::InternalError, &err.to_string()),
     };
 
-    // Create object store: try config first, fall back to environment on any failure
-    let object_store = {
-        // Try to parse store config from JSON
-        let store_result = safe_str_from_ptr(store_config_json)
-            .and_then(|json_str| {
-                parse_store_config(json_str).map_err(|_| CSdbError::InvalidArgument)
-            })
-            .and_then(|config| {
-                create_object_store(&config).map_err(|_| CSdbError::InvalidArgument)
-            });
-
-        match store_result {
-            Ok(store) => store,
-            Err(_) => {
-                // Config failed, try environment fallback
-                match load_object_store_from_env(None) {
-                    Ok(store) => store,
-                    Err(_) => return CSdbHandle::null(),
-                }
-            }
+    let url_str: Option<&str> = if url.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(url) {
+            Ok(s) => Some(s),
+            Err(err) => return create_handle_error_result(err, "Invalid pointer for config"),
+        }
+    };
+    let env_file_str = if env_file.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(env_file) {
+            Ok(s) => Some(s.to_string()),
+            Err(err) => return create_handle_error_result(err, "Invalid pointer for env file"),
+        }
+    };
+    let object_store = match create_object_store(url_str, env_file_str) {
+        Ok(store) => store,
+        Err(err) => {
+            return create_handle_error_result(CSdbError::InvalidProvider, &err.to_string())
         }
     };
 
@@ -67,9 +70,9 @@ pub extern "C" fn slatedb_open(
     }) {
         Ok(db) => {
             let ffi = Box::new(SlateDbFFI { rt, db });
-            CSdbHandle(Box::into_raw(ffi))
+            create_handle_success_result(CSdbHandle(Box::into_raw(ffi)))
         }
-        Err(_) => CSdbHandle::null(),
+        Err(err) => create_handle_error_result(CSdbError::InternalError, &err.to_string()),
     }
 }
 
@@ -295,7 +298,7 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
     ) {
         Ok(iter) => {
             // Create FFI wrapper
-            let iter_ffi = CSdbIterator::new(handle_ptr, iter);
+            let iter_ffi = CSdbIterator::new_db(handle_ptr, iter);
             unsafe {
                 *iterator_ptr = Box::into_raw(iter_ffi);
             }
@@ -308,6 +311,100 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
     }
 }
 
+/// # Safety
+///
+/// - `handle` must contain a valid database handle pointer
+/// - `prefix` must point to valid memory of at least `prefix_len` bytes (unless prefix_len is 0)
+/// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+/// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_scan_prefix_with_options(
+    mut handle: CSdbHandle,
+    prefix: *const u8,
+    prefix_len: usize,
+    scan_options: *const CSdbScanOptions,
+    iterator_ptr: *mut *mut CSdbIterator,
+) -> CSdbResult {
+    if handle.is_null() {
+        return create_error_result(CSdbError::NullPointer, "Database handle is null");
+    }
+
+    if iterator_ptr.is_null() {
+        return create_error_result(CSdbError::NullPointer, "Iterator output pointer is null");
+    }
+
+    if prefix.is_null() && prefix_len > 0 {
+        return create_error_result(CSdbError::NullPointer, "Prefix pointer is null");
+    }
+
+    let prefix_slice = if prefix_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(prefix, prefix_len) }
+    };
+
+    // Extract raw pointer before borrowing handle
+    let handle_ptr = handle.0;
+    let db_ffi = handle.as_inner();
+
+    let scan_opts = convert_scan_options(scan_options);
+
+    match db_ffi.block_on(db_ffi.db.scan_prefix_with_options(prefix_slice, &scan_opts)) {
+        Ok(iter) => {
+            let iter_ffi = CSdbIterator::new_db(handle_ptr, iter);
+            unsafe {
+                *iterator_ptr = Box::into_raw(iter_ffi);
+            }
+            create_success_result()
+        }
+        Err(e) => {
+            let error_code = slate_error_to_code(&e);
+            create_error_result(error_code, &format!("Scan prefix operation failed: {}", e))
+        }
+    }
+}
+
+/// # Safety
+///
+/// - `handle` must contain a valid database handle pointer
+/// - `value_out` must be a valid pointer to a location where a value can be stored
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_metrics(
+    mut handle: CSdbHandle,
+    value_out: *mut CSdbValue,
+) -> CSdbResult {
+    if handle.is_null() {
+        return create_error_result(CSdbError::InvalidHandle, "Invalid database handle");
+    }
+    if value_out.is_null() {
+        return create_error_result(CSdbError::NullPointer, "value_out is null");
+    }
+    let inner = handle.as_inner();
+    let metrics = inner.db.metrics();
+    let mut metrics_map: HashMap<String, i64> = HashMap::new();
+    for name in metrics.names() {
+        if let Some(value) = metrics.lookup(name) {
+            metrics_map.insert(name.to_string(), value.get());
+        }
+    }
+    match serde_json::to_vec(&metrics_map) {
+        Ok(json_vec) => {
+            let len = json_vec.len();
+            let boxed_slice = json_vec.into_boxed_slice();
+            let ptr = Box::into_raw(boxed_slice) as *mut u8;
+            unsafe {
+                (*value_out).data = ptr;
+                (*value_out).len = len;
+            }
+            create_success_result()
+        }
+        Err(e) => create_error_result(
+            CSdbError::InternalError,
+            &format!("Metrics serialization failed: {}", e),
+        ),
+    }
+}
+
 // ============================================================================
 // Database Builder Functions
 // ============================================================================
@@ -316,34 +413,33 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
 #[no_mangle]
 pub extern "C" fn slatedb_builder_new(
     path: *const c_char,
-    store_config_json: *const c_char,
+    url: *const c_char,
+    env_file: *const c_char,
 ) -> *mut slatedb::DbBuilder<String> {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s.to_string(),
         Err(_) => return std::ptr::null_mut(),
     };
 
-    // Create object store from config, fall back to environment on failure
-    let object_store = {
-        // Try to parse store config from JSON and create object store
-        let store_result = safe_str_from_ptr(store_config_json)
-            .and_then(|json_str| {
-                parse_store_config(json_str).map_err(|_| CSdbError::InvalidArgument)
-            })
-            .and_then(|config| {
-                create_object_store(&config).map_err(|_| CSdbError::InvalidArgument)
-            });
-
-        match store_result {
-            Ok(store) => store,
-            Err(_) => {
-                // Config failed, try environment fallback
-                match load_object_store_from_env(None) {
-                    Ok(store) => store,
-                    Err(_) => return std::ptr::null_mut(),
-                }
-            }
+    let url_str: Option<&str> = if url.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(url) {
+            Ok(s) => Some(s),
+            Err(_) => return std::ptr::null_mut(),
         }
+    };
+    let env_file_str = if env_file.is_null() {
+        None
+    } else {
+        match safe_str_from_ptr(env_file) {
+            Ok(s) => Some(s.to_string()),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    };
+    let object_store = match create_object_store(url_str, env_file_str) {
+        Ok(store) => store,
+        Err(_) => return std::ptr::null_mut(),
     };
 
     let builder = Db::builder(path_str, object_store);

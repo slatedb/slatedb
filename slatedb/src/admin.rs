@@ -17,6 +17,7 @@ use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::env;
+use std::env::VarError;
 use std::error::Error;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
+use crate::transactional_object::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -52,7 +54,6 @@ impl Admin {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         );
         let id_manifest = if let Some(id) = maybe_id {
             manifest_store
@@ -77,21 +78,44 @@ impl Admin {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         );
         let manifests = manifest_store.list_manifests(range).await?;
         Ok(serde_json::to_string(&manifests)?)
     }
 
-    /// List checkpoints
-    pub async fn list_checkpoints(&self) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
+    /// List checkpoints, optionally filtering by name. When name is provided, only checkpoints
+    /// with this exact name will be returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `name_filter`: Name that will be used to filter checkpoints.
+    pub async fn list_checkpoints(
+        &self,
+        name_filter: Option<&str>,
+    ) -> Result<Vec<Checkpoint>, Box<dyn Error>> {
         let manifest_store = ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         );
         let (_, manifest) = manifest_store.read_latest_manifest().await?;
-        Ok(manifest.core.checkpoints)
+
+        let checkpoints = match name_filter {
+            Some("") => manifest
+                .core
+                .checkpoints
+                .into_iter()
+                .filter(|cp| cp.name.as_deref() == Some("") || cp.name.is_none())
+                .collect(),
+            Some(name) => manifest
+                .core
+                .checkpoints
+                .into_iter()
+                .filter(|cp| cp.name.as_deref() == Some(name))
+                .collect(),
+            None => manifest.core.checkpoints,
+        };
+
+        Ok(checkpoints)
     }
 
     /// Run the garbage collector once in the foreground.
@@ -199,12 +223,12 @@ impl Admin {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         ));
         manifest_store
             .validate_no_wal_object_store_configured()
             .await?;
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         let checkpoint_id = self.rand.rng().gen_uuid();
         let checkpoint = stored_manifest
             .write_checkpoint(checkpoint_id, options)
@@ -227,14 +251,14 @@ impl Admin {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
-                let mut dirty = stored_manifest.prepare_dirty();
+            .maybe_apply_update(|stored_manifest| {
+                let mut dirty = stored_manifest.prepare_dirty()?;
                 let expire_time = lifetime.map(|l| self.system_clock.now() + l);
-                let Some(_) = dirty.core.checkpoints.iter_mut().find_map(|c| {
+                let Some(_) = dirty.value.core.checkpoints.iter_mut().find_map(|c| {
                     if c.id == id {
                         c.expire_time = expire_time;
                         return Some(());
@@ -254,20 +278,20 @@ impl Admin {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         ));
-        let mut stored_manifest = StoredManifest::load(manifest_store).await?;
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
-            .maybe_apply_manifest_update(|stored_manifest| {
-                let mut dirty = stored_manifest.prepare_dirty();
+            .maybe_apply_update(|stored_manifest| {
+                let mut dirty = stored_manifest.prepare_dirty()?;
                 let checkpoints: Vec<Checkpoint> = dirty
-                    .core
+                    .core()
                     .checkpoints
                     .iter()
                     .filter(|c| c.id != id)
                     .cloned()
                     .collect();
-                dirty.core.checkpoints = checkpoints;
+                dirty.value.core.checkpoints = checkpoints;
                 Ok(Some(dirty))
             })
             .await
@@ -322,7 +346,6 @@ impl Admin {
         ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-            self.system_clock.clone(),
         )
     }
 
@@ -409,6 +432,18 @@ impl Admin {
     }
 }
 
+fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
+    env::var(name).map_err(|e| match e {
+        VarError::NotPresent => SlateDBError::UndefinedEnvironmentVariable {
+            key: name.to_string(),
+        },
+        VarError::NotUnicode(not_unicode_value) => SlateDBError::InvalidEnvironmentVariable {
+            key: name.to_string(),
+            value: format!("{:?}", not_unicode_value),
+        },
+    })
+}
+
 /// Loads an object store from configured environment variables.
 /// The provider is specified using the CLOUD_PROVIDER variable.
 /// For specific provider configurations, see the corresponding
@@ -424,12 +459,8 @@ pub fn load_object_store_from_env(
     env_file: Option<String>,
 ) -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     dotenvy::from_filename(env_file.unwrap_or(String::from(".env"))).ok();
-
-    let provider = &*env::var("CLOUD_PROVIDER")
-        .expect("CLOUD_PROVIDER must be set")
-        .to_lowercase();
-
-    match provider {
+    let cloud_provider = get_env_variable("CLOUD_PROVIDER")?;
+    match cloud_provider.to_lowercase().as_str() {
         "local" => load_local(),
         #[cfg(feature = "aws")]
         "aws" => load_aws(),
@@ -437,7 +468,11 @@ pub fn load_object_store_from_env(
         "azure" => load_azure(),
         #[cfg(feature = "opendal")]
         "opendal" => load_opendal(),
-        _ => Err(format!("Unknown CLOUD_PROVIDER: '{}'", provider).into()),
+        invalid_value => Err(SlateDBError::InvalidEnvironmentVariable {
+            key: "CLOUD_PROVIDER".to_string(),
+            value: invalid_value.to_string(),
+        }
+        .into()),
     }
 }
 
@@ -447,7 +482,7 @@ pub fn load_object_store_from_env(
 /// |--------------|-----|----------|
 /// | LOCAL_PATH | The path to the local directory where all data will be stored | Yes |
 pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    let local_path = env::var("LOCAL_PATH").expect("LOCAL_PATH must be set");
+    let local_path = get_env_variable("LOCAL_PATH")?;
     let lfs = object_store::local::LocalFileSystem::new_with_prefix(local_path)?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
@@ -477,7 +512,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let endpoint = env::var("AWS_ENDPOINT").ok();
 
     // Start building the S3 object store builder with required params.
-    let mut builder = object_store::aws::AmazonS3Builder::new()
+    let mut builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch)
         .with_bucket_name(bucket)
         .with_region(region);
@@ -494,11 +529,9 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
         }
     }
 
-    let builder = if let Some(endpoint) = endpoint {
-        builder.with_allow_http(true).with_endpoint(endpoint)
-    } else {
-        builder
-    };
+    if let Some(endpoint) = endpoint {
+        builder = builder.with_allow_http(true).with_endpoint(endpoint);
+    }
 
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
@@ -564,4 +597,33 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 
     let op = Operator::via_iter(scheme, iter)?;
     Ok(Arc::new(object_store_opendal::OpendalStore::new(op)) as Arc<dyn ObjectStore>)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::admin::load_object_store_from_env;
+
+    #[test]
+    fn test_load_object_store_from_env() {
+        figment::Jail::expect_with(|jail| {
+            // creating an object store without CLOUD_PROVIDER env variable
+            let r = load_object_store_from_env(None);
+            assert!(r.is_err());
+            assert_eq!(
+                r.unwrap_err().to_string(),
+                "undefined environment variable CLOUD_PROVIDER"
+            );
+
+            jail.create_file("invalid.env", "CLOUD_PROVIDER=invalid")
+                .expect("failed to create temp env file");
+            let r = load_object_store_from_env(Some("invalid.env".to_string()));
+            assert!(r.is_err());
+            assert_eq!(
+                r.unwrap_err().to_string(),
+                "invalid environment variable CLOUD_PROVIDER value `invalid`"
+            );
+
+            Ok(())
+        });
+    }
 }

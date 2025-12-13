@@ -234,7 +234,7 @@ pub enum DurabilityLevel {
 
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ReadOptions {
     /// Specifies the minimum durability level for data returned by this read. For example,
     /// if set to Remote then slatedb returns the latest version of a row that has been durably
@@ -243,6 +243,18 @@ pub struct ReadOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
+    /// Whether or not fetched blocks should be cached
+    pub cache_blocks: bool,
+}
+
+impl Default for ReadOptions {
+    fn default() -> Self {
+        Self {
+            durability_filter: DurabilityLevel::default(),
+            dirty: false,
+            cache_blocks: true,
+        }
+    }
 }
 
 impl ReadOptions {
@@ -257,6 +269,13 @@ impl ReadOptions {
     pub fn with_durability_filter(self, durability_filter: DurabilityLevel) -> Self {
         Self {
             durability_filter,
+            ..self
+        }
+    }
+
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
+        Self {
+            cache_blocks,
             ..self
         }
     }
@@ -487,6 +506,9 @@ pub struct CheckpointOptions {
     /// is useful for users to establish checkpoints from existing checkpoints, but with a different
     /// lifecycle and/or metadata.
     pub source: Option<Uuid>,
+
+    /// Optionally specifies a name for the checkpoint. Can be used to list the checkpoints.
+    pub name: Option<String>,
 }
 
 /// Settings represents the configuration options that a user can tweak to customize
@@ -721,6 +743,44 @@ impl Settings {
     /// # Arguments
     ///
     /// * `prefix` - A string that specifies the prefix for the environment variables to be considered.
+    /// * `default` - The base `Settings` value to merge environment overrides into.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Settings)` if the environment variables were successfully read and parsed.
+    /// * `Err(Error)` if there was an error reading or parsing the environment variables.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slatedb::config::Settings;
+    ///
+    /// // Assuming environment variables like SLATEDB_FLUSH_INTERVAL, SLATEDB_WAL_ENABLED, etc. are set
+    /// let config = Settings::from_env_with_default("SLATEDB_", Settings::default()).expect("Failed to load options from env");
+    /// ```
+    pub fn from_env_with_default(
+        prefix: &str,
+        default: Settings,
+    ) -> Result<Settings, crate::Error> {
+        Figment::from(default)
+            .merge(Env::prefixed(prefix))
+            .extract()
+            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
+    }
+
+    /// Loads Settings from environment variables with a specified prefix.
+    ///
+    /// This function attempts to create a Settings instance by reading environment variables
+    /// that start with the given prefix. Nested options are separated by a dot (.) in the environment variable names.
+    ///
+    /// For example, if the prefix is "SLATEDB_" and there's an environment variable named "SLATEDB_DB_FLUSH_INTERVAL",
+    /// it would correspond to the `flush_interval` field within the `Settings` struct.
+    /// If there is an environment variable named "SLATEDB_OBJECT_STORE_CACHE_OPTIONS.ROOT_FOLDER",
+    /// it would correspond to the `root_folder` field within the `ObjectStoreCacheOptions` within `Settings`".
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - A string that specifies the prefix for the environment variables to be considered.
     ///
     /// # Returns
     ///
@@ -736,10 +796,7 @@ impl Settings {
     /// let config = Settings::from_env("SLATEDB_").expect("Failed to load options from env");
     /// ```
     pub fn from_env(prefix: &str) -> Result<Settings, crate::Error> {
-        Figment::from(Settings::default())
-            .merge(Env::prefixed(prefix))
-            .extract()
-            .map_err(|e| SlateDBError::InvalidConfigurationFormat(Box::new(e)).into())
+        Settings::from_env_with_default(prefix, Settings::default())
     }
 
     /// Loads Settings from multiple configuration sources in a specific order.
@@ -1288,6 +1345,7 @@ object_store_cache_options:
         let options = ReadOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);
         assert!(!options.dirty);
+        assert!(options.cache_blocks);
 
         let options = ScanOptions::default();
         assert_eq!(options.durability_filter, DurabilityLevel::Memory);

@@ -44,14 +44,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match args.command {
         CliCommands::ReadManifest { id } => exec_read_manifest(&admin, id).await?,
         CliCommands::ListManifests { start, end } => exec_list_manifest(&admin, start, end).await?,
-        CliCommands::CreateCheckpoint { lifetime, source } => {
-            exec_create_checkpoint(&admin, lifetime, source).await?
-        }
+        CliCommands::CreateCheckpoint {
+            lifetime,
+            source,
+            name,
+        } => exec_create_checkpoint(&admin, lifetime, source, name).await?,
         CliCommands::RefreshCheckpoint { id, lifetime } => {
             exec_refresh_checkpoint(&admin, id, lifetime).await?;
         }
         CliCommands::DeleteCheckpoint { id } => exec_delete_checkpoint(&admin, id).await?,
-        CliCommands::ListCheckpoints {} => exec_list_checkpoints(&admin).await?,
+        CliCommands::ListCheckpoints { name } => exec_list_checkpoints(&admin, name).await?,
         CliCommands::RunGarbageCollection { resource, min_age } => {
             exec_gc_once(&admin, resource, min_age).await?
         }
@@ -104,9 +106,14 @@ async fn exec_create_checkpoint(
     admin: &Admin,
     lifetime: Option<Duration>,
     source: Option<Uuid>,
+    name: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let result = admin
-        .create_detached_checkpoint(&CheckpointOptions { lifetime, source })
+        .create_detached_checkpoint(&CheckpointOptions {
+            lifetime,
+            source,
+            name,
+        })
         .await?;
     println!("{:?}", result);
     Ok(())
@@ -126,8 +133,11 @@ async fn exec_delete_checkpoint(admin: &Admin, id: Uuid) -> Result<(), Box<dyn E
     Ok(())
 }
 
-async fn exec_list_checkpoints(admin: &Admin) -> Result<(), Box<dyn Error>> {
-    let checkpoint = admin.list_checkpoints().await?;
+async fn exec_list_checkpoints(
+    admin: &Admin,
+    name_filter: Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    let checkpoint = admin.list_checkpoints(name_filter.as_deref()).await?;
     let checkpoint_json = serde_json::to_string(&checkpoint)?;
     println!("{}", checkpoint_json);
     Ok(())
