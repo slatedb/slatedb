@@ -33,22 +33,28 @@ impl std::fmt::Display for CSdbResult {
 }
 
 #[repr(C)]
-pub struct CSdbHandleResult(CSdbHandle, CSdbResult);
+pub struct CSdbHandleResult {
+    pub handle: CSdbHandle,
+    pub result: CSdbResult,
+}
 
 pub fn create_handle_error_result(error: CSdbError, message: &str) -> CSdbHandleResult {
     let c_message =
         CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
-    CSdbHandleResult(
-        CSdbHandle::null(),
-        CSdbResult {
+    CSdbHandleResult {
+        handle: CSdbHandle::null(),
+        result: CSdbResult {
             error,
             message: c_message.into_raw(),
         },
-    )
+    }
 }
 
 pub fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
-    CSdbHandleResult(handler, create_success_result())
+    CSdbHandleResult {
+        handle: handler,
+        result: create_success_result(),
+    }
 }
 
 // Helper functions for error handling

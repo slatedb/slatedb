@@ -36,7 +36,6 @@ opendal = { workspace = true, optional = true }
 once_cell = { workspace = true }
 ouroboros = { workspace = true }
 parking_lot = { workspace = true }
-radix_trie = { workspace = true }
 rand = { workspace = true }
 rand_xoshiro = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
