@@ -1297,6 +1297,7 @@ mod tests {
                 PathResolver::new(self.path.clone()),
                 Arc::clone(&self.fp_registry),
                 None,
+                false,
             ))
         }
 
