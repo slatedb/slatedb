@@ -1,5 +1,29 @@
 # Use OpenDAL as IO access layer
 
+<!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
+
+- [Background](#background)
+- [Goals and Constraints](#goals-and-constraints)
+   * [Goals](#goals)
+   * [Constraints](#constraints)
+- [Scope](#scope)
+- [Proposal](#proposal)
+   * [Migration Strategy](#migration-strategy)
+   * [Analysis of Direct Usages](#analysis-of-direct-usages)
+      + [TableStore](#tablestore)
+      + [ObjectStoreSequencedStorageProtocol](#objectstoresequencedstorageprotocol)
+   * [RetryingObjectStore](#retryingobjectstore)
+   * [CachedObjectStore](#cachedobjectstore)
+
+<!-- TOC end -->
+
+Status: Work in Progress
+
+Authors:
+
+- [Li Yazhou](https://github.com/flaneur2020)
+
+<!-- TOC --><a name="background"></a>
 ## Background
 
 Currently, SlateDB uses the `object_store` crate as its IO access layer. The `object_store` crate provides a minimal trait abstraction for different storage backends, which has served us well for basic storage operations.
@@ -28,8 +52,10 @@ We hope to have a solution that reduces the complexity of maintaining our own wr
 
 **OpenDAL** offers a promising solution: it's an Apache Incubator project that provides a **composable layer system** where features like caching, retrying, and observability are production-ready layers that can be combined without custom wrapper code. This addresses our exact pain points while being actively maintained by a nice community.
 
+<!-- TOC --><a name="goals-and-constraints"></a>
 ## Goals and Constraints
 
+<!-- TOC --><a name="goals"></a>
 ### Goals
 
 The primary goals of migrating to OpenDAL are:
@@ -38,6 +64,7 @@ The primary goals of migrating to OpenDAL are:
 2. **Improve extensibility**: Gain access to OpenDAL's rich layer ecosystem for future capabilities (observability, rate limiting, etc.) without additional development effort
 3. **Future-proof storage integration**: Benefit from OpenDAL's active development and broader backend support as SlateDB evolves
 
+<!-- TOC --><a name="constraints"></a>
 ### Constraints
 
 Given that `object_store` is a core dependency deeply integrated throughout SlateDB, we must ensure:
@@ -47,6 +74,7 @@ Given that `object_store` is a core dependency deeply integrated throughout Slat
 3. **Feature completeness**: All existing functionality (caching, retrying, error handling) must be preserved or improved during migration.
 4. **Validation before rollout**: A PoC must be implemented and validated against our test suite before committing to the full migration. The transition should be incremental and allow rollback if issues arise.
 
+<!-- TOC --><a name="scope"></a>
 ## Scope
 
 This RFC aims to accomplish the following:
@@ -55,8 +83,10 @@ This RFC aims to accomplish the following:
 2. **Design migration path**: Develop a concrete, step-by-step migration strategy that satisfies the constraints outlined above
 3. **Validate OpenDAL compatibility**: Verify that OpenDAL's features and layers can pass our existing test suite and meet our functional requirements
 
+<!-- TOC --><a name="proposal"></a>
 ## Proposal
 
+<!-- TOC --><a name="migration-strategy"></a>
 ### Migration Strategy
 
 OpenDAL provides a **compatibility layer** that accepts `object_store::ObjectStore` implementations as backends. This allows us to maintain API compatibility with existing users while internally leveraging OpenDAL's layer system.
@@ -78,6 +108,7 @@ Over time, we can evaluate OpenDAL's built-in layers for feature parity, replace
 
 This approach decouples the migration timeline from the need to immediately replace all custom logic, reducing risk and allowing thorough validation at each step.
 
+<!-- TOC --><a name="analysis-of-direct-usages"></a>
 ### Analysis of Direct Usages
 
 SlateDB has significant `object_store` integration across multiple components. This section analyzes the **direct call sites** of `object_store::ObjectStore` APIs in core business logic to understand the migration scope.
@@ -86,6 +117,7 @@ We skip the wrapper implementations (`CachedObjectStore`, `RetryingObjectStore`)
 
 Fortunately, direct usage of `object_store` APIs is highly concentrated in just two components: `TableStore` and `ObjectStoreSequencedStorageProtocol`. Most other components use object stores indirectly through these abstractions, which significantly reduces the migration surface area.
 
+<!-- TOC --><a name="tablestore"></a>
 #### TableStore
 
 The `TableStore` component (`tablestore.rs`) has four direct call sites to `object_store` APIs: 
@@ -99,6 +131,7 @@ The `ReadOnlyObject` struct, which implements the `ReadOnlyBlob` trait, serves a
 
 Migrating these four call sites to OpenDAL equivalents is straightforward, though we need to ensure OpenDAL provides equivalent buffered write capabilities and that stream-based list operations work seamlessly.
 
+<!-- TOC --><a name="objectstoresequencedstorageprotocol"></a>
 #### ObjectStoreSequencedStorageProtocol
 
 The `ObjectStoreSequencedStorageProtocol` component (`transactional_object/object_store.rs`) has three direct call sites:
@@ -111,10 +144,12 @@ This component provides the versioned storage protocol for `ManifestStore` and i
 
 The migration requires that OpenDAL **supports CAS (create-if-not-exists) semantics equivalent to `PutMode::Create`**—this is a P0 validation requirement. Additionally, the list operation must support range queries over versioned objects.
 
+<!-- TOC --><a name="retryingobjectstore"></a>
 ### RetryingObjectStore
 
 tbd
 
+<!-- TOC --><a name="cachedobjectstore"></a>
 ### CachedObjectStore
 
 tbd
