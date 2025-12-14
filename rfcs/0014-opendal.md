@@ -17,16 +17,16 @@ These wrapper implementations have several drawbacks:
 - Maintaining and testing these wrappers adds ongoing engineering overhead
 - The composition of multiple wrapper layers can be error-prone and harder to reason about
 
-There were issues that discussed about introducing some composibility for `object_store` crate:
+There were issues that discussed about introducing some composability for `object_store` crate:
 
 - https://github.com/apache/arrow-rs-object-store/issues/14
 - https://github.com/apache/arrow-rs-object-store/issues/274
 
 Unfortunately, these issues still have little progress.
 
-We need a solution that reduces the complexity of maintaining our own wrapper layers while leveraging extension capabilities from the ecosystem.
+We hope to have a solution that reduces the complexity of maintaining our own wrapper layers while leveraging extension capabilities from an actively developed ecosystem.
 
-**OpenDAL** offers an alternative approach: it's an Apache Incubator project that provides a **composable layer system** where features like caching, retrying, and observability are production-ready layers that can be combined without custom wrapper code. This addresses our exact pain points while being actively maintained by a large community.
+**OpenDAL** offers a promising solution: it's an Apache Incubator project that provides a **composable layer system** where features like caching, retrying, and observability are production-ready layers that can be combined without custom wrapper code. This addresses our exact pain points while being actively maintained by a nice community.
 
 ## Goals and Constraints
 
@@ -53,7 +53,7 @@ This RFC aims to accomplish the following:
 
 1. **Assess migration effort**: Document our current usage of `object_store` throughout the codebase and evaluate the feasibility of migrating to OpenDAL equivalents
 2. **Design migration path**: Develop a concrete, step-by-step migration strategy that satisfies the constraints outlined above
-3. **Validate OpenDAL maturity**: Verify that OpenDAL's features and layers can pass our existing test suite and meet our functional requirements
+3. **Validate OpenDAL compatibility**: Verify that OpenDAL's features and layers can pass our existing test suite and meet our functional requirements
 
 ## Proposal
 
@@ -64,16 +64,12 @@ OpenDAL provides a **compatibility layer** that accepts `object_store::ObjectSto
 The migration approach is straightforward: we keep the public API unchanged while internally wrapping user-provided object stores with OpenDAL's compatibility layer. This wrapper enables us to compose OpenDAL's layers (retry, metrics, caching) on top of any `object_store` implementation:
 
 ```rust
-// Public API remains unchanged
-pub fn new(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
-    // Internally wrap with OpenDAL's compatibility layer
-    let operator = OpenDAL::from_object_store(object_store)
-        .layer(RetryLayer::new())      // Replace RetryingObjectStore
-        .layer(MetricsLayer::new())    // Add observability
-        .layer(cache_layer)            // CachedObjectStore or OpenDAL's cache
-        .build()?;
-    // Internal code uses OpenDAL APIs
-}
+let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+let operator = Operator::new(ObjectStoreBuilder::new(store).build()?)
+    .layer(RetryLayer::new())
+    .layer(MetricsLayer::new())
+    .layer(cache_layer)
+    .finish()?;
 ```
 
 This compatibility layer enables a low-risk, incremental migration strategy. In the initial phase, complex wrappers like `CachedObjectStore` can remain unchanged and be passed directly to OpenDAL's compatibility layer. This ensures zero behavioral changes for systems that heavily depend on current caching semantics, such as ZeroFS.
@@ -84,7 +80,7 @@ This approach decouples the migration timeline from the need to immediately repl
 
 ### Analysis of Direct Usages
 
-SlateDB has significant `object_store` integration across multiple components. This section analyzes the **actual call sites** of `object_store::ObjectStore` APIs in core business logic to understand the migration scope.
+SlateDB has significant `object_store` integration across multiple components. This section analyzes the **direct call sites** of `object_store::ObjectStore` APIs in core business logic to understand the migration scope.
 
 We skip the wrapper implementations (`CachedObjectStore`, `RetryingObjectStore`) here since they will be replaced by OpenDAL's layer system. Instead, we focus on where core components directly invoke `object_store` APIs.
 
