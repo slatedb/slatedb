@@ -57,6 +57,29 @@ This RFC aims to accomplish the following:
 
 ## Proposal
 
-### Assessment of Migration Effort
+### Migration Strategy
 
-tbd
+OpenDAL provides a **compatibility layer** that accepts `object_store::ObjectStore` implementations as backends. This allows us to maintain API compatibility with existing users while internally leveraging OpenDAL's layer system.
+
+The migration approach is straightforward: we keep the public API unchanged while internally wrapping user-provided object stores with OpenDAL's compatibility layer. This wrapper enables us to compose OpenDAL's layers (retry, metrics, caching) on top of any `object_store` implementation:
+
+```rust
+// Public API remains unchanged
+pub fn new(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
+    // Internally wrap with OpenDAL's compatibility layer
+    let operator = OpenDAL::from_object_store(object_store)
+        .layer(RetryLayer::new())      // Replace RetryingObjectStore
+        .layer(MetricsLayer::new())    // Add observability
+        .layer(cache_layer)            // CachedObjectStore or OpenDAL's cache
+        .build()?;
+    // Internal code uses OpenDAL APIs
+}
+```
+
+This compatibility layer enables a low-risk, incremental migration strategy. In the initial phase, complex wrappers like `CachedObjectStore` can remain unchanged and be passed directly to OpenDAL's compatibility layer. This ensures zero behavioral changes for systems that heavily depend on current caching semantics, such as ZeroFS.
+
+Over time, we can evaluate OpenDAL's built-in layers for feature parity, replace custom wrappers with OpenDAL equivalents where beneficial, and contribute missing functionality upstream to OpenDAL if needed.
+
+This approach decouples the migration timeline from the need to immediately replace all custom logic, reducing risk and allowing thorough validation at each step.
+
+### Assessment of Migration Effort
