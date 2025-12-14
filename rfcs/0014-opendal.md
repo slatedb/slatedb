@@ -45,7 +45,7 @@ Given that `object_store` is a core dependency deeply integrated throughout Slat
 1. **No breaking changes**: The migration must be transparent to SlateDB users. Since we currently expose the `object_store::ObjectStore` trait as our public I/O API, we need to maintain API compatibility—either by keeping the same trait interface with a compatibility layer that preserves existing behavior.
 2. **Performance parity**: I/O performance must not regress. Critical paths (read, write, list operations) should be benchmarked to ensure OpenDAL meets or exceeds current performance metrics.
 3. **Feature completeness**: All existing functionality (caching, retrying, error handling) must be preserved or improved during migration.
-4. **Validation before rollout**: A proof-of-concept (PoC) must be implemented and validated against our test suite before committing to the full migration. The transition should be incremental and allow rollback if issues arise.
+4. **Validation before rollout**: A PoC must be implemented and validated against our test suite before committing to the full migration. The transition should be incremental and allow rollback if issues arise.
 
 ## Scope
 
@@ -82,7 +82,7 @@ Over time, we can evaluate OpenDAL's built-in layers for feature parity, replace
 
 This approach decouples the migration timeline from the need to immediately replace all custom logic, reducing risk and allowing thorough validation at each step.
 
-### Current Direct Usages
+### Analysis of Direct Usages
 
 SlateDB has significant `object_store` integration across multiple components. This section analyzes the **actual call sites** of `object_store::ObjectStore` APIs in core business logic to understand the migration scope.
 
@@ -114,3 +114,11 @@ The `ObjectStoreSequencedStorageProtocol` component (`transactional_object/objec
 This component provides the versioned storage protocol for `ManifestStore` and is particularly critical because it **uses `PutMode::Create` for optimistic concurrency control**. This create-if-not-exists semantics prevents concurrent manifest corruption, making it essential for fencing in distributed scenarios.
 
 The migration requires that OpenDAL **supports CAS (create-if-not-exists) semantics equivalent to `PutMode::Create`**—this is a P0 validation requirement. Additionally, the list operation must support range queries over versioned objects.
+
+### RetryingObjectStore
+
+tbd
+
+### CachedObjectStore
+
+tbd
