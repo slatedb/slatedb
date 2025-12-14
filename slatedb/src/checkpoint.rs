@@ -77,6 +77,7 @@ mod tests {
     use crate::test_utils;
     use bytes::Bytes;
     use chrono::TimeDelta;
+    use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -316,6 +317,113 @@ mod tests {
         let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         assert!(!manifest.core.checkpoints.iter().any(|c| c.id == id));
+    }
+
+    #[tokio::test]
+    async fn test_should_restore_checkpoint() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"key", b"old_val").await.unwrap();
+        let checkpoint = db
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        db.put(b"key", b"new_val").await.unwrap();
+        db.close().await.unwrap();
+
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            Some(Bytes::from_static(b"new_val")), // previous value should be overwritten
+            db.get(b"key").await.unwrap(),
+        );
+
+        admin.restore_checkpoint(checkpoint.id).await.unwrap();
+
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            Some(Bytes::from_static(b"old_val")), // previous value should be restored
+            db.get(b"key").await.unwrap(),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_rollback_restore_checkpoint_if_wal_copying_fails() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone())
+            .with_fp_registry(fp_registry.clone())
+            .build();
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        let checkpoint = db
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let manifest_store = ManifestStore::new(&path, object_store.clone());
+        let manifest_before_restore_command = manifest_store.read_latest_manifest().await.unwrap();
+
+        fail_parallel::cfg(fp_registry, "copy-wal-sst-io-error", "return").unwrap();
+        admin.restore_checkpoint(checkpoint.id).await.unwrap_err();
+
+        assert_eq!(
+            manifest_before_restore_command,
+            manifest_store.read_latest_manifest().await.unwrap(),
+            "manifest should not have changed after a failed restore_checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-util")]
+    async fn test_should_fail_restore_checkpoint_if_other_checkpoints_active() {
+        use crate::clock::MockSystemClock;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let system_clock = Arc::new(MockSystemClock::new());
+        let admin = AdminBuilder::new(path.clone(), object_store.clone())
+            .with_system_clock(system_clock.clone())
+            .build();
+        let _ = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        let checkpoint = admin
+            .create_detached_checkpoint(&CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let expiry_duration = Duration::from_secs(1);
+        admin
+            .create_detached_checkpoint(&CheckpointOptions {
+                lifetime: Some(expiry_duration),
+                ..CheckpointOptions::default()
+            })
+            .await
+            .unwrap();
+
+        let result = admin.restore_checkpoint(checkpoint.id).await.unwrap_err();
+        assert_eq!("Invalid error: invalid deletion", result.to_string());
+
+        // expire the other checkpoint and check that it does not fail anymore
+        system_clock.advance(expiry_duration).await;
+        admin.restore_checkpoint(checkpoint.id).await.unwrap();
     }
 
     #[tokio::test]

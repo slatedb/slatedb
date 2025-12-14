@@ -3,6 +3,7 @@ use object_store::ObjectStore;
 use std::sync::Arc;
 
 /// Resolves object stores for different [object store types](ObjectStoreType).
+#[derive(Clone)]
 pub(crate) struct ObjectStores {
     /// The main object store used for everything that doesn't have a more
     /// specific object store configured.

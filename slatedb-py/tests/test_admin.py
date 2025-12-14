@@ -177,6 +177,36 @@ async def test_admin_refresh_and_delete_checkpoint_async(db_path, env_file):
     await admin.refresh_checkpoint_async(res["id"], lifetime=1000)
     await admin.delete_checkpoint_async(res["id"])
 
+def test_admin_restore_checkpoint(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"keyA", b"v")
+    db.close()
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    res = admin.create_checkpoint()
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"keyA", b"v-modified")
+    db.close()
+    admin.restore_checkpoint(res["id"])
+    db = SlateDB(db_path, env_file=env_file)
+    assert db.get(b"keyA") == b"v"
+    db.close()
+
+@pytest.mark.asyncio
+async def test_admin_restore_checkpoint_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"keyA", b"v")
+    db.close()
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    res = admin.create_checkpoint()
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"keyA", b"v-modified")
+    db.close()
+    await admin.restore_checkpoint_async(res["id"])
+    db = SlateDB(db_path, env_file=env_file)
+    assert db.get(b"keyA") == b"v"
+    db.close()
+
+
 def test_admin_sequence_time_mapping(db_path, env_file):
     # Just verify methods return int|None without raising
     db = SlateDB(db_path, env_file=env_file)
