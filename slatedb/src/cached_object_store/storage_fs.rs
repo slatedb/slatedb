@@ -593,11 +593,9 @@ impl FsCacheEvictorInner {
         let mut evicted_bytes: usize = 0;
         if evict && self.cache_size_bytes.load(Ordering::Relaxed) > self.max_cache_size_bytes as u64
         {
-            let target_size = ((self.max_cache_size_bytes as f64) * 0.9) as u64;
             // We sacrifice floating-point precision error to prevent possible overflow(i.e. self.max_cache_size_bytes * 9 / 10).
-            while self.cache_size_bytes.load(Ordering::Relaxed)
-                > target_size
-            {
+            let target_size = ((self.max_cache_size_bytes as f64) * 0.9) as u64;
+            while self.cache_size_bytes.load(Ordering::Relaxed) > target_size {
                 // TODO(asukamilet): reduce the number of lock acquisitions by evicting multiple files in one call.
                 let bytes = self.maybe_evict_once().await;
                 if bytes == 0 {
