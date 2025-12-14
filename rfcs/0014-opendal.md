@@ -82,4 +82,35 @@ Over time, we can evaluate OpenDAL's built-in layers for feature parity, replace
 
 This approach decouples the migration timeline from the need to immediately replace all custom logic, reducing risk and allowing thorough validation at each step.
 
-### Assessment of Migration Effort
+### Current Direct Usages
+
+SlateDB has significant `object_store` integration across multiple components. This section analyzes the **actual call sites** of `object_store::ObjectStore` APIs in core business logic to understand the migration scope.
+
+We skip the wrapper implementations (`CachedObjectStore`, `RetryingObjectStore`) here since they will be replaced by OpenDAL's layer system. Instead, we focus on where core components directly invoke `object_store` APIs.
+
+Fortunately, direct usage of `object_store` APIs is highly concentrated in just two components: `TableStore` and `ObjectStoreSequencedStorageProtocol`. Most other components use object stores indirectly through these abstractions, which significantly reduces the migration surface area.
+
+#### TableStore
+
+The `TableStore` component (`tablestore.rs`) has four direct call sites to `object_store` APIs: 
+
+1. `head()` for getting object metadata in `ReadOnlyObject::len()`
+2. `get_range()` for reading byte ranges in `ReadOnlyObject::read_range()`
+3. `get()` for reading full files in `ReadOnlyObject::read()`
+4. `delete()` for SST file cleanup in `delete_sst()`
+
+The `ReadOnlyObject` struct, which implements the `ReadOnlyBlob` trait, serves as the primary interface for reading SSTable blocks, indexes, and filters. Additionally, the component uses `object_store::buffered::BufWriter` for efficient SST writes in `write_sst_in_object_store()`. List operations for WAL and SST discovery are delegated to the underlying object store via the `ObjectStores` wrapper.
+
+Migrating these four call sites to OpenDAL equivalents is straightforward, though we need to ensure OpenDAL provides equivalent buffered write capabilities and that stream-based list operations work seamlessly.
+
+#### ObjectStoreSequencedStorageProtocol
+
+The `ObjectStoreSequencedStorageProtocol` component (`transactional_object/object_store.rs`) has three direct call sites:
+
+1. `put_opts()` with `PutMode::Create` for writing new versioned manifests with CAS semantics
+2. `get()` for reading specific manifest versions
+3. `list()` for listing manifest versions in a range
+
+This component provides the versioned storage protocol for `ManifestStore` and is particularly critical because it **uses `PutMode::Create` for optimistic concurrency control**. This create-if-not-exists semantics prevents concurrent manifest corruption, making it essential for fencing in distributed scenarios.
+
+The migration requires that OpenDAL **supports CAS (create-if-not-exists) semantics equivalent to `PutMode::Create`**—this is a P0 validation requirement. Additionally, the list operation must support range queries over versioned objects.
