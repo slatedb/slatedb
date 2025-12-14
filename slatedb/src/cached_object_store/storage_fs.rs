@@ -578,6 +578,35 @@ impl FsCacheEvictorInner {
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
 
+        // if the cache size is still below the limit, do nothing
+        if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
+            return 0;
+        }
+        // TODO: check the disk space ratio here, if the disk space is low, also triggers evict.
+
+        // The maximum byte size the cache will take up on disk. If a write would cause the
+        // cache to exceed this threshold, entries are evicted using an 2-random strategy until
+        // the cache reaches 90% of `max_cache_size_bytes`.
+        //
+        // It's ok to call evict after inserting the new entry, because we will evict entries with eailer `accessed_time`.
+        // This ensures that the newly added entry will not be evicted immediately.
+        let mut evicted_bytes: usize = 0;
+        if evict && self.cache_size_bytes.load(Ordering::Relaxed) > self.max_cache_size_bytes as u64
+        {
+            let target_size = ((self.max_cache_size_bytes as f64) * 0.9) as u64;
+            // We sacrifice floating-point precision error to prevent possible overflow(i.e. self.max_cache_size_bytes * 9 / 10).
+            while self.cache_size_bytes.load(Ordering::Relaxed)
+                > target_size
+            {
+                // TODO(asukamilet): reduce the number of lock acquisitions by evicting multiple files in one call.
+                let bytes = self.maybe_evict_once().await;
+                if bytes == 0 {
+                    break;
+                }
+                evicted_bytes += bytes;
+            }
+        }
+
         evicted_bytes
     }
 
@@ -724,13 +753,13 @@ mod tests {
         let evicted = evictor
             .track_entry_accessed(path2, 1024, DefaultSystemClock::default().now(), true)
             .await;
-        assert_eq!(evicted, 1024);
+        assert_eq!(evicted, 2048);
 
         let file_paths = walkdir::WalkDir::new(temp_dir.path())
             .into_iter()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(file_paths.len(), 3); // the folder file "." is also counted
+        assert_eq!(file_paths.len(), 2); // the folder file "." is also counted
     }
 
     #[tokio::test]
