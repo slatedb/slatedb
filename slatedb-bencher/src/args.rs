@@ -52,6 +52,7 @@ pub(crate) struct BencherArgs {
 pub(crate) enum BencherCommands {
     Db(BenchmarkDbArgs),
     Compaction(BenchmarkCompactionArgs),
+    Transaction(BenchmarkTransactionArgs),
 }
 
 #[derive(Args, Clone)]
@@ -308,4 +309,99 @@ pub(crate) struct CompactionClearArgs {
         default_value_t = 4
     )]
     pub(crate) num_ssts: usize,
+}
+
+#[derive(Args, Clone)]
+#[command(about = "Benchmark SlateDB transactions.")]
+pub(crate) struct BenchmarkTransactionArgs {
+    #[clap(flatten)]
+    pub(crate) db_args: DbArgs,
+
+    #[arg(long, help = "The duration in seconds to run the benchmark for.")]
+    pub(crate) duration: Option<u32>,
+
+    #[arg(
+        long,
+        help = "The key generator to use.",
+        default_value_t = KeyGeneratorType::FixedSet
+    )]
+    pub(crate) key_generator: KeyGeneratorType,
+
+    #[arg(
+        long,
+        help = "The number of keys to generate for FixedSet key generator.",
+        default_value_t = 100_000
+    )]
+    pub(crate) key_count: u64,
+
+    #[arg(
+        long,
+        help = "The length of the keys to generate.",
+        default_value_t = 16
+    )]
+    pub(crate) key_len: usize,
+
+    #[arg(long, help = "The number of concurrent workers.", default_value_t = 4)]
+    pub(crate) concurrency: u32,
+
+    #[arg(
+        long,
+        help = "The length of the values to generate.",
+        default_value_t = 1024
+    )]
+    pub(crate) val_len: usize,
+
+    #[arg(
+        long,
+        help = "Number of operations per transaction.",
+        default_value_t = 10
+    )]
+    pub(crate) transaction_size: u32,
+
+    #[arg(
+        long,
+        help = "Percentage of transactions that should abort/rollback.",
+        default_value_t = 10
+    )]
+    pub(crate) abort_percentage: u32,
+
+    #[arg(
+        long,
+        help = "Use WriteBatch instead of Transaction for comparison.",
+        default_value_t = false
+    )]
+    pub(crate) use_write_batch: bool,
+
+    #[arg(
+        long,
+        help = "Isolation level: 'snapshot' or 'serializable'.",
+        default_value = "snapshot"
+    )]
+    pub(crate) isolation_level: String,
+
+    #[arg(
+        long,
+        help = "Whether to await durable writes.",
+        default_value_t = false
+    )]
+    pub(crate) await_durable: bool,
+}
+
+impl BenchmarkTransactionArgs {
+    pub(crate) fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
+        let key_len = self.key_len;
+        let key_count = self.key_count;
+        let supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>> = match self.key_generator {
+            KeyGeneratorType::Random => {
+                info!(key_len, "using random key generator");
+                Box::new(move || Box::new(RandomKeyGenerator::new(key_len)))
+            }
+            KeyGeneratorType::FixedSet => {
+                info!(key_len, key_count, "using fixed set key generator");
+                Box::new(move || Box::new(FixedSetKeyGenerator::new(key_len, key_count)))
+            }
+        };
+
+        supplier
+    }
 }

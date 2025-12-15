@@ -1,10 +1,14 @@
 #![allow(clippy::result_large_err)]
 
 use crate::args::BencherArgs;
-use args::{BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, CompactionSubcommands};
+use args::{
+    BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, BenchmarkTransactionArgs,
+    CompactionSubcommands,
+};
 use bytes::Bytes;
 use clap::Parser;
 use db::DbBench;
+use transactions::TransactionBench;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use object_store::path::Path;
@@ -26,6 +30,7 @@ use tracing_subscriber::EnvFilter;
 mod args;
 mod db;
 mod system_monitor;
+mod transactions;
 
 const CLEANUP_NAME: &str = ".clean_benchmark_data";
 
@@ -56,6 +61,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         BencherCommands::Compaction(subcommand_args) => {
             exec_benchmark_compaction(path.clone(), object_store.clone(), subcommand_args).await;
+        }
+        BencherCommands::Transaction(subcommand_args) => {
+            exec_benchmark_transaction(path.clone(), object_store.clone(), subcommand_args).await;
         }
     }
 
@@ -134,6 +142,53 @@ async fn exec_benchmark_compaction(
                 .expect("failed to run clear");
         }
     }
+}
+
+async fn exec_benchmark_transaction(
+    path: Path,
+    object_store: Arc<dyn ObjectStore>,
+    args: BenchmarkTransactionArgs,
+) {
+    let (config, memory_cache) = args.db_args.config().unwrap();
+    let write_options = WriteOptions {
+        await_durable: args.await_durable,
+    };
+
+    let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
+
+    if let Some(memory_cache) = memory_cache {
+        builder = builder.with_memory_cache(memory_cache);
+    }
+
+    let db = Arc::new(builder.build().await.unwrap());
+
+    let isolation_level = match args.isolation_level.to_lowercase().as_str() {
+        "snapshot" => slatedb::IsolationLevel::Snapshot,
+        "serializable" => slatedb::IsolationLevel::SerializableSnapshot,
+        _ => {
+            error!(
+                "Invalid isolation level: {}. Using Snapshot",
+                args.isolation_level
+            );
+            slatedb::IsolationLevel::Snapshot
+        }
+    };
+
+    let bencher = TransactionBench::new(
+        args.key_gen_supplier(),
+        args.val_len,
+        write_options,
+        args.concurrency,
+        args.duration.map(|d| Duration::from_secs(d as u64)),
+        args.transaction_size,
+        args.abort_percentage,
+        args.use_write_batch,
+        isolation_level,
+        db.clone(),
+    );
+    bencher.run().await;
+
+    db.close().await.expect("failed to close db");
 }
 
 /// Creates a lock file that's used as a signal to clean up test data.
