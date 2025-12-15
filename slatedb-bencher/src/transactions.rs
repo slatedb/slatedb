@@ -205,13 +205,8 @@ impl TransactionTask {
 
             if last_report.elapsed() >= REPORT_INTERVAL {
                 last_report = Instant::now();
-                self.stats_recorder.record(
-                    last_report,
-                    commits,
-                    aborts,
-                    conflicts,
-                    total_ops,
-                );
+                self.stats_recorder
+                    .record(last_report, commits, aborts, conflicts, total_ops);
                 commits = 0;
                 aborts = 0;
                 conflicts = 0;
@@ -239,11 +234,7 @@ impl TransactionTask {
             batch.put(key, value);
         }
 
-        match self
-            .db
-            .write_with_options(batch, &self.write_options)
-            .await
-        {
+        match self.db.write_with_options(batch, &self.write_options).await {
             Ok(_) => Ok(ops as u64),
             Err(e) => {
                 warn!("write batch failed [error={}]", e);
@@ -402,10 +393,7 @@ impl TransactionStatsRecorderInner {
         Some((range, commits, aborts, conflicts, total_ops))
     }
 
-    fn stats_since(
-        &self,
-        lookback: Duration,
-    ) -> Option<(Range<Instant>, u64, u64, u64, u64)> {
+    fn stats_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64, u64, u64)> {
         Self::sum_windows(&self.windows, lookback)
     }
 }
@@ -465,8 +453,7 @@ async fn dump_stats(stats: Arc<TransactionStatsRecorder>) {
         tokio::time::sleep(REPORT_INTERVAL).await;
 
         let stats_since = stats.stats_since(STAT_DUMP_LOOKBACK);
-        if let Some((range, commits_since, aborts_since, conflicts_since, ops_since)) =
-            stats_since
+        if let Some((range, commits_since, aborts_since, conflicts_since, ops_since)) = stats_since
         {
             let interval = range.end - range.start;
             let total_commits = stats.commits();

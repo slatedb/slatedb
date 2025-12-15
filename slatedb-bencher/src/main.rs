@@ -8,7 +8,6 @@ use args::{
 use bytes::Bytes;
 use clap::Parser;
 use db::DbBench;
-use transactions::TransactionBench;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use object_store::path::Path;
@@ -26,6 +25,7 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+use transactions::TransactionBench;
 
 mod args;
 mod db;
