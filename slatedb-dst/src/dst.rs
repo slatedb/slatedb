@@ -95,6 +95,7 @@ use slatedb::clock::SystemClock;
 use slatedb::config::PutOptions;
 use slatedb::config::ReadOptions;
 use slatedb::config::ScanOptions;
+use slatedb::config::Ttl;
 use slatedb::config::WriteOptions;
 use slatedb::Db;
 use slatedb::DbRand;
@@ -413,7 +414,13 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_put_options(&self) -> PutOptions {
-        PutOptions::default()
+        let ttl = if self.rand.rng().random_bool(0.5) {
+            Ttl::NoExpiry
+        } else {
+            Ttl::ExpireAfter(self.rand.rng().random_range(1..i64::MAX as u64))
+        };
+
+        PutOptions { ttl }
     }
 
     /// Generates write options for actions that require write options.
@@ -505,7 +512,7 @@ impl Dst {
         action_sampler: Box<dyn DstDistribution>,
         options: DstOptions,
     ) -> Result<Self, Error> {
-        let state = SQLiteState::new(options.state_path)?;
+        let state = SQLiteState::new(options.state_path, system_clock.clone())?;
         Ok(Self {
             db,
             state,
