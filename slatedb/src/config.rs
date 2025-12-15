@@ -924,6 +924,7 @@ pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
         return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
             crate::db_cache::foyer::FoyerCacheOptions {
                 max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                ..Default::default()
             },
         )));
     }
@@ -947,6 +948,7 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
         return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
             crate::db_cache::foyer::FoyerCacheOptions {
                 max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                ..Default::default()
             },
         )));
     }
