@@ -15,16 +15,16 @@ use crate::error::{
     CSdbResult,
 };
 use crate::object_store::create_object_store;
-use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue, SlateDbFFI};
+use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue};
 
 /// Internal struct that owns a Tokio runtime and a SlateDB DbReader instance.
 /// Similar to SlateDbFFI but for read-only operations.
-pub struct DbReaderFFI {
+pub struct SlateDbReaderFFI {
     pub rt: Runtime,
     pub reader: DbReader,
 }
 
-impl DbReaderFFI {
+impl SlateDbReaderFFI {
     /// Convenience helper to run an async block on the internal runtime.
     pub fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
         self.rt.block_on(f)
@@ -34,7 +34,7 @@ impl DbReaderFFI {
 /// Type-safe wrapper around a pointer to DbReaderFFI.
 /// This provides better type safety than raw pointers.
 #[repr(C)]
-pub struct CSdbReaderHandle(pub *mut DbReaderFFI);
+pub struct CSdbReaderHandle(pub *mut SlateDbReaderFFI);
 
 impl CSdbReaderHandle {
     pub fn null() -> Self {
@@ -49,7 +49,7 @@ impl CSdbReaderHandle {
     ///
     /// Caller must ensure the pointer is valid and properly aligned.
     /// The returned mutable reference must not outlive the pointer's validity.
-    pub unsafe fn as_inner(&mut self) -> &mut DbReaderFFI {
+    pub unsafe fn as_inner(&mut self) -> &mut SlateDbReaderFFI {
         &mut *self.0
     }
 }
@@ -60,7 +60,7 @@ impl CSdbReaderHandle {
 pub struct CSdbReaderOptions {
     /// How often to poll for manifest updates (in milliseconds)
     pub manifest_poll_interval_ms: u64,
-    /// How long checkpoints should live (in milliseconds)  
+    /// How long checkpoints should live (in milliseconds)
     pub checkpoint_lifetime_ms: u64,
     /// Max size of in-memory table for WAL buffering
     pub max_memtable_bytes: u64,
@@ -160,7 +160,7 @@ pub extern "C" fn slatedb_reader_open(
                 "slatedb_reader_open: Successfully opened DbReader for path '{}'",
                 path_str
             );
-            let ffi = Box::new(DbReaderFFI { rt, reader });
+            let ffi = Box::new(SlateDbReaderFFI { rt, reader });
             CSdbReaderHandle(Box::into_raw(ffi))
         }
         Err(e) => {
@@ -257,13 +257,12 @@ pub unsafe extern "C" fn slatedb_reader_scan_with_options(
     let rust_scan_opts = convert_scan_options(scan_options);
 
     // Extract raw pointer before borrowing handle
-    let handle_ptr = handle.0 as *mut SlateDbFFI;
+    let handle_ptr = handle.0;
     let inner = handle.as_inner();
     match inner.block_on(inner.reader.scan_with_options(range, &rust_scan_opts)) {
         Ok(iter) => {
-            // Create iterator FFI wrapper - we'll use a dummy SlateDbFFI pointer since
-            // CSdbIterator was designed for DB, but DbReader iterators work similarly
-            let iter_box = CSdbIterator::new(handle_ptr, iter);
+            // Create iterator FFI wrapper tied to reader lifecycle
+            let iter_box = CSdbIterator::new_reader(handle_ptr, iter);
             unsafe {
                 *iterator_ptr = Box::into_raw(iter_box);
             }
@@ -272,6 +271,62 @@ pub unsafe extern "C" fn slatedb_reader_scan_with_options(
         Err(e) => {
             let error_code = slate_error_to_code(&e);
             create_error_result(error_code, &format!("Scan operation failed: {}", e))
+        }
+    }
+}
+
+/// # Safety
+///
+/// - `handle` must contain a valid reader handle pointer
+/// - `prefix` must point to valid memory of at least `prefix_len` bytes (unless prefix_len is 0)
+/// - `scan_options` must be a valid pointer to CSdbScanOptions or null
+/// - `iterator_ptr` must be a valid pointer to a location where an iterator pointer can be stored
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_reader_scan_prefix_with_options(
+    mut handle: CSdbReaderHandle,
+    prefix: *const u8,
+    prefix_len: usize,
+    scan_options: *const CSdbScanOptions,
+    iterator_ptr: *mut *mut CSdbIterator,
+) -> CSdbResult {
+    if handle.is_null() {
+        return create_error_result(CSdbError::InvalidHandle, "Invalid reader handle");
+    }
+
+    if iterator_ptr.is_null() {
+        return create_error_result(CSdbError::NullPointer, "Iterator pointer is null");
+    }
+
+    if prefix.is_null() && prefix_len > 0 {
+        return create_error_result(CSdbError::NullPointer, "Prefix pointer is null");
+    }
+
+    let prefix_slice = if prefix_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(prefix, prefix_len) }
+    };
+
+    let rust_scan_opts = convert_scan_options(scan_options);
+
+    // Extract raw pointer before borrowing handle
+    let handle_ptr = handle.0;
+    let inner = handle.as_inner();
+    match inner.block_on(
+        inner
+            .reader
+            .scan_prefix_with_options(prefix_slice, &rust_scan_opts),
+    ) {
+        Ok(iter) => {
+            let iter_box = CSdbIterator::new_reader(handle_ptr, iter);
+            unsafe {
+                *iterator_ptr = Box::into_raw(iter_box);
+            }
+            create_success_result()
+        }
+        Err(e) => {
+            let error_code = slate_error_to_code(&e);
+            create_error_result(error_code, &format!("Scan prefix operation failed: {}", e))
         }
     }
 }

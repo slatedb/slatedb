@@ -1,3 +1,4 @@
+use crate::types::CSdbHandle;
 use slatedb::Error as SlateError;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -14,6 +15,7 @@ pub enum CSdbError {
     InternalError = 5,
     NullPointer = 6,
     InvalidHandle = 7,
+    InvalidProvider = 8,
 }
 
 // Result type for returning both error codes and messages
@@ -21,6 +23,38 @@ pub enum CSdbError {
 pub struct CSdbResult {
     pub error: CSdbError,
     pub message: *mut c_char,
+}
+
+impl std::fmt::Display for CSdbResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {:?}", self.error, self.message)?;
+        Ok(())
+    }
+}
+
+#[repr(C)]
+pub struct CSdbHandleResult {
+    pub handle: CSdbHandle,
+    pub result: CSdbResult,
+}
+
+pub fn create_handle_error_result(error: CSdbError, message: &str) -> CSdbHandleResult {
+    let c_message =
+        CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
+    CSdbHandleResult {
+        handle: CSdbHandle::null(),
+        result: CSdbResult {
+            error,
+            message: c_message.into_raw(),
+        },
+    }
+}
+
+pub fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
+    CSdbHandleResult {
+        handle: handler,
+        result: create_success_result(),
+    }
 }
 
 // Helper functions for error handling

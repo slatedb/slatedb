@@ -19,3 +19,12 @@ func createEnvFile(dirPath string) (string, error) {
 	}
 	return envFile, nil
 }
+
+func cleanupEnvVariables() error {
+	for _, name := range []string{"CLOUD_PROVIDER", "LOCAL_PATH"} {
+		if err := os.Unsetenv(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}

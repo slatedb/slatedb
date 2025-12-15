@@ -9,7 +9,7 @@ Please follow the instructions in the [pull request template](.github/PULL_REQUE
 If you plan on making a substantial change, please follow these steps:
 
 1. Open a Github issue
-2. If requested, write an RFC
+2. If requested, write an RFC (use [0000-template.md](./rfcs/0000-template.md) as a template)
 3. Submit incremental PRs that add functionality while moving us toward the goal of the RFC/issue
 4. If you feel the need to submit a large PR, submit it as a draft with a bullet-point list of steps to break it into smaller pieces. We will not accept large PRs.
 

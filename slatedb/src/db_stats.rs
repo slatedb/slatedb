@@ -18,6 +18,8 @@ pub const GET_REQUESTS: &str = db_stat_name!("get_requests");
 pub const SCAN_REQUESTS: &str = db_stat_name!("scan_requests");
 pub const WRITE_BATCH_COUNT: &str = db_stat_name!("write_batch_count");
 pub const WRITE_OPS: &str = db_stat_name!("write_ops");
+pub const TOTAL_MEM_SIZE_BYTES: &str = db_stat_name!("total_mem_size_bytes");
+pub const L0_SST_COUNT: &str = db_stat_name!("l0_sst_count");
 
 #[non_exhaustive]
 #[derive(Clone, Debug)]
@@ -33,6 +35,8 @@ pub(crate) struct DbStats {
     pub(crate) scan_requests: Arc<Counter>,
     pub(crate) write_batch_count: Arc<Counter>,
     pub(crate) write_ops: Arc<Counter>,
+    pub(crate) total_mem_size_bytes: Arc<Gauge<i64>>,
+    pub(crate) l0_sst_count: Arc<Gauge<i64>>,
 }
 
 impl DbStats {
@@ -49,6 +53,8 @@ impl DbStats {
             scan_requests: Arc::new(Counter::default()),
             write_batch_count: Arc::new(Counter::default()),
             write_ops: Arc::new(Counter::default()),
+            total_mem_size_bytes: Arc::new(Gauge::default()),
+            l0_sst_count: Arc::new(Gauge::default()),
         };
         registry.register(
             IMMUTABLE_MEMTABLE_FLUSHES,
@@ -70,6 +76,8 @@ impl DbStats {
         registry.register(SCAN_REQUESTS, stats.scan_requests.clone());
         registry.register(WRITE_BATCH_COUNT, stats.write_batch_count.clone());
         registry.register(WRITE_OPS, stats.write_ops.clone());
+        registry.register(TOTAL_MEM_SIZE_BYTES, stats.total_mem_size_bytes.clone());
+        registry.register(L0_SST_COUNT, stats.l0_sst_count.clone());
         stats
     }
 }

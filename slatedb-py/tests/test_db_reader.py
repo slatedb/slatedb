@@ -81,6 +81,40 @@ def test_scan_operations(db_path, env_file, populated_db):
     expected = [(b"prefix_a", b"data_a"), (b"prefix_b", b"data_b")]
     assert results == expected
 
+    # New prefix helpers
+    results = list(reader.scan_prefix(b"prefix"))
+    assert results == expected
+
+    it = reader.scan_prefix_with_options(
+        b"prefix",
+        durability_filter="memory",
+        dirty=False,
+        read_ahead_bytes=256,
+        cache_blocks=True,
+        max_fetch_tasks=1,
+    )
+    assert list(it) == expected
+
+    expected_all = [
+        (b"key1", b"value1"),
+        (b"key2", b"value2"),
+        (b"key3", b"value3"),
+        (b"prefix_a", b"data_a"),
+        (b"prefix_b", b"data_b"),
+    ]
+
+    assert list(reader.scan_prefix(b"")) == expected_all
+
+    it_all = reader.scan_prefix_with_options(
+        b"",
+        durability_filter="memory",
+        dirty=False,
+        read_ahead_bytes=256,
+        cache_blocks=True,
+        max_fetch_tasks=1,
+    )
+    assert list(it_all) == expected_all
+
     reader.close()
 
 @pytest.mark.asyncio
@@ -89,6 +123,43 @@ async def test_reader_scan_async(db_path, env_file, populated_db):
     it = await reader.scan_async(b"key")
     pairs = list(it)
     assert (b"key1", b"value1") in pairs and (b"key2", b"value2") in pairs
+    reader.close()
+
+@pytest.mark.asyncio
+async def test_reader_scan_prefix_async(db_path, env_file, populated_db):
+    reader = SlateDBReader(db_path, env_file=env_file)
+    it = await reader.scan_prefix_async(b"prefix")
+    assert list(it) == [(b"prefix_a", b"data_a"), (b"prefix_b", b"data_b")]
+    it2 = await reader.scan_prefix_with_options_async(
+        b"prefix",
+        durability_filter="memory",
+        dirty=False,
+        read_ahead_bytes=64,
+        cache_blocks=True,
+        max_fetch_tasks=1,
+    )
+    assert list(it2) == [(b"prefix_a", b"data_a"), (b"prefix_b", b"data_b")]
+
+    expected_all = [
+        (b"key1", b"value1"),
+        (b"key2", b"value2"),
+        (b"key3", b"value3"),
+        (b"prefix_a", b"data_a"),
+        (b"prefix_b", b"data_b"),
+    ]
+
+    it_all = await reader.scan_prefix_async(b"")
+    assert list(it_all) == expected_all
+
+    it_all2 = await reader.scan_prefix_with_options_async(
+        b"",
+        durability_filter="memory",
+        dirty=False,
+        read_ahead_bytes=64,
+        cache_blocks=True,
+        max_fetch_tasks=1,
+    )
+    assert list(it_all2) == expected_all
     reader.close()
 
 
