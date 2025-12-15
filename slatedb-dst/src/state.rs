@@ -1,14 +1,12 @@
 use std::{fmt, sync::Arc};
 
 use crate::{error::DstError, DstWriteOp};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use slatedb::{clock::SystemClock, config::Ttl, Error};
 
 const CREATE_STATE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS dst_state (key BLOB PRIMARY KEY, val BLOB, expire_ts INTEGER)";
 const INSERT_STATE_SQL: &str =
-    "INSERT INTO dst_state (key, val) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET val = ?2";
-const INSERT_STATE_TTL_SQL: &str =
     "INSERT INTO dst_state (key, val, expire_ts) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET val = ?2, expire_ts = ?3";
 const DELETE_STATE_SQL: &str = "DELETE FROM dst_state WHERE key = ?1";
 const SELECT_STATE_SQL: &str =
@@ -69,11 +67,14 @@ impl State for SQLiteState {
             .map_err(DstError::SQLiteStateError)?;
         for (key, val, options) in batch {
             if let Some(val) = val {
-                match options.ttl {
-                    Ttl::NoExpiry => tx.execute(INSERT_STATE_SQL, (key, val)),
-                    Ttl::ExpireAfter(ttl) => tx.execute(INSERT_STATE_TTL_SQL, (key, val, ttl)),
+                let expiry_ts = match options.ttl {
+                    Ttl::NoExpiry => None,
+                    Ttl::ExpireAfter(ttl) => {
+                        Some(self.system_clock.now().timestamp_millis() + ttl as i64)
+                    }
                     _ => unimplemented!(),
-                }
+                };
+                tx.execute(INSERT_STATE_SQL, params![key, val, expiry_ts])
             } else {
                 tx.execute(DELETE_STATE_SQL, (key,))
             }
