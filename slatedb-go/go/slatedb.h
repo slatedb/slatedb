@@ -68,8 +68,8 @@ typedef struct CSdbWriteOptions {
 } CSdbWriteOptions;
 
 typedef struct CSdbHandleResult {
-    struct CSdbHandle _0;
-    struct CSdbResult _1;
+    struct CSdbHandle handle;
+    struct CSdbResult result;
 } CSdbHandleResult;
 
 typedef struct CSdbReadOptions {

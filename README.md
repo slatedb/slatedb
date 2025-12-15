@@ -152,6 +152,7 @@ See who's using SlateDB.
 - [Responsive](https://responsive.dev)
 - [SQLync](https://sqlync.com)
 - [Tensorlake](https://www.tensorlake.ai)
+- [ZeroFS](https://zerofs.net)
 
 ## Talks
 

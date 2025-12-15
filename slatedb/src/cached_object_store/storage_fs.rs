@@ -1,5 +1,6 @@
-use std::ops::{DerefMut, Range};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt::Display, io::SeekFrom};
@@ -12,8 +13,6 @@ use chrono::{DateTime, Utc};
 use log::{debug, warn};
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
-use radix_trie::{Trie, TrieCommon};
-use rand::seq::IteratorRandom;
 use rand::{distr::Alphanumeric, Rng};
 use tokio::fs::File;
 use tokio::{
@@ -333,6 +332,7 @@ struct FsCacheEvictor {
     scan_interval: Option<Duration>,
     tx: tokio::sync::mpsc::Sender<FsCacheEvictorWork>,
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<FsCacheEvictorWork>>>,
+    started: AtomicBool,
     background_evict_handle: OnceCell<tokio::task::JoinHandle<()>>,
     background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
     stats: Arc<CachedObjectStoreStats>,
@@ -356,6 +356,7 @@ impl FsCacheEvictor {
             max_cache_size_bytes,
             tx,
             rx: Mutex::new(Some(rx)),
+            started: AtomicBool::new(false),
             background_evict_handle: OnceCell::new(),
             background_scan_handle: OnceCell::new(),
             stats,
@@ -374,6 +375,8 @@ impl FsCacheEvictor {
 
         let guard = self.rx.lock();
         let rx = guard.await.take().expect("evictor already started");
+
+        self.started.store(true, Ordering::Release);
 
         // scan the cache folder (defaults as every 1 hour) to keep the in-memory cache_entries eventually
         // consistent with the cache folder.
@@ -395,8 +398,8 @@ impl FsCacheEvictor {
             .ok();
     }
 
-    async fn started(&self) -> bool {
-        self.rx.lock().await.is_none()
+    fn started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
     }
 
     async fn background_evict(
@@ -436,7 +439,7 @@ impl FsCacheEvictor {
     // when the evictor is dropped.
     #[allow(clippy::disallowed_methods)]
     pub async fn track_entry_accessed(&self, path: std::path::PathBuf, bytes: usize, evict: bool) {
-        if !self.started().await {
+        if !self.started() {
             return;
         }
 
@@ -444,7 +447,20 @@ impl FsCacheEvictor {
     }
 }
 
-/// FsCacheEvictorInner manages the cache entries in an in-memory trie, and evict the cache entries
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    access_time: DateTime<Utc>,
+    size_bytes: usize,
+    key_index: usize,
+}
+
+#[derive(Debug, Default)]
+struct CacheState {
+    entries: HashMap<std::path::PathBuf, CacheEntry>,
+    keys: Vec<std::path::PathBuf>,
+}
+
+/// FsCacheEvictorInner manages the cache entries in `CacheState`, and evict the cache entries
 /// when the cache size exceeds the limit. it uses a pick-of-2 strategy to approximate LRU, and evict
 /// the older file when the cache size exceeds the limit.
 ///
@@ -454,10 +470,9 @@ impl FsCacheEvictor {
 #[derive(Debug)]
 struct FsCacheEvictorInner {
     root_folder: std::path::PathBuf,
-    batch_factor: usize,
     max_cache_size_bytes: usize,
     track_lock: Mutex<()>,
-    cache_entries: Mutex<Trie<std::path::PathBuf, (DateTime<Utc>, usize)>>,
+    cache_state: Mutex<CacheState>,
     cache_size_bytes: AtomicU64,
     stats: Arc<CachedObjectStoreStats>,
     rand: Arc<DbRand>,
@@ -472,41 +487,40 @@ impl FsCacheEvictorInner {
     ) -> Self {
         Self {
             root_folder,
-            batch_factor: 10,
             max_cache_size_bytes,
             track_lock: Mutex::new(()),
-            cache_entries: Mutex::new(Trie::new()),
+            cache_state: Mutex::new(CacheState::default()),
             cache_size_bytes: AtomicU64::new(0_u64),
             stats,
             rand,
         }
     }
 
-    // scan the cache folder, and load the cache entries into the in memory trie cache_entries.
+    // scan the cache folder, and load the cache entries into memory.
     // this function is only called on start up, and it's expected to run interleavely with
     // maybe_evict is being called.
     pub async fn scan_entries(self: Arc<Self>, evict: bool) {
-        // walk the cache folder, record the files and their last access time into the cache_entries
-        let iter = WalkDir::new(&self.root_folder).into_iter();
-        for entry in iter {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) => {
-                    warn!("evictor failed to walk the cache folder [error={}]", err);
-                    continue;
-                }
-            };
-            if entry.file_type().is_dir() {
-                continue;
-            }
+        let root_folder = self.root_folder.clone();
 
-            let metadata = match tokio::fs::metadata(entry.path()).await {
+        #[allow(clippy::disallowed_methods)]
+        let paths = tokio::task::spawn_blocking(move || {
+            WalkDir::new(&root_folder)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .map(|e| e.path().to_path_buf())
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+
+        for path in paths {
+            let metadata = match tokio::fs::metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) => {
                     warn!(
                         "evictor failed to get the metadata of the cache file [path={:?}, error={}]",
-                        entry.path(),
-                        err
+                        path, err
                     );
                     continue;
                 }
@@ -516,7 +530,6 @@ impl FsCacheEvictorInner {
                 .accessed()
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
                 .into();
-            let path = entry.path().to_path_buf();
             let bytes = metadata.len() as usize;
 
             self.track_entry_accessed(path, bytes, atime, evict).await;
@@ -535,27 +548,35 @@ impl FsCacheEvictorInner {
     ) -> usize {
         let _track_guard = self.track_lock.lock().await;
 
-        // record the new cache entry into the cache_entries, and increase the cache_size_bytes.
-        // NOTE: only increase the cache_size_bytes if the entry is not already in the cache_entries.
-        {
-            let mut guard = self.cache_entries.lock().await;
-            if guard.insert(path.clone(), (accessed_time, bytes)).is_none() {
-                self.cache_size_bytes
-                    .fetch_add(bytes as u64, Ordering::SeqCst);
-            }
-        }
+        let entry_count = {
+            let mut cache_state = self.cache_state.lock().await;
 
-        // record the metrics
-        self.stats
-            .object_store_cache_keys
-            .set(self.cache_entries.lock().await.len() as u64);
+            match cache_state.entries.get_mut(&path) {
+                Some(entry) => {
+                    entry.access_time = accessed_time;
+                }
+                None => {
+                    let key_index = cache_state.keys.len();
+                    cache_state.keys.push(path.clone());
+                    cache_state.entries.insert(
+                        path.clone(),
+                        CacheEntry {
+                            access_time: accessed_time,
+                            size_bytes: bytes,
+                            key_index,
+                        },
+                    );
+                    self.cache_size_bytes
+                        .fetch_add(bytes as u64, Ordering::SeqCst);
+                }
+            }
+            cache_state.entries.len()
+        };
+
+        self.stats.object_store_cache_keys.set(entry_count as u64);
         self.stats
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
-
-        if !evict {
-            return 0;
-        }
 
         // if the cache size is still below the limit, do nothing
         if self.cache_size_bytes.load(Ordering::Relaxed) <= self.max_cache_size_bytes as u64 {
@@ -563,20 +584,33 @@ impl FsCacheEvictorInner {
         }
         // TODO: check the disk space ratio here, if the disk space is low, also triggers evict.
 
-        // if the cache size exceeds the limit, evict the cache files in batch with the batch_factor,
-        // this may help to avoid the cases like triggering the evictor too frequently when the cache
-        // size is just slightly above the limit.
-        let mut total_bytes: usize = 0;
-        for _ in 0..self.batch_factor {
-            let evicted_bytes = self.maybe_evict_once().await;
-            if evicted_bytes == 0 {
-                return total_bytes;
+        // The maximum byte size the cache will take up on disk. If a write would cause the
+        // cache to exceed this threshold, entries are evicted using an 2-random strategy until
+        // the cache reaches 90% of `max_cache_size_bytes`.
+        //
+        // It's ok to call evict after inserting the new entry, because we will evict entries with eailer `accessed_time`.
+        // This ensures that the newly added entry will not be evicted immediately.
+        let mut evicted_bytes: usize = 0;
+        if evict && self.cache_size_bytes.load(Ordering::Relaxed) > self.max_cache_size_bytes as u64
+        {
+            // We sacrifice floating-point precision error to prevent possible overflow(i.e. self.max_cache_size_bytes * 9 / 10).
+            let target_size = ((self.max_cache_size_bytes as f64) * 0.9) as u64;
+            while self.cache_size_bytes.load(Ordering::Relaxed) > target_size {
+                // TODO(asukamilet): reduce the number of lock acquisitions by evicting multiple files in one call.
+                let bytes = self.maybe_evict_once().await;
+                if bytes == 0 {
+                    warn!(
+                        "cache_size_bytes still exceeds max_cache_size_bytes but no more entries can be evicted(cache_size_bytes={}, max_cache_size_bytes={})",
+                        self.cache_size_bytes.load(Ordering::Relaxed),
+                        self.max_cache_size_bytes
+                    );
+                    break;
+                }
+                evicted_bytes += bytes;
             }
-
-            total_bytes += evicted_bytes;
         }
 
-        total_bytes
+        evicted_bytes
     }
 
     // find a file, and evict it from disk. return the bytes of the evicted file. if no file is evicted or
@@ -601,24 +635,31 @@ impl FsCacheEvictorInner {
             target, target_bytes
         );
 
-        // remove the entry from the cache_entries, and decrease the cache_size_bytes
+        // remove the entry from the cache_entries and cache_keys, and decrease the cache_size_bytes
         // NOTE: only decrease the cache_size_bytes if the entry is actually removed from the cache_entries.
-        {
-            let mut guard = self.cache_entries.lock().await;
-            if guard.remove(&target).is_some() {
+        let entry_count = {
+            let mut cache_state = self.cache_state.lock().await;
+
+            if let Some(removed) = cache_state.entries.remove(&target) {
+                cache_state.keys.swap_remove(removed.key_index);
+                if removed.key_index < cache_state.keys.len() {
+                    let swapped_key = cache_state.keys[removed.key_index].clone();
+                    if let Some(swapped) = cache_state.entries.get_mut(&swapped_key) {
+                        swapped.key_index = removed.key_index;
+                    }
+                }
                 self.cache_size_bytes
                     .fetch_sub(target_bytes as u64, Ordering::SeqCst);
             }
-        }
+            cache_state.entries.len()
+        };
 
         // sync the metrics after eviction
         self.stats
             .object_store_cache_evicted_bytes
             .add(target_bytes as u64);
         self.stats.object_store_cache_evicted_keys.inc();
-        self.stats
-            .object_store_cache_keys
-            .set(self.cache_entries.lock().await.len() as u64);
+        self.stats.object_store_cache_keys.set(entry_count as u64);
         self.stats
             .object_store_cache_bytes
             .set(self.cache_size_bytes.load(Ordering::Relaxed));
@@ -629,48 +670,30 @@ impl FsCacheEvictorInner {
     // pick a file to evict, return None if no file is picked. it takes a pick-of-2 strategy, which is an approximation
     // of LRU, it randomized pick two files, compare their last access time, and choose the older one to evict.
     async fn pick_evict_target(&self) -> Option<(std::path::PathBuf, usize)> {
-        if self.cache_entries.lock().await.len() < 2 {
+        let cache_state = self.cache_state.lock().await;
+
+        if cache_state.keys.len() < 2 {
             return None;
         }
 
-        loop {
-            let ((path0, (atime0, bytes0)), (path1, (atime1, bytes1))) = match (
-                self.random_pick_entry().await,
-                self.random_pick_entry().await,
-            ) {
-                (Some(o0), Some(o1)) => (o0, o1),
-                _ => return None,
-            };
-
-            // random_pick_entry might return the same file, skip it.
-            if path0 == path1 {
-                continue;
-            }
-
-            if atime0 <= atime1 {
-                return Some((path0, bytes0));
-            } else {
-                return Some((path1, bytes1));
-            }
-        }
-    }
-
-    async fn random_pick_entry(&self) -> Option<(std::path::PathBuf, (DateTime<Utc>, usize))> {
-        let cache_entries = self.cache_entries.lock().await;
         let mut rng = self.rand.rng();
 
-        let mut rand_child = match cache_entries.children().choose(rng.deref_mut()) {
-            None => return None,
-            Some(child) => child,
-        };
-        loop {
-            if rand_child.is_leaf() {
-                return rand_child.key().cloned().zip(rand_child.value().cloned());
-            }
-            rand_child = match rand_child.children().choose(rng.deref_mut()) {
-                None => return None,
-                Some(child) => child,
-            };
+        let idx0 = rng.random_range(0..cache_state.keys.len());
+        let mut idx1 = rng.random_range(0..cache_state.keys.len());
+        while idx1 == idx0 {
+            idx1 = rng.random_range(0..cache_state.keys.len());
+        }
+
+        let path0 = &cache_state.keys[idx0];
+        let path1 = &cache_state.keys[idx1];
+
+        let entry0 = cache_state.entries.get(path0)?;
+        let entry1 = cache_state.entries.get(path1)?;
+
+        if entry0.access_time <= entry1.access_time {
+            Some((path0.clone(), entry0.size_bytes))
+        } else {
+            Some((path1.clone(), entry1.size_bytes))
         }
     }
 }
@@ -710,13 +733,12 @@ mod tests {
             .unwrap();
         let registry = StatRegistry::new();
 
-        let mut evictor = FsCacheEvictorInner::new(
+        let evictor = FsCacheEvictorInner::new(
             temp_dir.path().to_path_buf(),
             1024 * 2,
             Arc::new(CachedObjectStoreStats::new(&registry)),
             Arc::new(DbRand::default()),
         );
-        evictor.batch_factor = 2;
 
         let path0 = gen_rand_file(temp_dir.path(), "file0", 1024);
         let evicted = evictor
