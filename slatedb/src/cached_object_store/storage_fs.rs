@@ -599,6 +599,11 @@ impl FsCacheEvictorInner {
                 // TODO(asukamilet): reduce the number of lock acquisitions by evicting multiple files in one call.
                 let bytes = self.maybe_evict_once().await;
                 if bytes == 0 {
+                    warn!(
+                        "cache_size_bytes still exceeds max_cache_size_bytes but no more entries can be evicted(cache_size_bytes={}, max_cache_size_bytes={})",
+                        self.cache_size_bytes.load(Ordering::Relaxed),
+                        self.max_cache_size_bytes
+                    );
                     break;
                 }
                 evicted_bytes += bytes;
