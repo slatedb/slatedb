@@ -73,27 +73,27 @@ impl SystemMonitor {
                     ProcessRefreshKind::nothing().with_memory(),
                 );
 
-                let total_memory = slatedb::format_bytes_si(system.total_memory());
-                let used_memory = slatedb::format_bytes_si(system.used_memory());
-                let free_memory = slatedb::format_bytes_si(system.free_memory());
-                let available_memory = slatedb::format_bytes_si(system.available_memory());
-                let total_swap = slatedb::format_bytes_si(system.total_swap());
-                let free_swap = slatedb::format_bytes_si(system.free_swap());
-                let used_swap = slatedb::format_bytes_si(system.used_swap());
-                let bencher_memory = system
+                let total_memory_mb = system.total_memory() / 1024 / 1024;
+                let used_memory_mb = system.used_memory() / 1024 / 1024;
+                let free_memory_mb = system.free_memory() / 1024 / 1024;
+                let available_memory_mb = system.available_memory() / 1024 / 1024;
+                let total_swap_mb = system.total_swap() / 1024 / 1024;
+                let free_swap_mb = system.free_swap() / 1024 / 1024;
+                let used_swap_mb = system.used_swap() / 1024 / 1024;
+                let bencher_memory_mb = system
                     .process(bencher_pid)
-                    .map(|p| slatedb::format_bytes_si(p.memory()))
-                    .unwrap_or_else(|| "0 B".to_string());
+                    .map(|p| p.memory() / 1024 / 1024)
+                    .unwrap_or(0);
                 info!(
-                    bencher_memory,
-                    total_memory,
-                    used_memory,
-                    free_memory,
-                    available_memory,
-                    total_swap,
-                    free_swap,
-                    used_swap,
-                    "memory usage"
+                    bencher_memory_mb,
+                    total_memory_mb,
+                    used_memory_mb,
+                    free_memory_mb,
+                    available_memory_mb,
+                    total_swap_mb,
+                    free_swap_mb,
+                    used_swap_mb,
+                    "memory usage (MiB)"
                 );
 
                 disks.refresh(true);
@@ -103,18 +103,16 @@ impl SystemMonitor {
 
                 for disk in disks.list() {
                     let usage = disk.usage();
-                    let read_bytes_per_second =
-                        (usage.read_bytes as f64 / elapsed.as_secs_f64()) as u64;
-                    let write_bytes_per_second =
-                        (usage.written_bytes as f64 / elapsed.as_secs_f64()) as u64;
+                    let read_mb_since_last_refresh = usage.read_bytes / 1024 / 1024;
+                    let write_mb_since_last_refresh = usage.written_bytes / 1024 / 1024;
+                    let read_mb_per_second =
+                        read_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
+                    let write_mb_per_second =
+                        write_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
                     let disk_name = disk.name().to_str().unwrap();
-                    let read_per_second =
-                        format!("{}/s", slatedb::format_bytes_si(read_bytes_per_second));
-                    let write_per_second =
-                        format!("{}/s", slatedb::format_bytes_si(write_bytes_per_second));
                     info!(
                         disk_name,
-                        read_per_second, write_per_second, "disk usage",
+                        read_mb_per_second, write_mb_per_second, "disk usage (MiB/s)",
                     );
                 }
 
@@ -124,23 +122,20 @@ impl SystemMonitor {
                 last_network_refresh = now;
 
                 for (interface_name, data) in networks.list() {
-                    let received_bytes = data.received();
-                    let transmitted_bytes = data.transmitted();
-                    if received_bytes == 0 && transmitted_bytes == 0 {
+                    let received_mb_since_last_refresh = data.received() / 1024 / 1024;
+                    let transmitted_mb_since_last_refresh = data.transmitted() / 1024 / 1024;
+                    if received_mb_since_last_refresh == 0 && transmitted_mb_since_last_refresh == 0
+                    {
                         continue;
                     }
-                    let received_bytes_per_second =
-                        (received_bytes as f64 / elapsed.as_secs_f64()) as u64;
-                    let transmitted_bytes_per_second =
-                        (transmitted_bytes as f64 / elapsed.as_secs_f64()) as u64;
-                    let received_per_second =
-                        format!("{}/s", slatedb::format_bytes_si(received_bytes_per_second));
-                    let transmitted_per_second =
-                        format!("{}/s", slatedb::format_bytes_si(transmitted_bytes_per_second));
+                    let received_mb_per_second =
+                        received_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
+                    let transmitted_mb_per_second =
+                        transmitted_mb_since_last_refresh as f64 / elapsed.as_secs_f64();
 
                     info!(
                         interface_name,
-                        received_per_second, transmitted_per_second, "network usage",
+                        received_mb_per_second, transmitted_mb_per_second, "network usage (MiB/s)",
                     );
                 }
 
