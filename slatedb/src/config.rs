@@ -1046,7 +1046,7 @@ impl std::fmt::Debug for CompactorOptions {
 }
 
 /// Options for the Size-Tiered Compaction Scheduler
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct SizeTieredCompactionSchedulerOptions {
     /// The minimum number of sources to include together in a single compaction step.
     pub min_compaction_sources: usize,
