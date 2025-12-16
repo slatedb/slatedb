@@ -88,6 +88,7 @@ impl DbArgs {
         let block_cache = self.block_cache_size.map(|capacity| {
             Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
                 max_capacity: capacity,
+                ..Default::default()
             })) as Arc<dyn DbCache>
         });
 
@@ -98,6 +99,7 @@ impl DbArgs {
             self.meta_cache_size.map(|capacity| {
                 Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
                     max_capacity: capacity,
+                    ..Default::default()
                 })) as Arc<dyn DbCache>
             })
         };
