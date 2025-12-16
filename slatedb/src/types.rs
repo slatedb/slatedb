@@ -61,6 +61,29 @@ impl RowEntry {
         size
     }
 
+    /// Returns the encoded size of this entry when written to an SST block.
+    /// The `key_prefix_len` is the number of bytes shared with the block's first key.
+    pub(crate) fn encoded_size(&self, key_prefix_len: usize) -> usize {
+        let key_suffix_len = self.key.len() - key_prefix_len;
+        let mut size = std::mem::size_of::<u16>() // key_prefix_len
+            + std::mem::size_of::<u16>() // key_suffix_len
+            + key_suffix_len
+            + std::mem::size_of::<u64>() // seq
+            + std::mem::size_of::<u8>(); // flags
+
+        if self.expire_ts.is_some() {
+            size += std::mem::size_of::<i64>();
+        }
+        if self.create_ts.is_some() {
+            size += std::mem::size_of::<i64>();
+        }
+        if !self.value.is_tombstone() {
+            size += std::mem::size_of::<u32>(); // value_len
+            size += self.value.len();
+        }
+        size
+    }
+
     #[cfg(test)]
     pub(crate) fn new_value(key: &[u8], value: &[u8], seq: u64) -> Self {
         Self {

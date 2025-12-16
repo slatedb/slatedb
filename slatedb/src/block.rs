@@ -114,13 +114,28 @@ impl BlockBuilder {
         + self.data.len()    // key-value pairs
     }
 
+    /// Checks if the entry would fit in the current block without consuming it.
+    /// Empty blocks always return true (they accept entries that exceed block_size).
+    pub fn would_fit(&self, entry: &RowEntry) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
+        self.estimated_size() + entry.encoded_size(key_prefix_len) <= self.block_size
+    }
+
     #[must_use]
     pub fn add(&mut self, entry: RowEntry) -> bool {
         assert!(!entry.key.is_empty(), "key must not be empty");
+
+        if !self.would_fit(&entry) {
+            return false;
+        }
+
         let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
         let key_suffix = entry.key.slice(key_prefix_len..);
 
-        let sst_row_entry = &SstRowEntry::new(
+        let sst_row_entry = SstRowEntry::new(
             key_prefix_len,
             key_suffix,
             entry.seq,
@@ -129,15 +144,9 @@ impl BlockBuilder {
             entry.expire_ts,
         );
 
-        // If adding the key-value pair would exceed the block size limit, don't add it.
-        // (Unless the block is empty, in which case, allow the block to exceed the limit.)
-        if self.estimated_size() + sst_row_entry.size() > self.block_size && !self.is_empty() {
-            return false;
-        }
-
         self.offsets.push(self.data.len() as u16);
         let codec = SstRowCodecV0::new();
-        codec.encode(&mut self.data, sst_row_entry);
+        codec.encode(&mut self.data, &sst_row_entry);
 
         if self.first_key.is_empty() {
             self.first_key = Bytes::copy_from_slice(entry.key.as_ref());
