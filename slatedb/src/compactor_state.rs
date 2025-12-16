@@ -198,7 +198,7 @@ impl Display for Compaction {
         if self.bytes_processed > 0 {
             let human_bytes_processed = crate::utils::format_bytes_si(self.bytes_processed);
 
-            write!(f, " ({} bytes processed)", human_bytes_processed)?;
+            write!(f, " ({} processed)", human_bytes_processed)?;
         }
         Ok(())
     }
