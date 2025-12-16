@@ -25,11 +25,11 @@ pub(crate) struct ConflictChecker {
 }
 
 impl ConflictChecker {
-    fn new(compactions: &[CompactionSpec]) -> Self {
+    fn new<'a>(compactions: impl Iterator<Item = &'a CompactionSpec>) -> Self {
         let mut checker = Self {
             sources_used: HashSet::new(),
         };
-        for compaction in compactions.iter() {
+        for compaction in compactions {
             checker.add_compaction(compaction);
         }
         checker
@@ -179,13 +179,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         let mut compactions = Vec::new();
         let db_state = state.db_state();
         let (l0, srs) = self.compaction_sources(db_state);
-        let conflict_checker = ConflictChecker::new(
-            state
-                .compactions()
-                .map(|j| j.spec().clone())
-                .collect::<Vec<_>>()
-                .as_slice(),
-        );
+        let conflict_checker = ConflictChecker::new(state.compactions().map(|j| j.spec()));
         let backpressure_checker = BackpressureChecker::new(
             self.options.include_size_threshold,
             self.options.max_compaction_sources,
