@@ -2,10 +2,14 @@ use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
+use crate::db_state::SsTableId;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::paths::PathResolver;
+use crate::sst::SsTableFormat;
+use crate::tablestore::TableStore;
 
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
@@ -14,8 +18,10 @@ use crate::seq_tracker::FindOption;
 use crate::utils::{IdGenerator, WatchableOnceCell};
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
+use log::error;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use std::collections::HashSet;
 use std::env;
 use std::env::VarError;
 use std::error::Error;
@@ -43,6 +49,8 @@ pub struct Admin {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
     pub(crate) rand: Arc<DbRand>,
+    /// The fail point registry to use to inject failures in tests
+    pub(crate) fp_registry: Option<Arc<FailPointRegistry>>,
 }
 
 impl Admin {
@@ -298,6 +306,87 @@ impl Admin {
             .map_err(Into::into)
     }
 
+    /// Restores the checkpoint by duplicating the checkpointed manifest as the latest and copying
+    /// the necessary WALs to be the latest active WALs.
+    ///
+    /// Fences any writers through uploading a fencing WAL at the start of the operation. Fences
+    /// any other clients through advancing the new manifest's epochs.
+    ///
+    /// Fails with SlateDBError::InvalidDeletion if there are any active checkpoints that will be
+    /// lost after the restore.
+    /// TODO: Add option flag to retain existing checkpoints after restore, instead of failing.
+    ///
+    /// Failing at any point should rollback by deleting the restored manifest, and any of the restored WALs.
+    pub async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
+        let manifest_store = Arc::new(self.manifest_store());
+        let wal_store = self.table_store();
+        let fencing_wal = self.fence_writers(&wal_store).await?;
+
+        let mut current_manifest =
+            StoredManifest::load(manifest_store.clone(), self.system_clock.clone()).await?;
+        let checkpoint = match current_manifest.db_state().find_checkpoint(id) {
+            Some(found_checkpoint) => found_checkpoint.clone(),
+            None => return Err(SlateDBError::CheckpointMissing(id).into()),
+        };
+
+        let manifest_to_restore = manifest_store.read_manifest(checkpoint.manifest_id).await?;
+
+        let retained_checkpoint_ids: HashSet<_> = manifest_to_restore
+            .core
+            .checkpoints
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        current_manifest
+            .maybe_apply_update(|stored_manifest| {
+                // Ensure there are no other active checkpoints before deleting
+                for cp in stored_manifest.object().core.checkpoints.iter() {
+                    match cp.expire_time {
+                        Some(expire_time) if self.system_clock.now() >= expire_time => continue,
+                        _ => {}
+                    }
+                    if !retained_checkpoint_ids.contains(&cp.id) {
+                        return Err(SlateDBError::InvalidDeletion);
+                    }
+                }
+
+                let mut dirty = stored_manifest.prepare_dirty()?;
+                dirty.value = manifest_to_restore.clone();
+
+                dirty.value.core.replay_after_wal_id = fencing_wal;
+                dirty.value.core.next_wal_sst_id = fencing_wal + 1;
+                // advance epochs to fence any other clients that might still be running
+                dirty.value.writer_epoch = stored_manifest.object().writer_epoch + 1;
+                dirty.value.compactor_epoch = stored_manifest.object().compactor_epoch + 1;
+
+                Ok(Some(dirty))
+            })
+            .await?;
+
+        if let Err(e) = wal_store
+            .copy_wal_ssts(
+                manifest_to_restore.core.replay_after_wal_id
+                    ..manifest_to_restore.core.next_wal_sst_id,
+                &SsTableId::Wal(fencing_wal + 1),
+            )
+            .await
+        {
+            if let Err(delete_err) = manifest_store
+                .delete_manifest_unchecked(current_manifest.id())
+                .await
+            {
+                error!(
+                    "error deleting manifest [id={:?}, error={}]",
+                    current_manifest.id(),
+                    delete_err
+                );
+            }
+            return Err(e.into());
+        }
+
+        Ok(())
+    }
+
     /// Returns the timestamp or sequence from the latest manifest's sequence tracker.
     /// When `round_up` is true, uses the next higher value; otherwise the previous one.
     pub async fn get_timestamp_for_sequence(
@@ -347,6 +436,42 @@ impl Admin {
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
+    }
+
+    fn table_store(&self) -> TableStore {
+        match self.fp_registry.as_ref() {
+            Some(fp_registry) => TableStore::new_with_fp_registry(
+                self.object_stores.clone(),
+                SsTableFormat::default(),
+                PathResolver::new(self.path.clone()),
+                fp_registry.clone(),
+                None,
+            ),
+            None => TableStore::new(
+                self.object_stores.clone(),
+                SsTableFormat::default(),
+                self.path.clone(),
+                None,
+            ),
+        }
+    }
+
+    // Writes an empty WAL SST to storage to fence other writers. Returns the id of the WAL
+    // uploaded.
+    async fn fence_writers(&self, wal_store: &TableStore) -> Result<u64, SlateDBError> {
+        let mut empty_wal_id = wal_store.last_seen_wal_id().await?;
+
+        loop {
+            let empty_sst = wal_store.table_builder().build()?;
+            match wal_store
+                .write_sst(&SsTableId::Wal(empty_wal_id), empty_sst, false)
+                .await
+            {
+                Ok(_) => return Ok(empty_wal_id),
+                Err(SlateDBError::Fenced) => empty_wal_id += 1,
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Clone a database. If no db already exists at the specified path, then this will create
@@ -499,7 +624,7 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// | AWS_ENDPOINT | The endpoint to use for S3 (disables https) | No |
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    use object_store::aws::S3ConditionalPut;
+    use object_store::aws::{S3ConditionalPut, S3CopyIfNotExists};
 
     // Mandatory environment variables
     let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
@@ -514,6 +639,10 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     // Start building the S3 object store builder with required params.
     let mut builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch)
+        .with_copy_if_not_exists(S3CopyIfNotExists::Header(
+            "If-None-Match".to_string(),
+            "*".to_string(),
+        ))
         .with_bucket_name(bucket)
         .with_region(region);
 
@@ -601,7 +730,37 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::admin::load_object_store_from_env;
+    use crate::admin::Admin;
+    use crate::Db;
+    use object_store::memory::InMemory;
+    use object_store::ObjectStore;
+
+    #[tokio::test]
+    async fn test_admin_fence_writers() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+
+        // open db and assert that it can write.
+        let db = Db::builder(path, object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"1", b"1").await.unwrap();
+
+        let admin = Admin::builder(path, object_store).build();
+
+        let table_store = admin.table_store();
+        let wal_id = admin.fence_writers(&table_store).await.unwrap();
+
+        assert_eq!(table_store.last_seen_wal_id().await.unwrap(), wal_id);
+
+        // assert that db can no longer write.
+        let err = db.put(b"1", b"1").await.unwrap_err();
+        assert_eq!(err.to_string(), "Closed error: detected newer DB client");
+    }
 
     #[test]
     fn test_load_object_store_from_env() {
