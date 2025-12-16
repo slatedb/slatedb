@@ -81,7 +81,7 @@ use crate::rand::DbRand;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
 
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
 
@@ -469,13 +469,13 @@ impl CompactorEventHandler {
                 0
             };
             debug!(
-                "compaction progress [id={}, progress={}%, processed_bytes={}, estimated_source_bytes={}, elapsed={:.2}s, throughput={:.2} bytes/sec]",
+                "compaction progress [id={}, progress={}%, processed_bytes={}, estimated_source_bytes={}, elapsed={:.2}s, throughput={}/s]",
                 compaction.id(),
                 percentage,
-                compaction.bytes_processed(),
-                estimated_source_bytes,
+                format_bytes_si(compaction.bytes_processed()),
+                format_bytes_si(estimated_source_bytes),
                 elapsed_secs,
-                throughput,
+                format_bytes_si(throughput as u64),
             );
         }
 

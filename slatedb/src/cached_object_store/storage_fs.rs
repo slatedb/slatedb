@@ -23,6 +23,7 @@ use tokio::{
 use walkdir::WalkDir;
 
 use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};
+use crate::utils::format_bytes_si;
 
 #[derive(Debug)]
 pub struct FsCacheStorage {
@@ -633,7 +634,8 @@ impl FsCacheEvictorInner {
 
         debug!(
             "evictor evicted cache file [path={:?}, bytes={}]",
-            target, target_bytes
+            target,
+            format_bytes_si(target_bytes as u64)
         );
 
         // remove the entry from the cache_entries and cache_keys, and decrease the cache_size_bytes
