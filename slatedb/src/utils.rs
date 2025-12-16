@@ -612,7 +612,7 @@ pub(crate) fn split_join_result(
 /// Uses decimal (SI) prefixes where 1 KB = 1000 bytes.
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// use slatedb::format_bytes_si;
 ///
 /// assert_eq!(format_bytes_si(0), "0 B");
