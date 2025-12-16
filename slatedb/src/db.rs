@@ -66,7 +66,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{MonotonicSeq, SendSafely};
+use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use log::{info, trace, warn};
@@ -318,20 +318,20 @@ impl DbInner {
 
             trace!(
                 "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
-                total_mem_size_bytes,
-                wal_size_bytes,
-                imm_memtable_size_bytes,
-                self.settings.max_unflushed_bytes,
+                format_bytes_si(total_mem_size_bytes as u64),
+                format_bytes_si(wal_size_bytes as u64),
+                format_bytes_si(imm_memtable_size_bytes as u64),
+                format_bytes_si(self.settings.max_unflushed_bytes as u64),
             );
 
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();
                 warn!(
                     "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
-                    total_mem_size_bytes,
-                    wal_size_bytes,
-                    imm_memtable_size_bytes,
-                    self.settings.max_unflushed_bytes,
+                    format_bytes_si(total_mem_size_bytes as u64),
+                    format_bytes_si(wal_size_bytes as u64),
+                    format_bytes_si(imm_memtable_size_bytes as u64),
+                    format_bytes_si(self.settings.max_unflushed_bytes as u64),
                 );
 
                 let maybe_oldest_unflushed_memtable = {

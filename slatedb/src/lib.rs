@@ -51,6 +51,7 @@ pub use rand::DbRand;
 pub use seq_tracker::FindOption;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
+pub use utils::format_bytes_si;
 
 pub mod admin;
 pub mod clock;

@@ -612,14 +612,16 @@ pub(crate) fn split_join_result(
 /// Uses decimal (SI) prefixes where 1 KB = 1000 bytes.
 ///
 /// # Examples
-/// ```ignore
+/// ```
+/// use slatedb::format_bytes_si;
+///
 /// assert_eq!(format_bytes_si(0), "0 B");
 /// assert_eq!(format_bytes_si(999), "999 B");
 /// assert_eq!(format_bytes_si(1000), "1.00 KB");
 /// assert_eq!(format_bytes_si(1500), "1.50 KB");
 /// assert_eq!(format_bytes_si(1_000_000), "1.00 MB");
 /// ```
-pub(crate) fn format_bytes_si(bytes: u64) -> String {
+pub fn format_bytes_si(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB"];
     const FACTOR: f64 = 1000.0;
 
