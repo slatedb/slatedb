@@ -17,6 +17,7 @@ bitflags = { workspace = true }
 bytemuck = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 chrono = { workspace = true, features = ["serde"] }
+sysinfo = { workspace = true }
 crc32fast = { workspace = true }
 crossbeam-skiplist = { workspace = true }
 dotenvy = { workspace = true }
