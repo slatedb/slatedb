@@ -12,8 +12,10 @@ async fn main() -> anyhow::Result<()> {
     let object_store = Arc::new(LocalFileSystem::new_with_prefix(local_root)?);
 
     // Disable the embedded compactor by clearing compactor options.
-    let mut settings = Settings::default();
-    settings.compactor_options = None;
+    let settings = Settings {
+        compactor_options: None,
+        ..Default::default()
+    };
 
     let db = Db::builder("db", object_store)
         .with_settings(settings)
