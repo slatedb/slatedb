@@ -53,6 +53,7 @@ following environment variables before benchmarking:
 - `AWS_REGION`
 - `AWS_BUCKET`
 - `AWS_ENDPOINT` (optional), if you are using a custom S3 endpoint.
+- `AWS_ALLOW_HTTP` (optional), if your AWS_ENDPOINT uses HTTP instead of HTTPS.
 - `AWS_SESSION_TOKEN` (optional), if you are using temporary credentials. 
 
 ## `benchmark-db.sh`

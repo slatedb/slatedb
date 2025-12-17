@@ -487,71 +487,27 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
 
-/// Loads an AWS S3 Object store instance.
-///
-/// | Env Variable | Doc | Required |
-/// |--------------|-----|----------|
-/// | AWS_ACCESS_KEY_ID | The access key for a role with permissions to access the store | No |
-/// | AWS_SECRET_ACCESS_KEY | The access key secret for the above ID | No |
-/// | AWS_SESSION_TOKEN | The session token for the above ID | No |
-/// | AWS_BUCKET | The bucket to use within S3 | Yes |
-/// | AWS_REGION | The AWS region to use | Yes |
-/// | AWS_ENDPOINT | The endpoint to use for S3 (disables https) | No |
+/// Loads an AWS S3 Object store instance. The environment variables consumed are
+/// the same as those supported by [`AmazonS3Builder::from_env`]. Refer to the
+/// builder documentation for the full list and meaning of supported variables:
+/// <https://docs.rs/object_store/latest/object_store/aws/struct.AmazonS3Builder.html#method.with_config>
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     use object_store::aws::S3ConditionalPut;
 
-    // Mandatory environment variables
-    let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
-    let region = env::var("AWS_REGION").expect("AWS_REGION must be set");
-
-    // Optional environment variables (credentials / session token)
-    let key = env::var("AWS_ACCESS_KEY_ID").ok();
-    let secret = env::var("AWS_SECRET_ACCESS_KEY").ok();
-    let session_token = env::var("AWS_SESSION_TOKEN").ok();
-    let endpoint = env::var("AWS_ENDPOINT").ok();
-
-    // Start building the S3 object store builder with required params.
-    let mut builder = object_store::aws::AmazonS3Builder::from_env()
-        .with_conditional_put(S3ConditionalPut::ETagMatch)
-        .with_bucket_name(bucket)
-        .with_region(region);
-
-    // If explicit credentials are supplied, configure them; otherwise rely on the AWS SDK
-    // default credential provider chain (which covers IMDS / IRSA).
-    if let (Some(access_key), Some(secret_key)) = (key, secret) {
-        builder = builder
-            .with_access_key_id(access_key)
-            .with_secret_access_key(secret_key);
-
-        if let Some(token) = session_token {
-            builder = builder.with_token(token);
-        }
-    }
-
-    if let Some(endpoint) = endpoint {
-        builder = builder.with_allow_http(true).with_endpoint(endpoint);
-    }
+    let builder = object_store::aws::AmazonS3Builder::from_env()
+        .with_conditional_put(S3ConditionalPut::ETagMatch);
 
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
 
-/// Loads an Azure Object store instance.
-///
-/// | Env Variable | Doc | Required |
-/// |--------------|-----|----------|
-/// | AZURE_ACCOUNT | The azure storage account name | Yes |
-/// | AZURE_KEY | The azure storage account key| Yes |
-/// | AZURE_CONTAINER | The storage container name| Yes |
+/// Loads an Azure Object store instance. The environment variables consumed are
+/// the same as those supported by [`MicrosoftAzureBuilder::from_env`]. Refer to
+/// the builder documentation for the full list and meaning of supported variables:
+/// <https://docs.rs/object_store/latest/object_store/azure/struct.MicrosoftAzureBuilder.html#method.with_config>
 #[cfg(feature = "azure")]
 pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    let account = env::var("AZURE_ACCOUNT").expect("AZURE_ACCOUNT must be set");
-    let key = env::var("AZURE_KEY").expect("AZURE_KEY must be set");
-    let container = env::var("AZURE_CONTAINER").expect("AZURE_CONTAINER must be set");
-    let builder = object_store::azure::MicrosoftAzureBuilder::new()
-        .with_account(account)
-        .with_access_key(key)
-        .with_container_name(container);
+    let builder = object_store::azure::MicrosoftAzureBuilder::from_env();
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
 

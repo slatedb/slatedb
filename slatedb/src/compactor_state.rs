@@ -14,7 +14,7 @@ use crate::transactional_object::DirtyObject;
 /// A `SourceId` distinguishes between two kinds of inputs a compaction can read:
 /// an existing compacted sorted run (identified by its run id), or an L0 SSTable
 /// (identified by its ULID).
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum SourceId {
     SortedRun(u32),
     Sst(Ulid),
@@ -196,7 +196,9 @@ impl Display for Compaction {
             .collect();
         write!(f, "{:?} -> {}", displayed_sources, self.spec.destination(),)?;
         if self.bytes_processed > 0 {
-            write!(f, " ({} bytes processed)", self.bytes_processed)?;
+            let human_bytes_processed = crate::utils::format_bytes_si(self.bytes_processed);
+
+            write!(f, " ({} processed)", human_bytes_processed)?;
         }
         Ok(())
     }

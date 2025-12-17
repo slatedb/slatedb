@@ -1,7 +1,5 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::iter::Peekable;
-use std::slice::Iter;
 
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
@@ -13,7 +11,7 @@ use log::warn;
 
 const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 4;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct CompactionSource {
     source: SourceId,
     size: u64,
@@ -27,11 +25,11 @@ pub(crate) struct ConflictChecker {
 }
 
 impl ConflictChecker {
-    fn new(compactions: &[CompactionSpec]) -> Self {
+    fn new<'a>(compactions: impl Iterator<Item = &'a CompactionSpec>) -> Self {
         let mut checker = Self {
             sources_used: HashSet::new(),
         };
-        for compaction in compactions.iter() {
+        for compaction in compactions {
             checker.add_compaction(compaction);
         }
         checker
@@ -52,7 +50,7 @@ impl ConflictChecker {
 
     fn add_compaction(&mut self, compaction: &CompactionSpec) {
         for source in compaction.sources().iter() {
-            self.sources_used.insert(source.clone());
+            self.sources_used.insert(*source);
         }
         self.sources_used
             .insert(SourceId::SortedRun(compaction.destination()));
@@ -80,16 +78,15 @@ impl BackpressureChecker {
         srs: &[CompactionSource],
     ) -> Self {
         let mut longest_compactable_runs_by_sr = HashMap::new();
-        let mut srs_iter = srs.iter().peekable();
-        while let Some(sr) = srs_iter.peek() {
-            let sr = sr.source.unwrap_sorted_run();
+        for (i, sr) in srs.iter().enumerate() {
+            let sr_id = sr.source.unwrap_sorted_run();
             let compactable_run = SizeTieredCompactionScheduler::build_compactable_run(
                 include_size_threshold,
-                srs_iter.clone(),
+                srs,
+                i,
                 None,
             );
-            longest_compactable_runs_by_sr.insert(sr, compactable_run);
-            srs_iter.next();
+            longest_compactable_runs_by_sr.insert(sr_id, compactable_run);
         }
         Self {
             include_size_threshold,
@@ -107,8 +104,8 @@ impl BackpressureChecker {
         // with lots of runs. If we are, we should wait till those runs are compacted
         let estimated_result_size: u64 = sources.iter().map(|src| src.size).sum();
         if let Some(next_sr) = next_sr {
-            let estimated_result_sz = estimated_result_size;
-            if next_sr.size <= ((estimated_result_sz as f32) * self.include_size_threshold) as u64 {
+            if next_sr.size <= ((estimated_result_size as f32) * self.include_size_threshold) as u64
+            {
                 // the result of this compaction can be compacted with the next sr. Check to see
                 // if there's already a max sized list of compactable runs there
                 if self
@@ -182,13 +179,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         let mut compactions = Vec::new();
         let db_state = state.db_state();
         let (l0, srs) = self.compaction_sources(db_state);
-        let conflict_checker = ConflictChecker::new(
-            state
-                .compactions()
-                .map(|j| j.spec().clone())
-                .collect::<Vec<_>>()
-                .as_slice(),
-        );
+        let conflict_checker = ConflictChecker::new(state.compactions().map(|j| j.spec()));
         let backpressure_checker = BackpressureChecker::new(
             self.options.include_size_threshold,
             self.options.max_compaction_sources,
@@ -286,7 +277,7 @@ impl SizeTieredCompactionScheduler {
         checker: &CompactionChecker,
     ) -> Option<CompactionSpec> {
         // compact l0s if required
-        let l0_candidates: VecDeque<_> = l0.iter().cloned().collect();
+        let l0_candidates: VecDeque<_> = l0.iter().copied().collect();
         if let Some(mut l0_candidates) = self.clamp_min(l0_candidates) {
             l0_candidates = self.clamp_max(l0_candidates);
             let dst = srs
@@ -299,11 +290,11 @@ impl SizeTieredCompactionScheduler {
         }
 
         // try to compact the lower levels
-        let mut srs_iter = srs.iter().peekable();
-        while srs_iter.peek().is_some() {
+        for i in 0..srs.len() {
             let compactable_run = Self::build_compactable_run(
                 self.options.include_size_threshold,
-                srs_iter.clone(),
+                srs,
+                i,
                 Some(checker),
             );
             let compactable_run = self.clamp_min(compactable_run);
@@ -316,7 +307,6 @@ impl SizeTieredCompactionScheduler {
                     .unwrap_sorted_run();
                 return Some(self.create_compaction(compactable_run, dst));
             }
-            srs_iter.next();
         }
         None
     }
@@ -336,7 +326,7 @@ impl SizeTieredCompactionScheduler {
     }
 
     fn create_compaction(&self, sources: VecDeque<CompactionSource>, dst: u32) -> CompactionSpec {
-        let sources: Vec<SourceId> = sources.iter().map(|src| src.source.clone()).collect();
+        let sources: Vec<SourceId> = sources.iter().map(|src| src.source).collect();
         CompactionSpec::new(sources, dst)
     }
 
@@ -344,12 +334,14 @@ impl SizeTieredCompactionScheduler {
     // optionally validating the resulting series
     fn build_compactable_run(
         size_threshold: f32,
-        mut sources: Peekable<Iter<CompactionSource>>,
+        sources: &[CompactionSource],
+        start_idx: usize,
         checker: Option<&CompactionChecker>,
     ) -> VecDeque<CompactionSource> {
         let mut compactable_runs = VecDeque::new();
         let mut maybe_min_sz = None;
-        while let Some(src) = sources.next() {
+        for i in start_idx..sources.len() {
+            let src = sources[i];
             if let Some(min_sz) = maybe_min_sz {
                 if src.size > ((min_sz as f32) * size_threshold) as u64 {
                     break;
@@ -358,11 +350,11 @@ impl SizeTieredCompactionScheduler {
             } else {
                 maybe_min_sz = Some(src.size);
             }
-            compactable_runs.push_back(src.clone());
+            compactable_runs.push_back(src);
             if let Some(checker) = checker {
                 let dst = src.source.unwrap_sorted_run();
-                let next_sr = sources.peek().cloned().cloned();
-                if !checker.check_compaction(&compactable_runs, dst, next_sr.as_ref()) {
+                let next_sr = sources.get(i + 1);
+                if !checker.check_compaction(&compactable_runs, dst, next_sr) {
                     compactable_runs.pop_back();
                     break;
                 }
@@ -413,7 +405,7 @@ impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
         compactor_options: &CompactorOptions,
     ) -> Box<dyn CompactionScheduler + Send + Sync> {
         Box::new(SizeTieredCompactionScheduler::new(
-            self.options.clone(),
+            self.options,
             compactor_options.max_concurrent_compactions,
         ))
     }
