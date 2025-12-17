@@ -180,3 +180,50 @@ impl ValueDeletable {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::row_codec::SstRowEntry;
+    use rstest::rstest;
+
+    // Tombstone encoding:
+    //   key_prefix_len (u16) + key_suffix_len (u16) + key_suffix + seq (u64) + flags (u8)
+    // = 2 + 2 + key_suffix_len + 8 + 1
+    // = 13 + key_suffix_len
+    #[rstest]
+    #[case(0, 18)] // key_suffix_len=5: 13 + 5 = 18
+    #[case(2, 16)] // key_suffix_len=3: 13 + 3 = 16
+    #[case(4, 14)] // key_suffix_len=1: 13 + 1 = 14
+    fn encoded_size_tombstone(#[case] prefix_len: usize, #[case] expected: usize) {
+        let entry = RowEntry::new_tombstone(b"hello", 1);
+        assert_eq!(entry.encoded_size(prefix_len), expected);
+    }
+
+    // Value encoding:
+    //   tombstone encoding + value_len (u32) + value
+    // = 13 + key_suffix_len + 4 + value_len
+    // = 17 + key_suffix_len + value_len
+    #[rstest]
+    #[case(0, 25)] // key_suffix_len=5, value_len=3: 17 + 5 + 3 = 25
+    #[case(2, 23)] // key_suffix_len=3, value_len=3: 17 + 3 + 3 = 23
+    #[case(4, 21)] // key_suffix_len=1, value_len=3: 17 + 1 + 3 = 21
+    fn encoded_size_value(#[case] prefix_len: usize, #[case] expected: usize) {
+        let entry = RowEntry::new_value(b"hello", b"val", 1);
+        assert_eq!(entry.encoded_size(prefix_len), expected);
+    }
+
+    #[test]
+    fn encoded_size_matches_sst_row_entry() {
+        let entry = RowEntry::new_value(b"prefixkey", b"value", 1);
+        let sst_entry = SstRowEntry::new(
+            6,
+            Bytes::from("key"),
+            1,
+            ValueDeletable::Value(Bytes::from("value")),
+            None,
+            None,
+        );
+        assert_eq!(entry.encoded_size(6), sst_entry.size());
+    }
+}
