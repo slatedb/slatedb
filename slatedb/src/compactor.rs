@@ -196,7 +196,6 @@ pub(crate) enum CompactorMessage {
 /// sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
 /// is the [`TokioCompactionExecutor`] which runs compaction on a local tokio runtime.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct Compactor {
     manifest_store: Arc<ManifestStore>,
     compactions_store: Arc<CompactionsStore>,
@@ -253,7 +252,7 @@ impl Compactor {
     ///
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
-    pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
+    pub async fn run_async_task(&self) -> Result<(), crate::Error> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let executor = Arc::new(TokioCompactionExecutor::new(
@@ -287,15 +286,21 @@ impl Compactor {
             )
             .expect("failed to spawn compactor task");
         self.task_executor.monitor_on(&Handle::current())?;
-        self.task_executor.join_task(COMPACTOR_TASK_NAME).await
+        self.task_executor
+            .join_task(COMPACTOR_TASK_NAME)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// Gracefully stops the compactor task and waits for it to finish.
     ///
     /// ## Returns
     /// - `Ok(())` once the task has shut down, or [`SlateDBError`] if shutdown fails.
-    pub async fn stop(&self) -> Result<(), SlateDBError> {
-        self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await
+    pub async fn stop(&self) -> Result<(), crate::Error> {
+        self.task_executor
+            .shutdown_task(COMPACTOR_TASK_NAME)
+            .await
+            .map_err(|e| e.into())
     }
 }
 
