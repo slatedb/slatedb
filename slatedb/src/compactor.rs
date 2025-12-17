@@ -70,7 +70,7 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
 };
-use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
+use crate::compactor_state::Compaction;
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -82,6 +82,8 @@ pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
+
+pub use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
 
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
 
