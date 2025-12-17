@@ -163,8 +163,6 @@ async fn exec_benchmark_transaction(
 
     let db = Arc::new(builder.build().await.unwrap());
 
-    let isolation_level = args.isolation_level.into();
-
     let bencher = TransactionBench::new(
         args.key_gen_supplier(),
         args.val_len,
@@ -174,7 +172,7 @@ async fn exec_benchmark_transaction(
         args.transaction_size,
         args.abort_percentage,
         args.use_write_batch,
-        isolation_level,
+        args.isolation_level,
         db.clone(),
     );
     bencher.run().await;

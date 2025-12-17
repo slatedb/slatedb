@@ -11,7 +11,7 @@ use slatedb::{
         foyer::{FoyerCache, FoyerCacheOptions},
         DbCache, SplitCache,
     },
-    Error,
+    Error, IsolationLevel,
 };
 use tracing::info;
 
@@ -252,52 +252,14 @@ impl Display for KeyGeneratorType {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum IsolationLevelType {
-    Snapshot,
-    Serializable,
-}
-
-const ISOLATION_LEVEL_SNAPSHOT: &str = "snapshot";
-const ISOLATION_LEVEL_SERIALIZABLE: &str = "serializable";
-
-impl ValueEnum for IsolationLevelType {
-    fn value_variants<'a>() -> &'a [Self] {
-        &[
-            IsolationLevelType::Snapshot,
-            IsolationLevelType::Serializable,
-        ]
-    }
-
-    fn to_possible_value(&self) -> Option<PossibleValue> {
-        match self {
-            IsolationLevelType::Snapshot => Some(PossibleValue::new(ISOLATION_LEVEL_SNAPSHOT)),
-            IsolationLevelType::Serializable => {
-                Some(PossibleValue::new(ISOLATION_LEVEL_SERIALIZABLE))
-            }
-        }
-    }
-}
-
-impl Display for IsolationLevelType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                IsolationLevelType::Snapshot => ISOLATION_LEVEL_SNAPSHOT,
-                IsolationLevelType::Serializable => ISOLATION_LEVEL_SERIALIZABLE,
-            }
-        )
-    }
-}
-
-impl From<IsolationLevelType> for slatedb::IsolationLevel {
-    fn from(level: IsolationLevelType) -> Self {
-        match level {
-            IsolationLevelType::Snapshot => slatedb::IsolationLevel::Snapshot,
-            IsolationLevelType::Serializable => slatedb::IsolationLevel::SerializableSnapshot,
-        }
+fn parse_isolation_level(s: &str) -> Result<IsolationLevel, String> {
+    match s.to_lowercase().as_str() {
+        "snapshot" => Ok(IsolationLevel::Snapshot),
+        "serializable" => Ok(IsolationLevel::SerializableSnapshot),
+        _ => Err(format!(
+            "invalid isolation level: '{}'. Valid options: 'snapshot', 'serializable'",
+            s
+        )),
     }
 }
 
@@ -445,9 +407,10 @@ pub(crate) struct BenchmarkTransactionArgs {
     #[arg(
         long,
         help = "Isolation level: 'snapshot' or 'serializable'.",
-        default_value_t = IsolationLevelType::Snapshot
+        value_parser = parse_isolation_level,
+        default_value = "snapshot"
     )]
-    pub(crate) isolation_level: IsolationLevelType,
+    pub(crate) isolation_level: IsolationLevel,
 
     #[arg(
         long,
