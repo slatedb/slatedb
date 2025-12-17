@@ -36,7 +36,8 @@ pub use batch::WriteBatch;
 pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 pub use compactor::{
-    CompactionScheduler, CompactionSchedulerSupplier, CompactionSpec, CompactorState, SourceId,
+    CompactionScheduler, CompactionSchedulerSupplier, CompactionSpec, CompactorBuilder,
+    CompactorState, SourceId,
 };
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder};
