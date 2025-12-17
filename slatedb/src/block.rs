@@ -106,12 +106,11 @@ impl BlockBuilder {
         }
     }
 
-    #[rustfmt::skip]
     #[inline]
-    fn estimated_size(&self) -> usize {
+    fn size(&self) -> usize {
         SIZEOF_U16           // number of key-value pairs in the block
         + self.offsets.len() * SIZEOF_U16 // offsets
-        + self.data.len()    // key-value pairs
+        + self.data.len() // key-value pairs
     }
 
     /// Checks if the entry would fit in the current block without consuming it.
@@ -121,7 +120,7 @@ impl BlockBuilder {
             return true;
         }
         let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
-        self.estimated_size() + entry.encoded_size(key_prefix_len) <= self.block_size
+        self.size() + entry.encoded_size(key_prefix_len) <= self.block_size
     }
 
     #[must_use]
