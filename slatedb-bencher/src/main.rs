@@ -3,7 +3,7 @@
 use crate::args::BencherArgs;
 use args::{
     BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, BenchmarkTransactionArgs,
-    CompactionSubcommands,
+    CompactionSubcommands, KeyGeneratorSupplier,
 };
 use bytes::Bytes;
 use clap::Parser;
@@ -29,6 +29,7 @@ use transactions::TransactionBench;
 
 mod args;
 mod db;
+mod stats;
 mod system_monitor;
 mod transactions;
 
@@ -162,17 +163,7 @@ async fn exec_benchmark_transaction(
 
     let db = Arc::new(builder.build().await.unwrap());
 
-    let isolation_level = match args.isolation_level.to_lowercase().as_str() {
-        "snapshot" => slatedb::IsolationLevel::Snapshot,
-        "serializable" => slatedb::IsolationLevel::SerializableSnapshot,
-        _ => {
-            error!(
-                "Invalid isolation level: {}. Using Snapshot",
-                args.isolation_level
-            );
-            slatedb::IsolationLevel::Snapshot
-        }
-    };
+    let isolation_level = args.isolation_level.into();
 
     let bencher = TransactionBench::new(
         args.key_gen_supplier(),

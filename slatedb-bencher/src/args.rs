@@ -179,11 +179,16 @@ pub(crate) struct BenchmarkDbArgs {
     pub(crate) get_hit_percentage: u32,
 }
 
-impl BenchmarkDbArgs {
-    pub(crate) fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
-        let key_len = self.key_len;
-        let key_count = self.key_count;
-        let supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>> = match self.key_generator {
+/// Trait for types that can supply key generators
+pub(crate) trait KeyGeneratorSupplier {
+    fn key_generator(&self) -> KeyGeneratorType;
+    fn key_len(&self) -> usize;
+    fn key_count(&self) -> u64;
+
+    fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
+        let key_len = self.key_len();
+        let key_count = self.key_count();
+        let supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>> = match self.key_generator() {
             KeyGeneratorType::Random => {
                 info!(key_len, "using random key generator");
                 Box::new(move || Box::new(RandomKeyGenerator::new(key_len)))
@@ -195,6 +200,20 @@ impl BenchmarkDbArgs {
         };
 
         supplier
+    }
+}
+
+impl KeyGeneratorSupplier for BenchmarkDbArgs {
+    fn key_generator(&self) -> KeyGeneratorType {
+        self.key_generator.clone()
+    }
+
+    fn key_len(&self) -> usize {
+        self.key_len
+    }
+
+    fn key_count(&self) -> u64 {
+        self.key_count
     }
 }
 
@@ -230,6 +249,55 @@ impl Display for KeyGeneratorType {
                 KeyGeneratorType::FixedSet => KEY_GENERATOR_TYPE_FIXEDSET,
             }
         )
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum IsolationLevelType {
+    Snapshot,
+    Serializable,
+}
+
+const ISOLATION_LEVEL_SNAPSHOT: &str = "snapshot";
+const ISOLATION_LEVEL_SERIALIZABLE: &str = "serializable";
+
+impl ValueEnum for IsolationLevelType {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[
+            IsolationLevelType::Snapshot,
+            IsolationLevelType::Serializable,
+        ]
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        match self {
+            IsolationLevelType::Snapshot => Some(PossibleValue::new(ISOLATION_LEVEL_SNAPSHOT)),
+            IsolationLevelType::Serializable => {
+                Some(PossibleValue::new(ISOLATION_LEVEL_SERIALIZABLE))
+            }
+        }
+    }
+}
+
+impl Display for IsolationLevelType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                IsolationLevelType::Snapshot => ISOLATION_LEVEL_SNAPSHOT,
+                IsolationLevelType::Serializable => ISOLATION_LEVEL_SERIALIZABLE,
+            }
+        )
+    }
+}
+
+impl From<IsolationLevelType> for slatedb::IsolationLevel {
+    fn from(level: IsolationLevelType) -> Self {
+        match level {
+            IsolationLevelType::Snapshot => slatedb::IsolationLevel::Snapshot,
+            IsolationLevelType::Serializable => slatedb::IsolationLevel::SerializableSnapshot,
+        }
     }
 }
 
@@ -377,9 +445,9 @@ pub(crate) struct BenchmarkTransactionArgs {
     #[arg(
         long,
         help = "Isolation level: 'snapshot' or 'serializable'.",
-        default_value = "snapshot"
+        default_value_t = IsolationLevelType::Snapshot
     )]
-    pub(crate) isolation_level: String,
+    pub(crate) isolation_level: IsolationLevelType,
 
     #[arg(
         long,
@@ -389,21 +457,16 @@ pub(crate) struct BenchmarkTransactionArgs {
     pub(crate) await_durable: bool,
 }
 
-impl BenchmarkTransactionArgs {
-    pub(crate) fn key_gen_supplier(&self) -> Box<dyn Fn() -> Box<dyn KeyGenerator>> {
-        let key_len = self.key_len;
-        let key_count = self.key_count;
-        let supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>> = match self.key_generator {
-            KeyGeneratorType::Random => {
-                info!(key_len, "using random key generator");
-                Box::new(move || Box::new(RandomKeyGenerator::new(key_len)))
-            }
-            KeyGeneratorType::FixedSet => {
-                info!(key_len, key_count, "using fixed set key generator");
-                Box::new(move || Box::new(FixedSetKeyGenerator::new(key_len, key_count)))
-            }
-        };
+impl KeyGeneratorSupplier for BenchmarkTransactionArgs {
+    fn key_generator(&self) -> KeyGeneratorType {
+        self.key_generator.clone()
+    }
 
-        supplier
+    fn key_len(&self) -> usize {
+        self.key_len
+    }
+
+    fn key_count(&self) -> u64 {
+        self.key_count
     }
 }

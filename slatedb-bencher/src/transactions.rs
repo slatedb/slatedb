@@ -20,9 +20,8 @@
 //! Stats are tracked separately for commits, aborts, and conflicts, and are
 //! dumped periodically to the console.
 
-use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rand::{Rng, RngCore, SeedableRng};
@@ -33,6 +32,7 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 use crate::db::KeyGenerator;
+use crate::stats::{StatsRecorder, WindowStats};
 
 /// How frequently to dump stats to the console.
 const STAT_DUMP_INTERVAL: Duration = Duration::from_secs(10);
@@ -42,9 +42,6 @@ const STAT_DUMP_LOOKBACK: Duration = Duration::from_secs(60);
 
 /// How frequently to update stats and check if we need to dump new stats.
 const REPORT_INTERVAL: Duration = Duration::from_millis(100);
-
-/// The size of each window.
-const WINDOW_SIZE: Duration = Duration::from_secs(10);
 
 /// The transaction benchmarker.
 pub struct TransactionBench {
@@ -293,7 +290,7 @@ enum TransactionResult {
 
 /// Represents the number of commits, aborts, and conflicts in a window of time.
 #[derive(Debug)]
-struct Window {
+struct TransactionWindow {
     range: Range<Instant>,
     commits: u64,
     aborts: u64,
@@ -301,148 +298,93 @@ struct Window {
     total_ops: u64,
 }
 
-struct TransactionStatsRecorderInner {
-    commits: u64,
-    aborts: u64,
-    conflicts: u64,
-    total_ops: u64,
-    windows: VecDeque<Window>,
+impl Default for TransactionWindow {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            range: now..now,
+            commits: 0,
+            aborts: 0,
+            conflicts: 0,
+            total_ops: 0,
+        }
+    }
 }
 
-impl TransactionStatsRecorderInner {
-    /// Rolls the window if necessary. Creates a new window if there are no windows.
-    fn maybe_roll_window(now: Instant, windows: &mut VecDeque<Window>) {
-        let Some(mut front) = windows.front() else {
-            windows.push_front(Window {
-                range: now..now + WINDOW_SIZE,
-                commits: 0,
-                aborts: 0,
-                conflicts: 0,
-                total_ops: 0,
-            });
-            return;
-        };
-        while now >= front.range.end {
-            windows.push_front(Window {
-                range: front.range.end..front.range.end + WINDOW_SIZE,
-                commits: 0,
-                aborts: 0,
-                conflicts: 0,
-                total_ops: 0,
-            });
-            while windows.len() > 180 {
-                windows.pop_back();
-            }
-            front = windows.front().unwrap();
-        }
+impl WindowStats for TransactionWindow {
+    fn range(&self) -> Range<Instant> {
+        self.range.clone()
     }
 
-    fn record(&mut self, now: Instant, commits: u64, aborts: u64, conflicts: u64, ops: u64) {
-        Self::maybe_roll_window(now, &mut self.windows);
-        if let Some(front) = self.windows.front_mut() {
-            front.commits += commits;
-            front.aborts += aborts;
-            front.conflicts += conflicts;
-            front.total_ops += ops;
-        }
-        self.commits += commits;
-        self.aborts += aborts;
-        self.conflicts += conflicts;
-        self.total_ops += ops;
-    }
-
-    fn commits(&self) -> u64 {
-        self.commits
-    }
-
-    fn aborts(&self) -> u64 {
-        self.aborts
-    }
-
-    fn conflicts(&self) -> u64 {
-        self.conflicts
-    }
-
-    fn total_ops(&self) -> u64 {
-        self.total_ops
-    }
-
-    /// Sums the stats in the windows that are contained in the lookback.
-    fn sum_windows(
-        windows: &VecDeque<Window>,
-        lookback: Duration,
-    ) -> Option<(Range<Instant>, u64, u64, u64, u64)> {
-        let mut commits = 0;
-        let mut aborts = 0;
-        let mut conflicts = 0;
-        let mut total_ops = 0;
-        let mut windows_iter = windows.iter();
-        let active_window = windows_iter.next();
-        let mut range = if let Some(window) = active_window {
-            (window.range.start)..window.range.start
-        } else {
-            return None;
-        };
-        for window in windows_iter.filter(|w| w.range.start >= range.end - lookback) {
-            commits += window.commits;
-            aborts += window.aborts;
-            conflicts += window.conflicts;
-            total_ops += window.total_ops;
-            range.start = window.range.start;
-        }
-        Some((range, commits, aborts, conflicts, total_ops))
-    }
-
-    fn stats_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64, u64, u64)> {
-        Self::sum_windows(&self.windows, lookback)
+    fn set_range(&mut self, range: Range<Instant>) {
+        self.range = range;
     }
 }
 
 struct TransactionStatsRecorder {
-    inner: Mutex<TransactionStatsRecorderInner>,
+    recorder: StatsRecorder<TransactionWindow>,
+    // Overall totals tracked separately
+    total_commits: std::sync::atomic::AtomicU64,
+    total_aborts: std::sync::atomic::AtomicU64,
+    total_conflicts: std::sync::atomic::AtomicU64,
+    total_ops: std::sync::atomic::AtomicU64,
 }
 
 impl TransactionStatsRecorder {
     fn new() -> Self {
         Self {
-            inner: Mutex::new(TransactionStatsRecorderInner {
-                commits: 0,
-                aborts: 0,
-                conflicts: 0,
-                total_ops: 0,
-                windows: VecDeque::new(),
-            }),
+            recorder: StatsRecorder::new(),
+            total_commits: std::sync::atomic::AtomicU64::new(0),
+            total_aborts: std::sync::atomic::AtomicU64::new(0),
+            total_conflicts: std::sync::atomic::AtomicU64::new(0),
+            total_ops: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     fn record(&self, now: Instant, commits: u64, aborts: u64, conflicts: u64, ops: u64) {
-        let mut guard = self.inner.lock().expect("lock failed");
-        guard.record(now, commits, aborts, conflicts, ops);
+        self.total_commits
+            .fetch_add(commits, std::sync::atomic::Ordering::Relaxed);
+        self.total_aborts
+            .fetch_add(aborts, std::sync::atomic::Ordering::Relaxed);
+        self.total_conflicts
+            .fetch_add(conflicts, std::sync::atomic::Ordering::Relaxed);
+        self.total_ops
+            .fetch_add(ops, std::sync::atomic::Ordering::Relaxed);
+
+        self.recorder.record(now, |window| {
+            window.commits += commits;
+            window.aborts += aborts;
+            window.conflicts += conflicts;
+            window.total_ops += ops;
+        });
     }
 
     fn commits(&self) -> u64 {
-        let guard = self.inner.lock().expect("lock failed");
-        guard.commits()
+        self.total_commits
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn aborts(&self) -> u64 {
-        let guard = self.inner.lock().expect("lock failed");
-        guard.aborts()
+        self.total_aborts.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn conflicts(&self) -> u64 {
-        let guard = self.inner.lock().expect("lock failed");
-        guard.conflicts()
+        self.total_conflicts
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn total_ops(&self) -> u64 {
-        let guard = self.inner.lock().expect("lock failed");
-        guard.total_ops()
+        self.total_ops.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn stats_since(&self, lookback: Duration) -> Option<(Range<Instant>, u64, u64, u64, u64)> {
-        let guard = self.inner.lock().expect("lock failed");
-        guard.stats_since(lookback)
+        self.recorder.stats_since(lookback, |range, windows| {
+            let commits = windows.iter().map(|w| w.commits).sum();
+            let aborts = windows.iter().map(|w| w.aborts).sum();
+            let conflicts = windows.iter().map(|w| w.conflicts).sum();
+            let ops = windows.iter().map(|w| w.total_ops).sum();
+            (range, commits, aborts, conflicts, ops)
+        })
     }
 }
 
