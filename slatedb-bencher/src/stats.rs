@@ -1,8 +1,4 @@
 //! Generic statistics recording with rolling time windows.
-//!
-//! This module provides a generic stats recorder that can be used by different
-//! benchmarks (db, transaction, etc.) without duplicating the windowing logic.
-
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Mutex;

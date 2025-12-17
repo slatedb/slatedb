@@ -41,6 +41,13 @@ run_txn_bench() {
 
   echo "Running: $bench_cmd"
   $bench_cmd | tee "$log_file"
+  
+  # Cleanup after each test to prevent memory/disk accumulation
+  local db_path="${LOCAL_PATH}/slatedb-txn-bencher_${isolation_level}_${concurrency}_${transaction_size}_${use_write_batch}"
+  echo "Cleaning up $db_path..."
+  rm -rf "$db_path"
+  
+  sleep 2
 }
 
 # Set CLOUD_PROVIDER to local if not already set
@@ -50,7 +57,7 @@ echo "Using cloud provider: $CLOUD_PROVIDER"
 # Set LOCAL_PATH if CLOUD_PROVIDER is local and path not already set
 if [ "$CLOUD_PROVIDER" = "local" ]; then
     export LOCAL_PATH=${LOCAL_PATH:-/tmp/slatedb-txn}
-    mkdir -p $LOCAL_PATH
+    mkdir -p "$LOCAL_PATH"
     echo "Using local path: $LOCAL_PATH"
 fi
 
@@ -67,15 +74,15 @@ run_txn_bench "snapshot" 4 10 true "$OUT/logs/snapshot_4_10_batch.log"
 
 # Test 3: High concurrency, Snapshot isolation, Transaction
 echo "Test 3: High concurrency with Transactions (Snapshot)"
-run_txn_bench "snapshot" 32 10 false "$OUT/logs/snapshot_32_10_txn.log"
+run_txn_bench "snapshot" 16 10 false "$OUT/logs/snapshot_16_10_txn.log"
 
 # Test 4: High concurrency, Snapshot isolation, WriteBatch
 echo "Test 4: High concurrency with WriteBatch"
-run_txn_bench "snapshot" 32 10 true "$OUT/logs/snapshot_32_10_batch.log"
+run_txn_bench "snapshot" 16 10 true "$OUT/logs/snapshot_16_10_batch.log"
 
 # Test 5: High concurrency, SerializableSnapshot isolation
 echo "Test 5: High concurrency with SerializableSnapshot"
-run_txn_bench "serializable" 32 10 false "$OUT/logs/serializable_32_10_txn.log"
+run_txn_bench "serializable" 16 10 false "$OUT/logs/serializable_16_10_txn.log"
 
 # Test 6: Large transactions
 echo "Test 6: Large transactions (50 ops)"
