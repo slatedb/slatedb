@@ -83,6 +83,9 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
 
+pub use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
+pub use crate::db::builder::CompactorBuilder;
+
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
 
 /// Supplies a concrete [`CompactionScheduler`] implementation.
