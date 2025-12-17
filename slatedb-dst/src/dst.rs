@@ -561,6 +561,9 @@ impl Dst {
         write_ops: &Vec<DstWriteOp>,
         write_options: &WriteOptions,
     ) -> Result<(), Error> {
+        // run expected write() before future is polled and clock is advanced.
+        self.state.write_batch(write_ops)?;
+
         let mut write_batch = WriteBatch::new();
 
         for (key, val, options) in write_ops {
@@ -581,14 +584,14 @@ impl Dst {
             0f64
         };
         self.poll_await(future, flush_probability).await?;
-        self.state.write_batch(write_ops)?;
         Ok(())
     }
 
     async fn run_get(&mut self, key: &Vec<u8>, read_options: &ReadOptions) -> Result<(), Error> {
+        // run expected get() before future is polled and clock is advanced.
+        let expected_val = self.state.get(key)?;
         let future = self.db.get_with_options(key, read_options);
         let result = self.poll_await(future, 0f64).await?;
-        let expected_val = self.state.get(key)?;
         let actual_val = result.map(|b| b.to_vec());
         assert_eq!(expected_val, actual_val);
         Ok(())
@@ -605,9 +608,11 @@ impl Dst {
             // Skip because SlateDB does not allow empty ranges (see #681)
             return Ok(());
         }
+        // run expected scan()  before future is polled and clock is advanced.
+        let expected_itr = self.state.scan(start_key, end_key)?;
+
         let future = self.db.scan_with_options(start_key..end_key, scan_options);
         let mut actual_itr = self.poll_await(future, 0f64).await?;
-        let expected_itr = self.state.scan(start_key, end_key)?;
 
         for (expected_key, expected_val) in expected_itr {
             let actual_key_val = actual_itr

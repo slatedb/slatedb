@@ -259,6 +259,13 @@ impl DefaultLogicalClock {
             last_ts: AtomicI64::new(i64::MIN),
         }
     }
+
+    pub fn new_with_system_clock(system_clock: Arc<dyn SystemClock>) -> Self {
+        Self {
+            inner: system_clock,
+            last_ts: AtomicI64::new(i64::MIN),
+        }
+    }
 }
 
 impl LogicalClock for DefaultLogicalClock {
