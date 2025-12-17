@@ -252,7 +252,7 @@ impl Compactor {
     ///
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
-    pub async fn run_async_task(&self) -> Result<(), crate::Error> {
+    pub async fn run(&self) -> Result<(), crate::Error> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let executor = Arc::new(TokioCompactionExecutor::new(
