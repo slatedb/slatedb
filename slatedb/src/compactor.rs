@@ -197,7 +197,7 @@ pub(crate) enum CompactorMessage {
 /// is the [`TokioCompactionExecutor`] which runs compaction on a local tokio runtime.
 #[derive(Clone)]
 #[allow(dead_code)]
-pub(crate) struct Compactor {
+pub struct Compactor {
     manifest_store: Arc<ManifestStore>,
     compactions_store: Arc<CompactionsStore>,
     table_store: Arc<TableStore>,
@@ -253,7 +253,6 @@ impl Compactor {
     ///
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
-    #[allow(dead_code)]
     pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
@@ -295,7 +294,6 @@ impl Compactor {
     ///
     /// ## Returns
     /// - `Ok(())` once the task has shut down, or [`SlateDBError`] if shutdown fails.
-    #[allow(dead_code)]
     pub async fn stop(&self) -> Result<(), SlateDBError> {
         self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await
     }

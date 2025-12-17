@@ -266,7 +266,7 @@ mod tests {
 
     use crate::checkpoint::Checkpoint;
     use crate::clock::DefaultSystemClock;
-    use crate::compactor_stats::COMPACTION_LOW_WATERMARK_TS;
+    use crate::compactor::stats::COMPACTION_LOW_WATERMARK_TS;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
