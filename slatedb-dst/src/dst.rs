@@ -272,7 +272,7 @@ impl DefaultDstDistribution {
         let mut write_ops = Vec::new();
         let write_options = self.get_write_options();
         let mut remaining_bytes =
-            self.sample_log10_uniform(1..self.options.max_write_batch_bytes) as i64;
+            self.sample_log10_uniform(1..self.options.max_write_batch_bytes as u64) as i64;
         while remaining_bytes > 0 {
             if self.is_put_operation() {
                 let key = self.gen_key(state);
@@ -321,7 +321,7 @@ impl DefaultDstDistribution {
     /// Generates an advance time action. The duration is sampled using a log-uniform
     /// distribution. The range is hard coded as 1..300_000 (1ms to 5 minutes).
     fn sample_advance_time(&self) -> DstAction {
-        let sleep_ms = self.sample_log10_uniform(1..300_000).into();
+        let sleep_ms = self.sample_log10_uniform(1..300_000);
         DstAction::AdvanceTime(Duration::from_millis(sleep_ms))
     }
 
@@ -336,7 +336,7 @@ impl DefaultDstDistribution {
     ///
     /// For DST, evenly sampling across orders of magnitude seems to expose the most bugs.
     #[inline]
-    fn sample_log10_uniform<R: RangeBounds<u32>>(&self, range: R) -> u32 {
+    fn sample_log10_uniform<R: RangeBounds<u64>>(&self, range: R) -> u64 {
         let min = match range.start_bound() {
             Bound::Unbounded => 1,
             Bound::Included(min) => *min,
@@ -344,7 +344,7 @@ impl DefaultDstDistribution {
         };
         assert!(min > 0, "min must be > 0");
         let max = match range.end_bound() {
-            Bound::Unbounded => u32::MAX,
+            Bound::Unbounded => u64::MAX,
             Bound::Included(max) => *max,
             Bound::Excluded(max) => max - 1,
         };
@@ -355,7 +355,7 @@ impl DefaultDstDistribution {
         let log10_dist = Uniform::new(min_log10, max_log10).expect("non-empty weights and all ≥ 0");
         let u = log10_dist.sample(&mut self.rand.rng());
         // Go back to original range. Clamping biases the end of the range, but is fine for DST.
-        (10f64.powf(u) as u32).clamp(min, max)
+        (10f64.powf(u) as u64).clamp(min, max)
     }
 
     /// Generates a key for actions that require a key. The key can be either a key that's
@@ -371,7 +371,7 @@ impl DefaultDstDistribution {
         if let Some(existing_key) = self.maybe_get_existing_key(state) {
             return existing_key;
         }
-        let key_len = self.sample_log10_uniform(1..self.options.max_key_bytes as u32) as usize;
+        let key_len = self.sample_log10_uniform(1..self.options.max_key_bytes as u64) as usize;
         let mut bytes = vec![0; key_len];
         self.rand.rng().fill_bytes(&mut bytes);
         bytes
@@ -406,7 +406,7 @@ impl DefaultDstDistribution {
     /// See [DefaultDstDistribution::sample_log10_uniform] for more details.
     #[inline]
     fn gen_val(&self) -> Vec<u8> {
-        let val_len = self.sample_log10_uniform(1..self.options.max_val_bytes) as usize;
+        let val_len = self.sample_log10_uniform(1..self.options.max_val_bytes as u64) as usize;
         let mut bytes = vec![0; val_len];
         self.rand.rng().fill_bytes(&mut bytes);
         bytes
@@ -417,7 +417,7 @@ impl DefaultDstDistribution {
         let ttl = if self.rand.rng().random_bool(0.5) {
             Ttl::NoExpiry
         } else {
-            Ttl::ExpireAfter(self.rand.rng().random_range(1..i64::MAX as u64))
+            Ttl::ExpireAfter(self.sample_log10_uniform(1..=i64::MAX as u64))
         };
 
         PutOptions { ttl }
@@ -561,9 +561,6 @@ impl Dst {
         write_ops: &Vec<DstWriteOp>,
         write_options: &WriteOptions,
     ) -> Result<(), Error> {
-        // run expected write() before future is polled and clock is advanced.
-        self.state.write_batch(write_ops)?;
-
         let mut write_batch = WriteBatch::new();
 
         for (key, val, options) in write_ops {
@@ -584,6 +581,7 @@ impl Dst {
             0f64
         };
         self.poll_await(future, flush_probability).await?;
+        self.state.write_batch(write_ops)?;
         Ok(())
     }
 

@@ -15,8 +15,6 @@ use object_store::memory::InMemory;
 use rand::Rng;
 use rstest::rstest;
 use slatedb::clock::DefaultLogicalClock;
-use slatedb::clock::LogicalClock;
-use slatedb::clock::MockLogicalClock;
 use slatedb::clock::MockSystemClock;
 use slatedb::clock::SystemClock;
 use slatedb::DbRand;
