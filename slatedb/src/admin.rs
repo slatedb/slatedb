@@ -225,7 +225,8 @@ impl Admin {
 
         match run_task.await {
             Ok(inner) => inner,
-            Err(join_err) => Err(crate::Error::internal("compactor task failed".to_string()).with_source(Box::new(join_err))),
+            Err(join_err) => Err(crate::Error::internal("compactor task failed".to_string())
+                .with_source(Box::new(join_err))),
         }
     }
 
