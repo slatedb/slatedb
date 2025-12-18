@@ -72,7 +72,7 @@ use crate::compactor_executor::{
 };
 use crate::compactor_state::Compaction;
 use crate::compactor_state_protocols::CompactorStateWriter;
-use crate::config::{CheckpointOptions, CompactorOptions};
+use crate::config::CompactorOptions;
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
