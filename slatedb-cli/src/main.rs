@@ -57,6 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         CliCommands::RunGarbageCollection { resource, min_age } => {
             exec_gc_once(&admin, resource, min_age).await?
         }
+        CliCommands::RunCompactor => admin.run_compactor(cancellation_token.clone()).await?,
         CliCommands::ScheduleGarbageCollection {
             manifest,
             wal,
