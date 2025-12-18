@@ -522,27 +522,25 @@ impl EncodedSsTableBuilder<'_> {
     /// The block size is None if the builder has not finished compacting a block yet.
     pub fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
         self.num_keys += 1;
-        let key = entry.key.clone();
 
-        let index_key = compute_index_key(self.current_block_max_key.take(), &key);
-        self.current_block_max_key = Some(key.clone());
+        let index_key = compute_index_key(self.current_block_max_key.take(), &entry.key);
+        let is_sst_first_key = self.sst_first_key.is_none();
 
         let mut block_size = None;
-        if !self.builder.add(entry.clone()) {
-            // Create a new block builder and append block data
+        if !self.builder.would_fit(&entry) {
             block_size = self.finish_block()?;
-
-            // New block must always accept the first KV pair
-            assert!(self.builder.add(entry));
-
             self.first_key = Some(self.index_builder.create_vector(&index_key));
-        } else if self.sst_first_key.is_none() {
-            self.sst_first_key = Some(Bytes::copy_from_slice(&key));
-
+        } else if is_sst_first_key {
             self.first_key = Some(self.index_builder.create_vector(&index_key));
         }
 
-        self.filter_builder.add_key(&key);
+        self.filter_builder.add_key(&entry.key);
+        if is_sst_first_key {
+            self.sst_first_key = Some(entry.key.clone());
+        }
+        self.current_block_max_key = Some(entry.key.clone());
+
+        assert!(self.builder.add(entry));
 
         Ok(block_size)
     }

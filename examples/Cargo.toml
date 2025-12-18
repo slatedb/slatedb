@@ -75,9 +75,21 @@ path = "src/google_cloud_storage.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "db-without-compactor"
+path = "src/db_without_compactor.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "standalone-compactor"
+path = "src/standalone_compactor.rs"
+test = false
+bench = false
+
 [dependencies]
 anyhow.workspace = true
 object_store = { workspace = true, features = ["azure", "gcp"] }
 slatedb.workspace = true
-tokio = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["macros", "signal"] }
 tracing-subscriber.workspace = true

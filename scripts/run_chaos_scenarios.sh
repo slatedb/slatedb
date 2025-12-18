@@ -137,12 +137,14 @@ reset_bucket() {
   AWS_ACCESS_KEY_ID=test \
   AWS_SECRET_ACCESS_KEY=test \
   AWS_REGION=us-east-1 \
+  AWS_ALLOW_HTTP=true \
   aws --endpoint-url "$LOCALSTACK_S3" s3 rb "s3://${bucket}" --force >/dev/null 2>&1 || true
 
   # Recreate the bucket.
   AWS_ACCESS_KEY_ID=test \
   AWS_SECRET_ACCESS_KEY=test \
   AWS_REGION=us-east-1 \
+  AWS_ALLOW_HTTP=true \
   aws --endpoint-url "$LOCALSTACK_S3" s3 mb "s3://${bucket}" >/dev/null
 }
 
@@ -153,6 +155,7 @@ list_bucket_contents() {
   AWS_ACCESS_KEY_ID=test \
   AWS_SECRET_ACCESS_KEY=test \
   AWS_REGION=us-east-1 \
+  AWS_ALLOW_HTTP=true \
   aws --endpoint-url "$LOCALSTACK_S3" s3 ls "s3://${bucket}" --recursive || \
     log "s3: failed to list contents of s3://${bucket}"
 }
@@ -174,6 +177,7 @@ run_smoke() {
   AWS_SECRET_ACCESS_KEY=test \
   AWS_BUCKET=slatedb-test \
   AWS_REGION=us-east-1 \
+  AWS_ALLOW_HTTP=true \
   AWS_ENDPOINT="$endpoint" \
   AWS_S3_FORCE_PATH_STYLE=true \
   RUST_LOG=${RUST_LOG:-info} \

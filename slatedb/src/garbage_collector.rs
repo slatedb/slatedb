@@ -270,6 +270,7 @@ mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::compactions_store::StoredCompactions;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
+    use crate::compactor::stats::COMPACTION_LOW_WATERMARK_TS;
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
