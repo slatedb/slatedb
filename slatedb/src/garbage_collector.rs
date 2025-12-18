@@ -269,7 +269,6 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::clock::DefaultSystemClock;
     use crate::compactions_store::StoredCompactions;
-    use crate::compactor::stats::COMPACTION_LOW_WATERMARK_TS;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
     use crate::dispatcher::MessageHandlerExecutor;
