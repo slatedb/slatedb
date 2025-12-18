@@ -25,7 +25,7 @@ run_txn_bench() {
   fi
 
   local bench_cmd="cargo run -r --package slatedb-bencher -- \
-    --path /slatedb-txn-bencher_${isolation_level}_${concurrency}_${transaction_size}_${use_write_batch} $clean_flag transaction \
+    --path /slatedb-txn-bencher $clean_flag transaction \
     --db-options-path $DIR/Slatedb.toml \
     --duration 60 \
     --val-len 1024 \
@@ -43,7 +43,7 @@ run_txn_bench() {
   $bench_cmd | tee "$log_file"
   
   # Cleanup after each test to prevent memory/disk accumulation
-  local db_path="${LOCAL_PATH}/slatedb-txn-bencher_${isolation_level}_${concurrency}_${transaction_size}_${use_write_batch}"
+  local db_path="${LOCAL_PATH}/slatedb-txn-bencher"
   echo "Cleaning up $db_path..."
   rm -rf "$db_path"
   
