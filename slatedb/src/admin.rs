@@ -213,21 +213,7 @@ impl Admin {
             }
         }
 
-        // Shutdown was requested. Try to stop gracefully even if the compactor hasn't fully
-        // started yet (e.g., SIGINT during startup).
-        while !run_task.is_finished() {
-            compactor.stop().await?;
-            if run_task.is_finished() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-
-        match run_task.await {
-            Ok(inner) => inner,
-            Err(join_err) => Err(crate::Error::internal("compactor task failed".to_string())
-                .with_source(Box::new(join_err))),
-        }
+        compactor.stop().await
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
