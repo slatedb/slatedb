@@ -206,7 +206,6 @@ mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-    use crate::compactor::stats::RUNNING_COMPACTIONS;
     use crate::db_state::{CoreDbState, SsTableId};
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;

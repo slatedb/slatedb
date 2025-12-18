@@ -111,7 +111,7 @@ impl Display for CompactionSpec {
 ///
 /// This is currently tracked in-memory, but not in the .compactions file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CompactionStatus {
+pub enum CompactionStatus {
     /// The compaction has been submitted but not yet started.
     Submitted,
     /// The compaction is currently running.
