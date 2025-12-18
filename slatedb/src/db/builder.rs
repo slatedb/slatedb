@@ -156,6 +156,43 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
 
+/// Runtime configuration for compaction.
+///
+/// This allows configuring the tokio runtime handle and compaction scheduler
+/// for both standalone compactors and compactors embedded within a Db.
+pub struct CompactorRuntime {
+    pub(crate) handle: Option<Handle>,
+    pub(crate) scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
+}
+
+impl CompactorRuntime {
+    pub fn new() -> Self {
+        Self {
+            handle: None,
+            scheduler_supplier: None,
+        }
+    }
+
+    pub fn with_handle(mut self, handle: Handle) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+
+    pub fn with_scheduler_supplier(
+        mut self,
+        scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    ) -> Self {
+        self.scheduler_supplier = Some(scheduler_supplier);
+        self
+    }
+}
+
+impl Default for CompactorRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A builder for creating a new Db instance.
 ///
 /// This builder provides a fluent API for configuring and opening a SlateDB database.
@@ -169,8 +206,7 @@ pub struct DbBuilder<P: Into<Path>> {
     logical_clock: Option<Arc<dyn LogicalClock>>,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
-    compaction_runtime: Option<Handle>,
-    compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
+    compactor_runtime: Option<CompactorRuntime>,
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
@@ -189,8 +225,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             logical_clock: None,
             system_clock: None,
             gc_runtime: None,
-            compaction_runtime: None,
-            compaction_scheduler_supplier: None,
+            compactor_runtime: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
             sst_block_size: None,
@@ -243,17 +278,12 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the compaction runtime to use for the database.
-    pub fn with_compaction_runtime(mut self, compaction_runtime: Handle) -> Self {
-        self.compaction_runtime = Some(compaction_runtime);
-        self
-    }
-
-    pub fn with_compaction_scheduler_supplier(
-        mut self,
-        compaction_scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
-    ) -> Self {
-        self.compaction_scheduler_supplier = Some(compaction_scheduler_supplier);
+    /// Sets the runtime configuration for the embedded compactor.
+    ///
+    /// This allows overriding the tokio runtime handle and compaction scheduler.
+    /// Compaction is enabled via [`Settings::compactor_options`].
+    pub fn with_compactor_runtime(mut self, runtime: CompactorRuntime) -> Self {
+        self.compactor_runtime = Some(runtime);
         self
     }
 
@@ -536,16 +566,13 @@ impl<P: Into<Path>> DbBuilder<P> {
             None,
         ));
 
-        // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
-        // If either are set, we need to initialize the compactor.
-        if self.compaction_scheduler_supplier.is_some() || self.settings.compactor_options.is_some()
-        {
+        // Enable compactor if either compactor_options or compactor_runtime is set.
+        if self.settings.compactor_options.is_some() || self.compactor_runtime.is_some() {
             let compactor_options = Arc::new(self.settings.compactor_options.unwrap_or_default());
-            let compaction_handle = self
-                .compaction_runtime
-                .unwrap_or_else(|| tokio_handle.clone());
-            let scheduler_supplier = self
-                .compaction_scheduler_supplier
+            let runtime = self.compactor_runtime.unwrap_or_default();
+            let compaction_handle = runtime.handle.unwrap_or_else(|| tokio_handle.clone());
+            let scheduler_supplier = runtime
+                .scheduler_supplier
                 .unwrap_or_else(default_compaction_scheduler_supplier);
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&compactor_options));
@@ -760,9 +787,8 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
 pub struct CompactorBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,
-    compaction_runtime: Handle,
+    compactor_runtime: CompactorRuntime,
     options: CompactorOptions,
-    scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
@@ -776,9 +802,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         Self {
             path,
             main_object_store,
-            compaction_runtime: Handle::current(),
+            compactor_runtime: CompactorRuntime::default(),
             options: CompactorOptions::default(),
-            scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
@@ -787,10 +812,9 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         }
     }
 
-    /// Sets the tokio handle to use for background tasks.
-    #[allow(unused)]
-    pub fn with_runtime(mut self, compaction_runtime: Handle) -> Self {
-        self.compaction_runtime = compaction_runtime;
+    /// Sets the runtime configuration for the compactor.
+    pub fn with_runtime(mut self, runtime: CompactorRuntime) -> Self {
+        self.compactor_runtime = runtime;
         self
     }
 
@@ -819,15 +843,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the compaction scheduler supplier to use for the compactor.
-    pub fn with_scheduler_supplier(
-        mut self,
-        scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
-    ) -> Self {
-        self.scheduler_supplier = Some(scheduler_supplier);
-        self
-    }
-
     /// Sets the merge operator to use for the compactor.
     pub fn with_merge_operator(mut self, merge_operator: MergeOperatorType) -> Self {
         self.merge_operator = Some(merge_operator);
@@ -853,7 +868,12 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             None, // no need for cache in GC
         ));
 
+        let compaction_handle = self
+            .compactor_runtime
+            .handle
+            .unwrap_or_else(Handle::current);
         let scheduler_supplier = self
+            .compactor_runtime
             .scheduler_supplier
             .unwrap_or_else(default_compaction_scheduler_supplier);
 
@@ -863,7 +883,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             table_store,
             self.options,
             scheduler_supplier,
-            self.compaction_runtime,
+            compaction_handle,
             self.rand,
             self.stat_registry,
             self.system_clock,
