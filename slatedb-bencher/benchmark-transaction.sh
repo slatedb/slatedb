@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 
-set -eu # stop on errors and undefined variables
+set -euo pipefail # stop on errors, undefined variables, and pipe failures
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="target/bencher/transaction-results"
 
 mkdir -p "$OUT/logs"
+
+# Define DB path once for both bencher and cleanup
+DB_PATH_NAME="slatedb-txn-bencher"
 
 run_txn_bench() {
   local isolation_level="$1"
@@ -25,7 +28,7 @@ run_txn_bench() {
   fi
 
   local bench_cmd="cargo run -r --package slatedb-bencher -- \
-    --path /slatedb-txn-bencher $clean_flag transaction \
+    --path /${DB_PATH_NAME} $clean_flag transaction \
     --db-options-path $DIR/Slatedb.toml \
     --duration 60 \
     --val-len 1024 \
@@ -40,12 +43,21 @@ run_txn_bench() {
   "
 
   echo "Running: $bench_cmd"
-  $bench_cmd | tee "$log_file"
+  # Set RUST_LOG to INFO level to prevent gigabyte-sized log files
+  # Override with RUST_LOG=debug to see all logs if needed
+  RUST_LOG=${RUST_LOG:-info} $bench_cmd 2>&1 | tee "$log_file"
   
   # Cleanup after each test to prevent memory/disk accumulation
-  local db_path="${LOCAL_PATH}/slatedb-txn-bencher"
-  echo "Cleaning up $db_path..."
-  rm -rf "$db_path"
+  if [ "$CLOUD_PROVIDER" = "local" ]; then
+    local db_path="${LOCAL_PATH}/${DB_PATH_NAME}"
+    # Safety check: ensure path contains expected directory name and is not empty
+    if [[ "$db_path" == *"${DB_PATH_NAME}"* ]] && [ -n "$db_path" ] && [ "$db_path" != "/" ]; then
+      echo "Cleaning up $db_path..."
+      rm -rf "$db_path"
+    else
+      echo "WARNING: Skipping cleanup - unexpected path: $db_path"
+    fi
+  fi
   
   sleep 2
 }
