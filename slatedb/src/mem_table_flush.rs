@@ -45,6 +45,10 @@ impl MemtableFlusher {
         self.manifest.refresh().await?;
         let mut wguard_state = self.db_inner.state.write();
         wguard_state.merge_remote_manifest(self.manifest.prepare_dirty()?);
+        self.db_inner
+            .db_stats
+            .l0_sst_count
+            .set(wguard_state.state().core().l0.len() as i64);
         Ok(())
     }
 

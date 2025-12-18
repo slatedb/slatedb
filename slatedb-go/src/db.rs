@@ -60,7 +60,13 @@ pub extern "C" fn slatedb_open(
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
         Err(err) => {
-            return create_handle_error_result(CSdbError::InvalidProvider, &err.to_string())
+            return CSdbHandleResult {
+                handle: CSdbHandle::null(),
+                result: CSdbResult {
+                    error: err.error,
+                    message: err.message,
+                },
+            }
         }
     };
 

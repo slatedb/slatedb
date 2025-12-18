@@ -66,7 +66,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{MonotonicSeq, SendSafely};
+use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use log::{info, trace, warn};
@@ -318,20 +318,20 @@ impl DbInner {
 
             trace!(
                 "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
-                total_mem_size_bytes,
-                wal_size_bytes,
-                imm_memtable_size_bytes,
-                self.settings.max_unflushed_bytes,
+                format_bytes_si(total_mem_size_bytes as u64),
+                format_bytes_si(wal_size_bytes as u64),
+                format_bytes_si(imm_memtable_size_bytes as u64),
+                format_bytes_si(self.settings.max_unflushed_bytes as u64),
             );
 
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();
                 warn!(
                     "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
-                    total_mem_size_bytes,
-                    wal_size_bytes,
-                    imm_memtable_size_bytes,
-                    self.settings.max_unflushed_bytes,
+                    format_bytes_si(total_mem_size_bytes as u64),
+                    format_bytes_si(wal_size_bytes as u64),
+                    format_bytes_si(imm_memtable_size_bytes as u64),
+                    format_bytes_si(self.settings.max_unflushed_bytes as u64),
                 );
 
                 let maybe_oldest_unflushed_memtable = {
@@ -1534,13 +1534,12 @@ mod tests {
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
-    use crate::types::RowEntry;
-    use crate::{
-        proptest_util, test_utils, CloseReason, KeyValue, MergeOperator, MergeOperatorError,
+    use crate::test_utils::{
+        assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator, TestClock,
     };
+    use crate::types::RowEntry;
+    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use async_trait::async_trait;
-    use bytes::BytesMut;
     use chrono::TimeDelta;
     #[cfg(feature = "test-util")]
     use chrono::{TimeZone, Utc};
@@ -3948,22 +3947,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_merges_from_snapshot_across_compaction() {
-        struct TestMergeOperator {}
-
-        impl MergeOperator for TestMergeOperator {
-            fn merge(
-                &self,
-                _key: &Bytes,
-                existing_value: Option<Bytes>,
-                value: Bytes,
-            ) -> Result<Bytes, MergeOperatorError> {
-                let mut result = BytesMut::new();
-                existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
-                result.extend_from_slice(value.as_ref());
-                Ok(result.freeze())
-            }
-        }
-
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/testdb";
         let should_compact_l0 = Arc::new(AtomicBool::new(false));
@@ -3973,7 +3956,7 @@ mod tests {
         )));
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
-            .with_merge_operator(Arc::new(TestMergeOperator {}))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
@@ -5351,27 +5334,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
-    }
-
-    // Merge operator test helpers
-    struct StringConcatMergeOperator;
-
-    impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
-        fn merge(
-            &self,
-            _key: &Bytes,
-            existing_value: Option<Bytes>,
-            value: Bytes,
-        ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {
-            match existing_value {
-                Some(existing) => {
-                    let mut merged = existing.to_vec();
-                    merged.extend_from_slice(&value);
-                    Ok(Bytes::from(merged))
-                }
-                None => Ok(value),
-            }
-        }
     }
 
     #[tokio::test]

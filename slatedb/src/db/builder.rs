@@ -122,12 +122,12 @@ use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
 use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
+use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::TokioCompactionExecutor;
-use crate::compactor_stats::CompactionStats;
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
@@ -766,7 +766,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
 pub struct CompactorBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,
-    tokio_handle: Handle,
+    compaction_runtime: Handle,
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
@@ -782,7 +782,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         Self {
             path,
             main_object_store,
-            tokio_handle: Handle::current(),
+            compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
@@ -795,8 +795,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
     /// Sets the tokio handle to use for background tasks.
     #[allow(unused)]
-    pub fn with_tokio_handle(mut self, tokio_handle: Handle) -> Self {
-        self.tokio_handle = tokio_handle;
+    pub fn with_runtime(mut self, compaction_runtime: Handle) -> Self {
+        self.compaction_runtime = compaction_runtime;
         self
     }
 
@@ -820,8 +820,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     }
 
     /// Sets the random number generator to use for the compactor.
-    pub fn with_rand(mut self, rand: Arc<DbRand>) -> Self {
-        self.rand = rand;
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Arc::new(DbRand::new(seed));
         self
     }
 
@@ -869,7 +869,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             table_store,
             self.options,
             scheduler_supplier,
-            self.tokio_handle,
+            self.compaction_runtime,
             self.rand,
             self.stat_registry,
             self.system_clock,
