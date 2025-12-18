@@ -148,6 +148,7 @@ Check out [CONTRIBUTING.md](CONTRIBUTING.md) for fun (and useful) projects to wo
 See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
+- [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Merklemap](https://merklemap.com)
 - [Responsive](https://responsive.dev)
 - [SQLync](https://sqlync.com)

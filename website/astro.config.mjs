@@ -199,6 +199,10 @@ export default defineConfig({
 						{
 							label: 'Checkpoint & Restore',
 							link: '/docs/tutorials/checkpoint/',
+						},
+						{
+							label: 'Standalone Compactor',
+							link: '/docs/tutorials/standalone-compactor/',
 						}
 					]
 				},

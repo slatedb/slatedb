@@ -1,0 +1,35 @@
+---
+title: Run a Standalone Compactor
+description: Learn how to run compaction as a separate process from your database clients
+---
+
+import { Code } from '@astrojs/starlight/components';
+import dbWithoutCompactor from '/../examples/src/db_without_compactor.rs?raw';
+import standaloneCompactor from '/../examples/src/standalone_compactor.rs?raw';
+
+By default, SlateDB starts a background compactor inside each `Db` instance.
+If you want to run compaction as a separate service (for example, on dedicated compute), you can:
+
+1. Open the `Db` with compaction disabled.
+2. Start a standalone compactor in a separate process.
+
+Both processes must use the same `ObjectStore` and database path (the path is the prefix inside your object store).
+
+## Create a Db with no compactor
+
+To prevent `Db` from starting the embedded compactor, set `Settings::compactor_options` to `None` and use `Db::builder`:
+
+<Code code={dbWithoutCompactor} lang="rust" title="main.rs" />
+
+## Run a compactor without a Db
+
+In a separate process, create a compactor using `CompactorBuilder` and call `run`:
+
+<Code code={standaloneCompactor} lang="rust" title="main.rs" />
+
+:::note
+
+The standalone compactor expects the database to already exist (a manifest must be present).
+If you're creating a new database, open it once (like in the previous section) before starting the compactor.
+
+:::
