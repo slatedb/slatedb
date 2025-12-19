@@ -99,8 +99,14 @@ impl CompactedGcTask {
         Ok(max_l0_ts)
     }
 
-    /// Returns the oldest recent compaction start time from persisted state. "Recent" currently
-    /// means all running compactions and the most recently finished compaction.
+    /// Returns the minimum starting timestamp of:
+    ///
+    /// 1. All on-going compactions, and
+    /// 2. the most recently completed compaction.
+    ///
+    /// This represents the boundary up to which the garbage collector can delete SSTs. Any SST
+    /// with a timestamp less than this value is the result of a complete compaction and therefore
+    /// eligible for garbage collection.
     ///
     /// The Unix epoch is returned if any of the following occur:
     ///
