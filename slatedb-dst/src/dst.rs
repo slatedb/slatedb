@@ -339,7 +339,7 @@ impl DefaultDstDistribution {
         DstAction::AdvanceSystemClock(Duration::from_millis(sleep_ms))
     }
 
-    /// Generates an advance time action for the logical_clock. The number of ticks is sampled
+    /// Generates an advance time action for the logical clock. The number of ticks is sampled
     /// using a log-uniform distribution that is shared with the TTL generation.
     fn sample_advance_logical_time(&self) -> DstAction {
         let ticks = self.sample_log10_uniform(1..=i64::MAX as u64);
@@ -515,13 +515,15 @@ impl DstDuration {
 /// The DstLogicalClock trait extends the LogicalClock trait so that the DST simulation can call to
 /// advance the logical clock to test things like TTL.
 ///
-/// The `.now()` method must return the same value when called repeatedly until `.advance()` is
+/// Calling [`Self::now()`] must return the same value when called repeatedly until [`Self::advance()`] is
 /// complete.
 pub trait DstLogicalClock: LogicalClock {
     // Advances the logical clock by the specified number of ticks.
     fn advance(&self, ticks: i64);
 }
 
+/// [DefaultDstLogicalClock] uses an atomic i64 to track time.
+/// The clock always starts at i64::MIN.
 #[derive(Debug)]
 pub struct DefaultDstLogicalClock {
     current_tick: AtomicI64,
@@ -560,7 +562,6 @@ pub struct Dst {
     /// The system clock to use for the simulation.
     system_clock: Arc<dyn SystemClock>,
     /// The logical clock to use for the simulation.
-    /// Advances every DstAction::Write and DstAction::AdvanceTime.
     logical_clock: Arc<dyn DstLogicalClock>,
     /// The random number generator to use for the simulation.
     rand: Rc<DbRand>,
@@ -674,7 +675,6 @@ impl Dst {
             // Skip because SlateDB does not allow empty ranges (see #681)
             return Ok(());
         }
-
         let future = self.db.scan_with_options(start_key..end_key, scan_options);
         let mut actual_itr = self.poll_await(future, 0f64).await?;
         let expected_itr = self.state.scan(start_key, end_key)?;
