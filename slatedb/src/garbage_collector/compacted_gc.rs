@@ -198,7 +198,7 @@ mod tests {
 
     use super::*;
     use crate::clock::DefaultSystemClock;
-    use crate::compactor_stats::RUNNING_COMPACTIONS;
+    use crate::compactor::stats::RUNNING_COMPACTIONS;
     use crate::db_state::{CoreDbState, SsTableId};
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;

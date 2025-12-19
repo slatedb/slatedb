@@ -70,7 +70,7 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
 };
-use crate::compactor_state::{Compaction, CompactionSpec, CompactorState, SourceId};
+use crate::compactor_state::Compaction;
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -81,7 +81,10 @@ use crate::rand::DbRand;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
+
+pub use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
+pub use crate::db::builder::CompactorBuilder;
 
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
 
@@ -193,8 +196,7 @@ pub(crate) enum CompactorMessage {
 /// sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only implementation
 /// is the [`TokioCompactionExecutor`] which runs compaction on a local tokio runtime.
 #[derive(Clone)]
-#[allow(dead_code)]
-pub(crate) struct Compactor {
+pub struct Compactor {
     manifest_store: Arc<ManifestStore>,
     compactions_store: Arc<CompactionsStore>,
     table_store: Arc<TableStore>,
@@ -250,8 +252,7 @@ impl Compactor {
     ///
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
-    #[allow(dead_code)]
-    pub async fn run_async_task(&self) -> Result<(), SlateDBError> {
+    pub async fn run(&self) -> Result<(), crate::Error> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let executor = Arc::new(TokioCompactionExecutor::new(
@@ -285,16 +286,21 @@ impl Compactor {
             )
             .expect("failed to spawn compactor task");
         self.task_executor.monitor_on(&Handle::current())?;
-        self.task_executor.join_task(COMPACTOR_TASK_NAME).await
+        self.task_executor
+            .join_task(COMPACTOR_TASK_NAME)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// Gracefully stops the compactor task and waits for it to finish.
     ///
     /// ## Returns
     /// - `Ok(())` once the task has shut down, or [`SlateDBError`] if shutdown fails.
-    #[allow(dead_code)]
-    pub async fn stop(&self) -> Result<(), SlateDBError> {
-        self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await
+    pub async fn stop(&self) -> Result<(), crate::Error> {
+        self.task_executor
+            .shutdown_task(COMPACTOR_TASK_NAME)
+            .await
+            .map_err(|e| e.into())
     }
 }
 
@@ -469,13 +475,13 @@ impl CompactorEventHandler {
                 0
             };
             debug!(
-                "compaction progress [id={}, progress={}%, processed_bytes={}, estimated_source_bytes={}, elapsed={:.2}s, throughput={:.2} bytes/sec]",
+                "compaction progress [id={}, progress={}%, processed_bytes={}, estimated_source_bytes={}, elapsed={:.2}s, throughput={}/s]",
                 compaction.id(),
                 percentage,
-                compaction.bytes_processed(),
-                estimated_source_bytes,
+                format_bytes_si(compaction.bytes_processed()),
+                format_bytes_si(estimated_source_bytes),
                 elapsed_secs,
-                throughput,
+                format_bytes_si(throughput as u64),
             );
         }
 
@@ -956,9 +962,9 @@ mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
+    use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
     use crate::compactor_executor::{CompactionExecutor, TokioCompactionExecutor};
     use crate::compactor_state::{CompactorState, SourceId};
-    use crate::compactor_stats::LAST_COMPACTION_TS_SEC;
     use crate::config::{
         PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
@@ -2620,7 +2626,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[cfg(feature = "zstd")]
     async fn test_compactor_compressed_block_size() {
-        use crate::compactor_stats::BYTES_COMPACTED;
+        use crate::compactor::stats::BYTES_COMPACTED;
         use crate::config::{CompressionCodec, SstBlockSize};
 
         // given:

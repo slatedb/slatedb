@@ -15,6 +15,7 @@ use tokio::{
 use tracing::instrument;
 
 use crate::oracle::Oracle;
+use crate::utils::format_bytes_si;
 use crate::{
     clock::MonotonicClock,
     db_state::{DbState, SsTableId},
@@ -215,8 +216,8 @@ impl WalBufferManager {
             );
             trace!(
                 "checking flush trigger [current_wal_size={}, max_wal_bytes_size={}]",
-                current_wal_size,
-                self.max_wal_bytes_size,
+                format_bytes_si(current_wal_size as u64),
+                format_bytes_si(self.max_wal_bytes_size as u64),
             );
             let need_flush = current_wal_size >= self.max_wal_bytes_size;
             (

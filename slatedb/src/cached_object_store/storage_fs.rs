@@ -23,6 +23,7 @@ use tokio::{
 use walkdir::WalkDir;
 
 use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};
+use crate::utils::format_bytes_si;
 
 #[derive(Debug)]
 pub struct FsCacheStorage {
@@ -622,17 +623,19 @@ impl FsCacheEvictorInner {
         };
 
         // if the file is not found, still try to remove it from the cache_entries, and decrease the cache_size_bytes.
-        // this might happen when the file is removed by other processes, but the cache_entries is not updated yet.
+        // this might happen when the file is removed by other processes, or due to a race between the background
+        // scan (which collects paths then processes them) and eviction deleting files in between.
         if let Err(err) = tokio::fs::remove_file(&target).await {
-            warn!("evictor failed to remove the cache file [error={}]", err);
             if err.kind() != std::io::ErrorKind::NotFound {
+                warn!("evictor failed to remove the cache file [error={}]", err);
                 return 0;
             }
         }
 
         debug!(
             "evictor evicted cache file [path={:?}, bytes={}]",
-            target, target_bytes
+            target,
+            format_bytes_si(target_bytes as u64)
         );
 
         // remove the entry from the cache_entries and cache_keys, and decrease the cache_size_bytes
