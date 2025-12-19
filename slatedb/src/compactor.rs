@@ -414,6 +414,9 @@ impl CompactorEventHandler {
         let compactions = fenceable_compactions;
         let mut dirty_compactions = compactions.prepare_dirty()?;
         // We don't resume old jobs, but keep the latest finished entry for GC safety (#1044).
+        // This is to keep the GC's low-watermark monotonically increasing. Otherwise, whenever
+        // there are no actively running jobs, it will fall back to UNIX_EPOCH. This isn't wrong,
+        // but is harder to reason about.
         dirty_compactions.value.iter_mut().for_each(|c| {
             c.set_status(CompactionStatus::Finished);
         });
@@ -1941,6 +1944,8 @@ mod tests {
         .await
         .unwrap();
 
+        // This is `None` evne though we have a (finished) compaction because
+        // `compactions()` only returns active compactions.
         assert!(handler.state.compactions().next().is_none());
         assert!(
             handler.state.manifest().value.compactor_epoch > first_epoch,
