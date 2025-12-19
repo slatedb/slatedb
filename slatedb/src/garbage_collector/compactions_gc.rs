@@ -1,3 +1,23 @@
+//! Garbage collection for `.compactions` files.
+//!
+//! The compactions store is a versioned log of compactor state snapshots. GC can
+//! safely delete older versions because only the latest record is required for:
+//! - establishing the compaction low-watermark (to prevent deleting in-flight outputs),
+//! - fencing semantics (epoch checks on the newest record).
+//!
+//! Policy:
+//! - Always retain the most recent `.compactions` file.
+//! - Only delete files older than the configured `min_age`.
+//!
+//! Safety:
+//! - Deleting old versions does not affect recovery because the newest record
+//!   contains the authoritative compactor epoch and retained compaction state.
+//! - This task does not inspect compaction contents; it is purely time-based and
+//!   version-aware (keeps the latest).
+//!
+//! Errors are logged and the task continues; stats are updated only on successful
+//! deletes.
+
 use crate::{
     compactions_store::CompactionsStore, config::GarbageCollectorDirectoryOptions,
     error::SlateDBError,
