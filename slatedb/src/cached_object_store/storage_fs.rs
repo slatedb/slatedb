@@ -519,10 +519,13 @@ impl FsCacheEvictorInner {
             let metadata = match tokio::fs::metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) => {
-                    warn!(
-                        "evictor failed to get the metadata of the cache file [path={:?}, error={}]",
-                        path, err
-                    );
+                    if err.kind() != std::io::ErrorKind::NotFound {
+                        warn!(
+                            "evictor failed to get the metadata of the cache file [path={:?}, error={}]",
+                            path, err
+                        );
+                    }
+
                     continue;
                 }
             };
