@@ -25,6 +25,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use crate::dst::DstDuration;
+use crate::dst::DstLogicalClock;
 use crate::object_store::ClockedObjectStore;
 use crate::DefaultDstDistribution;
 use crate::Dst;
@@ -49,7 +50,7 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
 pub async fn build_dst(
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
-    logical_clock: Arc<dyn LogicalClock>,
+    logical_clock: Arc<dyn DstLogicalClock>,
     rand: Rc<DbRand>,
     dst_opts: DstOptions,
 ) -> Result<Dst, Error> {
@@ -64,6 +65,7 @@ pub async fn build_dst(
     Dst::new(
         db,
         system_clock,
+        logical_clock,
         rand.clone(),
         Box::new(DefaultDstDistribution::new(rand, dst_opts.clone())),
         dst_opts,
@@ -189,7 +191,7 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
 pub async fn run_simulation(
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
-    logical_clock: Arc<dyn LogicalClock>,
+    logical_clock: Arc<dyn DstLogicalClock>,
     rand: Rc<DbRand>,
     dst_duration: DstDuration,
     dst_opts: DstOptions,
