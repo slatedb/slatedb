@@ -92,7 +92,7 @@ The list of records is followed by a list of record sizes represented by 4-bytes
 The record sizes have the same order as the records. That is, the first record size is the size of the first record
 in the object, the second record size is the size of the second record in the object, and so on.
 After, the record sizes the format contains the number of records in the WAL object as a 4 bytes unsigned integer in little endian.
-Finally, the last 2 bytes contain the version of the format as an unsigend integer in little endian.
+Finally, the last 2 bytes contain the version of the format as an unsigned integer in little endian.
 
 
 ```
