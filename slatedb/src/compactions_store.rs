@@ -226,7 +226,6 @@ impl CompactionsStore {
         Ok(compactions)
     }
 
-    #[cfg(test)]
     pub(crate) async fn try_read_latest_compactions(
         &self,
     ) -> Result<Option<(u64, Compactions)>, SlateDBError> {

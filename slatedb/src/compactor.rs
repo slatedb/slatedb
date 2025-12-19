@@ -83,7 +83,7 @@ use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
 
-pub use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
+pub use crate::compactor_state::{CompactionSpec, CompactionStatus, CompactorState, SourceId};
 pub use crate::db::builder::CompactorBuilder;
 
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
@@ -351,8 +351,10 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 id,
                 bytes_processed,
             } => {
-                self.state
-                    .update_compaction(&id, |c| c.set_bytes_processed(bytes_processed));
+                self.state.update_compaction(&id, |c| {
+                    c.set_status(CompactionStatus::Running);
+                    c.set_bytes_processed(bytes_processed);
+                });
             }
         }
         Ok(())
@@ -411,8 +413,14 @@ impl CompactorEventHandler {
         .await?;
         let compactions = fenceable_compactions;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // TODO(criccomini): Always start with no jobs for now. Remove this when we add job resume support.
-        dirty_compactions.value.clear();
+        // We don't resume old jobs, but keep the latest finished entry for GC safety (#1044).
+        // This is to keep the GC's low-watermark monotonically increasing. Otherwise, whenever
+        // there are no actively running jobs, it will fall back to UNIX_EPOCH. This isn't wrong,
+        // but is harder to reason about.
+        dirty_compactions.value.iter_mut().for_each(|c| {
+            c.set_status(CompactionStatus::Finished);
+        });
+        dirty_compactions.value.retain_active_and_last_finished();
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
@@ -628,7 +636,8 @@ impl CompactorEventHandler {
     /// Persists the current compactions state to the compactions store and refreshes the
     /// local dirty object with the latest version.
     async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
-        let desired_value = self.state.compactions_dirty().value.clone();
+        let mut desired_value = self.state.compactions_dirty().value.clone();
+        desired_value.retain_active_and_last_finished();
         loop {
             let mut dirty_compactions = self.compactions.prepare_dirty()?;
             dirty_compactions.value = desired_value.clone();
@@ -770,7 +779,6 @@ impl CompactorEventHandler {
     async fn finish_failed_compaction(&mut self, id: Ulid) -> Result<(), SlateDBError> {
         self.state.remove_compaction(&id);
         self.write_compactions_safely().await?;
-        self.update_compaction_low_watermark();
         Ok(())
     }
 
@@ -786,7 +794,6 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         self.write_manifest_safely().await?;
         self.write_compactions_safely().await?;
-        self.update_compaction_low_watermark();
         self.maybe_schedule_compactions().await?;
         self.stats
             .last_compaction_ts
@@ -843,34 +850,6 @@ impl CompactorEventHandler {
             }
         }
     }
-
-    /// Updates the [`stats::COMPACTION_LOW_WATERMARK_TS`] gauge with the earliest
-    /// (oldest) ULID timestamp among active compactions. If there are no active compactions,
-    /// the gauge is left unchanged.
-    ///
-    /// This serves as a GC safety barrier: the GC should not delete any compacted SST
-    /// whose ULID timestamp is greater than or equal to this value.
-    ///
-    /// This is a process-local coordination mechanism that only works when the compactor
-    /// and garbage collector run in the same process and share the same StatRegistry. It's
-    /// a hack until we have proper compactor persistence (so GC can retrieve the compactor
-    /// state from the object store). See #604 for details.
-    fn update_compaction_low_watermark(&self) {
-        let min_ts = self
-            .state
-            .compactions()
-            .map(|c| {
-                c.id()
-                    .datetime()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("invalid duration")
-                    .as_millis() as u64
-            })
-            .min();
-        if let Some(min_ts) = min_ts {
-            self.stats.compaction_low_watermark_ts.set(min_ts);
-        }
-    }
 }
 
 pub mod stats {
@@ -886,10 +865,6 @@ pub mod stats {
     pub const BYTES_COMPACTED: &str = compactor_stat_name!("bytes_compacted");
     pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
     pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
-    /// The earliest (oldest) ULID timestamp among active compactions. See
-    /// [super::CompactorEventHandler::update_longest_running_start_metric] for details.
-    pub const COMPACTION_LOW_WATERMARK_TS: &str =
-        compactor_stat_name!("compaction_low_watermark_ts");
     pub const TOTAL_BYTES_BEING_COMPACTED: &str =
         compactor_stat_name!("total_bytes_being_compacted");
     pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
@@ -899,7 +874,6 @@ pub mod stats {
         pub(crate) last_compaction_ts: Arc<Gauge<u64>>,
         pub(crate) running_compactions: Arc<Gauge<i64>>,
         pub(crate) bytes_compacted: Arc<Counter>,
-        pub(crate) compaction_low_watermark_ts: Arc<Gauge<u64>>,
         pub(crate) total_bytes_being_compacted: Arc<Gauge<u64>>,
         pub(crate) total_throughput: Arc<Gauge<u64>>,
     }
@@ -911,7 +885,6 @@ pub mod stats {
         /// - `last_compaction_timestamp_sec`: Unix timestamp of the last completed compaction.
         /// - `running_compactions`: Gauge tracking active compaction attempts.
         /// - `bytes_compacted`: Counter of bytes written by the executor.
-        /// - `compaction_low_watermark_ts`: Earliest ULID timestamp among active compactions (GC hint).
         /// - `total_bytes_being_compacted`: Total bytes across all running compactions.
         /// - `total_throughput_bytes_per_sec`: Combined throughput across all running compactions.
         pub(crate) fn new(stat_registry: Arc<StatRegistry>) -> Self {
@@ -919,17 +892,12 @@ pub mod stats {
                 last_compaction_ts: Arc::new(Gauge::default()),
                 running_compactions: Arc::new(Gauge::default()),
                 bytes_compacted: Arc::new(Counter::default()),
-                compaction_low_watermark_ts: Arc::new(Gauge::default()),
                 total_bytes_being_compacted: Arc::new(Gauge::default()),
                 total_throughput: Arc::new(Gauge::default()),
             };
             stat_registry.register(LAST_COMPACTION_TS_SEC, stats.last_compaction_ts.clone());
             stat_registry.register(RUNNING_COMPACTIONS, stats.running_compactions.clone());
             stat_registry.register(BYTES_COMPACTED, stats.bytes_compacted.clone());
-            stat_registry.register(
-                COMPACTION_LOW_WATERMARK_TS,
-                stats.compaction_low_watermark_ts.clone(),
-            );
             stat_registry.register(
                 TOTAL_BYTES_BEING_COMPACTED,
                 stats.total_bytes_being_compacted.clone(),
@@ -964,6 +932,7 @@ mod tests {
     use crate::compactor::stats::CompactionStats;
     use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
     use crate::compactor_executor::{CompactionExecutor, TokioCompactionExecutor};
+    use crate::compactor_state::CompactionStatus;
     use crate::compactor_state::{CompactorState, SourceId};
     use crate::config::{
         PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
@@ -1915,42 +1884,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compaction_low_watermark_uses_min_ulid_time() {
-        let mut fixture = CompactorEventHandlerTestFixture::new().await;
-
-        // Two artificial compactions with known ULID timestamps
-        let older_ts_ms: u64 = 1_000;
-        let newer_ts_ms: u64 = 2_000;
-        let compaction_old = Compaction::new(
-            Ulid::from_parts(older_ts_ms, 0),
-            CompactionSpec::new(vec![], 10),
-        );
-        let compaction_new = Compaction::new(
-            Ulid::from_parts(newer_ts_ms, 0),
-            CompactionSpec::new(vec![], 11),
-        );
-
-        fixture
-            .handler
-            .state
-            .add_compaction(compaction_old)
-            .expect("failed to add old compaction");
-        fixture
-            .handler
-            .state
-            .add_compaction(compaction_new)
-            .expect("failed to add new compaction");
-
-        // Update the metric and verify it matches the oldest compaction's ULID time
-        fixture.handler.update_compaction_low_watermark();
-        assert_eq!(
-            fixture.handler.stats.compaction_low_watermark_ts.value(),
-            older_ts_ms
-        );
-    }
-
-    #[tokio::test]
-    async fn test_compactor_starts_with_empty_compactions() {
+    async fn test_compactor_saves_latest_compaction_on_restart() {
         let os = Arc::new(InMemory::new());
         let (manifest_store, compactions_store, _table_store) = build_test_stores(os);
         let clock = Arc::new(DefaultSystemClock::new());
@@ -2010,22 +1944,130 @@ mod tests {
         .await
         .unwrap();
 
+        // This is `None` evne though we have a (finished) compaction because
+        // `compactions()` only returns active compactions.
         assert!(handler.state.compactions().next().is_none());
         assert!(
             handler.state.manifest().value.compactor_epoch > first_epoch,
             "compactor epoch should advance on restart"
         );
 
-        // Persisting after restart should clear the stored compactions as well.
+        // Persisting after restart should keep only the retained finished compaction for GC.
         handler.write_compactions_safely().await.unwrap();
-        let (_, persisted_after_clear) = compactions_store
+        let (_, persisted_after_trim) = compactions_store
             .try_read_latest_compactions()
             .await
             .unwrap()
             .expect("compactions should exist after clearing");
+        let mut persisted_after_trim_iter = persisted_after_trim.iter();
+        assert_eq!(
+            persisted_after_trim_iter
+                .next()
+                .expect("expected one retained compaction after restart")
+                .id(),
+            compaction_id,
+            "stored compactions should retain the latest finished compaction after restart"
+        );
         assert!(
-            persisted_after_clear.iter().next().is_none(),
-            "stored compactions should be cleared after restart"
+            persisted_after_trim_iter.next().is_none(),
+            "no additional compactions should be retained beyond the latest finished one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compactor_starts_with_empty_compactions() {
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, compactions_store, _table_store) = build_test_stores(os);
+        let clock = Arc::new(DefaultSystemClock::new());
+        StoredManifest::create_new_db(manifest_store.clone(), CoreDbState::new(), clock.clone())
+            .await
+            .unwrap();
+
+        let compactor_options = Arc::new(compactor_options());
+        let rand = Arc::new(DbRand::default());
+
+        // Seed a stored compaction in the first epoch.
+        let mut handler = CompactorEventHandler::new(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            compactor_options.clone(),
+            Arc::new(MockScheduler::new()),
+            Arc::new(MockExecutor::new()),
+            rand.clone(),
+            Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let first_epoch = handler.state.manifest().value.compactor_epoch;
+        let compaction_id = Ulid::new();
+        let compaction = Compaction::new(
+            compaction_id,
+            CompactionSpec::new(vec![SourceId::Sst(Ulid::new())], 0),
+        );
+        handler.state.add_compaction(compaction).unwrap();
+        handler.write_compactions_safely().await.unwrap();
+
+        let (_, persisted) = compactions_store
+            .try_read_latest_compactions()
+            .await
+            .unwrap()
+            .expect("compactions should exist after first write");
+        let mut persisted_iter = persisted.iter();
+        assert!(
+            persisted_iter.next().is_some(),
+            "expected stored compactions to include the seeded compaction"
+        );
+        assert!(
+            persisted_iter.next().is_none(),
+            "expected only one stored compaction"
+        );
+
+        drop(handler);
+
+        // Restart compactor (new epoch) and ensure state starts with no active compactions
+        // and only one retained finished compaction for GC.
+        let mut handler = CompactorEventHandler::new(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            compactor_options.clone(),
+            Arc::new(MockScheduler::new()),
+            Arc::new(MockExecutor::new()),
+            rand,
+            Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Ensure no active compactions.
+        assert!(handler.state.compactions().next().is_none());
+        assert!(
+            handler.state.manifest().value.compactor_epoch > first_epoch,
+            "compactor epoch should advance on restart"
+        );
+
+        // Ensure one compaction (marked as finished) is retained.
+        handler.write_compactions_safely().await.unwrap();
+        let compactions = handler.state.compactions_dirty().clone().into_value();
+        let mut all_compactions = compactions.iter();
+        let finished_compaction = all_compactions
+            .next()
+            .expect("expected one retained compaction after restart");
+        assert_eq!(
+            finished_compaction.id(),
+            compaction_id,
+            "stored compactions should retain the latest finished compaction after restart"
+        );
+        assert_eq!(
+            finished_compaction.status(),
+            CompactionStatus::Finished,
+            "retained compaction should be marked as finished"
+        );
+        assert!(
+            all_compactions.next().is_none(),
+            "no additional compactions should be retained beyond the latest finished one"
         );
     }
 
@@ -2448,9 +2490,17 @@ mod tests {
             .read_latest_compactions()
             .await
             .unwrap();
+        let mut stored_compactions_iter = stored_compactions.iter();
+        assert_eq!(
+            stored_compactions_iter
+                .next()
+                .expect("compactions should not be empty after finish")
+                .id(),
+            running_id,
+        );
         assert!(
-            stored_compactions.iter().next().is_none(),
-            "compactions should be cleared after finish"
+            stored_compactions_iter.next().is_none(),
+            "expected only one retained finished compaction for GC"
         );
     }
 
@@ -2482,7 +2532,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_persist_failed_compaction_removal() {
+    async fn test_should_update_failed_compaction_status() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0().await;
@@ -2512,8 +2562,14 @@ mod tests {
             .read_latest_compactions()
             .await
             .unwrap();
-        assert!(
-            stored_after.iter().next().is_none(),
+        assert_eq!(
+            stored_after
+                .iter()
+                .next()
+                .expect("compactions should be empty after failure")
+                .status(),
+            // TODO(criccomini): change to Failed or Finished once we track status in the flatbuffers
+            CompactionStatus::Submitted,
             "compactions should be removed after failure"
         );
     }
