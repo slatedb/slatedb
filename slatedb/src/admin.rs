@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
@@ -177,6 +178,42 @@ impl Admin {
             .join_task(GC_TASK_NAME)
             .await
             .map_err(Into::<crate::Error>::into)
+    }
+
+    /// Run the compactor in the foreground until the provided cancellation token is cancelled.
+    ///
+    /// This method blocks until `cancellation_token` is cancelled, at which point it requests a
+    /// graceful shutdown and waits for the compactor to stop.
+    pub async fn run_compactor(
+        &self,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), crate::Error> {
+        let compactor = crate::CompactorBuilder::new(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.seed())
+        .build();
+
+        let mut run_task = tokio::spawn({
+            let compactor = compactor.clone();
+            async move { compactor.run().await }
+        });
+
+        tokio::select! {
+            result = &mut run_task => {
+                return match result {
+                    Ok(inner) => inner,
+                    Err(join_err) => Err(crate::Error::internal("compactor task failed".to_string()).with_source(Box::new(join_err))),
+                };
+            }
+            _ = cancellation_token.cancelled() => {
+                // fall through to shutdown logic
+            }
+        }
+
+        compactor.stop().await
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the

@@ -31,3 +31,21 @@ Every command requires the `--path` option, which specifies the root directory i
 ## Usage
 
 Run the CLI with `slatedb --help` to see a list of available commands and options.
+
+## Run the standalone compactor
+
+Run compaction as a standalone process (instead of inside your `Db` clients):
+
+```bash
+slatedb --env-file .env --path <db-path> run-compactor
+```
+
+The compactor runs until interrupted (Ctrl-C), then shuts down gracefully.
+
+:::note
+
+The compactor expects the database to already exist (a manifest must be present). If you're creating a new database, open it once before starting the compactor.
+
+:::
+
+See [Run a Standalone Compactor](/docs/tutorials/standalone-compactor/) for how to disable the embedded compactor in your database clients.
