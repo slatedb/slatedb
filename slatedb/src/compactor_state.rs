@@ -318,7 +318,7 @@ impl Compactions {
     }
 
     /// Keeps the most recently finished compaction and any active compactions, and removes others.
-    pub(crate) fn trim(&mut self) {
+    pub(crate) fn retain_active_and_last_finished(&mut self) {
         let latest_finished = self
             .recent_compactions
             .iter()
@@ -485,7 +485,7 @@ impl CompactorState {
         {
             compaction.set_status(CompactionStatus::Finished);
         }
-        self.compactions.value.trim();
+        self.compactions.value.retain_active_and_last_finished();
     }
 
     /// Mutates a running compaction in place if it exists.
@@ -564,7 +564,7 @@ impl CompactorState {
             db_state.compacted = new_compacted;
             self.manifest.value.core = db_state;
             compaction.set_status(CompactionStatus::Finished);
-            self.compactions.value.trim();
+            self.compactions.value.retain_active_and_last_finished();
         } else {
             error!("compaction not found [compaction_id={}]", compaction_id);
         }
@@ -622,7 +622,7 @@ mod tests {
         ));
         compactions.insert(compaction_with_status(active, CompactionStatus::Submitted));
 
-        compactions.trim();
+        compactions.retain_active_and_last_finished();
 
         assert!(compactions.contains(&active));
         assert!(compactions.contains(&latest_finished));
@@ -640,7 +640,7 @@ mod tests {
         compactions.insert(compaction_with_status(middle, CompactionStatus::Finished));
         compactions.insert(compaction_with_status(newest, CompactionStatus::Finished));
 
-        compactions.trim();
+        compactions.retain_active_and_last_finished();
 
         assert!(!compactions.contains(&older));
         assert!(!compactions.contains(&middle));
@@ -659,7 +659,7 @@ mod tests {
         ));
         compactions.insert(compaction_with_status(running, CompactionStatus::Running));
 
-        compactions.trim();
+        compactions.retain_active_and_last_finished();
 
         assert!(compactions.contains(&submitted));
         assert!(compactions.contains(&running));

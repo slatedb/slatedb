@@ -420,7 +420,7 @@ impl CompactorEventHandler {
         dirty_compactions.value.iter_mut().for_each(|c| {
             c.set_status(CompactionStatus::Finished);
         });
-        dirty_compactions.value.trim();
+        dirty_compactions.value.retain_active_and_last_finished();
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
@@ -637,7 +637,7 @@ impl CompactorEventHandler {
     /// local dirty object with the latest version.
     async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
         let mut desired_value = self.state.compactions_dirty().value.clone();
-        desired_value.trim();
+        desired_value.retain_active_and_last_finished();
         loop {
             let mut dirty_compactions = self.compactions.prepare_dirty()?;
             dirty_compactions.value = desired_value.clone();
