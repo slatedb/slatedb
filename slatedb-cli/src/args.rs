@@ -120,6 +120,9 @@ pub(crate) enum CliCommands {
         min_age: Duration,
     },
 
+    /// Runs the compactor until interrupted (Ctrl-C).
+    RunCompactor,
+
     /// Converts a sequence number to its corresponding timestamp using the latest manifest's sequence tracker.
     SeqToTs {
         seq: u64,

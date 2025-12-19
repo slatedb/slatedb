@@ -23,7 +23,15 @@ To prevent `Db` from starting the embedded compactor, set `Settings::compactor_o
 
 ## Run a compactor without a Db
 
-In a separate process, create a compactor using `CompactorBuilder` and call `run`:
+You can run the standalone compactor using the SlateDB CLI:
+
+```bash
+slatedb --env-file .env --path <db-path> run-compactor
+```
+
+The compactor runs until interrupted (Ctrl-C), then shuts down gracefully.
+
+Alternatively, you can embed the compactor in your own process using `CompactorBuilder` and call `run`:
 
 <Code code={standaloneCompactor} lang="rust" title="main.rs" />
 

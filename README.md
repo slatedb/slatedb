@@ -149,6 +149,7 @@ See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
+- [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
 - [Responsive](https://responsive.dev)
 - [SQLync](https://sqlync.com)
