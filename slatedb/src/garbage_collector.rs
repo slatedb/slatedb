@@ -4,6 +4,7 @@
 //! - Write-ahead log (WAL) SSTs that are no longer referenced by active manifests or
 //!   checkpoints
 //! - Compacted SSTs that are no longer referenced by active manifests or checkpoints
+//! - Old compactions files that are no longer needed
 //! - Old manifests that are not needed for recovery or checkpoints
 //!
 //! The garbage collector runs periodically in the background, with configurable intervals
@@ -26,6 +27,7 @@ use crate::transactional_object::{DirtyObject, SimpleTransactionalObject, Transa
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
+use compactions_gc::CompactionsGcTask;
 use futures::stream::BoxStream;
 use log::{debug, error, info};
 use manifest_gc::ManifestGcTask;
@@ -36,6 +38,7 @@ use tracing::instrument;
 use wal_gc::WalGcTask;
 
 mod compacted_gc;
+mod compactions_gc;
 mod manifest_gc;
 pub mod stats;
 mod wal_gc;
@@ -53,6 +56,7 @@ trait GcTask {
 pub(crate) enum GcMessage {
     GcWal,
     GcCompacted,
+    GcCompactions,
     GcManifest,
     LogStats,
 }
@@ -81,6 +85,7 @@ pub struct GarbageCollector {
     manifest_gc_task: ManifestGcTask,
     wal_gc_task: WalGcTask,
     compacted_gc_task: CompactedGcTask,
+    compactions_gc_task: CompactionsGcTask,
 }
 
 #[async_trait]
@@ -101,10 +106,16 @@ impl MessageHandler<GcMessage> for GarbageCollector {
             .wal_options
             .and_then(|o| o.interval)
             .unwrap_or(DEFAULT_INTERVAL);
+        let compactions_interval = self
+            .options
+            .compactions_options
+            .and_then(|o| o.interval)
+            .unwrap_or(DEFAULT_INTERVAL);
         vec![
             (manifest_interval, Box::new(|| GcMessage::GcManifest)),
             (wal_interval, Box::new(|| GcMessage::GcWal)),
             (compacted_interval, Box::new(|| GcMessage::GcCompacted)),
+            (compactions_interval, Box::new(|| GcMessage::GcCompactions)),
             (Duration::from_secs(60), Box::new(|| GcMessage::LogStats)),
         ]
     }
@@ -114,6 +125,7 @@ impl MessageHandler<GcMessage> for GarbageCollector {
             GcMessage::GcManifest => self.run_gc_task(&self.manifest_gc_task).await,
             GcMessage::GcWal => self.run_gc_task(&self.wal_gc_task).await,
             GcMessage::GcCompacted => self.run_gc_task(&self.compacted_gc_task).await,
+            GcMessage::GcCompactions => self.run_gc_task(&self.compactions_gc_task).await,
             GcMessage::LogStats => self.log_stats(),
         }
         Ok(())
@@ -162,10 +174,15 @@ impl GarbageCollector {
         );
         let compacted_gc_task = CompactedGcTask::new(
             manifest_store.clone(),
-            compactions_store,
+            compactions_store.clone(),
             table_store.clone(),
             stats.clone(),
             options.compacted_options,
+        );
+        let compactions_gc_task = CompactionsGcTask::new(
+            compactions_store,
+            stats.clone(),
+            options.compactions_options,
         );
         let manifest_gc_task = ManifestGcTask::new(
             manifest_store.clone(),
@@ -180,6 +197,7 @@ impl GarbageCollector {
             manifest_gc_task,
             wal_gc_task,
             compacted_gc_task,
+            compactions_gc_task,
         }
     }
 
@@ -194,6 +212,7 @@ impl GarbageCollector {
         self.run_gc_task(&self.manifest_gc_task).await;
         self.run_gc_task(&self.wal_gc_task).await;
         self.run_gc_task(&self.compacted_gc_task).await;
+        self.run_gc_task(&self.compactions_gc_task).await;
 
         self.stats.gc_count.inc();
     }
@@ -245,10 +264,11 @@ impl GarbageCollector {
 
     fn log_stats(&self) {
         debug!(
-            "garbage collector stats [manifest_count={}, wals_count={}, compacted_count={}]",
+            "garbage collector stats [manifest_count={}, wals_count={}, compacted_count={}, compactions_count={}]",
             self.stats.gc_manifest_count.value.load(Ordering::SeqCst),
             self.stats.gc_wal_count.value.load(Ordering::SeqCst),
-            self.stats.gc_compacted_count.value.load(Ordering::SeqCst)
+            self.stats.gc_compacted_count.value.load(Ordering::SeqCst),
+            self.stats.gc_compactions_count.value.load(Ordering::SeqCst)
         );
     }
 }
@@ -373,6 +393,113 @@ mod tests {
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0].id, 1);
         assert_eq!(manifests[1].id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_collect_garbage_compactions_keeps_latest() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let mut stored_compactions = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        // Create two compaction files so we can test that the latest is kept
+        stored_compactions
+            .update(stored_compactions.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored_compactions
+            .update(stored_compactions.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let compaction_count = compactions_store
+            .list_compactions(..)
+            .await
+            .expect("should list compactions")
+            .len();
+
+        assert_eq!(compaction_count, 3);
+
+        for id in 1..=compaction_count {
+            // Mark all compaction files as old enough to delete
+            set_modified(
+                local_object_store.clone(),
+                &Path::from(format!("compactions/{:020}.{}", id, "compactions")),
+                86400,
+            );
+        }
+
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
+
+        let compactions = compactions_store.list_compactions(..).await.unwrap();
+        assert_eq!(compactions.len(), 1);
+        assert_eq!(compactions[0].id, 3);
+    }
+
+    #[tokio::test]
+    async fn test_collect_garbage_compactions_respects_min_age() {
+        let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let mut stored_compactions = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        stored_compactions
+            .update(stored_compactions.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let compaction_count = compactions_store
+            .list_compactions(..)
+            .await
+            .expect("should list compactions")
+            .len();
+
+        assert_eq!(compaction_count, 2);
+
+        // Mark all compaction files as only 60 seconds old, which is less than the default min age of 300 seconds
+        for id in 1..=compaction_count {
+            set_modified(
+                local_object_store.clone(),
+                &Path::from(format!("compactions/{:020}.{}", id, "compactions")),
+                60,
+            );
+        }
+
+        run_gc_once(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            table_store.clone(),
+            None,
+        )
+        .await;
+
+        // Verify that no compaction files were deleted
+        let compactions = compactions_store.list_compactions(..).await.unwrap();
+        assert_eq!(compactions.len(), 2);
+        assert_eq!(compactions[0].id, 1);
+        assert_eq!(compactions[1].id, 2);
     }
 
     fn new_checkpoint(manifest_id: u64, expire_time: Option<DateTime<Utc>>) -> Checkpoint {
@@ -1183,6 +1310,10 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+                min_age: std::time::Duration::from_secs(3600),
+                interval: None,
+            }),
         };
 
         let gc = GarbageCollector::new(
@@ -1245,6 +1376,10 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
             }),
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: std::time::Duration::from_secs(3600),
+                interval: None,
+            }),
         };
 
         let mut gc = GarbageCollector::new(
@@ -1285,6 +1420,10 @@ mod tests {
                 interval: Some(Duration::from_secs(1)),
             }),
             compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
+                interval: Some(Duration::from_secs(1)),
+            }),
+            compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
             }),

@@ -160,16 +160,19 @@ async fn exec_gc_once(
             manifest_options: create_gc_dir_opts(min_age),
             wal_options: None,
             compacted_options: None,
+            compactions_options: None,
         },
         GcResource::Wal => GarbageCollectorOptions {
             manifest_options: None,
             wal_options: create_gc_dir_opts(min_age),
             compacted_options: None,
+            compactions_options: None,
         },
         GcResource::Compacted => GarbageCollectorOptions {
             manifest_options: None,
             wal_options: None,
             compacted_options: create_gc_dir_opts(min_age),
+            compactions_options: None,
         },
     };
     admin.run_gc_once(gc_opts).await?;
@@ -192,6 +195,7 @@ async fn schedule_gc(
         manifest_options: manifest_schedule.and_then(create_gc_dir_opts),
         wal_options: wal_schedule.and_then(create_gc_dir_opts),
         compacted_options: compacted_schedule.and_then(create_gc_dir_opts),
+        compactions_options: None,
     };
 
     admin.run_gc(gc_opts).await?;
