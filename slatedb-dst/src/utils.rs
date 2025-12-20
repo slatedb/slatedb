@@ -135,6 +135,10 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
                 min_age: Duration::from_secs(900),
                 ..Default::default()
             }),
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(300),
+                ..Default::default()
+            }),
         }),
         compactor_options: Some(CompactorOptions::default()),
         wal_enabled: rng.random_bool(0.5),

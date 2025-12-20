@@ -5568,6 +5568,10 @@ mod tests {
                 interval: None,
                 min_age: Duration::from_millis(0),
             }),
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age: Duration::from_millis(0),
+            }),
         };
 
         let gc = GarbageCollectorBuilder::new(path.clone(), object_store.clone())

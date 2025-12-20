@@ -75,6 +75,10 @@
 //! [garbage_collector_options.compacted_options]
 //! interval = "300s"
 //! min_age = "86400s"
+//!
+//! [garbage_collector_options.compactions_options]
+//! interval = "300s"
+//! min_age = "86400s"
 //! ```
 //!
 //! Representing `Settings` with JSON:
@@ -114,6 +118,10 @@
 //!    "compacted_options": {
 //!      "interval": "300s",
 //!      "min_age": "86400s"
+//!    },
+//!    "compactions_options": {
+//!      "interval": "300s",
+//!      "min_age": "86400s"
 //!    }
 //!  }
 //!}
@@ -149,6 +157,9 @@
 //!     interval: '60s'
 //!     min_age: '60s'
 //!   compacted_options:
+//!     interval: '300s'
+//!     min_age: '86400s'
+//!   compactions_options:
 //!     interval: '300s'
 //!     min_age: '86400s'
 //! ```
@@ -1081,6 +1092,10 @@ pub struct GarbageCollectorOptions {
 
     /// Garbage collection options for the compacted directory.
     pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
+
+    /// Garbage collection options for the compactions directory, which
+    /// contains compactor job state `.compactions` files.
+    pub compactions_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
 impl GarbageCollectorOptions {
@@ -1088,6 +1103,7 @@ impl GarbageCollectorOptions {
         self.manifest_options.is_none()
             && self.wal_options.is_none()
             && self.compacted_options.is_none()
+            && self.compactions_options.is_none()
     }
 }
 
@@ -1119,12 +1135,14 @@ pub struct GarbageCollectorDirectoryOptions {
 /// * Manifest options: interval of 60 seconds, min age of 1 day
 /// * WAL options: interval of 60 seconds, min age of 1 minute
 /// * Compacted options: interval of 60 seconds, min age of 1 day
+/// * Compactions options: interval of 60 seconds, min age of 1 day
 impl Default for GarbageCollectorOptions {
     fn default() -> Self {
         Self {
             manifest_options: None,
             wal_options: None,
             compacted_options: None,
+            compactions_options: None,
         }
     }
 }
