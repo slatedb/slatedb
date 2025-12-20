@@ -44,6 +44,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match args.command {
         CliCommands::ReadManifest { id } => exec_read_manifest(&admin, id).await?,
         CliCommands::ListManifests { start, end } => exec_list_manifest(&admin, start, end).await?,
+        CliCommands::ReadCompactions { id } => exec_read_compactions(&admin, id).await?,
+        CliCommands::ListCompactions { start, end } => {
+            exec_list_compactions(&admin, start, end).await?
+        }
         CliCommands::CreateCheckpoint {
             lifetime,
             source,
@@ -88,6 +92,18 @@ async fn exec_read_manifest(admin: &Admin, id: Option<u64>) -> Result<(), Box<dy
     Ok(())
 }
 
+async fn exec_read_compactions(admin: &Admin, id: Option<u64>) -> Result<(), Box<dyn Error>> {
+    match admin.read_compactions(id).await? {
+        None => {
+            println!("no compactions file found")
+        }
+        Some(compactions) => {
+            println!("{}", compactions);
+        }
+    }
+    Ok(())
+}
+
 async fn exec_list_manifest(
     admin: &Admin,
     start: Option<u64>,
@@ -101,6 +117,22 @@ async fn exec_list_manifest(
     };
 
     println!("{}", admin.list_manifests(range).await?);
+    Ok(())
+}
+
+async fn exec_list_compactions(
+    admin: &Admin,
+    start: Option<u64>,
+    end: Option<u64>,
+) -> Result<(), Box<dyn Error>> {
+    let range = match (start, end) {
+        (Some(s), Some(e)) => s..e,
+        (Some(s), None) => s..u64::MAX,
+        (None, Some(e)) => u64::MIN..e,
+        _ => u64::MIN..u64::MAX,
+    };
+
+    println!("{}", admin.list_compactions(range).await?);
     Ok(())
 }
 
