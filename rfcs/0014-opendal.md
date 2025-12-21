@@ -15,6 +15,7 @@
       - [ObjectStoreSequencedStorageProtocol](#objectstoresequencedstorageprotocol)
     - [RetryingObjectStore](#retryingobjectstore)
     - [CachedObjectStore](#cachedobjectstore)
+  - [Migration Plan](#migration-plan)
 
 <!-- TOC end -->
 
@@ -180,3 +181,15 @@ We can consider to take the following 3-steps to migrate the `CachedObjectStore`
 1. **Compatibility Layer**: still use the current implementation as the compatibility layer, and wrap the `ObjectStore` with OpenDAL's compatibility layer. This allows users to keep the caching behavior unchanged for systems which already had lots of cached objects whom do not hope to invalidate all of them in one shot.
 2. **Custom Cache Layer**: Implement a custom `CacheLayer` that preserves our chunked caching and eviction strategies while integrating with OpenDAL's layer composition system.
 3. **Push to Upstream**: Push the custom cache layer to OpenDAL upstream to make it a built-in feature, and reduce the complexity of maintaining the custom cache layer in our repository.
+
+## Migration Plan
+
+The migration can be separated into multiple phases with gradual changes:
+
+1. Phase 1: Replace direct usages of `object_store` APIs with OpenDAL's `Operator` in `TableStore` and `ObjectStoreSequencedStorageProtocol`. Continue using the current `RetryingObjectStore` and `CachedObjectStore` implementations by passing them through OpenDAL's compatibility layer as the backend.
+2. Phase 2: Replace the `RetryingObjectStore` implementation with OpenDAL's `RetryLayer`.
+3. Phase 3: Replace the `CachedObjectStore` implementation with OpenDAL's cache layer (either built-in or custom implementation).
+
+Each phase can be validated by the existing test suite and benchmark to ensure performance and correctness are not degraded, and user-exposing APIs are not expected to be changed.
+
+In the longer term, we could revisit the API to consider whether we want to expose the `ObjectStore` trait to users, or instead accept options such as an URI or environment variables to connect to object stores.
