@@ -2,19 +2,20 @@
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-- [Background](#background)
-- [Goals and Constraints](#goals-and-constraints)
-   * [Goals](#goals)
-   * [Constraints](#constraints)
-- [Scope](#scope)
-- [Proposal](#proposal)
-   * [Migration Strategy](#migration-strategy)
-   * [Analysis of Direct Usages](#analysis-of-direct-usages)
-      + [TableStore](#tablestore)
-      + [ObjectStoreSequencedStorageProtocol](#objectstoresequencedstorageprotocol)
-   * [RetryingObjectStore](#retryingobjectstore)
-   * [CachedObjectStore](#cachedobjectstore)
-- [Migration Plan](#migration-plan)
+- [Use OpenDAL as IO access layer](#use-opendal-as-io-access-layer)
+  - [Background](#background)
+  - [Goals and Constraints](#goals-and-constraints)
+    - [Goals](#goals)
+    - [Constraints](#constraints)
+  - [Scope](#scope)
+  - [Proposal](#proposal)
+    - [Migration Strategy](#migration-strategy)
+    - [Analysis of Direct Usages](#analysis-of-direct-usages)
+      - [TableStore](#tablestore)
+      - [ObjectStoreSequencedStorageProtocol](#objectstoresequencedstorageprotocol)
+    - [RetryingObjectStore](#retryingobjectstore)
+    - [CachedObjectStore](#cachedobjectstore)
+  - [Migration Plan](#migration-plan)
 
 <!-- TOC end -->
 
@@ -190,6 +191,6 @@ The migration can be separated into multiple phases with gradual changes:
 2. Phase 2: Replace the `RetryingObjectStore` implementation with OpenDAL's `RetryLayer`.
 3. Phase 3: Replace the `CachedObjectStore` implementation with OpenDAL's cache layer (either built-in or custom implementation).
 
-Each phase can be validated by the existing test suite and benchmark to ensure performance and correctness are not degraded, and user-exposing APIs are not expected to be changed.
+Each phase can be validated by the existing test suite and benchmark to ensure performance and correctness are not degraded, and user-exposing APIs are not expected to be changed during the migration.
 
-In the longer term, we could revisit the API to consider whether we want to expose the `ObjectStore` trait to users, or instead accept options such as an URI or environment variables to connect to object stores.
+The `ObjectStore` backend compatibility layer is very useful for enabling gradual migration to OpenDAL. However, maintaining this translation layer may not be necessary for all users in the long term. In the longer term, we could revisit the API design to consider whether we want to continue exposing the `ObjectStore` trait to users, or instead accept simpler configuration options such as a URI or environment variables to connect to object stores directly.
