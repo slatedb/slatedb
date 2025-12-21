@@ -114,6 +114,12 @@ SlateDB uses the [`object_store`](https://docs.rs/object_store/latest/object_sto
 
 Visit [slatedb.io](https://slatedb.io) to learn more.
 
+## Bindings
+
+- [Go](https://github.com/slatedb/slatedb/tree/main/slatedb-go) (official)
+- [Python](https://github.com/slatedb/slatedb/tree/main/slatedb-py) (official)
+- [Ruby](https://github.com/catkins/slatedb-rb)
+
 ## Features
 
 - [x] Basic API (get, put, delete)
@@ -142,10 +148,13 @@ Check out [CONTRIBUTING.md](CONTRIBUTING.md) for fun (and useful) projects to wo
 See who's using SlateDB.
 
 - [Embucket](https://www.embucket.com)
+- [Malstrom](https://github.com/MalstromDevelopers/malstrom)
+- [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
 - [Responsive](https://responsive.dev)
 - [SQLync](https://sqlync.com)
 - [Tensorlake](https://www.tensorlake.ai)
+- [ZeroFS](https://zerofs.net)
 
 ## Talks
 

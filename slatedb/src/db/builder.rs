@@ -121,12 +121,13 @@ use crate::clock::DefaultLogicalClock;
 use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
 use crate::clock::SystemClock;
+use crate::compactions_store::CompactionsStore;
+use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::TokioCompactionExecutor;
-use crate::compactor_stats::CompactionStats;
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
@@ -402,6 +403,10 @@ impl<P: Into<Path>> DbBuilder<P> {
             &path,
             maybe_cached_main_object_store.clone(),
         ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            maybe_cached_main_object_store.clone(),
+        ));
         let latest_manifest =
             StoredManifest::try_load(manifest_store.clone(), system_clock.clone()).await?;
 
@@ -558,6 +563,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),
+                compactions_store.clone(),
                 compactor_options.clone(),
                 scheduler,
                 executor,
@@ -580,6 +586,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
             let gc = GarbageCollector::new(
                 manifest_store.clone(),
+                compactions_store.clone(),
                 uncached_table_store.clone(),
                 gc_options,
                 inner.stat_registry.clone(),
@@ -729,6 +736,10 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
                 retrying_main_object_store.clone(),
@@ -740,6 +751,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         ));
         GarbageCollector::new(
             manifest_store,
+            compactions_store,
             table_store,
             self.options,
             self.stat_registry,
@@ -754,7 +766,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
 pub struct CompactorBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,
-    tokio_handle: Handle,
+    compaction_runtime: Handle,
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
@@ -770,7 +782,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         Self {
             path,
             main_object_store,
-            tokio_handle: Handle::current(),
+            compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
@@ -783,8 +795,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
     /// Sets the tokio handle to use for background tasks.
     #[allow(unused)]
-    pub fn with_tokio_handle(mut self, tokio_handle: Handle) -> Self {
-        self.tokio_handle = tokio_handle;
+    pub fn with_runtime(mut self, compaction_runtime: Handle) -> Self {
+        self.compaction_runtime = compaction_runtime;
         self
     }
 
@@ -808,8 +820,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     }
 
     /// Sets the random number generator to use for the compactor.
-    pub fn with_rand(mut self, rand: Arc<DbRand>) -> Self {
-        self.rand = rand;
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Arc::new(DbRand::new(seed));
         self
     }
 
@@ -836,6 +848,10 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store.clone(), None),
             SsTableFormat::default(), // read only SSTs can use default
@@ -849,10 +865,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
         Compactor::new(
             manifest_store,
+            compactions_store,
             table_store,
             self.options,
             scheduler_supplier,
-            self.tokio_handle,
+            self.compaction_runtime,
             self.rand,
             self.stat_registry,
             self.system_clock,

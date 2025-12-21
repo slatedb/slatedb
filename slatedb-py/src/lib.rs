@@ -19,7 +19,6 @@ use ::slatedb::config::{
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
     ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
-use ::slatedb::object_store::memory::InMemory;
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::DBTransaction;
 use ::slatedb::Db;
@@ -96,11 +95,7 @@ fn resolve_object_store_py(
     if let Some(u) = url {
         return Db::resolve_object_store(u).map_err(map_error);
     }
-    if let Some(env) = env_file {
-        return load_object_store_from_env(Some(env))
-            .map_err(|e| InvalidError::new_err(e.to_string()));
-    }
-    Ok(Arc::new(InMemory::new()))
+    load_object_store_from_env(env_file).map_err(|e| InvalidError::new_err(e.to_string()))
 }
 
 fn build_gc_options_from_kwargs(
@@ -110,6 +105,8 @@ fn build_gc_options_from_kwargs(
     wal_min_age: Option<u64>,
     compacted_interval: Option<u64>,
     compacted_min_age: Option<u64>,
+    compactions_interval: Option<u64>,
+    compactions_min_age: Option<u64>,
     require_interval: bool,
     for_once: bool,
 ) -> PyResult<GarbageCollectorOptions> {
@@ -154,6 +151,12 @@ fn build_gc_options_from_kwargs(
         compacted_options: build_dir(
             compacted_interval,
             compacted_min_age,
+            require_interval,
+            for_once,
+        )?,
+        compactions_options: build_dir(
+            compactions_interval,
+            compactions_min_age,
             require_interval,
             for_once,
         )?,
@@ -601,6 +604,27 @@ impl PySlateDB {
         })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async { db.scan_prefix(prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = db.scan_prefix(prefix).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (key))]
     fn delete(&self, py: Python<'_>, key: Vec<u8>) -> PyResult<()> {
         if key.is_empty() {
@@ -679,6 +703,61 @@ impl PySlateDB {
         future_into_py(py, async move {
             let iter = db
                 .scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let db = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            db.scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let db = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = db
+                .scan_prefix_with_options(&prefix, &opts)
                 .await
                 .map_err(map_error)?;
             Ok(PyDbIterator::from_iter(iter))
@@ -1207,6 +1286,27 @@ impl PySlateDBSnapshot {
         })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async { snapshot.scan_prefix(prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let snapshot = self.inner_ref()?;
+        future_into_py(py, async move {
+            let iter = snapshot.scan_prefix(prefix).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
     fn scan_with_options(
         &self,
@@ -1275,6 +1375,62 @@ impl PySlateDBSnapshot {
         future_into_py(py, async move {
             let iter = snapshot
                 .scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let snapshot = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            snapshot
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let snapshot = self.inner_ref()?;
+        future_into_py(py, async move {
+            let iter = snapshot
+                .scan_prefix_with_options(&prefix, &opts)
                 .await
                 .map_err(map_error)?;
             Ok(PyDbIterator::from_iter(iter))
@@ -1506,6 +1662,28 @@ impl PySlateDBTransaction {
         future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async { txn.scan_prefix(prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = py.allow_threads(|| {
+            rt.block_on(async { txn.scan_prefix(prefix).await.map_err(map_error) })
+        })?;
+        future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
+    }
+
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
     fn scan_with_options(
         &self,
@@ -1574,6 +1752,63 @@ impl PySlateDBTransaction {
         let iter = py.allow_threads(|| {
             rt.block_on(async {
                 txn.scan_with_options(start..end, &opts)
+                    .await
+                    .map_err(map_error)
+            })
+        })?;
+        future_into_py(py, async move { Ok(PyDbIterator::from_iter(iter)) })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            txn.scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let txn = self.inner_ref()?;
+        let rt = get_runtime();
+        let iter = py.allow_threads(|| {
+            rt.block_on(async {
+                txn.scan_prefix_with_options(&prefix, &opts)
                     .await
                     .map_err(map_error)
             })
@@ -1878,6 +2113,27 @@ impl PySlateDBReader {
         })
     }
 
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix(&self, prefix: Vec<u8>) -> PyResult<PyDbIterator> {
+        let reader = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async { reader.scan_prefix(prefix).await.map_err(map_error) })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix))]
+    fn scan_prefix_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let reader = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = reader.scan_prefix(prefix).await.map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
     #[pyo3(signature = (start, end = None, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
     fn scan_with_options(
         &self,
@@ -1946,6 +2202,62 @@ impl PySlateDBReader {
         future_into_py(py, async move {
             let iter = reader
                 .scan_with_options(start..end, &opts)
+                .await
+                .map_err(map_error)?;
+            Ok(PyDbIterator::from_iter(iter))
+        })
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options(
+        &self,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<PyDbIterator> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let reader = self.inner.clone();
+        let rt = get_runtime();
+        let iter = rt.block_on(async {
+            reader
+                .scan_prefix_with_options(&prefix, &opts)
+                .await
+                .map_err(map_error)
+        })?;
+        Ok(PyDbIterator::from_iter(iter))
+    }
+
+    #[pyo3(signature = (prefix, *, durability_filter = None, dirty = None, read_ahead_bytes = None, cache_blocks = None, max_fetch_tasks = None))]
+    fn scan_prefix_with_options_async<'py>(
+        &self,
+        py: Python<'py>,
+        prefix: Vec<u8>,
+        durability_filter: Option<String>,
+        dirty: Option<bool>,
+        read_ahead_bytes: Option<usize>,
+        cache_blocks: Option<bool>,
+        max_fetch_tasks: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_scan_options(
+            durability_filter,
+            dirty,
+            read_ahead_bytes,
+            cache_blocks,
+            max_fetch_tasks,
+        )?;
+        let reader = self.inner.clone();
+        future_into_py(py, async move {
+            let iter = reader
+                .scan_prefix_with_options(&prefix, &opts)
                 .await
                 .map_err(map_error)?;
             Ok(PyDbIterator::from_iter(iter))
@@ -2343,7 +2655,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc_once(
         &self,
         manifest_interval: Option<u64>,
@@ -2352,6 +2664,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<()> {
         let admin = self.inner.clone();
         let rt = get_runtime();
@@ -2362,6 +2676,8 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             false,
             true,
         )?;
@@ -2373,7 +2689,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc_once_async<'py>(
         &self,
         py: Python<'py>,
@@ -2383,6 +2699,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         let opts = build_gc_options_from_kwargs(
@@ -2392,6 +2710,8 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             false,
             true,
         )?;
@@ -2403,7 +2723,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc(
         &self,
         manifest_interval: Option<u64>,
@@ -2412,6 +2732,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<()> {
         let admin = self.inner.clone();
         let rt = get_runtime();
@@ -2422,13 +2744,15 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             true,
             false,
         )?;
         rt.block_on(async move { admin.run_gc(opts).await.map_err(map_error) })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc_async<'py>(
         &self,
         py: Python<'py>,
@@ -2438,6 +2762,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         let opts = build_gc_options_from_kwargs(
@@ -2447,6 +2773,8 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             true,
             false,
         )?;

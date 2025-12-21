@@ -607,6 +607,39 @@ pub(crate) fn split_join_result(
     }
 }
 
+/// Formats a byte count as a human-readable string using SI units (KB, MB, GB, etc.).
+///
+/// Uses decimal (SI) prefixes where 1 KB = 1000 bytes.
+///
+/// # Examples
+/// ```ignore
+/// use slatedb::format_bytes_si;
+///
+/// assert_eq!(format_bytes_si(0), "0 B");
+/// assert_eq!(format_bytes_si(999), "999 B");
+/// assert_eq!(format_bytes_si(1000), "1.00 KB");
+/// assert_eq!(format_bytes_si(1500), "1.50 KB");
+/// assert_eq!(format_bytes_si(1_000_000), "1.00 MB");
+/// ```
+pub fn format_bytes_si(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+    const FACTOR: f64 = 1000.0;
+
+    if bytes < 1000 {
+        return format!("{} B", bytes);
+    }
+
+    let mut value = bytes as f64;
+    let mut unit_index = 0;
+
+    while value >= FACTOR && unit_index < UNITS.len() - 1 {
+        value /= FACTOR;
+        unit_index += 1;
+    }
+
+    format!("{:.2} {}", value, UNITS[unit_index])
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -616,7 +649,8 @@ mod tests {
     use crate::test_utils::TestClock;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
+        compute_max_parallel, format_bytes_si, panic_string, spawn_bg_task, BitReader, BitWriter,
+        WatchableOnceCell,
     };
     use bytes::{BufMut, Bytes, BytesMut};
     use parking_lot::Mutex;
@@ -1094,6 +1128,23 @@ mod tests {
         assert_eq!(reader.read_bit(), None);
         assert_eq!(reader.read32(1), None);
         assert_eq!(reader.read64(1), None);
+    }
+
+    #[rstest]
+    #[case(0, "0 B")]
+    #[case(1, "1 B")]
+    #[case(999, "999 B")]
+    #[case(1_000, "1.00 KB")]
+    #[case(1_500, "1.50 KB")]
+    #[case(1_000_000, "1.00 MB")]
+    #[case(1_500_000, "1.50 MB")]
+    #[case(1_000_000_000, "1.00 GB")]
+    #[case(1_000_000_000_000, "1.00 TB")]
+    #[case(1_000_000_000_000_000, "1.00 PB")]
+    #[case(1_000_000_000_000_000_000, "1.00 EB")]
+    #[case(u64::MAX, "18.45 EB")]
+    fn test_format_bytes_si(#[case] bytes: u64, #[case] expected: &str) {
+        assert_eq!(format_bytes_si(bytes), expected);
     }
 
     #[test]

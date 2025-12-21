@@ -133,7 +133,7 @@ mod tests {
         let (cache, _dir) = setup().await;
         let mut items = HashMap::new();
         for b in 0u64..256 {
-            let k = CachedKey(SST_ID, b);
+            let k = CachedKey::from((SST_ID, b));
             let v = build_block();
             cache.insert(k.clone(), v.clone()).await;
             items.insert(k, v);

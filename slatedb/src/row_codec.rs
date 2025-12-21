@@ -108,6 +108,7 @@ impl SstRowEntry {
         flags
     }
 
+    #[cfg(test)]
     pub fn size(&self) -> usize {
         let mut size = 2  // u16 key_prefix_len
         + 2 // u16 key_suffix_len

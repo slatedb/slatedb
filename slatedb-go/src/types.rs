@@ -3,6 +3,8 @@ use slatedb::{Db, WriteBatch};
 use std::ptr;
 use tokio::runtime::Runtime;
 
+use crate::db_reader::SlateDbReaderFFI;
+
 /// Internal struct that owns a Tokio runtime and a SlateDB instance.
 /// This eliminates the need for a global handle map and shared runtime.
 pub struct SlateDbFFI {
@@ -104,16 +106,53 @@ pub struct CSdbScanOptions {
 }
 
 /// Internal struct for managing database iterators in FFI
-/// Contains the iterator and a reference to the database to ensure proper lifetime management
+#[derive(Clone, Copy)]
+pub enum IteratorOwner {
+    Db(*mut SlateDbFFI),
+    Reader(*mut SlateDbReaderFFI),
+}
+
+/// Contains the iterator and a reference to the owner to ensure proper lifetime management
 pub struct CSdbIterator {
-    pub db_ptr: *mut SlateDbFFI, // Keep DB alive via pointer reference
+    owner: IteratorOwner,
     pub iter: DbIterator,
 }
 
 impl CSdbIterator {
-    /// Create a new iterator FFI wrapper
-    pub fn new(db_ptr: *mut SlateDbFFI, iter: DbIterator) -> Box<Self> {
-        Box::new(CSdbIterator { db_ptr, iter })
+    /// Create a new iterator FFI wrapper backed by a read-write DB
+    pub fn new_db(db_ptr: *mut SlateDbFFI, iter: DbIterator) -> Box<Self> {
+        Box::new(CSdbIterator {
+            owner: IteratorOwner::Db(db_ptr),
+            iter,
+        })
+    }
+
+    /// Create a new iterator FFI wrapper backed by a read-only DbReader
+    pub fn new_reader(reader_ptr: *mut SlateDbReaderFFI, iter: DbIterator) -> Box<Self> {
+        Box::new(CSdbIterator {
+            owner: IteratorOwner::Reader(reader_ptr),
+            iter,
+        })
+    }
+
+    pub fn is_owner_valid(&self) -> bool {
+        match self.owner {
+            IteratorOwner::Db(ptr) => !ptr.is_null(),
+            IteratorOwner::Reader(ptr) => !ptr.is_null(),
+        }
+    }
+
+    pub fn owner(&self) -> IteratorOwner {
+        self.owner
+    }
+
+    pub fn block_on_with_owner<F: std::future::Future>(owner: IteratorOwner, fut: F) -> F::Output {
+        unsafe {
+            match owner {
+                IteratorOwner::Db(ptr) => (*ptr).block_on(fut),
+                IteratorOwner::Reader(ptr) => (*ptr).block_on(fut),
+            }
+        }
     }
 }
 
