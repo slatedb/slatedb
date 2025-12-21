@@ -2,18 +2,19 @@
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-- [Background](#background)
-- [Goals and Constraints](#goals-and-constraints)
-   * [Goals](#goals)
-   * [Constraints](#constraints)
-- [Scope](#scope)
-- [Proposal](#proposal)
-   * [Migration Strategy](#migration-strategy)
-   * [Analysis of Direct Usages](#analysis-of-direct-usages)
-      + [TableStore](#tablestore)
-      + [ObjectStoreSequencedStorageProtocol](#objectstoresequencedstorageprotocol)
-   * [RetryingObjectStore](#retryingobjectstore)
-   * [CachedObjectStore](#cachedobjectstore)
+- [Use OpenDAL as IO access layer](#use-opendal-as-io-access-layer)
+  - [Background](#background)
+  - [Goals and Constraints](#goals-and-constraints)
+    - [Goals](#goals)
+    - [Constraints](#constraints)
+  - [Scope](#scope)
+  - [Proposal](#proposal)
+    - [Migration Strategy](#migration-strategy)
+    - [Analysis of Direct Usages](#analysis-of-direct-usages)
+      - [TableStore](#tablestore)
+      - [ObjectStoreSequencedStorageProtocol](#objectstoresequencedstorageprotocol)
+    - [RetryingObjectStore](#retryingobjectstore)
+    - [CachedObjectStore](#cachedobjectstore)
 
 <!-- TOC end -->
 
@@ -147,7 +148,17 @@ The migration requires that OpenDAL **supports CAS (create-if-not-exists) semant
 <!-- TOC --><a name="retryingobjectstore"></a>
 ### RetryingObjectStore
 
-tbd
+In the short term, we can simply wrap the current implementation of `RetryingObjectStore` before passing `Arc<dyn object_store::ObjectStore>` to OpenDAL's operator.
+
+However, we should ensure it's technically possible to replace the current implementation with OpenDAL's layers.
+
+The current `RetryingObjectStore` (`retrying_object_store.rs`) wraps any `ObjectStore` with exponential backoff retry logic. The implementation avoids retrying certain error types that indicate non-transient failures: `AlreadyExists`, `Precondition`, and `NotImplemented` errors are never retried to preserve correctness semantics.
+
+One notable implementation detail is the special handling of `list()` operations. Because the list API returns a stream and cannot be easily retried mid-iteration, the current implementation collects the entire stream into a Vec before attempting the operation. This ensures atomicity—either the entire list succeeds or the entire operation is retried.
+
+OpenDAL provides a [`RetryLayer`](https://opendal.apache.org/docs/rust/opendal/layers/struct.RetryLayer.html) with configurable retry policies that can potentially replace our custom implementation. It retries on errors which `Error::is_temporary` returns true.
+
+However, we may want to customize the retry behavior to match our current implementation. For example, when encountering an `AlreadyExists` error, we may want to read the object metadata (via a `stat()` call) to determine whether to return success (if we created the object and it already exists, making the operation idempotent) or return a conflict error (if someone else created it).
 
 <!-- TOC --><a name="cachedobjectstore"></a>
 ### CachedObjectStore
