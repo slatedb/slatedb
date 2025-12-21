@@ -2,20 +2,19 @@
 
 <!-- TOC start (generated with https://github.com/derlin/bitdowntoc) -->
 
-- [Use OpenDAL as IO access layer](#use-opendal-as-io-access-layer)
-  - [Background](#background)
-  - [Goals and Constraints](#goals-and-constraints)
-    - [Goals](#goals)
-    - [Constraints](#constraints)
-  - [Scope](#scope)
-  - [Proposal](#proposal)
-    - [Migration Strategy](#migration-strategy)
-    - [Analysis of Direct Usages](#analysis-of-direct-usages)
-      - [TableStore](#tablestore)
-      - [ObjectStoreSequencedStorageProtocol](#objectstoresequencedstorageprotocol)
-    - [RetryingObjectStore](#retryingobjectstore)
-    - [CachedObjectStore](#cachedobjectstore)
-  - [Migration Plan](#migration-plan)
+- [Background](#background)
+- [Goals and Constraints](#goals-and-constraints)
+   * [Goals](#goals)
+   * [Constraints](#constraints)
+- [Scope](#scope)
+- [Proposal](#proposal)
+   * [Migration Strategy](#migration-strategy)
+   * [Analysis of Direct Usages](#analysis-of-direct-usages)
+      + [TableStore](#tablestore)
+      + [ObjectStoreSequencedStorageProtocol](#objectstoresequencedstorageprotocol)
+   * [RetryingObjectStore](#retryingobjectstore)
+   * [CachedObjectStore](#cachedobjectstore)
+- [Migration Plan](#migration-plan)
 
 <!-- TOC end -->
 
@@ -182,6 +181,7 @@ We can consider to take the following 3-steps to migrate the `CachedObjectStore`
 2. Implement a custom `CacheLayer` that preserves our chunked caching and eviction strategies. Or pick a community maintained cache layer like `opendal-foyer`.
 3. Push the customized or picked cache layer to OpenDAL upstream to make it a built-in feature, reducing the complexity of maintaining the cache layer in our repository.
 
+<!-- TOC --><a name="migration-plan"></a>
 ## Migration Plan
 
 The migration can be separated into multiple phases with gradual changes:
