@@ -172,15 +172,15 @@ The `CachedObjectStore` (`cached_object_store/`) is the most complex extension o
 2. **Cache admission control**: An `AdmissionPicker` determines which objects should be cached based on access patterns, preventing cache pollution from one-time reads.
 3. **Pick-of-2 eviction strategy**: When cache size exceeds the limit, the evictor uses a pick-of-2 algorithm to approximate LRU—it randomly selects two cached files, compares their last access times, and evicts the older one. This requires a background task to periodically track the files list in the memory.
 
-At the time of writing, OpenDAL does not provide a built-in cache layer that matches our requirements. There was an issue that aims to add a cache layer for opendal in <https://github.com/apache/opendal/issues/5678>, however, this issue does not have much progress.
+At the time of writing, OpenDAL does not provide a built-in cache layer that matches our requirements. There was an issue that aims to add a cache layer for opendal in <https://github.com/apache/opendal/issues/5678>, however, this issue does not have much progress. There're still exists some community maintained cache layers, such as <https://github.com/r3v2d0g/opendal-foyer>.
 
-In the longer term, we hope the complexities around caching can be maintained in a community force. Although the cache layer still haven't been built in from OpenDAL, we can push the force together to build it.
+In the longer term, we hope the complexities around caching can be maintained with community force. Although the cache layer still haven't been built in from OpenDAL, we can push the force together to build it.
 
 We can consider to take the following 3-steps to migrate the `CachedObjectStore`:
 
-1. **Compatibility Layer**: still use the current implementation as the compatibility layer, and wrap the `ObjectStore` with OpenDAL's compatibility layer. This allows users to keep the caching behavior unchanged for systems which already had lots of cached objects whom do not hope to invalidate all of them in one shot.
-2. **Custom Cache Layer**: Implement a custom `CacheLayer` that preserves our chunked caching and eviction strategies while integrating with OpenDAL's layer composition system.
-3. **Push to Upstream**: Push the custom cache layer to OpenDAL upstream to make it a built-in feature, and reduce the complexity of maintaining the custom cache layer in our repository.
+1. Still use the current implementation as the compatibility layer, and wrap the `ObjectStore` with OpenDAL's compatibility layer. This allows users to keep the caching behavior unchanged for systems which already had lots of cached objects whom do not hope to invalidate all of them in one shot.
+2. Implement a custom `CacheLayer` that preserves our chunked caching and eviction strategies. Or pick a community maintained cache layer like `opendal-foyer`.
+3. Push the customized or picked cache layer to OpenDAL upstream to make it a built-in feature, reducing the complexity of maintaining the cache layer in our repository.
 
 ## Migration Plan
 
