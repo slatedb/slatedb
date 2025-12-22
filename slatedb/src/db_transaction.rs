@@ -298,14 +298,31 @@ impl DBTransaction {
         Ok(())
     }
 
-    /// Mark a key as read for conflict detection in SI && SSI modes.
+    /// Mark a key as read for conflict detection.
+    ///
+    /// This method explicitly tracks a read operation for conflict detection. When a key is
+    /// marked as read, the transaction will detect conflicts if another transaction modifies
+    /// that key after this transaction started, regardless of the isolation level.
+    ///
+    /// This allows for selective read-write conflict detection even in Snapshot Isolation mode,
+    /// where reads are not automatically tracked (unlike `get()` which only tracks reads in SSI
+    /// mode).
     ///
     /// ## Arguments
     /// - `key`: the key to mark as read
+    ///
+    /// ## Example
+    /// ```rust
+    /// // In SI mode, get() doesn't track reads, but mark_read() does
+    /// let txn = db.begin(IsolationLevel::Snapshot).await?;
+    /// txn.mark_read(b"important_key")?;  // This key will be tracked for conflicts
+    /// // ... if another transaction modifies "important_key", this txn will conflict on commit
+    /// ```
     pub fn mark_read<K>(&self, key: K) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
     {
+        // Always track reads when explicitly marked, regardless of isolation level
         self.txn_manager.track_read_keys(
             &self.txn_id,
             &HashSet::from([Bytes::copy_from_slice(key.as_ref())]),
@@ -702,6 +719,7 @@ mod tests {
         TxnScan(Bytes, Bytes),
         TxnPut(Bytes, Bytes),
         TxnDelete(Bytes),
+        TxnMarkRead(Bytes),
         TxnCommit,
         TxnRollback,
         DbPut(Bytes, Bytes),
@@ -754,6 +772,10 @@ mod tests {
                     txn.delete(key).unwrap();
                     TransactionTestOpResult::Empty
                 }
+                (Some(txn), TransactionTestOp::TxnMarkRead(key)) => {
+                    txn.mark_read(key).unwrap();
+                    TransactionTestOpResult::Empty
+                }
                 (Some(_txn), TransactionTestOp::TxnCommit) => {
                     let txn = txn_opt.take().unwrap();
                     match txn.commit().await {
@@ -782,6 +804,7 @@ mod tests {
                 | (None, TransactionTestOp::TxnScan(_, _))
                 | (None, TransactionTestOp::TxnPut(_, _))
                 | (None, TransactionTestOp::TxnDelete(_))
+                | (None, TransactionTestOp::TxnMarkRead(_))
                 | (None, TransactionTestOp::TxnCommit)
                 | (None, TransactionTestOp::TxnRollback) => TransactionTestOpResult::Invalid,
             };
@@ -1016,6 +1039,110 @@ mod tests {
             ]
         }
     )]
+    #[case::ssi_mark_read_conflict(
+        TransactionTestCase {
+            name: "ssi_mark_read_conflict",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
+            operations: vec![
+                TransactionTestOp::TxnMarkRead(Bytes::from("k1")),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
+                TransactionTestOp::TxnPut(Bytes::from("k2"), Bytes::from("v2")),
+                TransactionTestOp::TxnCommit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
+    #[case::ssi_mark_read_multiple_keys_conflict(
+        TransactionTestCase {
+            name: "ssi_mark_read_multiple_keys_conflict",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![
+                (Bytes::from("k1"), Bytes::from("v1")),
+                (Bytes::from("k2"), Bytes::from("v2")),
+                (Bytes::from("k3"), Bytes::from("v3"))
+            ],
+            operations: vec![
+                TransactionTestOp::TxnMarkRead(Bytes::from("k1")),
+                TransactionTestOp::TxnMarkRead(Bytes::from("k2")),
+                TransactionTestOp::DbPut(Bytes::from("k2"), Bytes::from("v2_new")),
+                TransactionTestOp::TxnPut(Bytes::from("k4"), Bytes::from("v4")),
+                TransactionTestOp::TxnCommit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
+    #[case::ssi_mark_read_no_conflict_on_different_key(
+        TransactionTestCase {
+            name: "ssi_mark_read_no_conflict_on_different_key",
+            isolation_level: IsolationLevel::SerializableSnapshot,
+            initial_data: vec![
+                (Bytes::from("k1"), Bytes::from("v1")),
+                (Bytes::from("k2"), Bytes::from("v2"))
+            ],
+            operations: vec![
+                TransactionTestOp::TxnMarkRead(Bytes::from("k1")),
+                TransactionTestOp::DbPut(Bytes::from("k2"), Bytes::from("v2_new")),
+                TransactionTestOp::TxnPut(Bytes::from("k3"), Bytes::from("v3")),
+                TransactionTestOp::TxnCommit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+            ]
+        }
+    )]
+    #[case::si_mark_read_conflict(
+        TransactionTestCase {
+            name: "si_mark_read_conflict",
+            isolation_level: IsolationLevel::Snapshot,
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
+            operations: vec![
+                TransactionTestOp::TxnMarkRead(Bytes::from("k1")),
+                TransactionTestOp::DbPut(Bytes::from("k1"), Bytes::from("v2")),
+                TransactionTestOp::TxnPut(Bytes::from("k2"), Bytes::from("v2")),
+                TransactionTestOp::TxnCommit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
+    #[case::si_mark_read_write_write_conflict(
+        TransactionTestCase {
+            name: "si_mark_read_write_write_conflict",
+            isolation_level: IsolationLevel::Snapshot,
+            initial_data: vec![(Bytes::from("k1"), Bytes::from("v1"))],
+            operations: vec![
+                TransactionTestOp::TxnMarkRead(Bytes::from("k1")),
+                TransactionTestOp::TxnPut(Bytes::from("k2"), Bytes::from("v2")),
+                TransactionTestOp::DbPut(Bytes::from("k2"), Bytes::from("v2_db")),
+                TransactionTestOp::TxnCommit,
+            ],
+            expected_results: vec![
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Empty,
+                TransactionTestOpResult::Conflicted,
+            ]
+        }
+    )]
     #[tokio::test]
     async fn test_txn_table_driven(#[case] test_case: TransactionTestCase) {
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
@@ -1105,5 +1232,82 @@ mod tests {
         // Verify k2 is now in the database
         let value = db.get(b"k2").await.unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"v2")));
+    }
+
+    #[tokio::test]
+    async fn test_mark_read_equivalent_to_get_in_ssi() {
+        // This test verifies that mark_read() behaves the same as get() in terms of conflict detection in SSI mode.
+        // Setup database with initial data
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_mark_read_equivalent", object_store)
+            .await
+            .unwrap();
+
+        db.put(b"k1", b"v1").await.unwrap();
+
+        // Test 1: Transaction using mark_read() should conflict
+        let txn1 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        txn1.mark_read(b"k1").unwrap();
+
+        // Another transaction modifies k1
+        db.put(b"k1", b"v2").await.unwrap();
+
+        // Transaction 1 tries to write and commit
+        txn1.put(b"k2", b"v2").unwrap();
+        let result1 = txn1.commit().await;
+        assert!(
+            result1.is_err(),
+            "Transaction with mark_read() should conflict"
+        );
+
+        // Reset the database state
+        db.put(b"k1", b"v1").await.unwrap();
+
+        // Test 2: Transaction using get() should also conflict (same behavior)
+        let txn2 = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let _ = txn2.get(b"k1").await.unwrap();
+
+        // Another transaction modifies k1
+        db.put(b"k1", b"v2_again").await.unwrap();
+
+        // Transaction 2 tries to write and commit
+        txn2.put(b"k3", b"v3").unwrap();
+        let result2 = txn2.commit().await;
+        assert!(result2.is_err(), "Transaction with get() should conflict");
+
+        // Both should have the same behavior: conflict detection
+    }
+
+    #[tokio::test]
+    async fn test_mark_read_no_conflict_without_write_in_ssi() {
+        // This test verifies that mark_read() doesn't cause conflict if the transaction is read-only (no writes).
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_mark_read_no_write", object_store)
+            .await
+            .unwrap();
+
+        db.put(b"k1", b"v1").await.unwrap();
+
+        let txn = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        txn.mark_read(b"k1").unwrap();
+
+        // Another transaction modifies k1
+        db.put(b"k1", b"v2").await.unwrap();
+
+        // Transaction commits without any writes - should succeed
+        let result = txn.commit().await;
+        assert!(
+            result.is_ok(),
+            "Read-only transaction should not conflict even if read key was modified"
+        );
     }
 }
