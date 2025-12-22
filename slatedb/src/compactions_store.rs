@@ -13,7 +13,6 @@ use chrono::Utc;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
-#[cfg(test)]
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
@@ -194,7 +193,6 @@ impl CompactionsStore {
     }
 
     /// Delete a compactions file from the object store.
-    #[cfg(test)]
     pub(crate) async fn delete_compactions(&self, id: u64) -> Result<(), SlateDBError> {
         Ok(self.inner.delete(MonotonicId::new(id)).await?)
     }
@@ -203,7 +201,6 @@ impl CompactionsStore {
     /// range is the current compactions state.
     /// # Arguments
     /// * `id_range` - The range of IDs to list
-    #[cfg(test)]
     pub(crate) async fn list_compactions<R: RangeBounds<u64>>(
         &self,
         id_range: R,
@@ -226,7 +223,6 @@ impl CompactionsStore {
         Ok(compactions)
     }
 
-    #[cfg(test)]
     pub(crate) async fn try_read_latest_compactions(
         &self,
     ) -> Result<Option<(u64, Compactions)>, SlateDBError> {

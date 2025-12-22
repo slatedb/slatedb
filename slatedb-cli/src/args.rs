@@ -110,7 +110,7 @@ pub(crate) enum CliCommands {
 
     /// Runs a garbage collection for a specific resource type once
     RunGarbageCollection {
-        /// the type of resource to clean up (manifest, wal, compacted)
+        /// the type of resource to clean up (manifest, wal, compacted, compactions)
         #[arg(short, long)]
         resource: GcResource,
 
@@ -140,7 +140,7 @@ pub(crate) enum CliCommands {
     /// Schedules a period garbage collection job
     #[command(group(
     ArgGroup::new("gc_config")
-        .args(["manifest", "wal", "compacted"])
+        .args(["manifest", "wal", "compacted", "compactions"])
         .multiple(true)
         .required(true)
     ))]
@@ -165,6 +165,13 @@ pub(crate) enum CliCommands {
         /// the period is how often to attempt a GC
         #[arg(long, value_parser = parse_gc_schedule)]
         compacted: Option<GcSchedule>,
+
+        /// Configuration for compactions file garbage collection should be set in the
+        /// format min_age=<duration>,period=<duration> -- the min_age is the
+        /// minimum file age that should be considered for collection and
+        /// the period is how often to attempt a GC
+        #[arg(long, value_parser = parse_gc_schedule)]
+        compactions: Option<GcSchedule>,
     },
 }
 
@@ -173,6 +180,7 @@ pub(crate) enum GcResource {
     Manifest,
     Wal,
     Compacted,
+    Compactions,
 }
 
 fn parse_gc_schedule(s: &str) -> Result<GcSchedule, String> {
