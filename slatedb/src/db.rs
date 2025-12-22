@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
+use futures::TryFutureExt as _;
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
 use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
@@ -1087,8 +1088,7 @@ impl Db {
     {
         let mut batch = WriteBatch::new();
         batch.put_with_options(key, value, put_opts);
-        let write_opts = write_opts.clone();
-        async move { self.write_with_options(batch, &write_opts).await }
+        self.write_with_options(batch, &write_opts)
     }
 
     /// Delete a key from the database with default `WriteOptions`.
@@ -1154,8 +1154,7 @@ impl Db {
     ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_ {
         let mut batch = WriteBatch::new();
         batch.delete(key);
-        let options = options.clone();
-        async move { self.write_with_options(batch, &options).await }
+        self.write_with_options(batch, options)
     }
 
     /// Merge a value into the database with default `MergeOptions` and `WriteOptions`.
@@ -1276,8 +1275,7 @@ impl Db {
     {
         let mut batch = WriteBatch::new();
         batch.merge_with_options(key, value, merge_opts);
-        let write_opts = write_opts.clone();
-        async move { self.write_with_options(batch, &write_opts).await }
+        self.write_with_options(batch, &write_opts)
     }
 
     /// Write a batch of put/delete operations atomically to the database. Batch writes
@@ -1316,7 +1314,7 @@ impl Db {
         batch: WriteBatch,
     ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_ {
         let options = WriteOptions::default();
-        async move { self.write_with_options(batch, &options).await }
+        self.write_with_options(batch, &options)
     }
 
     /// Write a batch of put/delete operations atomically to the database. Batch writes
@@ -1351,14 +1349,13 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn write_with_options(
+    pub fn write_with_options(
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-    ) -> Result<(), crate::Error> {
+    ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_ {
         self.inner
             .write_with_options(batch, options)
-            .await
             .map_err(Into::into)
     }
 
