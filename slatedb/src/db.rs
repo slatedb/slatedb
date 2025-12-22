@@ -20,6 +20,7 @@
 //! }
 //! ```
 
+use std::future::Future;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -253,39 +254,57 @@ impl DbInner {
         return true;
     }
 
-    pub async fn write_with_options(
+    pub fn write_with_options(
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-    ) -> Result<(), SlateDBError> {
-        self.check_closed()?;
-        if batch.ops.is_empty() {
-            return Ok(());
-        }
-        // record write batch and number of operations
-        self.db_stats.write_batch_count.inc();
-        self.db_stats.write_ops.add(batch.ops.len() as u64);
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let batch_msg = WriteBatchMessage {
-            batch,
-            options: options.clone(),
-            done: tx,
-        };
-
-        self.maybe_apply_backpressure().await?;
-        self.write_notifier
-            .send_safely(self.state.read().closed_result_reader(), batch_msg)?;
-
-        // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
-
-        let mut durable_watcher = rx.await??;
-
-        if options.await_durable {
-            durable_watcher.await_value().await?;
+    ) -> impl Future<Output = Result<(), SlateDBError>> + Send + '_ {
+        enum EarlyReturn {
+            Ok,
+            Err(SlateDBError),
         }
 
-        Ok(())
+        let sync_result: Result<tokio::sync::oneshot::Receiver<_>, EarlyReturn> = (|| {
+            self.check_closed().map_err(EarlyReturn::Err)?;
+            if batch.ops.is_empty() {
+                return Err(EarlyReturn::Ok);
+            }
+            self.db_stats.write_batch_count.inc();
+            self.db_stats.write_ops.add(batch.ops.len() as u64);
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let batch_msg = WriteBatchMessage {
+                batch,
+                options: options.clone(),
+                done: tx,
+            };
+
+            self.write_notifier
+                .send_safely(self.state.read().closed_result_reader(), batch_msg)
+                .map_err(EarlyReturn::Err)?;
+
+            Ok(rx)
+        })();
+
+        let await_durable = options.await_durable;
+
+        async move {
+            let rx = match sync_result {
+                Ok(rx) => rx,
+                Err(EarlyReturn::Ok) => return Ok(()),
+                Err(EarlyReturn::Err(e)) => return Err(e),
+            };
+
+            self.maybe_apply_backpressure().await?;
+
+            let mut durable_watcher = rx.await??;
+
+            if await_durable {
+                durable_watcher.await_value().await?;
+            }
+
+            Ok(())
+        }
     }
 
     #[inline]
@@ -1015,14 +1034,18 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn put<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
+    pub fn put<K, V>(
+        &self,
+        key: K,
+        value: V,
+    ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
         let mut batch = WriteBatch::new();
         batch.put(key, value);
-        self.write(batch).await
+        self.write(batch)
     }
 
     /// Write a value into the database with custom `PutOptions` and `WriteOptions`.
@@ -1051,20 +1074,21 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn put_with_options<K, V>(
+    pub fn put_with_options<K, V>(
         &self,
         key: K,
         value: V,
         put_opts: &PutOptions,
         write_opts: &WriteOptions,
-    ) -> Result<(), crate::Error>
+    ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
         let mut batch = WriteBatch::new();
         batch.put_with_options(key, value, put_opts);
-        self.write_with_options(batch, write_opts).await
+        let write_opts = write_opts.clone();
+        async move { self.write_with_options(batch, &write_opts).await }
     }
 
     /// Delete a key from the database with default `WriteOptions`.
@@ -1090,10 +1114,13 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), crate::Error> {
+    pub fn delete<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+    ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_ {
         let mut batch = WriteBatch::new();
         batch.delete(key.as_ref());
-        self.write(batch).await
+        self.write(batch)
     }
 
     /// Delete a key from the database with custom `WriteOptions`.
@@ -1120,14 +1147,15 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn delete_with_options<K: AsRef<[u8]>>(
+    pub fn delete_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &WriteOptions,
-    ) -> Result<(), crate::Error> {
+    ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_ {
         let mut batch = WriteBatch::new();
         batch.delete(key);
-        self.write_with_options(batch, options).await
+        let options = options.clone();
+        async move { self.write_with_options(batch, &options).await }
     }
 
     /// Merge a value into the database with default `MergeOptions` and `WriteOptions`.
@@ -1172,14 +1200,18 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
+    pub fn merge<K, V>(
+        &self,
+        key: K,
+        value: V,
+    ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
         let mut batch = WriteBatch::new();
         batch.merge(key, value);
-        self.write(batch).await
+        self.write(batch)
     }
 
     /// Merge a value into the database with custom `MergeOptions` and `WriteOptions`.
@@ -1231,20 +1263,21 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn merge_with_options<K, V>(
+    pub fn merge_with_options<K, V>(
         &self,
         key: K,
         value: V,
         merge_opts: &MergeOptions,
         write_opts: &WriteOptions,
-    ) -> Result<(), crate::Error>
+    ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
         let mut batch = WriteBatch::new();
         batch.merge_with_options(key, value, merge_opts);
-        self.write_with_options(batch, write_opts).await
+        let write_opts = write_opts.clone();
+        async move { self.write_with_options(batch, &write_opts).await }
     }
 
     /// Write a batch of put/delete operations atomically to the database. Batch writes
@@ -1278,9 +1311,12 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn write(&self, batch: WriteBatch) -> Result<(), crate::Error> {
-        self.write_with_options(batch, &WriteOptions::default())
-            .await
+    pub fn write(
+        &self,
+        batch: WriteBatch,
+    ) -> impl Future<Output = Result<(), crate::Error>> + Send + '_ {
+        let options = WriteOptions::default();
+        async move { self.write_with_options(batch, &options).await }
     }
 
     /// Write a batch of put/delete operations atomically to the database. Batch writes
