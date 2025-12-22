@@ -399,7 +399,7 @@ impl DBTransaction {
         // sequentially, ensuring no concurrent writes. Both conflict checking & persisting
         // are handled there.
         self.db_inner
-            .write_with_options(write_batch, options)
+            .write_with_options(write_batch, options)?
             .await
             .map_err(Into::into)
     }

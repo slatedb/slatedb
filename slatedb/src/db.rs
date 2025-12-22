@@ -20,11 +20,13 @@
 //! }
 //! ```
 
+use std::future::Future;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
+use futures::TryFutureExt as _;
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
 use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
@@ -253,15 +255,13 @@ impl DbInner {
         return true;
     }
 
-    pub async fn write_with_options(
+    pub fn write_with_options(
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<impl Future<Output = Result<(), SlateDBError>> + Send + '_, SlateDBError> {
         self.check_closed()?;
-        if batch.ops.is_empty() {
-            return Ok(());
-        }
+        assert!(!batch.ops.is_empty());
         // record write batch and number of operations
         self.db_stats.write_batch_count.inc();
         self.db_stats.write_ops.add(batch.ops.len() as u64);
@@ -273,19 +273,23 @@ impl DbInner {
             done: tx,
         };
 
-        self.maybe_apply_backpressure().await?;
         self.write_notifier
             .send_safely(self.state.read().closed_result_reader(), batch_msg)?;
 
-        // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
+        let await_durable = options.await_durable;
+        Ok(async move {
+            // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
-        let mut durable_watcher = rx.await??;
+            let mut durable_watcher = rx.await??;
 
-        if options.await_durable {
-            durable_watcher.await_value().await?;
-        }
+            if await_durable {
+                durable_watcher.await_value().await?;
+            }
 
-        Ok(())
+            self.maybe_apply_backpressure().await?;
+
+            Ok(())
+        })
     }
 
     #[inline]
@@ -1321,9 +1325,20 @@ impl Db {
         options: &WriteOptions,
     ) -> Result<(), crate::Error> {
         self.inner
-            .write_with_options(batch, options)
+            .write_with_options(batch, options)?
             .await
             .map_err(Into::into)
+    }
+
+    pub fn write_with_options_pipelineable(
+        &self,
+        batch: WriteBatch,
+        options: &WriteOptions,
+    ) -> Result<impl Future<Output = Result<(), crate::Error>> + Send + '_, crate::Error> {
+        Ok(self
+            .inner
+            .write_with_options(batch, options)?
+            .map_err(Into::into))
     }
 
     /// Flush in-memory writes to disk. This function blocks until the in-memory
