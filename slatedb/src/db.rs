@@ -3487,7 +3487,7 @@ mod tests {
         };
 
         let mut froze_memtable = false;
-        for _ in 0..200 {
+        for _ in 0..6000 {
             {
                 let guard = db.inner.state.read();
                 if !guard.state().imm_memtable.is_empty() {
