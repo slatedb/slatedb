@@ -14,13 +14,12 @@
 use object_store::memory::InMemory;
 use rand::Rng;
 use rstest::rstest;
-use slatedb::clock::MockLogicalClock;
 use slatedb::clock::MockSystemClock;
 use slatedb::clock::SystemClock;
 use slatedb::DbRand;
 use slatedb::Error;
 use slatedb_dst::utils::{build_dst, build_runtime, run_simulation};
-use slatedb_dst::{DstDuration, DstOptions};
+use slatedb_dst::{DefaultDstLogicalClock, DstDuration, DstOptions};
 use std::rc::Rc;
 use std::sync::Arc;
 use tracing::error;
@@ -62,7 +61,7 @@ fn test_dst(
 ) -> Result<(), Error> {
     let object_store = Arc::new(InMemory::new());
     let runtime = build_runtime(rand.seed());
-    let logical_clock = Arc::new(MockLogicalClock::new());
+    let logical_clock = Arc::new(DefaultDstLogicalClock::new());
     runtime.block_on(async move {
         run_simulation(
             object_store,
@@ -116,7 +115,8 @@ fn test_dst_is_deterministic(
         let object_store = Arc::new(InMemory::new());
         let rand = Rc::new(DbRand::new(seed));
         let system_clock = Arc::new(MockSystemClock::new());
-        let logical_clock = Arc::new(MockLogicalClock::new());
+        let logical_clock = Arc::new(DefaultDstLogicalClock::new());
+
         let runtime = build_runtime(rand.rng().random::<u64>());
         runtime.block_on(async {
             let mut dst = build_dst(object_store.clone(), system_clock.clone(), logical_clock.clone(), rand.clone(), DstOptions::default()).await?;
@@ -197,7 +197,7 @@ fn test_dst_nightly() -> Result<(), Error> {
             let rand = Rc::new(DbRand::new(seed));
             let runtime = build_runtime(rand.seed());
             let system_clock = Arc::new(MockSystemClock::new());
-            let logical_clock = Arc::new(MockLogicalClock::new());
+            let logical_clock = Arc::new(DefaultDstLogicalClock::new());
             let duration = DstDuration::WallClock(std::time::Duration::from_secs(900)); // 15 minutes
             runtime.block_on(async move {
                 let span = tracing::info_span!("run_simulation", core = core, seed = seed);
