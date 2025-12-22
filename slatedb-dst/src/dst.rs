@@ -435,7 +435,7 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_put_options(&self) -> PutOptions {
-        let ttl = if self.rand.rng().random_bool(0.1) {
+        let ttl = if self.rand.rng().random_bool(0.9) {
             Ttl::NoExpiry
         } else {
             Ttl::ExpireAfter(self.sample_log10_uniform(1..=i64::MAX as u64))
