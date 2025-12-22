@@ -290,6 +290,8 @@ impl DbInner {
         let await_durable = options.await_durable;
 
         async move {
+            // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
+
             let rx = match sync_result {
                 Ok(rx) => rx,
                 Err(EarlyReturn::Ok) => return Ok(()),
