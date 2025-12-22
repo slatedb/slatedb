@@ -298,6 +298,21 @@ impl DBTransaction {
         Ok(())
     }
 
+    /// Mark a key as read for conflict detection in SI && SSI modes.
+    ///
+    /// ## Arguments
+    /// - `key`: the key to mark as read
+    pub fn mark_read<K>(&self, key: K) -> Result<(), crate::Error>
+    where
+        K: AsRef<[u8]>,
+    {
+        self.txn_manager.track_read_keys(
+            &self.txn_id,
+            &HashSet::from([Bytes::copy_from_slice(key.as_ref())]),
+        );
+        Ok(())
+    }
+
     /// Merge a key-value pair into the transaction.
     pub fn merge<K, V>(&self, key: K, value: V) -> Result<(), crate::Error>
     where
