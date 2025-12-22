@@ -322,7 +322,10 @@ impl DBTransaction {
     where
         K: AsRef<[u8]>,
     {
-        // Always track reads when explicitly marked, regardless of isolation level
+        // Always track reads when explicitly marked, regardless of isolation level.
+        // The current conflict checking logic always checks the read_keys set
+        // even in SI mode. The only difference between SI and SSI is whether
+        // the read keys are tracked in the read set or not.
         self.txn_manager.track_read_keys(
             &self.txn_id,
             &HashSet::from([Bytes::copy_from_slice(key.as_ref())]),
