@@ -260,42 +260,33 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> impl Future<Output = Result<(), SlateDBError>> + Send + '_ {
-        enum EarlyReturn {
-            Ok,
-            Err(SlateDBError),
+        if let Err(e) = self.check_closed() {
+            return futures::future::Either::Left(std::future::ready(Err(e)));
+        }
+        if batch.ops.is_empty() {
+            return futures::future::Either::Left(std::future::ready(Ok(())));
         }
 
-        let sync_result: Result<tokio::sync::oneshot::Receiver<_>, EarlyReturn> = (|| {
-            self.check_closed().map_err(EarlyReturn::Err)?;
-            if batch.ops.is_empty() {
-                return Err(EarlyReturn::Ok);
-            }
-            self.db_stats.write_batch_count.inc();
-            self.db_stats.write_ops.add(batch.ops.len() as u64);
+        self.db_stats.write_batch_count.inc();
+        self.db_stats.write_ops.add(batch.ops.len() as u64);
 
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let batch_msg = WriteBatchMessage {
-                batch,
-                options: options.clone(),
-                done: tx,
-            };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let batch_msg = WriteBatchMessage {
+            batch,
+            options: options.clone(),
+            done: tx,
+        };
 
-            self.write_notifier
-                .send_safely(self.state.read().closed_result_reader(), batch_msg)
-                .map_err(EarlyReturn::Err)?;
-
-            Ok(rx)
-        })();
+        if let Err(e) = self
+            .write_notifier
+            .send_safely(self.state.read().closed_result_reader(), batch_msg)
+        {
+            return futures::future::Either::Left(std::future::ready(Err(e)));
+        }
 
         let await_durable = options.await_durable;
 
-        async move {
-            let rx = match sync_result {
-                Ok(rx) => rx,
-                Err(EarlyReturn::Ok) => return Ok(()),
-                Err(EarlyReturn::Err(e)) => return Err(e),
-            };
-
+        futures::future::Either::Right(async move {
             self.maybe_apply_backpressure().await?;
 
             // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
@@ -307,7 +298,7 @@ impl DbInner {
             }
 
             Ok(())
-        }
+        })
     }
 
     #[inline]
