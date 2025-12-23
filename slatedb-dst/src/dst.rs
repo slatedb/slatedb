@@ -438,7 +438,7 @@ impl DefaultDstDistribution {
         let ttl = if self.rand.rng().random_bool(0.9) {
             Ttl::NoExpiry
         } else {
-            Ttl::ExpireAfter(self.sample_log10_uniform(1..2_629_746_000)) // one month in millis
+            Ttl::ExpireAfter(self.sample_log10_uniform(1..=i64::MAX as u64))
         };
 
         PutOptions { ttl }
