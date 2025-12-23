@@ -18,7 +18,7 @@ use tokio::fs::File;
 use tokio::{
     fs::{self, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::{Mutex, MutexGuard, OnceCell},
+    sync::{Mutex, OnceCell},
 };
 use walkdir::WalkDir;
 
@@ -611,10 +611,7 @@ impl FsCacheEvictorInner {
     /// This method acquires the lock once to pick all eviction targets, then releases the lock
     /// to delete files, and finally acquires the lock again to update the state.
     async fn evict_to_target_size(&self, target_size: u64) -> usize {
-        let picked_targets = {
-            let cache_state = self.cache_state.lock().await;
-            self.pick_evict_targets(&cache_state, target_size)
-        };
+        let picked_targets = self.pick_evict_targets(target_size).await;
 
         if picked_targets.is_empty() {
             if self.cache_size_bytes.load(Ordering::Relaxed) > target_size {
@@ -698,11 +695,9 @@ impl FsCacheEvictorInner {
     //  of LRU, it randomized pick two files, compare their last access time, and choose the older one to evict.
     ///
     /// Returns a list of (path, size_bytes) tuples to evict.
-    fn pick_evict_targets(
-        &self,
-        cache_state: &MutexGuard<'_, CacheState>,
-        target_size: u64,
-    ) -> Vec<(std::path::PathBuf, usize)> {
+    async fn pick_evict_targets(&self, target_size: u64) -> Vec<(std::path::PathBuf, usize)> {
+        let cache_state = self.cache_state.lock().await;
+
         if cache_state.keys.len() < 2 {
             return vec![];
         }
@@ -871,9 +866,7 @@ mod tests {
 
         evictor.clone().scan_entries(false).await;
 
-        let cache_state = evictor.cache_state.lock().await;
-        let targets = evictor.pick_evict_targets(&cache_state, 1025);
-        drop(cache_state);
+        let targets = evictor.pick_evict_targets(1025).await;
 
         assert_eq!(targets.len(), 1);
         let (target_path, size) = &targets[0];
