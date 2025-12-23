@@ -3,8 +3,8 @@ name: Nightly Benchmarks
 on:
   schedule:
     # Run at midnight Pacific (8 AM UTC)
-    - cron: '0 8 * * *'
-  workflow_dispatch:  # Allow manual trigger
+    - cron: "0 8 * * *"
+  workflow_dispatch: # Allow manual trigger
 
 permissions:
   # Required for storing benchmark results
@@ -34,7 +34,7 @@ jobs:
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: cargo bench
-          tool: 'cargo'
+          tool: "cargo"
           output-file-path: output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
@@ -208,6 +208,7 @@ jobs:
         env:
           RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
           RUST_LOG: "info"
+          RUST_BACKTRACE: "1"
           SLATEDB_DST_ROOT: "./"
 
   detect-flaky-tests:

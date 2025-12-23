@@ -340,9 +340,9 @@ impl DefaultDstDistribution {
     }
 
     /// Generates an advance time action for the logical clock. The number of ticks is sampled
-    /// using a log-uniform distribution that is shared with the TTL generation.
+    /// using a log-uniform distribution. The range is hard coded as 1..300_000 (1ms to 5 minutes).
     fn sample_advance_logical_time(&self) -> DstAction {
-        let ticks = self.sample_log10_uniform(1..=i64::MAX as u64);
+        let ticks = self.sample_log10_uniform(1..300_000);
         DstAction::AdvanceLogicalClock(ticks as i64)
     }
 
@@ -438,7 +438,7 @@ impl DefaultDstDistribution {
         let ttl = if self.rand.rng().random_bool(0.9) {
             Ttl::NoExpiry
         } else {
-            Ttl::ExpireAfter(self.sample_log10_uniform(1..=i64::MAX as u64))
+            Ttl::ExpireAfter(self.sample_log10_uniform(1..2_629_746_000)) // one month in millis
         };
 
         PutOptions { ttl }
