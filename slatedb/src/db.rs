@@ -560,6 +560,7 @@ impl DbInner {
     }
 }
 
+#[derive(Clone)]
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: Arc<MessageHandlerExecutor>,
