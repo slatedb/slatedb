@@ -120,7 +120,7 @@ impl DBTransaction {
             let key_bytes = Bytes::copy_from_slice(key.as_ref());
             let mut read_keys = HashSet::new();
             read_keys.insert(key_bytes);
-            self.txn_manager.track_read_keys(&self.txn_id, &read_keys);
+            self.txn_manager.track_read_keys(&self.txn_id, read_keys);
         }
 
         let db_state = self.db_inner.state.read().view();
@@ -298,38 +298,36 @@ impl DBTransaction {
         Ok(())
     }
 
-    /// Mark a key as read for conflict detection.
+    /// Mark keys as read for conflict detection.
     ///
-    /// This method explicitly tracks a read operation for conflict detection. When a key is
+    /// This method explicitly tracks read operations for conflict detection. When keys are
     /// marked as read, the transaction will detect conflicts if another transaction modifies
-    /// that key after this transaction started, regardless of the isolation level.
+    /// any of those keys after this transaction started, regardless of the isolation level.
     ///
     /// This allows for selective read-write conflict detection even in Snapshot Isolation mode,
     /// where reads are not automatically tracked (unlike `get()` which only tracks reads in SSI
     /// mode).
     ///
     /// ## Arguments
-    /// - `key`: the key to mark as read
+    /// - `keys`: an iterator of keys to mark as read
     ///
-    /// ## Example
+    /// ## Examples
     /// ```rust
-    /// // In SI mode, get() doesn't track reads, but mark_read() does
     /// let txn = db.begin(IsolationLevel::Snapshot).await?;
-    /// txn.mark_read(b"important_key")?;  // This key will be tracked for conflicts
-    /// // ... if another transaction modifies "important_key", this txn will conflict on commit
+    /// txn.mark_read([b"key1", b"key2", b"key3"])?;
     /// ```
-    pub fn mark_read<K>(&self, key: K) -> Result<(), crate::Error>
+    pub fn mark_read<K, I>(&self, keys: I) -> Result<(), crate::Error>
     where
         K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
     {
         // Always track reads when explicitly marked, regardless of isolation level.
         // The current conflict checking logic always checks the read_keys set
         // even in SI mode. The only difference between SI and SSI is whether
         // the read keys are tracked in the read set or not.
-        self.txn_manager.track_read_keys(
-            &self.txn_id,
-            &HashSet::from([Bytes::copy_from_slice(key.as_ref())]),
-        );
+
+        let read_keys = keys.into_iter().map(|k| Bytes::copy_from_slice(k.as_ref()));
+        self.txn_manager.track_read_keys(&self.txn_id, read_keys);
         Ok(())
     }
 
@@ -776,7 +774,7 @@ mod tests {
                     TransactionTestOpResult::Empty
                 }
                 (Some(txn), TransactionTestOp::TxnMarkRead(key)) => {
-                    txn.mark_read(key).unwrap();
+                    txn.mark_read([key]).unwrap();
                     TransactionTestOpResult::Empty
                 }
                 (Some(_txn), TransactionTestOp::TxnCommit) => {
@@ -1253,7 +1251,7 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        txn1.mark_read(b"k1").unwrap();
+        txn1.mark_read([b"k1"]).unwrap();
 
         // Another transaction modifies k1
         db.put(b"k1", b"v2").await.unwrap();
@@ -1301,7 +1299,7 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        txn.mark_read(b"k1").unwrap();
+        txn.mark_read([b"k1"]).unwrap();
 
         // Another transaction modifies k1
         db.put(b"k1", b"v2").await.unwrap();
@@ -1311,6 +1309,39 @@ mod tests {
         assert!(
             result.is_ok(),
             "Read-only transaction should not conflict even if read key was modified"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mark_read_multiple_keys_at_once() {
+        // This test verifies that mark_read() can track multiple keys in one call
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::open("test_mark_read_multiple", object_store)
+            .await
+            .unwrap();
+
+        db.put(b"k1", b"v1").await.unwrap();
+        db.put(b"k2", b"v2").await.unwrap();
+        db.put(b"k3", b"v3").await.unwrap();
+
+        let txn = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+
+        // Mark multiple keys at once
+        txn.mark_read([b"k1", b"k2", b"k3"]).unwrap();
+
+        // Another transaction modifies one of the marked keys
+        db.put(b"k2", b"v2_modified").await.unwrap();
+
+        // Transaction tries to commit with a write
+        txn.put(b"k4", b"v4").unwrap();
+        let result = txn.commit().await;
+
+        assert!(
+            result.is_err(),
+            "Transaction should conflict because k2 was modified"
         );
     }
 }
