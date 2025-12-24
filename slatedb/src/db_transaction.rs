@@ -313,8 +313,17 @@ impl DBTransaction {
     ///
     /// ## Examples
     /// ```rust
+    /// # async fn example() -> Result<(), slatedb::Error> {
+    /// # use std::sync::Arc;
+    /// # use slatedb::object_store::memory::InMemory;
+    /// use slatedb::{Db, IsolationLevel};
+    ///
+    /// # let object_store = Arc::new(InMemory::new());
+    /// # let db = Db::open("test_path", object_store).await?;
     /// let txn = db.begin(IsolationLevel::Snapshot).await?;
     /// txn.mark_read([b"key1", b"key2", b"key3"])?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn mark_read<K, I>(&self, keys: I) -> Result<(), crate::Error>
     where
