@@ -900,4 +900,57 @@ mod tests {
         let cache_size_bytes = evictor.cache_size_bytes.load(Ordering::SeqCst);
         assert_eq!(cache_size_bytes, 2049);
     }
+
+    #[rstest::rstest]
+    // Basic case: 2 keys, nothing picked, no exclusion
+    #[case(&[0, 1], &[], None, &[0, 1])]
+    // Basic case: 2 keys, nothing picked, exclude index 0
+    #[case(&[0, 1], &[], Some(0), &[1])]
+    // Basic case: 2 keys, nothing picked, exclude index 1
+    #[case(&[0, 1], &[], Some(1), &[0])]
+    // 3 keys, index 0 picked, no exclusion -> can return 1 or 2
+    #[case(&[0, 1, 2], &[0], None, &[1, 2])]
+    // 3 keys, index 0 picked, exclude index 1 -> must return 2
+    #[case(&[0, 1, 2], &[0], Some(1), &[2])]
+    // 4 keys, indices 0,1 picked, no exclusion -> can return 2 or 3
+    #[case(&[0, 1, 2, 3], &[0, 1], None, &[2, 3])]
+    // 4 keys, indices 0,1 picked, exclude 2 -> must return 3
+    #[case(&[0, 1, 2, 3], &[0, 1], Some(2), &[3])]
+    // Edge case: exclude_idx is already in picked (redundant exclusion)
+    #[case(&[0, 1, 2], &[0], Some(0), &[1, 2])]
+    fn test_pick_random_available_index(
+        #[case] key_indices: &[usize],
+        #[case] picked_indices: &[usize],
+        #[case] exclude_idx: Option<usize>,
+        #[case] expected_possible: &[usize],
+    ) {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("objstore_cache_test_pick_")
+            .tempdir()
+            .unwrap();
+        let registry = StatRegistry::new();
+        let evictor = FsCacheEvictorInner::new(
+            temp_dir.path().to_path_buf(),
+            1024,
+            Arc::new(CachedObjectStoreStats::new(&registry)),
+            Arc::new(DbRand::default()),
+        );
+
+        let keys: Vec<std::path::PathBuf> = key_indices
+            .iter()
+            .map(|i| std::path::PathBuf::from(format!("file{}", i)))
+            .collect();
+        let picked: HashSet<usize> = picked_indices.iter().copied().collect();
+
+        let mut rng = evictor.rand.rng();
+        for _ in 0..100 {
+            let result = evictor.pick_random_available_index(&mut rng, &keys, &picked, exclude_idx);
+            assert!(
+                expected_possible.contains(&result),
+                "pick_random_available_index returned {}, expected one of {:?}",
+                result,
+                expected_possible
+            );
+        }
+    }
 }
