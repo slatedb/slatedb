@@ -719,18 +719,24 @@ impl FsCacheEvictorInner {
             }
 
             // Pick two random indices that haven't been evicted yet
-            let idx0 = self.pick_random_available_index(
+            let idx0 = match self.pick_random_available_index(
                 &mut rng,
                 &cache_state.keys,
                 &picked_indices,
                 None,
-            );
-            let idx1 = self.pick_random_available_index(
+            ) {
+                Some(idx) => idx,
+                None => break,
+            };
+            let idx1 = match self.pick_random_available_index(
                 &mut rng,
                 &cache_state.keys,
                 &picked_indices,
                 Some(idx0),
-            );
+            ) {
+                Some(idx) => idx,
+                None => break,
+            };
 
             let path0 = &cache_state.keys[idx0];
             let path1 = &cache_state.keys[idx1];
@@ -760,20 +766,24 @@ impl FsCacheEvictorInner {
     }
 
     // Pick a random index from keys that hasn't been chosen yet and optionally excludes
-    // a specific index.
+    // a specific index. Returns None if no available index exists.
     fn pick_random_available_index(
         &self,
         rng: &mut impl rand::Rng,
         keys: &[std::path::PathBuf],
         picked: &HashSet<usize>,
         exclude_idx: Option<usize>,
-    ) -> usize {
-        loop {
-            let idx = rng.random_range(0..keys.len());
-            if !picked.contains(&idx) && Some(idx) != exclude_idx {
-                return idx;
-            }
+    ) -> Option<usize> {
+        let available = (0..keys.len())
+            .filter(|i| !picked.contains(i) && Some(*i) != exclude_idx)
+            .collect::<Vec<_>>();
+
+        if available.is_empty() {
+            return None;
         }
+
+        let chosen = rng.random_range(0..available.len());
+        available.get(chosen).copied()
     }
 }
 
@@ -916,8 +926,11 @@ mod tests {
     #[case(&[0, 1, 2, 3], &[0, 1], None, &[2, 3])]
     // 4 keys, indices 0,1 picked, exclude 2 -> must return 3
     #[case(&[0, 1, 2, 3], &[0, 1], Some(2), &[3])]
-    // Edge case: exclude_idx is already in picked (redundant exclusion)
-    #[case(&[0, 1, 2], &[0], Some(0), &[1, 2])]
+    // Corner case: exclude_idx is already in picked (redundant exclusion) -
+    // index 0 is both picked and excluded
+    #[case(&[0, 1], &[0], Some(0), &[1])]
+    // Corner case: no available index (all picked or excluded)
+    #[case(&[0, 1], &[0], Some(1), &[])]
     fn test_pick_random_available_index(
         #[case] key_indices: &[usize],
         #[case] picked_indices: &[usize],
@@ -943,14 +956,26 @@ mod tests {
         let picked: HashSet<usize> = picked_indices.iter().copied().collect();
 
         let mut rng = evictor.rand.rng();
-        for _ in 0..100 {
+
+        if expected_possible.is_empty() {
+            // Should return None when no available index exists
             let result = evictor.pick_random_available_index(&mut rng, &keys, &picked, exclude_idx);
             assert!(
-                expected_possible.contains(&result),
-                "pick_random_available_index returned {}, expected one of {:?}",
-                result,
-                expected_possible
+                result.is_none(),
+                "pick_random_available_index should return None, got {:?}",
+                result
             );
+        } else {
+            for _ in 0..100 {
+                let result =
+                    evictor.pick_random_available_index(&mut rng, &keys, &picked, exclude_idx);
+                assert!(
+                    result.is_some_and(|r| expected_possible.contains(&r)),
+                    "pick_random_available_index returned {:?}, expected one of {:?}",
+                    result,
+                    expected_possible
+                );
+            }
         }
     }
 }
