@@ -774,16 +774,13 @@ async def test_async_put_delete_merge_with_options(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file, merge_operator=last_write_wins)
     try:
         await db.put_with_options_async(b"ap1", b"v1", await_durable=False)
-        # Use durability_filter="memory" to see uncommitted data
         assert await db.get_with_options_async(b"ap1", durability_filter="memory") == b"v1"
 
         await db.delete_with_options_async(b"ap1", await_durable=False)
-        # Use durability_filter="memory" to see uncommitted delete
         assert await db.get_with_options_async(b"ap1", durability_filter="memory") is None
 
         await db.merge_with_options_async(b"am1", b"x", await_durable=False)
         await db.merge_with_options_async(b"am1", b"y", await_durable=False)
-        # Use durability_filter="memory" to see uncommitted merges
         assert await db.get_with_options_async(b"am1", durability_filter="memory") == b"y"
     finally:
         await db.close_async()
@@ -1002,7 +999,6 @@ async def test_async_write_batch_and_write_with_options(db_path, env_file):
         wb2 = WriteBatch()
         wb2.put(b"ab3", b"v3")
         await db.write_with_options_async(wb2, await_durable=False)
-        # Use durability_filter="memory" to see uncommitted data
         assert await db.get_with_options_async(b"ab3", durability_filter="memory") == b"v3"
     finally:
         await db.close_async()
