@@ -94,6 +94,7 @@ use rand::Rng;
 use rand::RngCore;
 use slatedb::clock::LogicalClock;
 use slatedb::clock::SystemClock;
+use slatedb::config::DurabilityLevel;
 use slatedb::config::PutOptions;
 use slatedb::config::ReadOptions;
 use slatedb::config::ScanOptions;
@@ -325,7 +326,7 @@ impl DefaultDstDistribution {
         } else if start_key == end_key {
             end_key.push(b'\0');
         }
-        DstAction::Scan(start_key.clone(), end_key.clone(), ScanOptions::default())
+        DstAction::Scan(start_key.clone(), end_key.clone(), self.gen_scan_options())
     }
 
     fn sample_flush(&self) -> DstAction {
@@ -458,7 +459,12 @@ impl DefaultDstDistribution {
 
     #[inline]
     fn gen_read_options(&self) -> ReadOptions {
-        ReadOptions::default()
+        ReadOptions::default().with_durability_filter(DurabilityLevel::Memory)
+    }
+
+    #[inline]
+    fn gen_scan_options(&self) -> ScanOptions {
+        ScanOptions::default().with_durability_filter(DurabilityLevel::Memory)
     }
 
     /// Returns true if the operation is a put, false if it is a delete.
