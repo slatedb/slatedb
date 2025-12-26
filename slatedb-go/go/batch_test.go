@@ -166,8 +166,9 @@ var _ = Describe("WriteBatch", func() {
 			err = db.WriteWithOptions(batch, writeOpts)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify the write
-			value, err := db.Get([]byte("key1"))
+			// Verify the write (use DurabilityMemory since write is not awaited for durability)
+			readOpts := &slatedb.ReadOptions{DurabilityFilter: slatedb.DurabilityMemory}
+			value, err := db.GetWithOptions([]byte("key1"), readOpts)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(value).To(Equal([]byte("value1")))
 		})

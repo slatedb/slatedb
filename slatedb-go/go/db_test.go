@@ -126,7 +126,9 @@ var _ = Describe("DB", func() {
 				err = db.DeleteWithOptions(key, writeOpts)
 				Expect(err).NotTo(HaveOccurred())
 
-				_, err = db.Get(key)
+				// Use DurabilityMemory to see the uncommitted delete
+				readOpts := &slatedb.ReadOptions{DurabilityFilter: slatedb.DurabilityMemory}
+				_, err = db.GetWithOptions(key, readOpts)
 				Expect(err).To(Equal(slatedb.ErrNotFound))
 			})
 		})
