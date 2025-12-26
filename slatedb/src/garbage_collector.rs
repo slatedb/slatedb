@@ -179,15 +179,15 @@ impl GarbageCollector {
             stats.clone(),
             options.compacted_options,
         );
-        let manifest_gc_task = ManifestGcTask::new(
-            manifest_store.clone(),
-            stats.clone(),
-            options.manifest_options,
-        );
         let compactions_gc_task = CompactionsGcTask::new(
             compactions_store.clone(),
             stats.clone(),
             options.compactions_options,
+        );
+        let manifest_gc_task = ManifestGcTask::new(
+            manifest_store.clone(),
+            stats.clone(),
+            options.manifest_options,
         );
         Self {
             manifest_store,
