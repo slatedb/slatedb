@@ -48,6 +48,26 @@ pub(crate) enum CliCommands {
         end: Option<u64>,
     },
 
+    /// Reads the latest compactions file and outputs a readable
+    /// String representation
+    ReadCompactions {
+        /// Specify a specific compactions id to read, if this is
+        /// not specified the latest compactions will be returned
+        #[arg(short, long)]
+        id: Option<u64>,
+    },
+
+    /// Lists all available compactions files
+    ListCompactions {
+        /// Optionally specify a start id for the range of compactions to lookup
+        #[arg(short, long)]
+        start: Option<u64>,
+
+        /// Optionally specify an end id for the range of compactions to lookup
+        #[arg(short, long)]
+        end: Option<u64>,
+    },
+
     /// Create a new checkpoint pointing to the database's current state.
     CreateCheckpoint {
         /// Optionally specify a lifetime for the created checkpoint. You can specify the lifetime
