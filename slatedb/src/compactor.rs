@@ -1836,6 +1836,8 @@ mod tests {
         .await
         .unwrap();
 
+        // This is `None` even though we have a (finished) compaction because
+        // `compactions()` only returns active compactions.
         assert!(handler.state().compactions().next().is_none());
         assert!(
             handler.state().manifest().value.compactor_epoch > first_epoch,

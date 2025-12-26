@@ -172,10 +172,10 @@ impl TransactionManager {
 
     /// Track a key read operation (for SSI)
     #[allow(unused)]
-    pub fn track_read_keys(&self, txn_id: &Uuid, read_keys: &HashSet<Bytes>) {
+    pub fn track_read_keys(&self, txn_id: &Uuid, read_keys: impl IntoIterator<Item = Bytes>) {
         let mut inner = self.inner.write();
         if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
-            txn_state.track_read_keys(read_keys.iter().cloned());
+            txn_state.track_read_keys(read_keys);
         }
     }
 
@@ -1313,7 +1313,7 @@ mod tests {
                 TxnOperation::TrackReadKeys { txn_id, keys } => {
                     let key_set: HashSet<Bytes> =
                         keys.iter().map(|k| Bytes::from(k.clone())).collect();
-                    manager.track_read_keys(txn_id, &key_set);
+                    manager.track_read_keys(txn_id, key_set);
                     ExecutionEffect::Nothing
                 }
                 TxnOperation::TrackReadRange {

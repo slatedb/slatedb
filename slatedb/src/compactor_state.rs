@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
 use log::{error, info};
+use serde::Serialize;
 use ulid::Ulid;
 
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
@@ -14,7 +15,7 @@ use crate::transactional_object::DirtyObject;
 /// A `SourceId` distinguishes between two kinds of inputs a compaction can read:
 /// an existing compacted sorted run (identified by its run id), or an L0 SSTable
 /// (identified by its ULID).
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize)]
 pub enum SourceId {
     SortedRun(u32),
     Sst(Ulid),
@@ -67,7 +68,7 @@ impl SourceId {
 
 /// Immutable spec that describes a compaction. Currently, this only holds the
 /// input sources and destination SR id for a compaction.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CompactionSpec {
     /// Input sources for the compaction.
     sources: Vec<SourceId>,
@@ -110,7 +111,7 @@ impl Display for CompactionSpec {
 /// Lifecycle status for a compaction.
 ///
 /// This is currently tracked in-memory, but not in the .compactions file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CompactionStatus {
     /// The compaction has been submitted but not yet started.
     Submitted,
@@ -137,7 +138,7 @@ impl CompactionStatus {
 ///
 /// A compaction is the unit tracked by the compactor: it has a stable `id` (ULID) and a `spec`
 /// (what to compact and where).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct Compaction {
     /// Stable id (ULID) used to track this compaction across messages and attempts.
     id: Ulid,
@@ -253,7 +254,7 @@ impl Display for Compaction {
 }
 
 /// Container for compactions tracked by the compactor alongside its epoch.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct Compactions {
     // The current compactor's epoch.
     pub(crate) compactor_epoch: u64,
@@ -318,7 +319,7 @@ impl Compactions {
     }
 
     /// Keeps the most recently finished compaction and any active compactions, and removes others.
-    pub(crate) fn trim(&mut self) {
+    pub(crate) fn retain_active_and_last_finished(&mut self) {
         let latest_finished = self
             .recent_compactions
             .iter()
@@ -485,7 +486,7 @@ impl CompactorState {
         {
             compaction.set_status(CompactionStatus::Finished);
         }
-        self.compactions.value.trim();
+        self.compactions.value.retain_active_and_last_finished();
     }
 
     /// Mutates a running compaction in place if it exists.
@@ -564,7 +565,7 @@ impl CompactorState {
             db_state.compacted = new_compacted;
             self.manifest.value.core = db_state;
             compaction.set_status(CompactionStatus::Finished);
-            self.compactions.value.trim();
+            self.compactions.value.retain_active_and_last_finished();
         } else {
             error!("compaction not found [compaction_id={}]", compaction_id);
         }
@@ -622,7 +623,7 @@ mod tests {
         ));
         compactions.insert(compaction_with_status(active, CompactionStatus::Submitted));
 
-        compactions.trim();
+        compactions.retain_active_and_last_finished();
 
         assert!(compactions.contains(&active));
         assert!(compactions.contains(&latest_finished));
@@ -640,7 +641,7 @@ mod tests {
         compactions.insert(compaction_with_status(middle, CompactionStatus::Finished));
         compactions.insert(compaction_with_status(newest, CompactionStatus::Finished));
 
-        compactions.trim();
+        compactions.retain_active_and_last_finished();
 
         assert!(!compactions.contains(&older));
         assert!(!compactions.contains(&middle));
@@ -659,7 +660,7 @@ mod tests {
         ));
         compactions.insert(compaction_with_status(running, CompactionStatus::Running));
 
-        compactions.trim();
+        compactions.retain_active_and_last_finished();
 
         assert!(compactions.contains(&submitted));
         assert!(compactions.contains(&running));
