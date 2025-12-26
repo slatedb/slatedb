@@ -12,6 +12,7 @@ use slatedb::config::{
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+use slatedb::CompactorRuntime;
 use slatedb::Db;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,7 +132,9 @@ async fn test_concurrent_writers_and_readers() {
             let db_path = format!("/tmp/test_concurrent_writers_readers_{}", ts);
             Db::builder(db_path, object_store.clone())
                 .with_settings(config.clone())
-                .with_compaction_scheduler_supplier(supplier.clone())
+                .with_compactor_runtime(
+                    CompactorRuntime::new().with_scheduler_supplier(supplier.clone()),
+                )
                 .build()
                 .await
         })

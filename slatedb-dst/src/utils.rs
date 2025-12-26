@@ -11,6 +11,7 @@ use slatedb::config::GarbageCollectorOptions;
 use slatedb::config::SizeTieredCompactionSchedulerOptions;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+use slatedb::CompactorRuntime;
 use slatedb::Db;
 use slatedb::DbBuilder;
 use slatedb::DbRand;
@@ -89,7 +90,9 @@ pub async fn build_db(
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
     builder = builder.with_system_clock(system_clock.clone());
     builder = builder.with_logical_clock(logical_clock.clone());
-    builder = builder.with_compaction_scheduler_supplier(compaction_scheduler_supplier);
+    builder = builder.with_compactor_runtime(
+        CompactorRuntime::new().with_scheduler_supplier(compaction_scheduler_supplier),
+    );
     builder.build().await.unwrap()
 }
 
