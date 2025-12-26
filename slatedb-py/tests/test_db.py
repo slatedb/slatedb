@@ -685,18 +685,15 @@ def test_db_put_delete_merge_with_options(db_path, env_file):
     try:
         # put with await_durable=False
         db.put_with_options(b"p1", b"v1", await_durable=False)
-        # Use durability_filter="memory" to see uncommitted data
         assert db.get_with_options(b"p1", durability_filter="memory") == b"v1"
 
         # delete with await_durable=False
         db.delete_with_options(b"p1", await_durable=False)
-        # Use durability_filter="memory" to see uncommitted delete
         assert db.get_with_options(b"p1", durability_filter="memory") is None
 
         # merge with options
         db.merge_with_options(b"m1", b"a", await_durable=False)
         db.merge_with_options(b"m1", b"b", await_durable=False)
-        # Use durability_filter="memory" to see uncommitted merges
         assert db.get_with_options(b"m1", durability_filter="memory") == b"b"
     finally:
         db.close()
@@ -716,7 +713,6 @@ def test_db_write_batch_and_write_with_options(db_path, env_file):
         wb2 = WriteBatch()
         wb2.put(b"b3", b"v3")
         db.write_with_options(wb2, await_durable=False)
-        # Use durability_filter="memory" to see uncommitted data
         assert db.get_with_options(b"b3", durability_filter="memory") == b"v3"
     finally:
         db.close()
