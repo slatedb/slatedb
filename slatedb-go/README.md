@@ -376,7 +376,7 @@ type DbReaderOptions struct {
 }
 
 type ScanOptions struct {
-    DurabilityFilter DurabilityLevel // Filter for scan durability (default: DurabilityMemory)
+    DurabilityFilter DurabilityLevel // Filter for scan durability (default: DurabilityRemote)
     Dirty            bool            // Include uncommitted writes
     ReadAheadBytes   uint64          // Buffer size for read-ahead
     CacheBlocks      bool            // Whether to cache blocks

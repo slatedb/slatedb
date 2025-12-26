@@ -235,11 +235,11 @@ impl SstBlockSize {
 #[derive(Clone, Default, Debug, Copy, PartialEq)]
 pub enum DurabilityLevel {
     /// Includes only data currently stored durably in object storage.
+    #[default]
     Remote,
 
     /// Includes data with level Remote and data currently only stored in-memory awaiting flush
     /// to object storage.
-    #[default]
     Memory,
 }
 
@@ -312,7 +312,7 @@ pub struct ScanOptions {
 }
 
 impl Default for ScanOptions {
-    /// Create a new ScanOptions with `read_level` set to [`DurabilityLevel::Memory`].
+    /// Create a new ScanOptions with `durability_filter` set to [`DurabilityLevel::Remote`].
     fn default() -> Self {
         Self {
             durability_filter: DurabilityLevel::default(),
@@ -1363,12 +1363,12 @@ object_store_cache_options:
     #[test]
     fn test_default_read_options() {
         let options = ReadOptions::default();
-        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert_eq!(options.durability_filter, DurabilityLevel::Remote);
         assert!(!options.dirty);
         assert!(options.cache_blocks);
 
         let options = ScanOptions::default();
-        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert_eq!(options.durability_filter, DurabilityLevel::Remote);
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
@@ -1381,7 +1381,7 @@ object_store_cache_options:
         assert_eq!(options.max_fetch_tasks, 4);
 
         // Verify other fields remain unchanged
-        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert_eq!(options.durability_filter, DurabilityLevel::Remote);
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);

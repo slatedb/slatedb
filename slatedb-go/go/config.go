@@ -74,8 +74,8 @@ func WithDbReaderOptions(opts DbReaderOptions) Option[DbReaderConfig] {
 type DurabilityLevel int
 
 const (
-	DurabilityMemory DurabilityLevel = 0 // Default - includes both persisted and in-memory data
-	DurabilityRemote DurabilityLevel = 1 // Only data persisted to object storage
+	DurabilityMemory DurabilityLevel = 0 // Includes both persisted and in-memory data
+	DurabilityRemote DurabilityLevel = 1 // Only data persisted to object storage (default)
 )
 
 // WriteOptions controls write operation behavior
@@ -468,7 +468,7 @@ func convertToCPutOptions(opts *PutOptions) *C.CSdbPutOptions {
 // convertToCReadOptions converts Go ReadOptions to C ReadOptions
 func convertToCReadOptions(opts *ReadOptions) *C.CSdbReadOptions {
 	if opts == nil {
-		opts = &ReadOptions{DurabilityFilter: DurabilityMemory, Dirty: false}
+		opts = &ReadOptions{DurabilityFilter: DurabilityRemote, Dirty: false}
 	}
 	return &C.CSdbReadOptions{
 		durability_filter: C.uint32_t(opts.DurabilityFilter),

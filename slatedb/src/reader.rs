@@ -1303,7 +1303,9 @@ mod tests {
         };
 
         // Call the actual get_with_options method
-        let read_options = ReadOptions::default().with_dirty(test_case.dirty);
+        let read_options = ReadOptions::default()
+            .with_durability_filter(DurabilityLevel::Memory)
+            .with_dirty(test_case.dirty);
         let result = reader
             .get_with_options(
                 test_case.query_key,
@@ -1775,7 +1777,9 @@ mod tests {
         let range = BytesRange::from_slice(test_case.range_start..test_case.range_end);
 
         // Call the actual scan_with_options method
-        let scan_options = ScanOptions::default().with_dirty(test_case.dirty);
+        let scan_options = ScanOptions::default()
+            .with_durability_filter(DurabilityLevel::Memory)
+            .with_dirty(test_case.dirty);
         let mut iter = reader
             .scan_with_options(
                 range,
