@@ -117,8 +117,10 @@ impl CompactorStateWriter {
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Mark any persisted compactions as finished so we don't resume them after restart.
-        // Keep only the most recent finished compaction for GC safety (#1044).
+        // We don't resume old jobs, but keep the latest finished entry for GC safety (#1044).
+        // This is to keep the GC's low-watermark monotonically increasing. Otherwise, whenever
+        // there are no actively running jobs, it will fall back to UNIX_EPOCH. This isn't wrong,
+        // but is harder to reason about.
         dirty_compactions
             .value
             .iter_mut()
