@@ -180,7 +180,7 @@ impl GarbageCollector {
             options.compacted_options,
         );
         let compactions_gc_task = CompactionsGcTask::new(
-            compactions_store,
+            compactions_store.clone(),
             stats.clone(),
             options.compactions_options,
         );

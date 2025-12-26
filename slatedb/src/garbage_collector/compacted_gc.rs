@@ -1,10 +1,11 @@
 use crate::{
-    compactions_store::CompactionsStore, config::GarbageCollectorDirectoryOptions,
+    compactions_store::CompactionsStore, compactor_state::Compactions,
+    compactor_state_protocols::CompactorStateReader, config::GarbageCollectorDirectoryOptions,
     db_state::SsTableId, error::SlateDBError, manifest::store::ManifestStore, manifest::Manifest,
     tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
-use log::{error, warn};
+use log::error;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -121,21 +122,14 @@ impl CompactedGcTask {
     /// In all of these cases, we want to be conservative and avoid deleting any SSTs that
     /// might be in use by a running compaction, so we return the Unix epoch to effectively
     /// disable deletion based on compaction state.
-    async fn compaction_low_watermark_dt(&self) -> DateTime<Utc> {
-        match self.compactions_store.try_read_latest_compactions().await {
-            Ok(Some((_, compactions))) => compactions
+    fn compaction_low_watermark_dt(compactions: &Option<(u64, Compactions)>) -> DateTime<Utc> {
+        match compactions {
+            Some((_, compactions)) => compactions
                 .iter()
                 .map(|c| DateTime::<Utc>::from(c.id().datetime()))
                 .min()
                 .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-            Ok(None) => DateTime::<Utc>::UNIX_EPOCH,
-            Err(err) => {
-                warn!(
-                    "failed to read persisted compaction state for GC, so disabling deletes [error={}]",
-                    err
-                );
-                DateTime::<Utc>::UNIX_EPOCH
-            }
+            None => DateTime::<Utc>::UNIX_EPOCH,
         }
     }
 }
@@ -154,8 +148,11 @@ impl GcTask for CompactedGcTask {
         // manifest) and the compaction low watermark _after_ the SSTs are added to the manifest.
         // This would allow the GC to delete the latest compaction job output SST since they would
         // not be active, and would be older than the low watermark.
-        let compaction_low_watermark_dt = self.compaction_low_watermark_dt().await;
-        let active_manifests = self.manifest_store.read_active_manifests().await?;
+        let state_reader = CompactorStateReader::new(&self.manifest_store, &self.compactions_store);
+        let view = state_reader.read_view().await?;
+        let compactions = view.compactions;
+        let active_manifests = view.active_manifests;
+        let compaction_low_watermark_dt = Self::compaction_low_watermark_dt(&compactions);
         let active_ssts = self
             .list_active_l0_and_compacted_ssts(&active_manifests)
             .await?;
