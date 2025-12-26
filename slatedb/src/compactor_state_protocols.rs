@@ -117,15 +117,13 @@ impl CompactorStateWriter {
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // We don't resume old jobs, but keep the latest finished entry for GC safety (#1044).
-        // This is to keep the GC's low-watermark monotonically increasing. Otherwise, whenever
-        // there are no actively running jobs, it will fall back to UNIX_EPOCH. This isn't wrong,
-        // but is harder to reason about.
+        // Mark any persisted compactions as finished so we don't resume them after restart.
+        // Keep only the most recent finished compaction for GC safety (#1044).
         dirty_compactions
             .value
             .iter_mut()
             .for_each(|c| c.set_status(CompactionStatus::Finished));
-        dirty_compactions.value.trim();
+        dirty_compactions.value.retain_active_and_last_finished();
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
@@ -238,7 +236,7 @@ impl CompactorStateWriter {
     /// - `SlateDBError` if an unrecoverable error occurs.
     pub(crate) async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
         let mut desired_value = self.state.compactions_dirty().value.clone();
-        desired_value.trim();
+        desired_value.retain_active_and_last_finished();
         loop {
             let mut dirty_compactions = self.compactions.prepare_dirty()?;
             dirty_compactions.value = desired_value.clone();

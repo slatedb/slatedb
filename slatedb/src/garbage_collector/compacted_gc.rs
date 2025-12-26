@@ -5,7 +5,7 @@ use crate::{
     tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
-use log::{error, warn};
+use log::error;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;

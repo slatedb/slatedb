@@ -174,7 +174,7 @@ impl GarbageCollector {
         );
         let compacted_gc_task = CompactedGcTask::new(
             manifest_store.clone(),
-            compactions_store,
+            compactions_store.clone(),
             table_store.clone(),
             stats.clone(),
             options.compacted_options,
@@ -183,6 +183,11 @@ impl GarbageCollector {
             manifest_store.clone(),
             stats.clone(),
             options.manifest_options,
+        );
+        let compactions_gc_task = CompactionsGcTask::new(
+            compactions_store.clone(),
+            stats.clone(),
+            options.compactions_options,
         );
         Self {
             manifest_store,
