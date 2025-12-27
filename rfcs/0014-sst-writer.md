@@ -106,5 +106,6 @@ In other words, SSI/SI isolation, manifest, etc., and SSTWriter are orthogonal p
 
 ## References
 - [Creating and Ingesting SST files - RocksDB](https://github.com/facebook/rocksdb/wiki/creating-and-ingesting-sst-files)
+- [sst_file_writer.h - RocksDB](https://github.com/facebook/rocksdb/blob/main/include/rocksdb/sst_file_writer.h)
 - [writer.go - Pebble](https://github.com/cockroachdb/pebble/blob/master/sstable/writer.go)
 - [ingest.go - Pebble](https://github.com/cockroachdb/pebble/blob/master/ingest.go) (An overview of Pebble's ingestion process can be found from L1274 to L1333)
