@@ -63,6 +63,7 @@ fail-parallel = { workspace = true, features = ["failpoints"] }
 figment = { workspace = true, features = ["test"] }
 filetime = { workspace = true }
 insta = { workspace = true }
+loom = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
 tempfile = { workspace = true }

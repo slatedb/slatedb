@@ -473,4 +473,881 @@ mod tests {
         assert_eq!(entry.create_ts(), Some(100));
         assert_eq!(entry.expire_ts(), Some(200));
     }
+
+    // ==================== Comprehensive Concurrent Tests ====================
+
+    mod concurrent_tests {
+        use super::*;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Barrier;
+
+        /// Helper to collect all keys from a map
+        fn collect_keys(map: &SkipMap) -> Vec<Vec<u8>> {
+            let mut range = map.range(..);
+            let mut keys = Vec::new();
+            while let Some(entry) = range.next() {
+                keys.push(entry.key_bytes().to_vec());
+            }
+            keys
+        }
+
+        // ==================== Category 1: Deterministic Concurrent Tests ====================
+
+        #[test]
+        fn should_handle_two_concurrent_inserts_at_same_position() {
+            // Given: A skipmap with entries "aaa" and "ccc"
+            let map = Arc::new(SkipMap::new());
+            map.compare_insert(make_key(b"aaa", 1), make_entry(b"aaa", b"1", 1), |_| true);
+            map.compare_insert(make_key(b"ccc", 1), make_entry(b"ccc", b"3", 1), |_| true);
+
+            let barrier = Arc::new(Barrier::new(2));
+
+            // When: Two threads simultaneously insert "bbb" with different sequences
+            let handles: Vec<_> = (0..2)
+                .map(|i| {
+                    let map = map.clone();
+                    let barrier = barrier.clone();
+                    thread::spawn(move || {
+                        barrier.wait();
+                        map.compare_insert(
+                            make_key(b"bbb", i as u64),
+                            make_entry(b"bbb", &[i as u8], i as u64),
+                            |_| true,
+                        );
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            // Then: All 4 entries exist in correct order
+            assert_eq!(map.len(), 4);
+            let keys = collect_keys(&map);
+            assert_eq!(keys[0], b"aaa");
+            assert_eq!(keys[1], b"bbb");
+            assert_eq!(keys[2], b"bbb");
+            assert_eq!(keys[3], b"ccc");
+        }
+
+        #[test]
+        fn should_maintain_mvcc_ordering_with_concurrent_sequence_inserts() {
+            // Given: Empty skipmap
+            let map = Arc::new(SkipMap::new());
+            let num_threads = 8;
+            let seqs_per_thread = 100;
+
+            // When: Many threads insert same key with different sequences
+            let handles: Vec<_> = (0..num_threads)
+                .map(|t| {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        for i in 0..seqs_per_thread {
+                            let seq = (t * seqs_per_thread + i) as u64;
+                            map.compare_insert(
+                                make_key(b"key", seq),
+                                make_entry(b"key", &seq.to_le_bytes(), seq),
+                                |_| true,
+                            );
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            // Then: All entries present, ordered by descending sequence
+            assert_eq!(map.len(), num_threads * seqs_per_thread);
+
+            let mut prev_seq = u64::MAX;
+            let mut range = map.range(..);
+            while let Some(entry) = range.next() {
+                assert!(
+                    entry.seq() < prev_seq,
+                    "MVCC ordering violated: {} should be < {}",
+                    entry.seq(),
+                    prev_seq
+                );
+                prev_seq = entry.seq();
+            }
+        }
+
+        #[test]
+        fn should_handle_concurrent_tall_node_insertions() {
+            // Given: Empty skipmap
+            // This test exercises the max_height CAS race condition
+            let map = Arc::new(SkipMap::new());
+            let num_threads = 8;
+            let inserts_per_thread = 1000;
+
+            // When: Many threads insert keys (some will have tall towers)
+            let handles: Vec<_> = (0..num_threads)
+                .map(|t| {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        for i in 0..inserts_per_thread {
+                            let key = format!("key-{:02}-{:06}", t, i);
+                            map.compare_insert(
+                                make_key(key.as_bytes(), 1),
+                                make_entry(key.as_bytes(), b"v", 1),
+                                |_| true,
+                            );
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            // Then: All entries present and sorted
+            assert_eq!(map.len(), num_threads * inserts_per_thread);
+
+            let mut prev_key: Option<Vec<u8>> = None;
+            let mut range = map.range(..);
+            while let Some(entry) = range.next() {
+                if let Some(ref pk) = prev_key {
+                    assert!(
+                        entry.key_bytes() > pk.as_slice(),
+                        "Order violated: {:?} should be > {:?}",
+                        entry.key_bytes(),
+                        pk
+                    );
+                }
+                prev_key = Some(entry.key_bytes().to_vec());
+            }
+        }
+
+        #[test]
+        fn should_handle_interleaved_inserts_across_key_range() {
+            // Given: Empty skipmap
+            let map = Arc::new(SkipMap::new());
+            let num_threads = 4;
+            let inserts_per_thread = 1000;
+
+            // When: Threads insert interleaved keys (thread 0 gets keys 0,4,8..., thread 1 gets 1,5,9...)
+            let handles: Vec<_> = (0..num_threads)
+                .map(|t| {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        for i in 0..inserts_per_thread {
+                            let key_num = t + i * num_threads;
+                            let key = format!("key-{:08}", key_num);
+                            map.compare_insert(
+                                make_key(key.as_bytes(), 1),
+                                make_entry(key.as_bytes(), b"v", 1),
+                                |_| true,
+                            );
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            // Then: All entries present and sorted
+            assert_eq!(map.len(), num_threads * inserts_per_thread);
+
+            // Verify contiguous sorted order
+            let mut range = map.range(..);
+            let mut count = 0;
+            while let Some(entry) = range.next() {
+                let expected = format!("key-{:08}", count);
+                assert_eq!(
+                    entry.key_bytes(),
+                    expected.as_bytes(),
+                    "Key mismatch at position {}",
+                    count
+                );
+                count += 1;
+            }
+            assert_eq!(count, num_threads * inserts_per_thread);
+        }
+
+        #[test]
+        fn should_correctly_count_entries_under_concurrency() {
+            // Given: Empty skipmap
+            let map = Arc::new(SkipMap::new());
+            let num_threads = 8;
+            let inserts_per_thread = 500;
+
+            // When: Many threads insert concurrently
+            let handles: Vec<_> = (0..num_threads)
+                .map(|t| {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        for i in 0..inserts_per_thread {
+                            let key = format!("t{}-k{}", t, i);
+                            map.compare_insert(
+                                make_key(key.as_bytes(), 1),
+                                make_entry(key.as_bytes(), b"v", 1),
+                                |_| true,
+                            );
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            // Then: len() should match actual count
+            let expected = num_threads * inserts_per_thread;
+            assert_eq!(map.len(), expected);
+
+            // Also verify by iterating
+            let mut range = map.range(..);
+            let mut actual = 0;
+            while range.next().is_some() {
+                actual += 1;
+            }
+            assert_eq!(actual, expected);
+        }
+
+        // ==================== Category 2: High-Contention Stress Tests ====================
+
+        #[test]
+        fn should_handle_high_contention_compare_fn_at_single_key() {
+            // Given: Empty skipmap
+            let map = Arc::new(SkipMap::new());
+            let compare_count = Arc::new(AtomicUsize::new(0));
+            let num_threads = 16;
+            let attempts_per_thread = 100;
+
+            // When: Many threads try to insert the same key, only first succeeds
+            let handles: Vec<_> = (0..num_threads)
+                .map(|_| {
+                    let map = map.clone();
+                    let compare_count = compare_count.clone();
+                    thread::spawn(move || {
+                        for _ in 0..attempts_per_thread {
+                            map.compare_insert(
+                                make_key(b"hotkey", 1),
+                                make_entry(b"hotkey", b"v", 1),
+                                |_existing| {
+                                    compare_count.fetch_add(1, Ordering::Relaxed);
+                                    false // Reject if exists
+                                },
+                            );
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            // Then: Only one entry exists
+            assert_eq!(map.len(), 1);
+            // And compare_fn was called for all subsequent attempts
+            let comparisons = compare_count.load(Ordering::Relaxed);
+            assert!(
+                comparisons >= (num_threads * attempts_per_thread - 1),
+                "Expected at least {} comparisons, got {}",
+                num_threads * attempts_per_thread - 1,
+                comparisons
+            );
+        }
+
+        #[test]
+        fn should_handle_burst_insertions_from_many_threads() {
+            // Given: Empty skipmap
+            let map = Arc::new(SkipMap::new());
+            let num_threads = 16;
+            let inserts_per_thread = 1000;
+            let barrier = Arc::new(Barrier::new(num_threads));
+
+            // When: All threads start simultaneously (burst pattern)
+            let handles: Vec<_> = (0..num_threads)
+                .map(|t| {
+                    let map = map.clone();
+                    let barrier = barrier.clone();
+                    thread::spawn(move || {
+                        barrier.wait(); // Synchronized start
+                        for i in 0..inserts_per_thread {
+                            let key = format!("burst-{:02}-{:06}", t, i);
+                            map.compare_insert(
+                                make_key(key.as_bytes(), 1),
+                                make_entry(key.as_bytes(), b"v", 1),
+                                |_| true,
+                            );
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            // Then: All entries present
+            assert_eq!(map.len(), num_threads * inserts_per_thread);
+        }
+
+        #[test]
+        fn should_maintain_consistency_with_concurrent_readers_and_writers() {
+            // Given: Skipmap with initial data
+            let map = Arc::new(SkipMap::new());
+
+            // Pre-populate with 100 entries
+            for i in 0..100 {
+                let key = format!("{:08}", i);
+                map.compare_insert(
+                    make_key(key.as_bytes(), 1),
+                    make_entry(key.as_bytes(), b"v", 1),
+                    |_| true,
+                );
+            }
+
+            let done = Arc::new(AtomicBool::new(false));
+
+            // When: Writers add more entries while readers iterate
+            let writer_handles: Vec<_> = (0..4)
+                .map(|t| {
+                    let map = map.clone();
+                    let done = done.clone();
+                    thread::spawn(move || {
+                        let mut i = 0;
+                        while !done.load(Ordering::Relaxed) {
+                            let key = format!("writer-{}-{:08}", t, i);
+                            map.compare_insert(
+                                make_key(key.as_bytes(), 1),
+                                make_entry(key.as_bytes(), b"v", 1),
+                                |_| true,
+                            );
+                            i += 1;
+                        }
+                    })
+                })
+                .collect();
+
+            // Readers check consistency
+            let reader_handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let map = map.clone();
+                    let done = done.clone();
+                    thread::spawn(move || {
+                        let mut iterations = 0;
+                        while !done.load(Ordering::Relaxed) && iterations < 100 {
+                            // Each iteration should see sorted entries
+                            let mut prev_key: Option<Vec<u8>> = None;
+                            let mut range = map.range(..);
+                            while let Some(entry) = range.next() {
+                                if let Some(ref pk) = prev_key {
+                                    assert!(
+                                        entry.key_bytes() > pk.as_slice(),
+                                        "Reader saw unsorted data"
+                                    );
+                                }
+                                prev_key = Some(entry.key_bytes().to_vec());
+                            }
+                            iterations += 1;
+                            thread::yield_now();
+                        }
+                    })
+                })
+                .collect();
+
+            // Let it run for a bit
+            thread::sleep(std::time::Duration::from_millis(100));
+            done.store(true, Ordering::Relaxed);
+
+            for h in writer_handles {
+                h.join().unwrap();
+            }
+            for h in reader_handles {
+                h.join().unwrap();
+            }
+
+            // Then: Map should have all initial entries plus writer entries
+            assert!(map.len() >= 100);
+        }
+
+        // ==================== Category 3: Iterator Correctness Tests ====================
+
+        #[test]
+        fn should_see_consistent_prefix_during_concurrent_inserts() {
+            // Given: Skipmap with initial entries
+            let map = Arc::new(SkipMap::new());
+
+            for i in 0..100 {
+                let key = format!("{:04}", i);
+                map.compare_insert(
+                    make_key(key.as_bytes(), 1),
+                    make_entry(key.as_bytes(), b"v", 1),
+                    |_| true,
+                );
+            }
+
+            let done = Arc::new(AtomicBool::new(false));
+
+            // When: Writer adds new entries
+            let writer = {
+                let map = map.clone();
+                let done = done.clone();
+                thread::spawn(move || {
+                    for i in 100..200 {
+                        if done.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let key = format!("{:04}", i);
+                        map.compare_insert(
+                            make_key(key.as_bytes(), 1),
+                            make_entry(key.as_bytes(), b"v", 1),
+                            |_| true,
+                        );
+                    }
+                })
+            };
+
+            // Then: Reader sees monotonically increasing counts
+            let mut seen_counts = Vec::new();
+            for _ in 0..20 {
+                let mut count = 0;
+                let mut range = map.range(..);
+                while range.next().is_some() {
+                    count += 1;
+                }
+                seen_counts.push(count);
+                thread::yield_now();
+            }
+
+            done.store(true, Ordering::Relaxed);
+            writer.join().unwrap();
+
+            // Counts should be non-decreasing
+            for window in seen_counts.windows(2) {
+                assert!(
+                    window[0] <= window[1],
+                    "Count decreased: {} -> {}",
+                    window[0],
+                    window[1]
+                );
+            }
+        }
+
+        #[test]
+        fn should_handle_bidirectional_iteration_with_concurrent_inserts() {
+            // Given: Skipmap with entries
+            let map = Arc::new(SkipMap::new());
+
+            for i in 0..50 {
+                let key = format!("{:04}", i);
+                map.compare_insert(
+                    make_key(key.as_bytes(), 1),
+                    make_entry(key.as_bytes(), b"v", 1),
+                    |_| true,
+                );
+            }
+
+            let done = Arc::new(AtomicBool::new(false));
+
+            // Writer adds entries during iteration
+            let writer = {
+                let map = map.clone();
+                let done = done.clone();
+                thread::spawn(move || {
+                    for i in 50..100 {
+                        if done.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let key = format!("{:04}", i);
+                        map.compare_insert(
+                            make_key(key.as_bytes(), 1),
+                            make_entry(key.as_bytes(), b"v", 1),
+                            |_| true,
+                        );
+                        thread::yield_now();
+                    }
+                })
+            };
+
+            // When: Reader does bidirectional iteration
+            for _ in 0..10 {
+                let mut range = map.range(..);
+                let mut forward_keys = Vec::new();
+                let mut backward_keys = Vec::new();
+
+                // Interleave forward and backward
+                for _ in 0..5 {
+                    if let Some(entry) = range.next() {
+                        forward_keys.push(entry.key_bytes().to_vec());
+                    }
+                    if let Some(entry) = range.next_back() {
+                        backward_keys.push(entry.key_bytes().to_vec());
+                    }
+                }
+
+                // Then: Forward keys should be ascending
+                for window in forward_keys.windows(2) {
+                    assert!(window[0] <= window[1], "Forward iteration not ascending");
+                }
+
+                // Backward keys should be descending
+                for window in backward_keys.windows(2) {
+                    assert!(window[0] >= window[1], "Backward iteration not descending");
+                }
+            }
+
+            done.store(true, Ordering::Relaxed);
+            writer.join().unwrap();
+        }
+
+        #[test]
+        fn should_terminate_correctly_when_forward_and_backward_meet() {
+            // Given: Skipmap with entries
+            let map = SkipMap::new();
+
+            for i in 0..10 {
+                let key = format!("{:02}", i);
+                map.compare_insert(
+                    make_key(key.as_bytes(), 1),
+                    make_entry(key.as_bytes(), b"v", 1),
+                    |_| true,
+                );
+            }
+
+            // When: Iterate forward and backward until they meet
+            let mut range = map.range(..);
+            let mut forward_keys = Vec::new();
+            let mut backward_keys = Vec::new();
+
+            loop {
+                let f = range.next();
+                let b = range.next_back();
+
+                let f_done = f.is_none();
+                let b_done = b.is_none();
+
+                if let Some(entry) = f {
+                    forward_keys.push(entry.key_bytes().to_vec());
+                }
+                if let Some(entry) = b {
+                    backward_keys.push(entry.key_bytes().to_vec());
+                }
+
+                if f_done && b_done {
+                    break;
+                }
+            }
+
+            // Then: All entries seen exactly once
+            let mut all_keys: Vec<_> = forward_keys
+                .into_iter()
+                .chain(backward_keys.into_iter())
+                .collect();
+            all_keys.sort();
+            all_keys.dedup();
+
+            assert_eq!(all_keys.len(), 10, "Should have seen all 10 entries");
+        }
+    }
+
+    // ==================== Loom Tests (Exhaustive Thread Interleaving) ====================
+
+    #[cfg(loom)]
+    mod loom_tests {
+        use super::*;
+        use loom::sync::Arc;
+        use loom::thread;
+
+        // Note: For loom tests, we use very small data sets because loom
+        // explores all possible interleavings, which grows exponentially.
+
+        #[test]
+        fn loom_should_handle_two_thread_insert_same_key() {
+            loom::model(|| {
+                let map = Arc::new(SkipMap::new());
+
+                let h1 = {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        map.compare_insert(
+                            make_key(b"key", 1),
+                            make_entry(b"key", b"v1", 1),
+                            |_| true,
+                        );
+                    })
+                };
+
+                let h2 = {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        map.compare_insert(
+                            make_key(b"key", 2),
+                            make_entry(b"key", b"v2", 2),
+                            |_| true,
+                        );
+                    })
+                };
+
+                h1.join().unwrap();
+                h2.join().unwrap();
+
+                // Invariant: exactly 2 entries, ordered by seq descending
+                assert_eq!(map.len(), 2);
+                let mut range = map.range(..);
+                let first = range.next().unwrap();
+                let second = range.next().unwrap();
+                assert_eq!(first.seq(), 2);
+                assert_eq!(second.seq(), 1);
+            });
+        }
+
+        #[test]
+        fn loom_should_handle_insert_during_iteration() {
+            loom::model(|| {
+                let map = Arc::new(SkipMap::new());
+
+                // Pre-insert one entry
+                map.compare_insert(make_key(b"aaa", 1), make_entry(b"aaa", b"1", 1), |_| true);
+
+                let h1 = {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        // Insert during iteration
+                        map.compare_insert(
+                            make_key(b"bbb", 1),
+                            make_entry(b"bbb", b"2", 1),
+                            |_| true,
+                        );
+                    })
+                };
+
+                // Iterate while insert happens
+                let mut range = map.range(..);
+                let mut count = 0;
+                while range.next().is_some() {
+                    count += 1;
+                }
+
+                h1.join().unwrap();
+
+                // Iterator sees at least the initial entry
+                assert!(count >= 1);
+                // Map has both entries at the end
+                assert_eq!(map.len(), 2);
+            });
+        }
+
+        #[test]
+        fn loom_should_handle_concurrent_inserts_different_keys() {
+            loom::model(|| {
+                let map = Arc::new(SkipMap::new());
+
+                let h1 = {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        map.compare_insert(
+                            make_key(b"aaa", 1),
+                            make_entry(b"aaa", b"1", 1),
+                            |_| true,
+                        );
+                    })
+                };
+
+                let h2 = {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        map.compare_insert(
+                            make_key(b"bbb", 1),
+                            make_entry(b"bbb", b"2", 1),
+                            |_| true,
+                        );
+                    })
+                };
+
+                h1.join().unwrap();
+                h2.join().unwrap();
+
+                // Invariant: both entries present, in sorted order
+                assert_eq!(map.len(), 2);
+                let mut range = map.range(..);
+                assert_eq!(range.next().unwrap().key_bytes(), b"aaa");
+                assert_eq!(range.next().unwrap().key_bytes(), b"bbb");
+            });
+        }
+
+        #[test]
+        fn loom_should_retry_cas_on_contention() {
+            loom::model(|| {
+                let map = Arc::new(SkipMap::new());
+
+                // Three threads inserting adjacent keys creates CAS contention
+                let h1 = {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        map.compare_insert(
+                            make_key(b"bbb", 1),
+                            make_entry(b"bbb", b"2", 1),
+                            |_| true,
+                        );
+                    })
+                };
+
+                let h2 = {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        map.compare_insert(
+                            make_key(b"aaa", 1),
+                            make_entry(b"aaa", b"1", 1),
+                            |_| true,
+                        );
+                    })
+                };
+
+                let h3 = {
+                    let map = map.clone();
+                    thread::spawn(move || {
+                        map.compare_insert(
+                            make_key(b"ccc", 1),
+                            make_entry(b"ccc", b"3", 1),
+                            |_| true,
+                        );
+                    })
+                };
+
+                h1.join().unwrap();
+                h2.join().unwrap();
+                h3.join().unwrap();
+
+                // Invariant: all entries present, in sorted order
+                assert_eq!(map.len(), 3);
+                let keys = {
+                    let mut range = map.range(..);
+                    let mut keys = Vec::new();
+                    while let Some(entry) = range.next() {
+                        keys.push(entry.key_bytes().to_vec());
+                    }
+                    keys
+                };
+                assert_eq!(keys[0], b"aaa");
+                assert_eq!(keys[1], b"bbb");
+                assert_eq!(keys[2], b"ccc");
+            });
+        }
+    }
+
+    // ==================== Proptest Property-Based Tests ====================
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(20))]
+
+            #[test]
+            fn prop_concurrent_inserts_maintain_sorted_order(
+                keys in prop::collection::vec("[a-z]{1,8}", 10..50),
+                num_threads in 2..8usize,
+            ) {
+                let map = Arc::new(SkipMap::new());
+                let keys = Arc::new(keys);
+
+                // Distribute keys across threads
+                let handles: Vec<_> = (0..num_threads)
+                    .map(|t| {
+                        let map = map.clone();
+                        let keys = keys.clone();
+                        thread::spawn(move || {
+                            for (i, key) in keys.iter().enumerate() {
+                                if i % num_threads == t {
+                                    map.compare_insert(
+                                        make_key(key.as_bytes(), 1),
+                                        make_entry(key.as_bytes(), b"v", 1),
+                                        |_| true,
+                                    );
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+
+                // Verify sorted order
+                let mut prev_key: Option<Vec<u8>> = None;
+                let mut range = map.range(..);
+                while let Some(entry) = range.next() {
+                    if let Some(ref pk) = prev_key {
+                        prop_assert!(entry.key_bytes() >= pk.as_slice());
+                    }
+                    prev_key = Some(entry.key_bytes().to_vec());
+                }
+            }
+
+            #[test]
+            fn prop_iterator_sees_all_committed_entries(
+                keys in prop::collection::vec("[a-z]{1,4}", 5..20),
+            ) {
+                let map = Arc::new(SkipMap::new());
+                let unique_keys: BTreeSet<_> = keys.iter().cloned().collect();
+                let expected_count = unique_keys.len();
+
+                // Insert all keys
+                for key in &keys {
+                    map.compare_insert(
+                        make_key(key.as_bytes(), 1),
+                        make_entry(key.as_bytes(), b"v", 1),
+                        |_| true, // Allow duplicates
+                    );
+                }
+
+                // Iterator should see at least expected_count entries
+                let mut range = map.range(..);
+                let mut count = 0;
+                while range.next().is_some() {
+                    count += 1;
+                }
+
+                // We allow duplicates, so count >= unique_keys.len()
+                prop_assert!(count >= expected_count);
+            }
+
+            #[test]
+            fn prop_range_bounds_always_respected(
+                keys in prop::collection::vec(0u32..1000, 20..50),
+                start in 0u32..500,
+                end in 500u32..1000,
+            ) {
+                let map = SkipMap::new();
+
+                for key in &keys {
+                    let key_str = format!("{:04}", key);
+                    map.compare_insert(
+                        make_key(key_str.as_bytes(), 1),
+                        make_entry(key_str.as_bytes(), b"v", 1),
+                        |_| true,
+                    );
+                }
+
+                let start_key = format!("{:04}", start);
+                let end_key = format!("{:04}", end);
+
+                // Use seq=u64::MAX for end bound to exclude all entries with end_key
+                // (because higher seq comes first in MVCC ordering)
+                let mut range = map.range(
+                    make_key(start_key.as_bytes(), u64::MAX)..make_key(end_key.as_bytes(), u64::MAX)
+                );
+
+                while let Some(entry) = range.next() {
+                    let key_bytes = entry.key_bytes();
+                    prop_assert!(key_bytes >= start_key.as_bytes());
+                    prop_assert!(key_bytes < end_key.as_bytes());
+                }
+            }
+        }
+    }
 }

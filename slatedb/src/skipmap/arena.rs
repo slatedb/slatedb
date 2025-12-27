@@ -24,6 +24,10 @@
 
 use std::alloc::{alloc, Layout};
 use std::cell::{Cell, UnsafeCell};
+
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(not(loom))]
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use thread_local::ThreadLocal;

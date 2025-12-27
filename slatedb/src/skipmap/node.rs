@@ -5,6 +5,10 @@
 
 use std::cmp::Ordering;
 use std::ptr;
+
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
+#[cfg(not(loom))]
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use bytes::Bytes;

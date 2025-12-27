@@ -8,6 +8,10 @@
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::ptr;
+
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+#[cfg(not(loom))]
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use super::arena::ConcurrentArena;
