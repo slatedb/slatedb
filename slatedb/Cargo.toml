@@ -66,6 +66,7 @@ tokio-util = { workspace = true, default-features = false, features = [
 ] }
 thread_local = { workspace = true }
 url = "2.5.4"
+criterion = { workspace = true, features = ["async_tokio", "html_reports"], optional = true }
 
 [dev-dependencies]
 bincode = { workspace = true }
@@ -75,6 +76,7 @@ fail-parallel = { workspace = true, features = ["failpoints"] }
 figment = { workspace = true, features = ["test"] }
 filetime = { workspace = true }
 insta = { workspace = true }
+loom = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
 tempfile = { workspace = true }
@@ -90,7 +92,7 @@ pprof = { workspace = true, features = ["criterion", "protobuf-codec"] }
 default = ["aws", "foyer"]
 aws = ["object_store/aws"]
 azure = ["object_store/azure"]
-bencher = ["aws", "azure", "wal_disable", "foyer"]
+bencher = ["aws", "azure", "wal_disable", "foyer", "dep:criterion"]
 compression = ["snappy"]
 opendal = ["dep:opendal", "dep:object_store_opendal"]
 snappy = ["dep:snap"]
@@ -110,6 +112,11 @@ bench = false
 [[bench]]
 name = "db_operations"
 harness = false
+
+[[bench]]
+name = "skipmap_comparison"
+harness = false
+required-features = ["bencher"]
 
 [lints]
 workspace = true
