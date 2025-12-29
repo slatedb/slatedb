@@ -535,8 +535,8 @@ impl ManifestStore {
         manifest_id: u64,
         manifest: &Manifest,
     ) -> Result<BTreeMap<u64, Manifest>, SlateDBError> {
-        let mut active_manifests = BTreeMap::new();
-        active_manifests.insert(manifest_id, manifest.clone());
+        let mut referenced_manifests = BTreeMap::new();
+        referenced_manifests.insert(manifest_id, manifest.clone());
 
         let checkpoint_manifest_ids = manifest
             .core
@@ -546,14 +546,14 @@ impl ManifestStore {
             .collect::<Vec<_>>();
         for checkpoint_manifest_id in checkpoint_manifest_ids {
             if let std::collections::btree_map::Entry::Vacant(entry) =
-                active_manifests.entry(checkpoint_manifest_id)
+                referenced_manifests.entry(checkpoint_manifest_id)
             {
                 let checkpoint_manifest = self.read_manifest(checkpoint_manifest_id).await?;
                 entry.insert(checkpoint_manifest);
             }
         }
 
-        Ok(active_manifests)
+        Ok(referenced_manifests)
     }
 
     pub(crate) async fn try_read_latest_manifest(
