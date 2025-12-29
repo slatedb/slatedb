@@ -51,6 +51,14 @@ impl CompactedGcTask {
         chrono::Duration::from_std(min_age).expect("invalid duration")
     }
 
+    /// Lists all SSTs referenced by the latest manifest and its checkpoints.
+    ///
+    /// ## Arguments
+    /// - `manifest_id`: The id of the latest manifest.
+    /// - `manifest`: The latest manifest contents.
+    ///
+    /// ## Returns
+    /// - A set of SST ids referenced by L0 and compacted runs across all referenced manifests.
     async fn list_active_l0_and_compacted_ssts(
         &self,
         manifest_id: u64,
@@ -74,6 +82,23 @@ impl CompactedGcTask {
         Ok(active_ssts)
     }
 
+    /// Computes the newest L0 timestamp from the latest manifest.
+    ///
+    /// This is used as a conservative upper bound for compacted SST deletion. The following
+    /// branches are handled in order:
+    ///
+    /// 1. If there are active L0 SSTs, take the newest (max) L0 timestamp.
+    /// 2. Else, if `l0_last_compacted` is set, use that timestamp as a fallback
+    ///    barrier for recently compacted L0s.
+    /// 3. Else, if the DB has never had L0s, return the Unix epoch to disable
+    ///    deletion based on this signal.
+    ///
+    /// ## Arguments
+    /// - `manifest`: The latest manifest contents.
+    ///
+    /// ## Returns
+    /// - The newest L0 timestamp if any L0s exist, otherwise a conservative fallback
+    ///   (last compacted L0 or Unix epoch).
     async fn newest_l0_dt(&self, manifest: &Manifest) -> Result<DateTime<Utc>, SlateDBError> {
         let l0_timestamps = if !manifest.core.l0.is_empty() {
             // Use active L0's if some exist
