@@ -1075,6 +1075,20 @@ mod tests {
         let initial_manifest = sm.manifest().clone();
         let initial_manifest_id = sm.id();
 
+        // Baseline: with no checkpoints, only the latest manifest is referenced.
+        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let referenced = ms
+            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .await
+            .unwrap();
+
+        assert_eq!(1, referenced.len());
+        assert_eq!(
+            Some(&initial_manifest),
+            referenced.get(&initial_manifest_id)
+        );
+
+        // Add a checkpoint pointing at the initial manifest so both should be returned.
         let mut dirty = sm.prepare_dirty().unwrap();
         dirty
             .value
@@ -1090,11 +1104,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(2, referenced.len());
-        assert_eq!(Some(&initial_manifest), referenced.get(&initial_manifest_id));
         assert_eq!(
-            Some(&latest_manifest),
-            referenced.get(&latest_manifest_id)
+            Some(&initial_manifest),
+            referenced.get(&initial_manifest_id)
         );
+        assert_eq!(Some(&latest_manifest), referenced.get(&latest_manifest_id));
+
+        // Remove checkpoints to ensure only the latest manifest remains referenced.
+        let mut dirty = sm.prepare_dirty().unwrap();
+        dirty.value.core.checkpoints.clear();
+        sm.update(dirty).await.unwrap();
+
+        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let referenced = ms
+            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .await
+            .unwrap();
+
+        assert_eq!(1, referenced.len());
+        assert_eq!(Some(&latest_manifest), referenced.get(&latest_manifest_id));
     }
 
     #[tokio::test]
@@ -1129,6 +1157,7 @@ mod tests {
             .await
             .unwrap();
 
+        // 1 for the active manifest and 1 for the checkpointed manifest (deduped)
         assert_eq!(2, referenced.len());
     }
 
