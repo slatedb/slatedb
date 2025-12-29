@@ -9,7 +9,6 @@
 //!
 //! Keeping these rules in one place makes it harder to regress GC safety or
 //! compactor fencing logic elsewhere in the codebase.
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,15 +29,15 @@ use crate::DbRand;
 /// This view intentionally avoids `DirtyObject` because reads should not create or mutate
 /// remote state (e.g., a missing `.compactions` file on a fresh DB).
 pub(crate) struct CompactorStateView {
-    /// The latest compactions state if present.
+    /// The latest compactions state if present. The u64 is the compactions file version.
     pub(crate) compactions: Option<(u64, Compactions)>,
-    /// The active manifest set (latest manifest plus checkpoint-referenced manifests).
-    pub(crate) active_manifests: BTreeMap<u64, Manifest>,
+    /// The latest manifest. The u64 is the manifest file version.
+    pub(crate) manifest: (u64, Manifest),
 }
 
 /// Reader that enforces compactions-first ordering when fetching state.
 pub(crate) struct CompactorStateReader {
-    /// Shared manifest store to read active manifests.
+    /// Shared manifest store to read the latest manifest.
     manifest_store: Arc<ManifestStore>,
     /// Shared compactions store to fetch the latest compaction state first.
     compactions_store: Arc<CompactionsStore>,
@@ -63,14 +62,14 @@ impl CompactorStateReader {
         }
     }
 
-    /// Reads compactions then active manifests to keep consumers from observing an inconsistent view.
+    /// Reads compactions then the latest manifest to keep consumers from observing an inconsistent view.
     pub(crate) async fn read_view(&self) -> Result<CompactorStateView, SlateDBError> {
         // Always read latest compactions before reading latest manifest.
         let compactions = self.compactions_store.try_read_latest_compactions().await?;
-        let active_manifests = self.manifest_store.read_active_manifests().await?;
+        let manifest = self.manifest_store.read_latest_manifest().await?;
         Ok(CompactorStateView {
             compactions,
-            active_manifests,
+            manifest,
         })
     }
 }
