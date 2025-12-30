@@ -31,7 +31,8 @@
 //!   `TransactionalStorageProtocol`.
 //! - `FenceableTransactionalObject<T>`: Wraps `SimpleTransactionalObject<T>` and enforces epoch
 //!   fencing for writers. On `init`, it bumps the epoch field (via provided `get_epoch`/`set_epoch`
-//!   fns) and writes that update, fencing out stale writers. Subsequent operations check the stored
+//!   fns) and writes that update, fencing out stale writers. `init_with_epoch` sets an externally
+//!   chosen epoch that must be higher than the stored value. Subsequent operations check the stored
 //!   epoch and return `Fenced` if the local epoch is behind.
 //! - `DirtyObject<T>`: A local, mutable candidate `{ id, value }` to be written. Callers get an
 //!   instance of `DirtyObject` by calling `TransactionalObject#prepare_dirty`. They can then apply
@@ -270,8 +271,51 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
             async {
                 loop {
                     let local_epoch = get_epoch(delegate.object()) + 1;
+                    match Self::init_with_epoch(
+                        delegate.clone(),
+                        object_update_timeout,
+                        system_clock.clone(),
+                        get_epoch,
+                        set_epoch,
+                        local_epoch,
+                    )
+                    .await
+                    {
+                        Ok(fenceable) => return Ok(fenceable),
+                        Err(TransactionalObjectError::Fenced) => {
+                            delegate.refresh().await?;
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn init_with_epoch(
+        mut delegate: SimpleTransactionalObject<T, MonotonicId>,
+        object_update_timeout: Duration,
+        system_clock: Arc<dyn SystemClock>,
+        get_epoch: fn(&T) -> u64,
+        set_epoch: fn(&mut T, u64),
+        epoch: u64,
+    ) -> Result<Self, TransactionalObjectError> {
+        utils::timeout(
+            system_clock.clone(),
+            object_update_timeout,
+            || TransactionalObjectError::ObjectUpdateTimeout {
+                timeout: object_update_timeout,
+            },
+            async {
+                loop {
+                    let stored_epoch = get_epoch(delegate.object());
+                    if epoch <= stored_epoch {
+                        return Err(TransactionalObjectError::Fenced);
+                    }
                     let mut new_val = delegate.object().clone();
-                    set_epoch(&mut new_val, local_epoch);
+                    set_epoch(&mut new_val, epoch);
                     let mut dirty = delegate.prepare_dirty()?;
                     dirty.value = new_val;
                     match delegate.update(dirty).await {
@@ -283,7 +327,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                         Ok(()) => {
                             return Ok(Self {
                                 delegate,
-                                local_epoch,
+                                local_epoch: epoch,
                                 get_epoch,
                             })
                         }
@@ -725,5 +769,53 @@ mod tests {
 
         // B can refresh
         assert!(fb.refresh().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_init_with_epoch_sets_epoch_and_fences_stale() {
+        let store = new_store();
+        let sr = SimpleTransactionalObject::<TestVal>::init(
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
+            TestVal {
+                epoch: 2,
+                payload: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let timeout = TokioDuration::from_secs(5);
+        let clock = Arc::new(DefaultSystemClock::new());
+
+        let fa = FenceableTransactionalObject::init_with_epoch(
+            sr,
+            timeout,
+            clock.clone(),
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+            5,
+        )
+        .await
+        .unwrap();
+
+        let (_, v1) = store.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(5, v1.epoch);
+        assert_eq!(5, fa.local_epoch());
+
+        let (id_b, val_b) = store.try_read_latest().await.unwrap().unwrap();
+        let sb = SimpleTransactionalObject {
+            id: id_b,
+            object: val_b,
+            ops: Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
+        };
+        let result = FenceableTransactionalObject::init_with_epoch(
+            sb,
+            timeout,
+            clock,
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+            5,
+        )
+        .await;
+        assert!(matches!(result, Err(TransactionalObjectError::Fenced)));
     }
 }

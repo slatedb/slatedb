@@ -80,7 +80,6 @@ impl StoredCompactions {
         self.inner.id().into()
     }
 
-    #[cfg(test)]
     pub(crate) fn compactions(&self) -> &Compactions {
         self.inner.object()
     }
@@ -112,17 +111,35 @@ pub(crate) struct FenceableCompactions {
 // the compactor epoch when initialized. It also detects when the current writer has been
 // fenced and fails all operations with SlateDBError::Fenced.
 impl FenceableCompactions {
+    #[cfg(test)]
     pub(crate) async fn init(
         stored_compactions: StoredCompactions,
         compactions_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        let fr = FenceableTransactionalObject::init(
+        let desired_epoch = stored_compactions.compactions().compactor_epoch + 1;
+        Self::init_with_epoch(
+            stored_compactions,
+            compactions_update_timeout,
+            system_clock,
+            desired_epoch,
+        )
+        .await
+    }
+
+    pub(crate) async fn init_with_epoch(
+        stored_compactions: StoredCompactions,
+        compactions_update_timeout: Duration,
+        system_clock: Arc<dyn SystemClock>,
+        compactor_epoch: u64,
+    ) -> Result<Self, SlateDBError> {
+        let fr = FenceableTransactionalObject::init_with_epoch(
             stored_compactions.inner,
             compactions_update_timeout,
             system_clock,
             |c: &Compactions| c.compactor_epoch,
             |c: &mut Compactions, e: u64| c.compactor_epoch = e,
+            compactor_epoch,
         )
         .await?;
         Ok(Self { inner: fr })

@@ -58,6 +58,7 @@ impl FenceableManifest {
         Ok(Self { inner: fr, clock })
     }
 
+    #[cfg(test)]
     pub(crate) async fn init_compactor(
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
@@ -70,6 +71,25 @@ impl FenceableManifest {
             system_clock,
             |m: &Manifest| m.compactor_epoch,
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
+        )
+        .await?;
+        Ok(Self { inner: fr, clock })
+    }
+
+    pub(crate) async fn init_compactor_with_epoch(
+        stored_manifest: StoredManifest,
+        manifest_update_timeout: Duration,
+        system_clock: Arc<dyn SystemClock>,
+        compactor_epoch: u64,
+    ) -> Result<Self, SlateDBError> {
+        let clock = system_clock.clone();
+        let fr = FenceableTransactionalObject::init_with_epoch(
+            stored_manifest.inner,
+            manifest_update_timeout,
+            system_clock,
+            |m: &Manifest| m.compactor_epoch,
+            |m: &mut Manifest, e: u64| m.compactor_epoch = e,
+            compactor_epoch,
         )
         .await?;
         Ok(Self { inner: fr, clock })
