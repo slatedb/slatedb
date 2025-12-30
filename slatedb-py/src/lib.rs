@@ -20,10 +20,10 @@ use ::slatedb::config::{
     ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
 use ::slatedb::object_store::ObjectStore;
-use ::slatedb::DBTransaction;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
 use ::slatedb::DbSnapshot;
+use ::slatedb::DbTransaction;
 use ::slatedb::Error;
 use ::slatedb::IsolationLevel;
 use ::slatedb::MergeOperator;
@@ -1451,11 +1451,11 @@ impl PySlateDBSnapshot {
 
 #[pyclass(name = "SlateDBTransaction")]
 struct PySlateDBTransaction {
-    inner: Option<DBTransaction>, // None after commit/rollback
+    inner: Option<DbTransaction>, // None after commit/rollback
 }
 
 impl PySlateDBTransaction {
-    fn inner_ref(&self) -> PyResult<&DBTransaction> {
+    fn inner_ref(&self) -> PyResult<&DbTransaction> {
         self.inner
             .as_ref()
             .ok_or_else(|| ClosedError::new_err("transaction is closed"))
