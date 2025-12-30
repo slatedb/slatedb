@@ -560,6 +560,7 @@ impl DbInner {
     }
 }
 
+#[derive(Clone)]
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: Arc<MessageHandlerExecutor>,
@@ -3487,7 +3488,7 @@ mod tests {
         };
 
         let mut froze_memtable = false;
-        for _ in 0..200 {
+        for _ in 0..6000 {
             {
                 let guard = db.inner.state.read();
                 if !guard.state().imm_memtable.is_empty() {
@@ -5565,6 +5566,10 @@ mod tests {
                 min_age: Duration::from_millis(0),
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age: Duration::from_millis(0),
+            }),
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
             }),

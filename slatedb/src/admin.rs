@@ -1,5 +1,6 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
+use crate::compactions_store::CompactionsStore;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::dispatcher::MessageHandlerExecutor;
@@ -24,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
@@ -81,6 +83,37 @@ impl Admin {
         );
         let manifests = manifest_store.list_manifests(range).await?;
         Ok(serde_json::to_string(&manifests)?)
+    }
+
+    /// Read-only access to the latest compactions file
+    pub async fn read_compactions(
+        &self,
+        maybe_id: Option<u64>,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        let compactions_store = self.compactions_store();
+        let id_compactions = if let Some(id) = maybe_id {
+            compactions_store
+                .try_read_compactions(id)
+                .await?
+                .map(|compactions| (id, compactions))
+        } else {
+            compactions_store.try_read_latest_compactions().await?
+        };
+
+        match id_compactions {
+            None => Ok(None),
+            Some(result) => Ok(Some(serde_json::to_string(&result)?)),
+        }
+    }
+
+    /// List compactions files within a range
+    pub async fn list_compactions<R: RangeBounds<u64>>(
+        &self,
+        range: R,
+    ) -> Result<String, Box<dyn Error>> {
+        let compactions_store = self.compactions_store();
+        let compactions = compactions_store.list_compactions(range).await?;
+        Ok(serde_json::to_string(&compactions)?)
     }
 
     /// List checkpoints, optionally filtering by name. When name is provided, only checkpoints
@@ -177,6 +210,42 @@ impl Admin {
             .join_task(GC_TASK_NAME)
             .await
             .map_err(Into::<crate::Error>::into)
+    }
+
+    /// Run the compactor in the foreground until the provided cancellation token is cancelled.
+    ///
+    /// This method blocks until `cancellation_token` is cancelled, at which point it requests a
+    /// graceful shutdown and waits for the compactor to stop.
+    pub async fn run_compactor(
+        &self,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), crate::Error> {
+        let compactor = crate::CompactorBuilder::new(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.seed())
+        .build();
+
+        let mut run_task = tokio::spawn({
+            let compactor = compactor.clone();
+            async move { compactor.run().await }
+        });
+
+        tokio::select! {
+            result = &mut run_task => {
+                return match result {
+                    Ok(inner) => inner,
+                    Err(join_err) => Err(crate::Error::internal("compactor task failed".to_string()).with_source(Box::new(join_err))),
+                };
+            }
+            _ = cancellation_token.cancelled() => {
+                // fall through to shutdown logic
+            }
+        }
+
+        compactor.stop().await
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
@@ -344,6 +413,13 @@ impl Admin {
 
     fn manifest_store(&self) -> ManifestStore {
         ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+    }
+
+    fn compactions_store(&self) -> CompactionsStore {
+        CompactionsStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
@@ -557,7 +633,14 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::admin::load_object_store_from_env;
+    use crate::admin::{load_object_store_from_env, AdminBuilder};
+    use crate::compactions_store::{CompactionsStore, StoredCompactions};
+    use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use std::sync::Arc;
+    use ulid::Ulid;
 
     #[test]
     fn test_load_object_store_from_env() {
@@ -581,5 +664,99 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[tokio::test]
+    async fn test_admin_read_compactions() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_read_compactions");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        let mut stored = StoredCompactions::create(compactions_store.clone(), 7)
+            .await
+            .unwrap();
+
+        let compaction_id = Ulid::new();
+        let compaction = Compaction::new(
+            compaction_id,
+            CompactionSpec::new(vec![SourceId::SortedRun(3)], 7),
+        );
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(compaction);
+        stored.update(dirty).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        let latest = admin
+            .read_compactions(None)
+            .await
+            .unwrap()
+            .expect("expected compactions");
+        let latest_value: serde_json::Value = serde_json::from_str(&latest).unwrap();
+        let latest_pair = latest_value.as_array().expect("expected [id, compactions]");
+        assert_eq!(latest_pair[0].as_u64().unwrap(), 2);
+
+        let latest_compactions = latest_pair[1].as_object().unwrap();
+        assert_eq!(
+            latest_compactions
+                .get("compactor_epoch")
+                .and_then(|v| v.as_u64())
+                .unwrap(),
+            7
+        );
+        let recent = latest_compactions
+            .get("recent_compactions")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(recent.len(), 1);
+        let compaction_id_str = compaction_id.to_string();
+        let stored_compaction = recent
+            .get(compaction_id_str.as_str())
+            .expect("expected compaction entry");
+        assert_eq!(
+            stored_compaction
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap(),
+            compaction_id_str
+        );
+
+        let first = admin
+            .read_compactions(Some(1))
+            .await
+            .unwrap()
+            .expect("expected compactions");
+        let first_value: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let first_pair = first_value.as_array().expect("expected [id, compactions]");
+        assert_eq!(first_pair[0].as_u64().unwrap(), 1);
+        let first_compactions = first_pair[1].as_object().unwrap();
+        let first_recent = first_compactions
+            .get("recent_compactions")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(first_recent.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_compactions() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_list_compactions");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        let mut stored = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+        let listed = admin.list_compactions(..).await.unwrap();
+        let listed_value: Vec<serde_json::Value> = serde_json::from_str(&listed).unwrap();
+        let ids: Vec<u64> = listed_value
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|id| id.as_u64()))
+            .collect();
+
+        assert_eq!(ids, vec![1, 2]);
     }
 }

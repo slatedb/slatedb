@@ -161,6 +161,7 @@ type GarbageCollectorOptions struct {
 	Manifest  *GarbageCollectorDirectoryOptions `json:"manifest_options,omitempty"`
 	Wal       *GarbageCollectorDirectoryOptions `json:"wal_options,omitempty"`
 	Compacted *GarbageCollectorDirectoryOptions `json:"compacted_options,omitempty"`
+	Compactions *GarbageCollectorDirectoryOptions `json:"compactions_options,omitempty"`
 }
 
 // GarbageCollectorDirectoryOptions represents per-directory GC configuration
