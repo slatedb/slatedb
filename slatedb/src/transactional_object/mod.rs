@@ -270,23 +270,21 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
             async {
                 loop {
                     let local_epoch = get_epoch(delegate.object()) + 1;
-                    let mut new_val = delegate.object().clone();
-                    set_epoch(&mut new_val, local_epoch);
-                    let mut dirty = delegate.prepare_dirty()?;
-                    dirty.value = new_val;
-                    match delegate.update(dirty).await {
-                        Err(TransactionalObjectError::ObjectVersionExists) => {
+                    match Self::init_with_epoch(
+                        delegate.clone(),
+                        object_update_timeout,
+                        system_clock.clone(),
+                        local_epoch,
+                        get_epoch,
+                        set_epoch,
+                    )
+                    .await
+                    {
+                        Ok(fenceable) => return Ok(fenceable),
+                        Err(TransactionalObjectError::Fenced) => {
                             delegate.refresh().await?;
-                            continue;
                         }
                         Err(err) => return Err(err),
-                        Ok(()) => {
-                            return Ok(Self {
-                                delegate,
-                                local_epoch,
-                                get_epoch,
-                            })
-                        }
                     }
                 }
             },
