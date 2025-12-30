@@ -143,6 +143,10 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 
 Check out [CONTRIBUTING.md](CONTRIBUTING.md) for fun (and useful) projects to work on.
 
+## Release Schedule
+
+SlateDB follows Semantic Versioning. We release new versions approximately every 2 months at the end of each even month (February, April, and so on). We guarantee forward/backward compatibility for storage formats between adjacent versions, but we do not currently guarantee API compatibility at this time (we reserve the right to break compile-time API compatibility).
+
 ## Adopters
 
 See who's using SlateDB.
