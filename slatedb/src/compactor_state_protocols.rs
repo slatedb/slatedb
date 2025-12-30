@@ -144,7 +144,6 @@ impl CompactorStateWriter {
             system_clock.clone(),
         )
         .await?;
-        let new_compactor_epoch = fenceable_manifest.compactor_epoch();
         let stored_compactions =
             match StoredCompactions::try_load(compactions_store.clone()).await? {
                 Some(compactions) => compactions,
@@ -157,7 +156,7 @@ impl CompactorStateWriter {
             stored_compactions,
             options.manifest_update_timeout,
             system_clock.clone(),
-            new_compactor_epoch,
+            fenceable_manifest.local_epoch(),
         )
         .await?;
         Ok((fenceable_manifest, fenceable_compactions))
