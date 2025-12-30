@@ -75,6 +75,10 @@ impl FenceableManifest {
         Ok(Self { inner: fr, clock })
     }
 
+    pub(crate) fn compactor_epoch(&self) -> u64 {
+        self.inner.object().compactor_epoch
+    }
+
     pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
         Ok(self.inner.refresh().await?)
     }
