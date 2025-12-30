@@ -117,14 +117,15 @@ impl FenceableCompactions {
         compactions_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        let desired_epoch = stored_compactions.compactions().compactor_epoch + 1;
-        Self::init_with_epoch(
-            stored_compactions,
+        let fr = FenceableTransactionalObject::init(
+            stored_compactions.inner,
             compactions_update_timeout,
             system_clock,
-            desired_epoch,
+            |c: &Compactions| c.compactor_epoch,
+            |c: &mut Compactions, e: u64| c.compactor_epoch = e,
         )
-        .await
+        .await?;
+        Ok(Self { inner: fr })
     }
 
     pub(crate) async fn init_with_epoch(
