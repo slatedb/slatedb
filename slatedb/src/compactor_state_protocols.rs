@@ -138,34 +138,35 @@ impl CompactorStateWriter {
         system_clock: Arc<dyn SystemClock>,
         options: &CompactorOptions,
     ) -> Result<(FenceableManifest, FenceableCompactions), SlateDBError> {
+        // Save the `compactor_epoch` before we `FenceableManifest::init_compactor`
+        // so  we can use it if we need to create a new compactions file.
+        let old_compactor_epoch = stored_manifest.manifest().compactor_epoch;
         let fenceable_manifest = FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
             system_clock.clone(),
         )
         .await?;
-        let manifest_compactor_epoch = fenceable_manifest.compactor_epoch();
-        let stored_compactions =
-            match StoredCompactions::try_load(compactions_store.clone()).await? {
-                Some(compactions) => compactions,
-                None => {
-                    info!(
-                        "creating new compactions file [compactor_epoch={}]",
-                        manifest_compactor_epoch
-                    );
-                    // Seed below the manifest epoch so init_with_epoch can fence to the manifest.
-                    StoredCompactions::create(
-                        compactions_store.clone(),
-                        manifest_compactor_epoch.saturating_sub(1),
-                    )
-                    .await?
-                }
-            };
+        let new_compactor_epoch = fenceable_manifest.compactor_epoch();
+        let stored_compactions = match StoredCompactions::try_load(compactions_store.clone())
+            .await?
+        {
+            Some(compactions) => compactions,
+            None => {
+                info!(
+                    "creating new compactions file [compactor_epoch={}]",
+                    old_compactor_epoch
+                );
+                // Create using the old epoch so `init_with_epoch` will always have a higher
+                // epoch (and thus never be fenced by this file).
+                StoredCompactions::create(compactions_store.clone(), old_compactor_epoch).await?
+            }
+        };
         let fenceable_compactions = FenceableCompactions::init_with_epoch(
             stored_compactions,
             options.manifest_update_timeout,
             system_clock.clone(),
-            manifest_compactor_epoch,
+            new_compactor_epoch,
         )
         .await?;
         Ok((fenceable_manifest, fenceable_compactions))
