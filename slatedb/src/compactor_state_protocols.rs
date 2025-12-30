@@ -138,7 +138,6 @@ impl CompactorStateWriter {
         system_clock: Arc<dyn SystemClock>,
         options: &CompactorOptions,
     ) -> Result<(FenceableManifest, FenceableCompactions), SlateDBError> {
-        let manifest_compactor_epoch = stored_manifest.manifest().compactor_epoch;
         let fenceable_manifest = FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
@@ -149,18 +148,15 @@ impl CompactorStateWriter {
             match StoredCompactions::try_load(compactions_store.clone()).await? {
                 Some(compactions) => compactions,
                 None => {
-                    info!(
-                        "creating new compactions file [compactor_epoch={}]",
-                        manifest_compactor_epoch
-                    );
-                    StoredCompactions::create(compactions_store.clone(), manifest_compactor_epoch)
-                        .await?
+                    info!("creating new compactions file [compactor_epoch=0]");
+                    StoredCompactions::create(compactions_store.clone(), 0).await?
                 }
             };
-        let fenceable_compactions = FenceableCompactions::init(
+        let fenceable_compactions = FenceableCompactions::init_with_epoch(
             stored_compactions,
             options.manifest_update_timeout,
             system_clock.clone(),
+            fenceable_manifest.local_epoch(),
         )
         .await?;
         Ok((fenceable_manifest, fenceable_compactions))
@@ -333,6 +329,58 @@ mod tests {
 
         let compactions_result = first_writer.compactions.refresh().await;
         assert!(matches!(compactions_result, Err(SlateDBError::Fenced)));
+    }
+
+    #[tokio::test]
+    async fn test_fence_syncs_compactor_epochs() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), system_clock.clone())
+                .await
+                .unwrap();
+        let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
+        dirty_manifest.value.compactor_epoch = 8;
+        stored_manifest.update(dirty_manifest).await.unwrap();
+
+        StoredCompactions::create(compactions_store.clone(), 7)
+            .await
+            .unwrap();
+
+        let options = CompactorOptions::default();
+        let rand = Arc::new(DbRand::new(7));
+
+        CompactorStateWriter::new(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        assert_eq!(manifest.compactor_epoch, 9);
+        assert_eq!(manifest.compactor_epoch, compactions.compactor_epoch);
     }
 
     #[tokio::test]
