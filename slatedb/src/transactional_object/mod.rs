@@ -254,6 +254,27 @@ pub(crate) struct FenceableTransactionalObject<T: Clone, Id: Copy = MonotonicId>
 }
 
 impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
+    /// Initializes a fenceable object by claiming the next available epoch.
+    ///
+    /// This keeps retrying until it successfully claims an epoch. If another
+    /// client advances the epoch concurrently, it refreshes and tries again.
+    ///
+    /// ## Arguments
+    /// - `delegate`: The underlying transactional object to wrap.
+    /// - `object_update_timeout`: Upper bound for a single update attempt.
+    /// - `system_clock`: Clock used by the timeout mechanism.
+    /// - `get_epoch`: Extracts the epoch from the object value.
+    /// - `set_epoch`: Updates the epoch on the object value.
+    ///
+    /// ## Returns
+    /// A `FenceableTransactionalObject` whose `local_epoch` has been claimed
+    /// and persisted to the underlying object.
+    ///
+    /// ## Errors
+    /// - [`TransactionalObjectError::ObjectUpdateTimeout`] if an update attempt
+    ///   cannot complete within `object_update_timeout`.
+    /// - Propagates any other [`TransactionalObjectError`] from refresh/update
+    ///   operations.
     pub(crate) async fn init(
         mut delegate: SimpleTransactionalObject<T, MonotonicId>,
         object_update_timeout: Duration,
@@ -292,6 +313,31 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
         .await
     }
 
+    /// Initializes a fenceable object by attempting to claim a specific epoch.
+    ///
+    /// Unlike `init`, this does not select a new epoch. If the given `epoch`
+    /// cannot be claimed because the stored epoch is already greater than or
+    /// equal to it, this returns `Fenced`.
+    ///
+    /// ## Arguments
+    /// - `delegate`: The underlying transactional object to wrap.
+    /// - `object_update_timeout`: Upper bound for a single update attempt.
+    /// - `system_clock`: Clock used by the timeout mechanism.
+    /// - `epoch`: The exact epoch to claim.
+    /// - `get_epoch`: Extracts the epoch from the object value.
+    /// - `set_epoch`: Updates the epoch on the object value.
+    ///
+    /// ## Returns
+    /// A `FenceableTransactionalObject` with `local_epoch == epoch` after the
+    /// epoch has been persisted to the underlying object.
+    ///
+    /// ## Errors
+    /// - [`TransactionalObjectError::Fenced`] if the stored epoch is already
+    ///   greater than or equal to `epoch`.
+    /// - `ObjectUpdateTimeout` if an update attempt cannot complete within
+    ///   `object_update_timeout`.
+    /// - Propagates any other [`TransactionalObjectError`] from refresh/update
+    ///   operations.
     pub(crate) async fn init_with_epoch(
         mut delegate: SimpleTransactionalObject<T, MonotonicId>,
         object_update_timeout: Duration,
