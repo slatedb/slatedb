@@ -358,10 +358,8 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                     if epoch <= stored_epoch {
                         return Err(TransactionalObjectError::Fenced);
                     }
-                    let mut new_val = delegate.object().clone();
-                    set_epoch(&mut new_val, epoch);
                     let mut dirty = delegate.prepare_dirty()?;
-                    dirty.value = new_val;
+                    set_epoch(&mut dirty.value, epoch);
                     match delegate.update(dirty).await {
                         Err(TransactionalObjectError::ObjectVersionExists) => {
                             delegate.refresh().await?;
