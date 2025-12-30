@@ -20,10 +20,10 @@ use ::slatedb::config::{
     ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
 use ::slatedb::object_store::ObjectStore;
-use ::slatedb::DbTransaction;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
 use ::slatedb::DbSnapshot;
+use ::slatedb::DbTransaction;
 use ::slatedb::Error;
 use ::slatedb::IsolationLevel;
 use ::slatedb::MergeOperator;
