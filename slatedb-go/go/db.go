@@ -415,7 +415,7 @@ func (db *DB) Scan(start, end []byte) (*Iterator, error) {
 //	    if err != nil { return err }
 //	    process(kv.Key, kv.Value)
 //	}
-func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, error) {
+func (db *DB) ScanWithOptions(start, end []byte, scanOpts *ScanOptions, opts ...Option[QueryConfig]) (*Iterator, error) {
 	var startPtr *C.uint8_t
 	var startLen C.uintptr_t
 	if len(start) > 0 {
@@ -430,7 +430,12 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 		endLen = C.uintptr_t(len(end))
 	}
 
-	cOpts := convertToCScanOptions(opts)
+	cOpts := convertToCScanOptions(scanOpts)
+
+	cfg := &QueryConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
 
 	var iterPtr *C.CSdbIterator
 	result := C.slatedb_scan_with_options(
@@ -441,6 +446,7 @@ func (db *DB) ScanWithOptions(start, end []byte, opts *ScanOptions) (*Iterator, 
 		endLen,
 		cOpts,
 		&iterPtr,
+		(*C.uint64_t)(unsafe.Pointer(&cfg.timeout)),
 	)
 	defer C.slatedb_free_result(result)
 
