@@ -31,7 +31,7 @@ use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use object_store::ObjectStore;
 
 use crate::compactor::COMPACTOR_TASK_NAME;
-use crate::db_transaction::DBTransaction;
+use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
@@ -1428,7 +1428,7 @@ impl Db {
     /// - `isolation_level`: the isolation level for the transaction
     ///
     /// ## Returns
-    /// - `Result<DBTransaction, crate::Error>`: the transaction handle
+    /// - `Result<DbTransaction, crate::Error>`: the transaction handle
     ///
     /// ## Examples
     ///
@@ -1448,10 +1448,10 @@ impl Db {
     pub async fn begin(
         &self,
         isolation_level: IsolationLevel,
-    ) -> Result<DBTransaction, crate::Error> {
+    ) -> Result<DbTransaction, crate::Error> {
         self.inner.check_closed()?;
         let seq = self.inner.oracle.last_committed_seq();
-        let txn = DBTransaction::new(
+        let txn = DbTransaction::new(
             self.inner.clone(),
             self.inner.txn_manager.clone(),
             seq,
