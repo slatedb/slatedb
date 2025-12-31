@@ -126,20 +126,28 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         compression_codec,
         garbage_collector_options: Some(GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
             }),
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(900),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
             }),
         }),
         compactor_options: Some(CompactorOptions::default()),
