@@ -180,7 +180,7 @@ impl GarbageCollector {
             options.compacted_options,
         );
         let compactions_gc_task = CompactionsGcTask::new(
-            compactions_store,
+            compactions_store.clone(),
             stats.clone(),
             options.compactions_options,
         );
@@ -1220,7 +1220,11 @@ mod tests {
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
     ) {
-        let manifests = manifest_store.read_active_manifests().await.unwrap();
+        let (manifest_id, manifest) = manifest_store.read_latest_manifest().await.unwrap();
+        let manifests = manifest_store
+            .read_referenced_manifests(manifest_id, &manifest)
+            .await
+            .unwrap();
 
         let wal_ssts = table_store
             .list_wal_ssts(..)

@@ -1,11 +1,11 @@
 use crate::{
-    compactions_store::CompactionsStore, config::GarbageCollectorDirectoryOptions,
+    compactions_store::CompactionsStore, compactor_state::Compactions,
+    compactor_state_protocols::CompactorStateReader, config::GarbageCollectorDirectoryOptions,
     db_state::SsTableId, error::SlateDBError, manifest::store::ManifestStore, manifest::Manifest,
     tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
-use log::{error, warn};
-use std::collections::BTreeMap;
+use log::error;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -51,10 +51,23 @@ impl CompactedGcTask {
         chrono::Duration::from_std(min_age).expect("invalid duration")
     }
 
+    /// Lists all SSTs referenced by the latest manifest and its checkpoints.
+    ///
+    /// ## Arguments
+    /// - `manifest_id`: The id of the latest manifest.
+    /// - `manifest`: The latest manifest contents.
+    ///
+    /// ## Returns
+    /// - A set of SST ids referenced by L0 and compacted runs across all referenced manifests.
     async fn list_active_l0_and_compacted_ssts(
         &self,
-        active_manifests: &BTreeMap<u64, Manifest>,
+        manifest_id: u64,
+        manifest: &Manifest,
     ) -> Result<HashSet<SsTableId>, SlateDBError> {
+        let active_manifests = self
+            .manifest_store
+            .read_referenced_manifests(manifest_id, manifest)
+            .await?;
         let mut active_ssts = HashSet::new();
         for manifest in active_manifests.values() {
             for sr in manifest.core.compacted.iter() {
@@ -69,14 +82,24 @@ impl CompactedGcTask {
         Ok(active_ssts)
     }
 
-    async fn newest_l0_dt(
-        &self,
-        active_manifests: &BTreeMap<u64, Manifest>,
-    ) -> Result<DateTime<Utc>, SlateDBError> {
-        let manifest = active_manifests
-            .values()
-            .last()
-            .expect("expected at least one manifest");
+    /// Computes the newest L0 timestamp from the latest manifest.
+    ///
+    /// This is used as a conservative upper bound for compacted SST deletion. The following
+    /// branches are handled in order:
+    ///
+    /// 1. If there are active L0 SSTs, take the newest (max) L0 timestamp.
+    /// 2. Else, if `l0_last_compacted` is set, use that timestamp as a fallback
+    ///    barrier for recently compacted L0s.
+    /// 3. Else, if the DB has never had L0s, return the Unix epoch to disable
+    ///    deletion based on this signal.
+    ///
+    /// ## Arguments
+    /// - `manifest`: The latest manifest contents.
+    ///
+    /// ## Returns
+    /// - The newest L0 timestamp if any L0s exist, otherwise a conservative fallback
+    ///   (last compacted L0 or Unix epoch).
+    async fn newest_l0_dt(&self, manifest: &Manifest) -> Result<DateTime<Utc>, SlateDBError> {
         let l0_timestamps = if !manifest.core.l0.is_empty() {
             // Use active L0's if some exist
             manifest
@@ -121,21 +144,14 @@ impl CompactedGcTask {
     /// In all of these cases, we want to be conservative and avoid deleting any SSTs that
     /// might be in use by a running compaction, so we return the Unix epoch to effectively
     /// disable deletion based on compaction state.
-    async fn compaction_low_watermark_dt(&self) -> DateTime<Utc> {
-        match self.compactions_store.try_read_latest_compactions().await {
-            Ok(Some((_, compactions))) => compactions
+    fn compaction_low_watermark_dt(compactions: &Option<(u64, Compactions)>) -> DateTime<Utc> {
+        match compactions {
+            Some((_, compactions)) => compactions
                 .iter()
                 .map(|c| DateTime::<Utc>::from(c.id().datetime()))
                 .min()
                 .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-            Ok(None) => DateTime::<Utc>::UNIX_EPOCH,
-            Err(err) => {
-                warn!(
-                    "failed to read persisted compaction state for GC, so disabling deletes [error={}]",
-                    err
-                );
-                DateTime::<Utc>::UNIX_EPOCH
-            }
+            None => DateTime::<Utc>::UNIX_EPOCH,
         }
     }
 }
@@ -154,17 +170,20 @@ impl GcTask for CompactedGcTask {
         // manifest) and the compaction low watermark _after_ the SSTs are added to the manifest.
         // This would allow the GC to delete the latest compaction job output SST since they would
         // not be active, and would be older than the low watermark.
-        let compaction_low_watermark_dt = self.compaction_low_watermark_dt().await;
-        let active_manifests = self.manifest_store.read_active_manifests().await?;
+        let state_reader = CompactorStateReader::new(&self.manifest_store, &self.compactions_store);
+        let view = state_reader.read_view().await?;
+        let compactions = view.compactions;
+        let (manifest_id, manifest) = view.manifest;
+        let compaction_low_watermark_dt = Self::compaction_low_watermark_dt(&compactions);
         let active_ssts = self
-            .list_active_l0_and_compacted_ssts(&active_manifests)
+            .list_active_l0_and_compacted_ssts(manifest_id, &manifest)
             .await?;
         // Don't delete any SSTs that are newer than the configured minimum age.
         let configured_min_age_dt = utc_now - self.compacted_sst_min_age();
         // Don't delete SSTs that are newer than this SST since they're probably an L0 that hasn't yet
         // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
         // manifest to object storage).
-        let newest_l0_dt = self.newest_l0_dt(&active_manifests).await?;
+        let newest_l0_dt = self.newest_l0_dt(&manifest).await?;
         // Take the minimum of the configured min age, the compaction low watermark, and the most
         // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
         let cutoff_dt = configured_min_age_dt
