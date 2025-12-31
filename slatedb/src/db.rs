@@ -27,8 +27,7 @@ use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
-use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
-use object_store::ObjectStore;
+use object_store::{parse_url_opts, ObjectStore};
 
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::db_transaction::DbTransaction;
@@ -1468,14 +1467,16 @@ impl Db {
     /// ## Returns
     /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
     pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
-        let registry = DefaultObjectStoreRegistry::new();
         let url = url
             .try_into()
             .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
-        let (object_store, path) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        // Lowercase env keys because parse_url_opts only recognizes lower case option keys.
+        let env_vars = std::env::vars().map(|(key, value)| (key.to_ascii_lowercase(), value));
+        let (object_store, path) = parse_url_opts(&url, env_vars).map_err(SlateDBError::from)?;
         let object_store: Arc<dyn ObjectStore> = if path.as_ref().is_empty() {
-            object_store
+            Arc::from(object_store)
         } else {
+            let object_store = Arc::from(object_store);
             Arc::new(PrefixStore::new(object_store, path))
         };
         Ok(object_store)
