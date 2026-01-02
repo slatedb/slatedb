@@ -232,7 +232,7 @@ Compactions will need to use the comparator to sort the keys in the SSTs.
 - [x] Indexing (bloom filters, metadata)
 - [x] SST format or block format
 
-The indexes and SSts will be sorted by the comparator
+The indexes and SSTs will be sorted by the comparator
 
 <!-- TOC --><a name="ecosystem-operations"></a>
 ### Ecosystem & Operations
@@ -259,21 +259,10 @@ approach outlined in the implementation section above.
 
 <!-- Describe any operational changes required to support this change. -->
 
-- Configuration changes
-- New components/services
-- Metrics
-- Logging
-
 This will require a new configuration option to set the key comparator.
 
 <!-- TOC --><a name="compatibility"></a>
 ### Compatibility
-
-<!-- Describe compatibility considerations with existing versions of SlateDB. -->
-
-- Existing data on object storage / on-disk formats
-- Existing public APIs (including bindings)
-- Rolling upgrades / mixed-version behavior (if applicable)
 
 Existing deployments will set an empty string for the key comparator name in the manifest
 the first time it is deployed with a version including this RFC. If the field does not
@@ -281,15 +270,6 @@ exist but the manifest already does, a custom comparator will not be allowed.
 
 <!-- TOC --><a name="testing"></a>
 ## Testing
-
-<!-- Describe the testing plan for this change. -->
-
-- Unit tests:
-- Integration tests:
-- Fault-injection/chaos tests:
-- Deterministic simulation tests:
-- Formal methods verification:
-- Performance tests:
 
 We should have comprehensive tests to ensure we don't break the ordering invariant
 going forward. All main code paths should be covered, in particular queriyng and
