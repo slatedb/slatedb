@@ -176,6 +176,28 @@ impl CompactorStateWriter {
         Ok(())
     }
 
+    /// Refreshes the compactions view and updates the local compactor state with any remote
+    /// changes.
+    ///
+    /// ## Returns
+    /// - `Ok(())` after compactions are refreshed, or `SlateDBError` on failure.
+    pub(crate) async fn load_compactions(&mut self) -> Result<(), SlateDBError> {
+        self.compactions.refresh().await?;
+        self.state
+            .merge_remote_compactions(self.compactions.prepare_dirty()?);
+        Ok(())
+    }
+
+    /// Refreshes compactions first, then manifests, to preserve a consistent ordering.
+    ///
+    /// ## Returns
+    /// - `Ok(())` after state is refreshed, or `SlateDBError` on failure.
+    pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
+        self.load_compactions().await?;
+        self.load_manifest().await?;
+        Ok(())
+    }
+
     /// Persists the updated manifest after a compaction finishes.
     ///
     /// A checkpoint with a 15-minute lifetime is written first to prevent GC from

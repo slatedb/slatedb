@@ -518,10 +518,10 @@ impl CompactorEventHandler {
             .sum()
     }
 
-    /// Handles a polling tick by refreshing the manifest and possibly scheduling compactions.
+    /// Handles a polling tick by refreshing compactions and the manifest, then possibly scheduling compactions.
     async fn handle_ticker(&mut self) -> Result<(), SlateDBError> {
         if !self.is_executor_stopped() {
-            self.state_writer.load_manifest().await?;
+            self.state_writer.refresh().await?;
             self.maybe_schedule_compactions().await?;
         }
         Ok(())

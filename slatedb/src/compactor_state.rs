@@ -392,6 +392,34 @@ impl CompactorState {
         self.compactions = compactions;
     }
 
+    /// Merges the remote compactions view into the compactor's local state.
+    ///
+    /// This preserves local in-flight compactions while pulling in newly submitted remote
+    /// compactions (e.g. external scheduling requests).
+    pub(crate) fn merge_remote_compactions(
+        &mut self,
+        mut remote_compactions: DirtyObject<Compactions>,
+    ) {
+        let mut merged = Vec::new();
+        let mut seen = HashSet::new();
+
+        for compaction in self.compactions.value.iter() {
+            seen.insert(compaction.id());
+            merged.push(compaction.clone());
+        }
+        for compaction in remote_compactions.value.iter() {
+            if seen.insert(compaction.id()) {
+                merged.push(compaction.clone());
+            }
+        }
+
+        let mut merged_compactions =
+            Compactions::new(self.compactions.value.compactor_epoch).with_compactions(merged);
+        merged_compactions.retain_active_and_last_finished();
+        remote_compactions.value = merged_compactions;
+        self.set_compactions(remote_compactions);
+    }
+
     /// Merges the remote (writer) manifest view into the compactor's local state.
     ///
     /// This preserves local knowledge about compactions already applied (e.g., L0 last
@@ -653,6 +681,59 @@ mod tests {
 
         assert!(compactions.contains(&submitted));
         assert!(compactions.contains(&running));
+    }
+
+    #[test]
+    fn test_merge_remote_compactions_preserves_local_and_adds_remote() {
+        let manifest = new_dirty_manifest();
+        let compactor_epoch = manifest.value.compactor_epoch;
+        let local_running = Ulid::from_parts(1, 0);
+        let local_finished = Ulid::from_parts(2, 0);
+
+        let mut local_compactions = new_dirty_compactions(compactor_epoch);
+        local_compactions.value.insert(compaction_with_status(
+            local_running,
+            CompactionStatus::Running,
+        ));
+        local_compactions.value.insert(compaction_with_status(
+            local_finished,
+            CompactionStatus::Completed,
+        ));
+
+        let mut state = CompactorState::new(manifest, local_compactions);
+
+        let remote_submitted = Ulid::from_parts(3, 0);
+        let remote_finished = Ulid::from_parts(4, 0);
+        let mut remote_compactions = new_dirty_compactions(compactor_epoch);
+        remote_compactions.value.insert(compaction_with_status(
+            remote_submitted,
+            CompactionStatus::Submitted,
+        ));
+        remote_compactions.value.insert(compaction_with_status(
+            remote_finished,
+            CompactionStatus::Failed,
+        ));
+
+        state.merge_remote_compactions(remote_compactions);
+
+        let merged = &state.compactions.value;
+        assert!(merged.contains(&local_running));
+        assert_eq!(
+            merged.get(&local_running).expect("not found").status(),
+            CompactionStatus::Running
+        );
+        assert!(merged.contains(&remote_submitted));
+        assert_eq!(
+            merged.get(&remote_submitted).expect("not found").status(),
+            CompactionStatus::Submitted
+        );
+        assert!(merged.contains(&remote_finished));
+        assert_eq!(
+            merged.get(&remote_finished).expect("not found").status(),
+            CompactionStatus::Failed
+        );
+        // Expect this to be trimmed since remote_finished is finished and newer
+        assert!(!merged.contains(&local_finished));
     }
 
     #[test]
