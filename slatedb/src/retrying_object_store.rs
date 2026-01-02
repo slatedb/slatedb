@@ -77,7 +77,9 @@ impl RetryingObjectStore {
     /// When a put operation times out after the file was successfully written,
     /// a retry would encounter an AlreadyExists or Precondition error. This method
     /// checks if the object in the store has our ULID, indicating our write succeeded.
-    async fn verify_put_succeeded(&self, location: &Path, expected_id: &str) -> bool {
+    ///
+    /// Returns `Some(ObjectMeta)` if verification succeeds, `None` otherwise.
+    async fn verify_put_succeeded(&self, location: &Path, expected_id: &str) -> Option<ObjectMeta> {
         let get_opts = GetOptions {
             head: true,
             ..Default::default()
@@ -91,12 +93,17 @@ impl RetryingObjectStore {
         match result {
             Ok(get_result) => {
                 let key = Attribute::Metadata(Cow::Borrowed(PUT_ID_ATTRIBUTE));
-                get_result
+                if get_result
                     .attributes
                     .get(&key)
                     .is_some_and(|v| v.as_ref() == expected_id)
+                {
+                    Some(get_result.meta)
+                } else {
+                    None
+                }
             }
-            Err(_) => false,
+            Err(_) => None,
         }
     }
 
@@ -167,17 +174,15 @@ impl MultipartUpload for RetryingMultipartUpload {
         match &result {
             Err(object_store::Error::AlreadyExists { .. })
             | Err(object_store::Error::Precondition { .. }) => {
-                if self
+                if let Some(meta) = self
                     .retrying_store
                     .verify_put_succeeded(&self.location, &self.put_id)
                     .await
                 {
-                    if let Ok(meta) = self.retrying_store.head(&self.location).await {
-                        return Ok(PutResult {
-                            e_tag: meta.e_tag,
-                            version: meta.version,
-                        });
-                    }
+                    return Ok(PutResult {
+                        e_tag: meta.e_tag,
+                        version: meta.version,
+                    });
                 }
                 result
             }
@@ -271,20 +276,11 @@ impl ObjectStore for RetryingObjectStore {
         match (&result, &put_id) {
             (Err(object_store::Error::AlreadyExists { .. }), Some(id))
             | (Err(object_store::Error::Precondition { .. }), Some(id)) => {
-                if self.verify_put_succeeded(location, id).await {
-                    let head_result = (|| async { self.inner.head(location).await })
-                        .retry(Self::retry_builder())
-                        .notify(Self::notify)
-                        .when(Self::should_retry_verification)
-                        .await;
-
-                    match head_result {
-                        Ok(meta) => Ok(PutResult {
-                            e_tag: meta.e_tag,
-                            version: meta.version,
-                        }),
-                        Err(_) => result,
-                    }
+                if let Some(meta) = self.verify_put_succeeded(location, id).await {
+                    Ok(PutResult {
+                        e_tag: meta.e_tag,
+                        version: meta.version,
+                    })
                 } else {
                     result
                 }
