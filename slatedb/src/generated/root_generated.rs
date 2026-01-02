@@ -287,6 +287,99 @@ impl flatbuffers::SimpleToVerifyInSlice for CompactionSpec {}
 pub struct CompactionSpecUnionTableOffset {}
 
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_COMPACTION_STATUS: i8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_COMPACTION_STATUS: i8 = 3;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_COMPACTION_STATUS: [CompactionStatus; 4] = [
+  CompactionStatus::Submitted,
+  CompactionStatus::Running,
+  CompactionStatus::Completed,
+  CompactionStatus::Failed,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct CompactionStatus(pub i8);
+#[allow(non_upper_case_globals)]
+impl CompactionStatus {
+  pub const Submitted: Self = Self(0);
+  pub const Running: Self = Self(1);
+  pub const Completed: Self = Self(2);
+  pub const Failed: Self = Self(3);
+
+  pub const ENUM_MIN: i8 = 0;
+  pub const ENUM_MAX: i8 = 3;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::Submitted,
+    Self::Running,
+    Self::Completed,
+    Self::Failed,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::Submitted => Some("Submitted"),
+      Self::Running => Some("Running"),
+      Self::Completed => Some("Completed"),
+      Self::Failed => Some("Failed"),
+      _ => None,
+    }
+  }
+}
+impl core::fmt::Debug for CompactionStatus {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> flatbuffers::Follow<'a> for CompactionStatus {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+    Self(b)
+  }
+}
+
+impl flatbuffers::Push for CompactionStatus {
+    type Output = CompactionStatus;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+    }
+}
+
+impl flatbuffers::EndianScalar for CompactionStatus {
+  type Scalar = i8;
+  #[inline]
+  fn to_little_endian(self) -> i8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: i8) -> Self {
+    let b = i8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> flatbuffers::Verifiable for CompactionStatus {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    i8::run_verifier(v, pos)
+  }
+}
+
+impl flatbuffers::SimpleToVerifyInSlice for CompactionStatus {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CHECKPOINT_METADATA: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MAX_CHECKPOINT_METADATA: u8 = 1;
@@ -1607,6 +1700,7 @@ impl<'a> Compaction<'a> {
   pub const VT_ID: flatbuffers::VOffsetT = 4;
   pub const VT_SPEC_TYPE: flatbuffers::VOffsetT = 6;
   pub const VT_SPEC: flatbuffers::VOffsetT = 8;
+  pub const VT_STATUS: flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1620,6 +1714,7 @@ impl<'a> Compaction<'a> {
     let mut builder = CompactionBuilder::new(_fbb);
     if let Some(x) = args.spec { builder.add_spec(x); }
     if let Some(x) = args.id { builder.add_id(x); }
+    builder.add_status(args.status);
     builder.add_spec_type(args.spec_type);
     builder.finish()
   }
@@ -1645,6 +1740,13 @@ impl<'a> Compaction<'a> {
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(Compaction::VT_SPEC, None).unwrap()}
+  }
+  #[inline]
+  pub fn status(&self) -> CompactionStatus {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<CompactionStatus>(Compaction::VT_STATUS, Some(CompactionStatus::Submitted)).unwrap()}
   }
   #[inline]
   #[allow(non_snake_case)]
@@ -1676,6 +1778,7 @@ impl flatbuffers::Verifiable for Compaction<'_> {
           _ => Ok(()),
         }
      })?
+     .visit_field::<CompactionStatus>("status", Self::VT_STATUS, false)?
      .finish();
     Ok(())
   }
@@ -1684,6 +1787,7 @@ pub struct CompactionArgs<'a> {
     pub id: Option<flatbuffers::WIPOffset<Ulid<'a>>>,
     pub spec_type: CompactionSpec,
     pub spec: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub status: CompactionStatus,
 }
 impl<'a> Default for CompactionArgs<'a> {
   #[inline]
@@ -1692,6 +1796,7 @@ impl<'a> Default for CompactionArgs<'a> {
       id: None, // required field
       spec_type: CompactionSpec::NONE,
       spec: None, // required field
+      status: CompactionStatus::Submitted,
     }
   }
 }
@@ -1712,6 +1817,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_spec(&mut self, spec: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Compaction::VT_SPEC, spec);
+  }
+  #[inline]
+  pub fn add_status(&mut self, status: CompactionStatus) {
+    self.fbb_.push_slot::<CompactionStatus>(Compaction::VT_STATUS, status, CompactionStatus::Submitted);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactionBuilder<'a, 'b, A> {
@@ -1748,6 +1857,7 @@ impl core::fmt::Debug for Compaction<'_> {
           ds.field("spec", &x)
         },
       };
+      ds.field("status", &self.status());
       ds.finish()
   }
 }

@@ -31,9 +31,9 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
     CompactedSsTableArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
-    CompactionSpec as FbCompactionSpec, CompactionsV1, CompactionsV1Args, CompressionFormat,
-    SortedRun, SortedRunArgs, TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid,
-    UlidArgs as FbUlidArgs, Uuid, UuidArgs,
+    CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
+    CompactionsV1Args, CompressionFormat, SortedRun, SortedRunArgs, TieredCompactionSpec,
+    TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
@@ -320,9 +320,8 @@ impl FlatBufferCompactionsCodec {
 
     fn compaction(compaction: &FbCompaction) -> Result<CompactorCompaction, SlateDBError> {
         let spec = Self::compaction_spec(compaction)?;
-        Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
-            // TODO(criccomini): use actual status when we encode it in flatbuffer
-            .with_status(CompactionStatus::Submitted))
+        let status = CompactionStatus::from(compaction.status());
+        Ok(CompactorCompaction::new(compaction.id().ulid(), spec).with_status(status))
     }
 
     fn compaction_spec(compaction: &FbCompaction) -> Result<CompactorCompactionSpec, SlateDBError> {
@@ -507,12 +506,14 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn add_compaction(&mut self, compaction: &CompactorCompaction) -> WIPOffset<FbCompaction<'b>> {
         let id = self.add_ulid(&compaction.id());
         let (spec_type, spec) = self.add_compaction_spec(compaction.spec());
+        let status = FbCompactionStatus::from(compaction.status());
         FbCompaction::create(
             &mut self.builder,
             &FbCompactionArgs {
                 id: Some(id),
                 spec_type,
                 spec: Some(spec),
+                status,
             },
         )
     }
@@ -715,6 +716,29 @@ impl From<CompressionFormat> for Option<CompressionCodec> {
     }
 }
 
+impl From<CompactionStatus> for FbCompactionStatus {
+    fn from(value: CompactionStatus) -> Self {
+        match value {
+            CompactionStatus::Submitted => FbCompactionStatus::Submitted,
+            CompactionStatus::Running => FbCompactionStatus::Running,
+            CompactionStatus::Completed => FbCompactionStatus::Completed,
+            CompactionStatus::Failed => FbCompactionStatus::Failed,
+        }
+    }
+}
+
+impl From<FbCompactionStatus> for CompactionStatus {
+    fn from(value: FbCompactionStatus) -> Self {
+        match value {
+            FbCompactionStatus::Submitted => CompactionStatus::Submitted,
+            FbCompactionStatus::Running => CompactionStatus::Running,
+            FbCompactionStatus::Completed => CompactionStatus::Completed,
+            FbCompactionStatus::Failed => CompactionStatus::Failed,
+            _ => CompactionStatus::Submitted,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_utils {
     use crate::flatbuffer_types::SsTableIndexOwned;
@@ -728,7 +752,9 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
-    use crate::compactor_state::{Compaction, CompactionSpec, Compactions, SourceId};
+    use crate::compactor_state::{
+        Compaction, CompactionSpec, CompactionStatus, Compactions, SourceId,
+    };
     use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
@@ -980,11 +1006,13 @@ mod tests {
         let compaction_l0 = Compaction::new(
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::Sst(ulid::Ulid::new())], 0),
-        );
+        )
+        .with_status(CompactionStatus::Running);
         let compaction_sr = Compaction::new(
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
-        );
+        )
+        .with_status(CompactionStatus::Failed);
         let mut compactions = Compactions::new(9);
         compactions.insert(compaction_l0.clone());
         compactions.insert(compaction_sr.clone());

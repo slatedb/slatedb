@@ -109,8 +109,6 @@ impl Display for CompactionSpec {
 }
 
 /// Lifecycle status for a compaction.
-///
-/// This is currently tracked in-memory, but not in the .compactions file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CompactionStatus {
     /// The compaction has been submitted but not yet started.

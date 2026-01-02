@@ -2258,7 +2258,7 @@ mod tests {
         };
         fixture.handler.handle(msg).await.unwrap();
 
-        // then: compactions store cleared
+        // then: compaction marked failed in store
         let (_, stored_after) = fixture
             .compactions_store
             .read_latest_compactions()
@@ -2268,11 +2268,10 @@ mod tests {
             stored_after
                 .iter()
                 .next()
-                .expect("compactions should be empty after failure")
+                .expect("compaction should be persisted after failure")
                 .status(),
-            // TODO(criccomini): change to Failed or Completed once we track status in the flatbuffers
-            CompactionStatus::Submitted,
-            "compactions should be removed after failure"
+            CompactionStatus::Failed,
+            "compaction should be marked failed after failure"
         );
     }
 
