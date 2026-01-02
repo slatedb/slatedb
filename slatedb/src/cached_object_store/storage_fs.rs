@@ -774,16 +774,22 @@ impl FsCacheEvictorInner {
         picked: &HashSet<usize>,
         exclude_idx: Option<usize>,
     ) -> Option<usize> {
-        let available = (0..keys.len())
-            .filter(|i| !picked.contains(i) && Some(*i) != exclude_idx)
-            .collect::<Vec<_>>();
+        let excluded_not_picked = exclude_idx.is_some_and(|idx| !picked.contains(&idx));
+        let available_count = keys
+            .len()
+            .saturating_sub(picked.len())
+            .saturating_sub(usize::from(excluded_not_picked));
 
-        if available.is_empty() {
+        if available_count == 0 {
             return None;
         }
 
-        let chosen = rng.random_range(0..available.len());
-        available.get(chosen).copied()
+        loop {
+            let idx = rng.random_range(0..keys.len());
+            if !picked.contains(&idx) && Some(idx) != exclude_idx {
+                return Some(idx);
+            }
+        }
     }
 }
 
