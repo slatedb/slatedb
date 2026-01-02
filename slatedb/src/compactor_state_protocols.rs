@@ -116,12 +116,14 @@ impl CompactorStateWriter {
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Mark any persisted compactions as finished so we don't resume them after restart.
+        // Mark running compactions as failed so we don't resume them after restart.
+        // Submitted compactions are left intact for future scheduling.
         // Keep only the most recent finished compaction for GC safety (#1044).
-        dirty_compactions
-            .value
-            .iter_mut()
-            .for_each(|c| c.set_status(CompactionStatus::Finished));
+        dirty_compactions.value.iter_mut().for_each(|c| {
+            if matches!(c.status(), CompactionStatus::Running) {
+                c.set_status(CompactionStatus::Failed);
+            }
+        });
         dirty_compactions.value.retain_active_and_last_finished();
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {

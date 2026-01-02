@@ -117,8 +117,10 @@ pub enum CompactionStatus {
     Submitted,
     /// The compaction is currently running.
     Running,
-    /// The compaction has finished (successfully or failed).
-    Finished,
+    /// The compaction finished successfully.
+    Completed,
+    /// The compaction failed. It might or might not have started before failure.
+    Failed,
 }
 
 impl CompactionStatus {
@@ -130,7 +132,7 @@ impl CompactionStatus {
     }
 
     fn finished(self) -> bool {
-        matches!(self, CompactionStatus::Finished)
+        matches!(self, CompactionStatus::Completed | CompactionStatus::Failed)
     }
 }
 
@@ -476,20 +478,7 @@ impl CompactorState {
         Ok(())
     }
 
-    /// Marks a compaction finished (called after completion or failure) and trims retained state.
-    pub(crate) fn remove_compaction(&mut self, compaction_id: &Ulid) {
-        if let Some(compaction) = self
-            .compactions
-            .value
-            .recent_compactions
-            .get_mut(compaction_id)
-        {
-            compaction.set_status(CompactionStatus::Finished);
-        }
-        self.compactions.value.retain_active_and_last_finished();
-    }
-
-    /// Mutates a running compaction in place if it exists.
+    /// Mutates a compaction in place if it exists, then trims retained state.
     pub(crate) fn update_compaction<F>(&mut self, compaction_id: &Ulid, f: F)
     where
         F: FnOnce(&mut Compaction),
@@ -502,6 +491,7 @@ impl CompactorState {
         {
             f(compaction);
         }
+        self.compactions.value.retain_active_and_last_finished();
     }
 
     /// Applies the effects of a finished compaction to the in-memory manifest.
@@ -564,8 +554,9 @@ impl CompactorState {
             db_state.l0 = new_l0;
             db_state.compacted = new_compacted;
             self.manifest.value.core = db_state;
-            compaction.set_status(CompactionStatus::Finished);
-            self.compactions.value.retain_active_and_last_finished();
+            self.update_compaction(&compaction_id, |c| {
+                c.set_status(CompactionStatus::Completed);
+            });
         } else {
             error!("compaction not found [compaction_id={}]", compaction_id);
         }
@@ -615,11 +606,11 @@ mod tests {
 
         compactions.insert(compaction_with_status(
             oldest_finished,
-            CompactionStatus::Finished,
+            CompactionStatus::Completed,
         ));
         compactions.insert(compaction_with_status(
             latest_finished,
-            CompactionStatus::Finished,
+            CompactionStatus::Completed,
         ));
         compactions.insert(compaction_with_status(active, CompactionStatus::Submitted));
 
@@ -637,9 +628,9 @@ mod tests {
         let middle = Ulid::from_parts(20, 0);
         let newest = Ulid::from_parts(30, 0);
 
-        compactions.insert(compaction_with_status(older, CompactionStatus::Finished));
-        compactions.insert(compaction_with_status(middle, CompactionStatus::Finished));
-        compactions.insert(compaction_with_status(newest, CompactionStatus::Finished));
+        compactions.insert(compaction_with_status(older, CompactionStatus::Completed));
+        compactions.insert(compaction_with_status(middle, CompactionStatus::Failed));
+        compactions.insert(compaction_with_status(newest, CompactionStatus::Completed));
 
         compactions.retain_active_and_last_finished();
 
