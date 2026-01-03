@@ -37,7 +37,7 @@ pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 pub use compactor::CompactorBuilder;
 pub use config::{Settings, SstBlockSize};
-pub use db::{Db, DbBuilder};
+pub use db::{Db, DbBuilder, builder::GarbageCollectorBuilder};
 pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
 pub use db_read::DbRead;
