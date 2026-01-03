@@ -685,7 +685,6 @@ impl CompactorEventHandler {
             }
 
             // Compaction is valid and there is capacity, so start it.
-            tracing::Span::current().record("id", tracing::field::display(&compaction.id()));
             match self
                 .start_compaction(compaction.id(), compaction.clone())
                 .await
@@ -713,6 +712,7 @@ impl CompactorEventHandler {
     }
 
     /// Creates a [`StartCompactionJobArgs`] for a [`Compaction`] and asks the executor to run it.
+    #[instrument(level = "debug", skip_all, fields(id = %job_id))]
     async fn start_compaction(
         &mut self,
         job_id: Ulid,
