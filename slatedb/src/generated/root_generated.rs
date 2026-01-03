@@ -304,9 +304,13 @@ pub const ENUM_VALUES_COMPACTION_STATUS: [CompactionStatus; 4] = [
 pub struct CompactionStatus(pub i8);
 #[allow(non_upper_case_globals)]
 impl CompactionStatus {
+  /// The compaction has been submitted but not yet started.
   pub const Submitted: Self = Self(0);
+  /// The compaction is currently running.
   pub const Running: Self = Self(1);
+  /// The compaction finished successfully.
   pub const Completed: Self = Self(2);
+  /// The compaction failed. It might or might not have started before failure.
   pub const Failed: Self = Self(3);
 
   pub const ENUM_MIN: i8 = 0;
