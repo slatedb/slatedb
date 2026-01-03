@@ -46,6 +46,7 @@ pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use garbage_collector::stats as garbage_collector_stats;
+pub use garbage_collector::GarbageCollectorBuilder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 pub use seq_tracker::FindOption;
