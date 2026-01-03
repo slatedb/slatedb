@@ -1037,6 +1037,22 @@ mod tests {
     }
 
     #[test]
+    fn test_should_round_trip_compaction_statuses() {
+        let statuses = [
+            CompactionStatus::Submitted,
+            CompactionStatus::Running,
+            CompactionStatus::Completed,
+            CompactionStatus::Failed,
+        ];
+
+        for status in statuses {
+            let fb_status = super::FbCompactionStatus::from(status);
+            let round_trip = CompactionStatus::from(fb_status);
+            assert_eq!(round_trip, status);
+        }
+    }
+
+    #[test]
     fn test_should_validate_compactions_version() {
         let codec = FlatBufferCompactionsCodec {};
         let compactions = Compactions::new(1);

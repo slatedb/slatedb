@@ -648,6 +648,19 @@ mod tests {
     }
 
     #[test]
+    fn test_compaction_status_active_and_finished() {
+        assert!(CompactionStatus::Submitted.active());
+        assert!(CompactionStatus::Running.active());
+        assert!(!CompactionStatus::Completed.active());
+        assert!(!CompactionStatus::Failed.active());
+
+        assert!(!CompactionStatus::Submitted.finished());
+        assert!(!CompactionStatus::Running.finished());
+        assert!(CompactionStatus::Completed.finished());
+        assert!(CompactionStatus::Failed.finished());
+    }
+
+    #[test]
     fn test_trim_keeps_only_most_recent_finished_when_no_active() {
         let mut compactions = Compactions::new(0);
         let older = Ulid::from_parts(10, 0);

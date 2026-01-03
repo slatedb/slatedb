@@ -2275,6 +2275,255 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_maybe_schedule_compactions_only_submits() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        let compaction = fixture.build_l0_compaction().await;
+        fixture.scheduler.inject_compaction(compaction);
+
+        fixture.handler.maybe_schedule_compactions().await.unwrap();
+
+        assert_eq!(fixture.executor.pop_jobs().len(), 0);
+        let mut compactions = fixture.handler.state().compactions();
+        let scheduled = compactions.next().expect("missing compaction");
+        assert_eq!(scheduled.status(), CompactionStatus::Submitted);
+        assert!(compactions.next().is_none());
+
+        let (_, stored_compactions) = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap();
+        let stored = stored_compactions
+            .iter()
+            .next()
+            .expect("compaction should be persisted");
+        assert_eq!(stored.status(), CompactionStatus::Submitted);
+    }
+
+    #[tokio::test]
+    async fn test_maybe_start_compactions_starts_submitted() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+        let spec = fixture.build_l0_compaction().await;
+        let compaction_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        fixture.handler.maybe_start_compactions().await.unwrap();
+
+        let jobs = fixture.executor.pop_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].compaction_id, compaction_id);
+        let compactions = &fixture.handler.state_writer.state.compactions_dirty().value;
+        assert_eq!(
+            compactions
+                .get(&compaction_id)
+                .expect("missing compaction")
+                .status(),
+            CompactionStatus::Running
+        );
+        let (_, stored_compactions) = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_compactions
+                .get(&compaction_id)
+                .expect("missing stored compaction")
+                .status(),
+            CompactionStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_start_compactions_respects_capacity() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await; // defaults to capacity of 1
+        fixture.write_l0().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+        let spec = fixture.build_l0_compaction().await;
+        let spec_alt = CompactionSpec::new(spec.sources().clone(), spec.destination() + 1);
+        let first_id = Ulid::from_parts(1, 0);
+        let second_id = Ulid::from_parts(2, 0);
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(first_id, spec))
+            .expect("failed to add compaction");
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(second_id, spec_alt))
+            .expect("failed to add compaction");
+
+        fixture.handler.maybe_start_compactions().await.unwrap();
+
+        let jobs = fixture.executor.pop_jobs();
+        assert_eq!(jobs.len(), 1);
+        let compactions = &fixture.handler.state_writer.state.compactions_dirty().value;
+        assert_eq!(
+            compactions
+                .get(&first_id)
+                .expect("missing first compaction")
+                .status(),
+            CompactionStatus::Running
+        );
+        assert_eq!(
+            compactions
+                .get(&second_id)
+                .expect("missing second compaction")
+                .status(),
+            CompactionStatus::Submitted
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_start_compactions_marks_invalid_failed() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let compaction_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(
+                compaction_id,
+                CompactionSpec::new(Vec::new(), 0), // invalid: no sources
+            ))
+            .expect("failed to add compaction");
+
+        fixture.handler.maybe_start_compactions().await.unwrap();
+
+        assert_eq!(fixture.executor.pop_jobs().len(), 0);
+        let compactions = &fixture.handler.state_writer.state.compactions_dirty().value;
+        assert_eq!(
+            compactions
+                .get(&compaction_id)
+                .expect("missing compaction")
+                .status(),
+            CompactionStatus::Failed
+        );
+        let (_, stored_compactions) = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_compactions
+                .get(&compaction_id)
+                .expect("missing stored compaction")
+                .status(),
+            CompactionStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_ticker_starts_preexisting_submitted_compaction() {
+        let compactor_options = Arc::new(compactor_options());
+        let options = db_options(None);
+
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), system_clock.clone())
+                .await
+                .unwrap();
+
+        // Create an L0 so the submitted compaction has valid sources.
+        let mut rng = rng::new_test_rng(None);
+        let manifest = stored_manifest.refresh().await.unwrap();
+        let l0s = manifest.core.l0.len();
+        let mut k = vec![0u8; options.l0_sst_size_bytes];
+        rng.fill_bytes(&mut k);
+        db.put(&k, &[b'x'; 10]).await.unwrap();
+        db.flush().await.unwrap();
+        loop {
+            let manifest = stored_manifest.refresh().await.unwrap().clone();
+            if manifest.core.l0.len() > l0s {
+                break;
+            }
+        }
+
+        // Seed the compactions store with a Submitted compaction before handler startup.
+        let db_state = stored_manifest.refresh().await.unwrap().core.clone();
+        let sources = db_state
+            .l0
+            .iter()
+            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .collect::<Vec<_>>();
+        let spec = CompactionSpec::new(sources, 0);
+        let compaction_id = Ulid::new();
+        let compaction = Compaction::new(compaction_id, spec);
+
+        let mut stored_compactions = StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
+        let mut dirty = stored_compactions.prepare_dirty().unwrap();
+        dirty.value.insert(compaction);
+        stored_compactions.update(dirty).await.unwrap();
+
+        // Build the handler and trigger a ticker refresh to pick up external compactions.
+        let scheduler = Arc::new(MockScheduler::new());
+        let executor = Arc::new(MockExecutor::new());
+        let rand = Arc::new(DbRand::default());
+        let stats_registry = Arc::new(StatRegistry::new());
+        let compactor_stats = Arc::new(CompactionStats::new(stats_registry));
+        let mut handler = CompactorEventHandler::new(
+            manifest_store,
+            compactions_store.clone(),
+            compactor_options,
+            scheduler,
+            executor.clone(),
+            rand,
+            compactor_stats,
+            system_clock,
+        )
+        .await
+        .unwrap();
+
+        handler.handle_ticker().await.unwrap();
+
+        // The pre-existing Submitted compaction should be started.
+        let jobs = executor.pop_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].compaction_id, compaction_id);
+
+        // Finish the compaction and ensure status is persisted as Completed.
+        let db_state = handler.state().db_state().clone();
+        let output_sr = SortedRun {
+            id: jobs[0].destination,
+            ssts: db_state.l0.iter().cloned().collect(),
+        };
+        let msg = CompactorMessage::CompactionJobFinished {
+            id: compaction_id,
+            result: Ok(output_sr),
+        };
+        handler.handle(msg).await.unwrap();
+
+        let (_, stored_compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        assert_eq!(
+            stored_compactions
+                .get(&compaction_id)
+                .expect("missing stored compaction")
+                .status(),
+            CompactionStatus::Completed
+        );
+    }
+
+    #[tokio::test]
     async fn test_should_fail_when_compactions_store_fences_compactor() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
