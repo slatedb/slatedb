@@ -649,8 +649,7 @@ impl CompactorEventHandler {
         let submitted_compactions = self
             .state()
             .compactions()
-            .filter(|c| c.status() == CompactionStatus::Submitted)
-            .map(|c| c.clone())
+            .filter(|c| c.status() == CompactionStatus::Submitted).cloned()
             .collect::<Vec<_>>();
 
         for compaction in submitted_compactions.iter() {
