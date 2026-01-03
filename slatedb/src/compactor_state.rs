@@ -109,6 +109,16 @@ impl Display for CompactionSpec {
 }
 
 /// Lifecycle status for a compaction.
+///
+/// State transitions:
+/// ```text
+/// Submitted --> Running --> Completed
+///     |             |
+///     |             v
+///     +----------> Failed
+/// ```
+///
+/// `Completed` and `Failed` are terminal states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum CompactionStatus {
     /// The compaction has been submitted but not yet started.
