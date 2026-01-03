@@ -348,13 +348,13 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                     }
                 }
                 self.maybe_schedule_compactions().await?;
+                self.maybe_start_compactions().await?;
             }
             CompactorMessage::CompactionJobProgress {
                 id,
                 bytes_processed,
             } => {
                 self.state_mut().update_compaction(&id, |c| {
-                    c.set_status(CompactionStatus::Running);
                     c.set_bytes_processed(bytes_processed);
                 });
             }
@@ -523,6 +523,7 @@ impl CompactorEventHandler {
         if !self.is_executor_stopped() {
             self.state_writer.refresh().await?;
             self.maybe_schedule_compactions().await?;
+            self.maybe_start_compactions().await?;
         }
         Ok(())
     }
@@ -596,25 +597,118 @@ impl CompactorEventHandler {
             .map_err(|_e| SlateDBError::InvalidCompaction)
     }
 
-    /// Invokes the scheduler and starts accepted compactions, provided that there are fewer than
-    /// [`CompactorOptions::max_concurrent_compactions`] currently running.
+    /// Requests new compactions from the scheduler, validates them, and adds them to the
+    /// state up to the the max concurrency limit. This method does not actually start
+    /// the compactions; that is done in [`CompactorEventHandler::maybe_start_compactions`].
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
+        let running_compaction_count = self
+            .state()
+            .compactions()
+            .filter(|c| c.status() == CompactionStatus::Running)
+            .count();
+        let available_capacity = self.options.max_concurrent_compactions - running_compaction_count;
+
+        if available_capacity == 0 {
+            debug!(
+                "skipping compaction scheduling since at capacity [running_compactions={}, max_concurrent_compactions={}]",
+                running_compaction_count,
+                self.options.max_concurrent_compactions
+            );
+            return Ok(());
+        }
+
         let mut specs = self.scheduler.maybe_schedule_compaction(self.state());
-        for spec in specs.drain(..) {
-            let active_compactions = self.state().compactions().count();
-            if active_compactions >= self.options.max_concurrent_compactions {
+
+        // Add new compactions up to the max concurrency limit
+        let num_specs_added = specs
+            .drain(..available_capacity.min(specs.len()))
+            .map(|spec| -> Result<(), SlateDBError> {
+                let compaction_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
+                debug!(
+                    "scheduling new compaction [spec={:?}, id={}]",
+                    spec, compaction_id
+                );
+                self.state_mut()
+                    .add_compaction(Compaction::new(compaction_id, spec))?;
+                Ok(())
+            })
+            .count();
+
+        // Save newly added compactions
+        if num_specs_added > 0 {
+            self.state_writer.write_compactions_safely().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Starts (valid) submitted compactions up to the max concurrency limit. Invalid
+    /// compactions are marked as failed. Successfully started compactions are marked
+    /// as running.
+    async fn maybe_start_compactions(&mut self) -> Result<(), SlateDBError> {
+        let submitted_compactions = self
+            .state()
+            .compactions()
+            .filter(|c| c.status() == CompactionStatus::Submitted)
+            .map(|c| c.clone())
+            .collect::<Vec<_>>();
+
+        for compaction in submitted_compactions.iter() {
+            let running_compaction_count = self
+                .state()
+                .compactions()
+                .filter(|c| c.status() == CompactionStatus::Running)
+                .count();
+
+            // Make sure we have capacity to start a new compaction.
+            if running_compaction_count >= self.options.max_concurrent_compactions {
                 info!(
-                    "already running {} compactions, which is at the max {}. Won't run compaction {:?}",
-                    active_compactions,
+                    "skipping compaction since capacity is exceeded [running_compactions={}, max_concurrent_compactions={}, compaction={:?}]",
+                    running_compaction_count,
                     self.options.max_concurrent_compactions,
-                    spec
+                    compaction
                 );
                 break;
             }
-            let compaction_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
-            let compaction = Compaction::new(compaction_id, spec);
-            self.submit_compaction(compaction).await?;
+
+            // Validate the candidate compaction; mark as failed if invalid.
+            if let Err(e) = self.validate_compaction(compaction.spec()) {
+                error!(
+                    "compaction validation failed [error={:?}, compaction={:?}]",
+                    compaction, e
+                );
+                self.state_mut().update_compaction(&compaction.id(), |c| {
+                    c.set_status(CompactionStatus::Failed)
+                });
+                self.state_writer.write_compactions_safely().await?;
+                continue;
+            }
+
+            // Compaction is valid and there is capacity, so start it.
+            tracing::Span::current().record("id", tracing::field::display(&compaction.id()));
+            match self
+                .start_compaction(compaction.id(), compaction.clone())
+                .await
+            {
+                Ok(_) => {
+                    self.state_mut().update_compaction(&compaction.id(), |c| {
+                        c.set_status(CompactionStatus::Running)
+                    });
+                }
+                Err(e) => {
+                    self.state_mut().update_compaction(&compaction.id(), |c| {
+                        c.set_status(CompactionStatus::Failed)
+                    });
+                    self.state_writer.write_compactions_safely().await?;
+                    return Err(e);
+                }
+            }
         }
+
+        if !submitted_compactions.is_empty() {
+            self.state_writer.write_compactions_safely().await?;
+        }
+
         Ok(())
     }
 
@@ -695,36 +789,10 @@ impl CompactorEventHandler {
         self.log_compaction_state();
         self.state_writer.write_state_safely().await?;
         self.maybe_schedule_compactions().await?;
+        self.maybe_start_compactions().await?;
         self.stats
             .last_compaction_ts
             .set(self.system_clock.now().timestamp() as u64);
-        Ok(())
-    }
-
-    /// Validates and submits a compaction for execution.
-    ///
-    /// Currently, compactions are executed with a 1:1 [`Compaction`]:Compaction Job
-    /// mapping. Future work may add retries or resume logic with multiple jobs per
-    /// compaction.
-    #[instrument(level = "debug", skip_all, fields(id = tracing::field::Empty))]
-    async fn submit_compaction(&mut self, compaction: Compaction) -> Result<(), SlateDBError> {
-        // Validate the candidate compaction; skip invalid ones
-        if let Err(e) = self.validate_compaction(compaction.spec()) {
-            warn!("invalid compaction [error={:?}]", e);
-            return Ok(());
-        }
-
-        self.state_mut().add_compaction(compaction.clone())?;
-        self.state_writer.write_compactions_safely().await?;
-        // Compactions and jobs are 1:1 right now.
-        let job_id = compaction.id();
-        tracing::Span::current().record("id", tracing::field::display(&job_id));
-        if let Err(err) = self.start_compaction(job_id, compaction).await {
-            self.state_mut()
-                .update_compaction(&job_id, |c| c.set_status(CompactionStatus::Failed));
-            self.state_writer.write_compactions_safely().await?;
-            return Err(err);
-        }
         Ok(())
     }
 
