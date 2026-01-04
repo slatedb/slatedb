@@ -104,7 +104,7 @@ impl Display for CompactionSpec {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let displayed_sources: Vec<String> =
             self.sources().iter().map(|s| format!("{}", s)).collect();
-        write!(f, "{:?} -> {}", displayed_sources, self.destination())
+        write!(f, "{:?} -> SR({})", displayed_sources, self.destination())
     }
 }
 
@@ -243,7 +243,12 @@ impl Display for Compaction {
             .iter()
             .map(|s| format!("{}", s))
             .collect();
-        write!(f, "{:?} -> {}", displayed_sources, self.spec.destination(),)?;
+        write!(
+            f,
+            "{:?} -> SR({})",
+            displayed_sources,
+            self.spec.destination(),
+        )?;
         if self.bytes_processed > 0 {
             let human_bytes_processed = crate::utils::format_bytes_si(self.bytes_processed);
 

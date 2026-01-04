@@ -16,6 +16,7 @@ use crate::checkpoint::Checkpoint;
 use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
 use crate::config::GarbageCollectorOptions;
+pub use crate::db::builder::GarbageCollectorBuilder;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::garbage_collector::stats::GcStats;
