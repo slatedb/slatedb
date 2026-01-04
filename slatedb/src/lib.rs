@@ -54,6 +54,7 @@ pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 
 pub mod admin;
+pub mod cached_object_store;
 pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
@@ -71,7 +72,6 @@ mod block_iterator;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;
-mod cached_object_store;
 mod checkpoint;
 mod clone;
 mod compactions_store;
