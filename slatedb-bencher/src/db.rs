@@ -34,9 +34,8 @@
 //! `WINDOW_SIZE`, the result will be the sum of multiple windows, and thus
 //! some smoothing will occur.
 
-use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -47,6 +46,8 @@ use slatedb::Db;
 use tokio::time::Instant;
 use tracing::{info, warn};
 
+use crate::stats::{StatsRecorder, WindowStats};
+
 /// How frequently to dump stats to the console.
 const STAT_DUMP_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -56,9 +57,6 @@ const STAT_DUMP_LOOKBACK: Duration = Duration::from_secs(60);
 /// How frequently to update stats between puts and gets and
 /// how frequently to check if we need to dump new stats.
 const REPORT_INTERVAL: Duration = Duration::from_millis(100);
-
-/// The size of each window.
-const WINDOW_SIZE: Duration = Duration::from_secs(10);
 
 /// Maximum number of randomly generated keys to keep track of for reuse in
 /// [`RandomKeyGenerator`]. Once this limit is reached, newly generated keys
@@ -204,7 +202,7 @@ impl DbBench {
     /// and then waits for all the tasks to complete. It also spawns a task
     /// to dump stats to the console.
     pub async fn run(&self) {
-        let stats_recorder = Arc::new(StatsRecorder::new());
+        let stats_recorder = Arc::new(DbStatsRecorder::new());
         let mut tasks = Vec::new();
         for _ in 0..self.concurrency {
             let mut task = Task::new(
@@ -235,7 +233,7 @@ struct Task {
     duration: Option<Duration>,
     put_percentage: u32,
     get_hit_percentage: u32,
-    stats_recorder: Arc<StatsRecorder>,
+    stats_recorder: Arc<DbStatsRecorder>,
     db: Arc<Db>,
 }
 
@@ -249,7 +247,7 @@ impl Task {
         duration: Option<Duration>,
         put_percentage: u32,
         get_hit_percentage: u32,
-        stats_recorder: Arc<StatsRecorder>,
+        stats_recorder: Arc<DbStatsRecorder>,
         db: Arc<Db>,
     ) -> Self {
         Self {
@@ -329,7 +327,7 @@ impl Task {
 
 /// Represents the number of puts and gets in a window of time.
 #[derive(Debug)]
-struct Window {
+struct DbWindow {
     range: Range<Instant>,
     puts: u64,
     gets: u64,
@@ -338,164 +336,103 @@ struct Window {
     gets_hits: u64,
 }
 
-struct StatsRecorderInner {
-    puts: u64,
-    gets: u64,
-    puts_bytes: u64,
-    gets_bytes: u64,
-    gets_hits: u64,
-    windows: VecDeque<Window>,
-}
-
-impl StatsRecorderInner {
-    /// Rolls the window if necessary. Creates a new window if there are no windows.
-    /// Otherwise, checks if the front window is in the past and creates a new
-    /// window if so.
-    fn maybe_roll_window(now: Instant, windows: &mut VecDeque<Window>) {
-        let Some(mut front) = windows.front() else {
-            windows.push_front(Window {
-                range: now..now + WINDOW_SIZE,
-                puts: 0,
-                gets: 0,
-                puts_bytes: 0,
-                gets_bytes: 0,
-                gets_hits: 0,
-            });
-            return;
-        };
-        while now >= front.range.end {
-            windows.push_front(Window {
-                range: front.range.end..front.range.end + WINDOW_SIZE,
-                puts: 0,
-                gets: 0,
-                puts_bytes: 0,
-                gets_bytes: 0,
-                gets_hits: 0,
-            });
-            while windows.len() > 180 {
-                windows.pop_back();
-            }
-            front = windows.front().unwrap();
+impl Default for DbWindow {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            range: now..now,
+            puts: 0,
+            gets: 0,
+            puts_bytes: 0,
+            gets_bytes: 0,
+            gets_hits: 0,
         }
-    }
-
-    fn record_puts(&mut self, now: Instant, puts: u64, bytes: u64) {
-        Self::maybe_roll_window(now, &mut self.windows);
-        if let Some(front) = self.windows.front_mut() {
-            front.puts += puts;
-            front.puts_bytes += bytes;
-        }
-        self.puts += puts;
-        self.puts_bytes += bytes;
-    }
-
-    fn record_gets(&mut self, now: Instant, gets: u64, bytes: u64, hits: u64) {
-        Self::maybe_roll_window(now, &mut self.windows);
-        if let Some(front) = self.windows.front_mut() {
-            front.gets += gets;
-            front.gets_bytes += bytes;
-            front.gets_hits += hits;
-        }
-        self.gets += gets;
-        self.gets_bytes += bytes;
-        self.gets_hits += hits;
-    }
-
-    fn puts(&self) -> u64 {
-        self.puts
-    }
-
-    fn gets(&self) -> u64 {
-        self.gets
-    }
-
-    /// Sums the puts and gets in the windows that are contained in the lookback.
-    /// Partially continued windows are excluded. The lookback starts from the start
-    /// of the active window, so the active window is not included in the sum.
-    fn sum_windows(
-        windows: &VecDeque<Window>,
-        lookback: Duration,
-    ) -> Option<(Range<Instant>, u64, u64, u64, u64, u64)> {
-        let mut puts = 0;
-        let mut gets = 0;
-        let mut puts_bytes = 0;
-        let mut gets_bytes = 0;
-        let mut gets_hits = 0;
-        let mut windows_iter = windows.iter();
-        // Don't count the active window, but use its start point as the end of the range.
-        let active_window = windows_iter.next();
-        let mut range = if let Some(window) = active_window {
-            (window.range.start)..window.range.start
-        } else {
-            return None;
-        };
-        for window in windows_iter.filter(|w| w.range.start >= range.end - lookback) {
-            puts += window.puts;
-            gets += window.gets;
-            puts_bytes += window.puts_bytes;
-            gets_bytes += window.gets_bytes;
-            gets_hits += window.gets_hits;
-            range.start = window.range.start;
-        }
-        Some((range, puts, gets, puts_bytes, gets_bytes, gets_hits))
-    }
-
-    fn operations_since(
-        &self,
-        lookback: Duration,
-    ) -> Option<(Range<Instant>, u64, u64, u64, u64, u64)> {
-        Self::sum_windows(&self.windows, lookback).map(|r| (r.0, r.1, r.2, r.3, r.4, r.5))
     }
 }
 
-struct StatsRecorder {
-    inner: Mutex<StatsRecorderInner>,
+impl WindowStats for DbWindow {
+    fn range(&self) -> Range<Instant> {
+        self.range.clone()
+    }
+
+    fn set_range(&mut self, range: Range<Instant>) {
+        self.range = range;
+    }
 }
 
-impl StatsRecorder {
+struct DbStatsRecorder {
+    recorder: StatsRecorder<DbWindow>,
+    // Overall totals tracked separately
+    total_puts: std::sync::atomic::AtomicU64,
+    total_gets: std::sync::atomic::AtomicU64,
+    total_puts_bytes: std::sync::atomic::AtomicU64,
+    total_gets_bytes: std::sync::atomic::AtomicU64,
+    total_gets_hits: std::sync::atomic::AtomicU64,
+}
+
+impl DbStatsRecorder {
     fn new() -> Self {
         Self {
-            inner: Mutex::new(StatsRecorderInner {
-                puts: 0,
-                gets: 0,
-                puts_bytes: 0,
-                gets_bytes: 0,
-                gets_hits: 0,
-                windows: VecDeque::new(),
-            }),
+            recorder: StatsRecorder::new(),
+            total_puts: std::sync::atomic::AtomicU64::new(0),
+            total_gets: std::sync::atomic::AtomicU64::new(0),
+            total_puts_bytes: std::sync::atomic::AtomicU64::new(0),
+            total_gets_bytes: std::sync::atomic::AtomicU64::new(0),
+            total_gets_hits: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    fn record_puts(&self, now: Instant, records: u64, bytes: u64) {
-        let mut guard = self.inner.lock().expect("lock failed");
-        guard.record_puts(now, records, bytes);
+    fn record_puts(&self, now: Instant, puts: u64, bytes: u64) {
+        self.total_puts
+            .fetch_add(puts, std::sync::atomic::Ordering::Relaxed);
+        self.total_puts_bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+
+        self.recorder.record(now, |window| {
+            window.puts += puts;
+            window.puts_bytes += bytes;
+        });
     }
 
-    fn record_gets(&self, now: Instant, records: u64, bytes: u64, hits: u64) {
-        let mut guard = self.inner.lock().expect("lock failed");
-        guard.record_gets(now, records, bytes, hits);
+    fn record_gets(&self, now: Instant, gets: u64, bytes: u64, hits: u64) {
+        self.total_gets
+            .fetch_add(gets, std::sync::atomic::Ordering::Relaxed);
+        self.total_gets_bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        self.total_gets_hits
+            .fetch_add(hits, std::sync::atomic::Ordering::Relaxed);
+
+        self.recorder.record(now, |window| {
+            window.gets += gets;
+            window.gets_bytes += bytes;
+            window.gets_hits += hits;
+        });
     }
 
     fn puts(&self) -> u64 {
-        let guard = self.inner.lock().expect("lock failed");
-        guard.puts()
+        self.total_puts.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn gets(&self) -> u64 {
-        let guard = self.inner.lock().expect("lock failed");
-        guard.gets()
+        self.total_gets.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn operations_since(
         &self,
         lookback: Duration,
     ) -> Option<(Range<Instant>, u64, u64, u64, u64, u64)> {
-        let guard = self.inner.lock().expect("lock failed");
-        guard.operations_since(lookback)
+        self.recorder.stats_since(lookback, |range, windows| {
+            let puts = windows.iter().map(|w| w.puts).sum();
+            let gets = windows.iter().map(|w| w.gets).sum();
+            let puts_bytes = windows.iter().map(|w| w.puts_bytes).sum();
+            let gets_bytes = windows.iter().map(|w| w.gets_bytes).sum();
+            let gets_hits = windows.iter().map(|w| w.gets_hits).sum();
+            (range, puts, gets, puts_bytes, gets_bytes, gets_hits)
+        })
     }
 }
 
-async fn dump_stats(stats: Arc<StatsRecorder>) {
+async fn dump_stats(stats: Arc<DbStatsRecorder>) {
     let mut last_stats_dump: Option<Instant> = None;
     let mut first_dump_start: Option<Instant> = None;
     loop {
