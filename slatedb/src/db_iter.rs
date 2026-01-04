@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// A [`DbIteratorRangeTracker`] can be passed to [`DbIterator`] optionally. If it's passed, you can retrieve
 /// the range of keys scanned by [`DbIterator`] from it.
 #[derive(Debug)]
-pub struct DbIteratorRangeTracker {
+pub(crate) struct DbIteratorRangeTracker {
     inner: Mutex<DbIteratorRangeTrackerInner>,
 }
 
@@ -43,7 +43,7 @@ struct DbIteratorRangeTrackerInner {
 }
 
 impl DbIteratorRangeTracker {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(DbIteratorRangeTrackerInner {
                 first_key: None,
@@ -53,7 +53,7 @@ impl DbIteratorRangeTracker {
         }
     }
 
-    pub fn track_key(&self, key: &Bytes) {
+    fn track_key(&self, key: &Bytes) {
         let mut inner = self.inner.lock();
 
         inner.first_key = Some(match &inner.first_key {
@@ -71,7 +71,7 @@ impl DbIteratorRangeTracker {
         inner.has_data = true;
     }
 
-    pub fn get_range(&self) -> Option<BytesRange> {
+    pub(crate) fn get_range(&self) -> Option<BytesRange> {
         let inner = self.inner.lock();
         match (&inner.first_key, &inner.last_key) {
             (Some(first), Some(last)) => {
@@ -85,7 +85,7 @@ impl DbIteratorRangeTracker {
         }
     }
 
-    pub fn has_data(&self) -> bool {
+    pub(crate) fn has_data(&self) -> bool {
         self.inner.lock().has_data
     }
 }
