@@ -385,6 +385,9 @@ pub(crate) struct FlakyObjectStore {
     put_opts_attempts: AtomicUsize,
     // Put options: if set, always return Precondition error (non-retryable)
     put_precondition_always: std::sync::atomic::AtomicBool,
+    // Put options: if set, write succeeds but returns AlreadyExists error
+    // This simulates a timeout that occurs after the write completes but before the response
+    put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool,
     // Head: transient failures on first N attempts
     fail_first_head: AtomicUsize,
     head_attempts: AtomicUsize,
@@ -409,6 +412,7 @@ impl FlakyObjectStore {
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
+            put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
             head_attempts: AtomicUsize::new(0),
             fail_first_list: AtomicUsize::new(0),
@@ -422,6 +426,14 @@ impl FlakyObjectStore {
 
     pub(crate) fn with_put_precondition_always(self) -> Self {
         self.put_precondition_always.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// Configure the store to write data successfully but return an AlreadyExists error.
+    /// This simulates a timeout that occurs after the write completes but before the response.
+    pub(crate) fn with_put_succeeds_but_returns_already_exists(self) -> Self {
+        self.put_succeeds_but_returns_already_exists
+            .store(true, Ordering::SeqCst);
         self
     }
 
@@ -540,6 +552,21 @@ impl ObjectStore for FlakyObjectStore {
             return Err(object_store::Error::Precondition {
                 path: location.to_string(),
                 source: Box::new(std::io::Error::other("injected precondition")),
+            });
+        }
+        // Simulate: write succeeds but returns AlreadyExists error (timeout after write)
+        if self
+            .put_succeeds_but_returns_already_exists
+            .load(Ordering::SeqCst)
+        {
+            // Actually write the data
+            let _ = self.inner.put_opts(location, payload, opts).await?;
+            // But return an error as if we didn't get the response
+            return Err(object_store::Error::AlreadyExists {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::other(
+                    "injected already exists after successful write",
+                )),
             });
         }
         if self

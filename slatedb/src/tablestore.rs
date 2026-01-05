@@ -615,6 +615,7 @@ mod tests {
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
     use crate::object_stores::ObjectStores;
+    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -1335,7 +1336,11 @@ mod tests {
         // Given a flaky store that times out on the first put_opts
         let base: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
-        let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
+        let retrying = Arc::new(RetryingObjectStore::new(
+            flaky.clone(),
+            Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
+        ));
 
         let format = SsTableFormat {
             block_size: 64,

@@ -315,10 +315,24 @@ impl<P: Into<Path>> DbBuilder<P> {
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
-        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> = self
-            .wal_object_store
-            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
+        let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
+        let system_clock = self
+            .system_clock
+            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
+
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+            self.main_object_store,
+            rand.clone(),
+            system_clock.clone(),
+        ));
+        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
+            self.wal_object_store.map(|s| {
+                Arc::new(RetryingObjectStore::new(
+                    s,
+                    rand.clone(),
+                    system_clock.clone(),
+                )) as Arc<dyn ObjectStore>
+            });
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
@@ -333,8 +347,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
         }
 
-        let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
-
         let logical_clock = self
             .logical_clock
             .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
@@ -348,10 +360,6 @@ impl<P: Into<Path>> DbBuilder<P> {
                     .build(),
             ))
         });
-
-        let system_clock = self
-            .system_clock
-            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
 
         let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
 
@@ -685,6 +693,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     options: GarbageCollectorOptions,
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
+    rand: Arc<DbRand>,
 }
 
 impl<P: Into<Path>> GarbageCollectorBuilder<P> {
@@ -696,6 +705,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
+            rand: Arc::new(DbRand::default()),
         }
     }
 
@@ -718,6 +728,12 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         self
     }
 
+    /// Sets the random number generator seed to use for the garbage collector.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Arc::new(DbRand::new(seed));
+        self
+    }
+
     /// Sets the WAL object store to use for the garbage collector.
     #[allow(unused)]
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
@@ -728,10 +744,18 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
-        let retrying_wal_object_store = self
-            .wal_object_store
-            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+            self.main_object_store,
+            self.rand.clone(),
+            self.system_clock.clone(),
+        ));
+        let retrying_wal_object_store = self.wal_object_store.map(|s| {
+            Arc::new(RetryingObjectStore::new(
+                s,
+                self.rand.clone(),
+                self.system_clock.clone(),
+            )) as Arc<dyn ObjectStore>
+        });
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
@@ -843,7 +867,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+            self.main_object_store,
+            self.rand.clone(),
+            self.system_clock.clone(),
+        ));
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),

@@ -170,6 +170,7 @@ impl Admin {
         .with_system_clock(self.system_clock.clone())
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
+        .with_seed(self.rand.seed())
         .build();
         gc.run_gc_once().await;
         Ok(())
@@ -191,6 +192,7 @@ impl Admin {
         .with_system_clock(self.system_clock.clone())
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
+        .with_seed(self.rand.seed())
         .build();
 
         let (_, rx) = mpsc::unbounded_channel();
