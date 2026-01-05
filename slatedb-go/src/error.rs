@@ -1,4 +1,5 @@
 use crate::types::CSdbHandle;
+use crate::CSdbReaderHandle;
 use slatedb::Error as SlateError;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -38,6 +39,12 @@ pub struct CSdbHandleResult {
     pub result: CSdbResult,
 }
 
+#[repr(C)]
+pub struct CSdbReaderHandleResult {
+    pub handle: CSdbReaderHandle,
+    pub result: CSdbResult,
+}
+
 pub(crate) fn create_handle_error_result(error: CSdbError, message: &str) -> CSdbHandleResult {
     let c_message =
         CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
@@ -52,6 +59,28 @@ pub(crate) fn create_handle_error_result(error: CSdbError, message: &str) -> CSd
 
 pub(crate) fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
     CSdbHandleResult {
+        handle: handler,
+        result: create_success_result(),
+    }
+}
+
+pub fn create_reader_handle_error_result(
+    error: CSdbError,
+    message: &str,
+) -> CSdbReaderHandleResult {
+    let c_message =
+        CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
+    CSdbReaderHandleResult {
+        handle: CSdbReaderHandle::null(),
+        result: CSdbResult {
+            error,
+            message: c_message.into_raw(),
+        },
+    }
+}
+
+pub fn create_reader_handle_success_result(handler: CSdbReaderHandle) -> CSdbReaderHandleResult {
+    CSdbReaderHandleResult {
         handle: handler,
         result: create_success_result(),
     }
