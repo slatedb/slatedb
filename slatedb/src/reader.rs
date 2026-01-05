@@ -520,10 +520,10 @@ mod tests {
             let mut builder = self.table_store.table_builder();
 
             for entry in entries {
-                builder.add(entry)?;
+                builder.add(entry).await?;
             }
 
-            let encoded = builder.build()?;
+            let encoded = builder.build().await?;
             let id = SsTableId::Compacted(Ulid::new());
             self.table_store.write_sst(&id, encoded, false).await
         }

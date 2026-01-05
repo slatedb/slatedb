@@ -903,10 +903,10 @@ mod tests {
         assert_eq!(manifest, decoded);
     }
 
-    #[test]
-    fn test_should_clamp_index_alloc() {
+    #[tokio::test]
+    async fn test_should_clamp_index_alloc() {
         let format = SsTableFormat::default();
-        let sst = build_test_sst(&format, 3);
+        let sst = build_test_sst(&format, 3).await;
         let data = sst.remaining_as_bytes();
         let start_off = sst.info.index_offset as usize;
         let end_off = sst.info.index_offset as usize + sst.info.index_len as usize;

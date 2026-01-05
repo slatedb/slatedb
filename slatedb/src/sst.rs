@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::ops::Range;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 
@@ -40,9 +41,14 @@ pub(crate) const VERSION_SIZE: usize = SIZEOF_U16;
 /// transformations on block data. The transformer is applied after compression
 /// on write and before decompression on read.
 ///
+/// The trait is async to allow implementations to use `spawn_blocking` for
+/// CPU-intensive operations (like encryption) or to call external services
+/// (like a KMS).
+///
 /// # Example
 ///
 /// ```
+/// use async_trait::async_trait;
 /// use bytes::Bytes;
 /// use slatedb::{BlockTransformer, Error};
 ///
@@ -50,23 +56,25 @@ pub(crate) const VERSION_SIZE: usize = SIZEOF_U16;
 ///     key: u8,
 /// }
 ///
+/// #[async_trait]
 /// impl BlockTransformer for XorTransformer {
-///     fn encode(&self, data: Bytes) -> Result<Bytes, Error> {
+///     async fn encode(&self, data: Bytes) -> Result<Bytes, Error> {
 ///         let transformed: Vec<u8> = data.iter().map(|b| b ^ self.key).collect();
 ///         Ok(Bytes::from(transformed))
 ///     }
 ///
-///     fn decode(&self, data: Bytes) -> Result<Bytes, Error> {
-///         self.encode(data)
+///     async fn decode(&self, data: Bytes) -> Result<Bytes, Error> {
+///         self.encode(data).await
 ///     }
 /// }
 /// ```
+#[async_trait]
 pub trait BlockTransformer: Send + Sync {
     /// Encode (transform) block data before storage.
-    fn encode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
+    async fn encode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
 
     /// Decode (inverse transform) block data after retrieval.
-    fn decode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
+    async fn decode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
 }
 
 #[derive(Clone)]
@@ -137,14 +145,14 @@ impl SsTableFormat {
             let filter_bytes = obj.read_range(filter_offset_range).await?;
             let compression_codec = info.compression_codec;
             filter = Some(Arc::new(
-                self.decode_filter(filter_bytes, compression_codec)?,
+                self.decode_filter(filter_bytes, compression_codec).await?,
             ));
         }
         Ok(filter)
     }
 
     #[allow(dead_code)]
-    pub(crate) fn read_filter_raw(
+    pub(crate) async fn read_filter_raw(
         &self,
         info: &SsTableInfo,
         sst_bytes: &Bytes,
@@ -157,11 +165,11 @@ impl SsTableFormat {
         let filter_bytes = sst_bytes.slice(filter_offset_range);
         let compression_codec = info.compression_codec;
         Ok(Some(Arc::new(
-            self.decode_filter(filter_bytes, compression_codec)?,
+            self.decode_filter(filter_bytes, compression_codec).await?,
         )))
     }
 
-    pub(crate) fn decode_filter(
+    pub(crate) async fn decode_filter(
         &self,
         bytes: Bytes,
         compression_codec: Option<CompressionCodec>,
@@ -171,6 +179,7 @@ impl SsTableFormat {
         let untransformed_bytes = match &self.block_transformer {
             Some(t) => t
                 .decode(filter_bytes)
+                .await
                 .map_err(|_| SlateDBError::BlockTransformError)?,
             None => filter_bytes,
         };
@@ -191,11 +200,11 @@ impl SsTableFormat {
         let index_end = index_off + info.index_len;
         let index_bytes = obj.read_range(index_off..index_end).await?;
         let compression_codec = info.compression_codec;
-        self.decode_index(index_bytes, compression_codec)
+        self.decode_index(index_bytes, compression_codec).await
     }
 
     #[cfg(test)]
-    pub(crate) fn read_index_raw(
+    pub(crate) async fn read_index_raw(
         &self,
         info: &SsTableInfo,
         sst_bytes: &Bytes,
@@ -204,10 +213,10 @@ impl SsTableFormat {
         let index_end = index_off + info.index_len as usize;
         let index_bytes: Bytes = sst_bytes.slice(index_off..index_end);
         let compression_codec = info.compression_codec;
-        self.decode_index(index_bytes, compression_codec)
+        self.decode_index(index_bytes, compression_codec).await
     }
 
-    fn decode_index(
+    async fn decode_index(
         &self,
         bytes: Bytes,
         compression_codec: Option<CompressionCodec>,
@@ -217,6 +226,7 @@ impl SsTableFormat {
         let untransformed_bytes = match &self.block_transformer {
             Some(t) => t
                 .decode(index_bytes)
+                .await
                 .map_err(|_| SlateDBError::BlockTransformError)?,
             None => index_bytes,
         };
@@ -314,12 +324,12 @@ impl SsTableFormat {
                     );
                 bytes.slice(block_bytes_start..block_bytes_end)
             };
-            decoded_blocks.push_back(self.decode_block(block_bytes, compression_codec)?);
+            decoded_blocks.push_back(self.decode_block(block_bytes, compression_codec).await?);
         }
         Ok(decoded_blocks)
     }
 
-    fn decode_block(
+    async fn decode_block(
         &self,
         bytes: Bytes,
         compression_codec: Option<CompressionCodec>,
@@ -328,6 +338,7 @@ impl SsTableFormat {
         let untransformed_bytes = match &self.block_transformer {
             Some(t) => t
                 .decode(block_bytes)
+                .await
                 .map_err(|_| SlateDBError::BlockTransformError)?,
             None => block_bytes,
         };
@@ -351,7 +362,7 @@ impl SsTableFormat {
     }
 
     #[cfg(test)]
-    pub(crate) fn read_block_raw(
+    pub(crate) async fn read_block_raw(
         &self,
         info: &SsTableInfo,
         index_owned: &SsTableIndexOwned,
@@ -363,7 +374,7 @@ impl SsTableFormat {
         let range = range.start as usize..range.end as usize;
         let bytes: Bytes = sst_bytes.slice(range);
         let compression_codec = info.compression_codec;
-        self.decode_block(bytes, compression_codec)
+        self.decode_block(bytes, compression_codec).await
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
@@ -584,7 +595,7 @@ impl EncodedSsTableBuilder<'_> {
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
-    pub(crate) fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
+    pub(crate) async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
         self.num_keys += 1;
 
         let index_key = compute_index_key(self.current_block_max_key.take(), &entry.key);
@@ -592,7 +603,7 @@ impl EncodedSsTableBuilder<'_> {
 
         let mut block_size = None;
         if !self.builder.would_fit(&entry) {
-            block_size = self.finish_block()?;
+            block_size = self.finish_block().await?;
             self.first_key = Some(self.index_builder.create_vector(&index_key));
         } else if is_sst_first_key {
             self.first_key = Some(self.index_builder.create_vector(&index_key));
@@ -610,7 +621,7 @@ impl EncodedSsTableBuilder<'_> {
     }
 
     #[cfg(test)]
-    pub(crate) fn add_value(
+    pub(crate) async fn add_value(
         &mut self,
         key: &[u8],
         val: &[u8],
@@ -623,7 +634,7 @@ impl EncodedSsTableBuilder<'_> {
             attrs.ts,
             attrs.expire_ts,
         );
-        self.add(entry)
+        self.add(entry).await
     }
 
     pub(crate) fn next_block(&mut self) -> Option<EncodedSsTableBlock> {
@@ -636,14 +647,14 @@ impl EncodedSsTableBuilder<'_> {
         self.block_meta.len()
     }
 
-    fn finish_block(&mut self) -> Result<Option<usize>, SlateDBError> {
+    async fn finish_block(&mut self) -> Result<Option<usize>, SlateDBError> {
         if self.is_drained() {
             return Ok(None);
         }
 
         let new_builder = BlockBuilder::new(self.block_size);
         let builder = std::mem::replace(&mut self.builder, new_builder);
-        let block = self.prepare_block(builder, self.current_len)?;
+        let block = self.prepare_block(builder, self.current_len).await?;
         let block_meta = BlockMeta::create(
             &mut self.index_builder,
             &BlockMetaArgs {
@@ -661,7 +672,7 @@ impl EncodedSsTableBuilder<'_> {
         Ok(Some(block_size))
     }
 
-    fn prepare_block(
+    async fn prepare_block(
         &mut self,
         builder: BlockBuilder,
         offset: u64,
@@ -675,6 +686,7 @@ impl EncodedSsTableBuilder<'_> {
         let transformed_block = match &self.block_transformer {
             Some(t) => t
                 .encode(compressed_block)
+                .await
                 .map_err(|_| SlateDBError::BlockTransformError)?,
             None => compressed_block,
         };
@@ -722,8 +734,8 @@ impl EncodedSsTableBuilder<'_> {
     /// +---------------------------------------------------+
     /// * Only present if num_keys >= min_filter_keys.
     ///
-    pub(crate) fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
-        self.finish_block()?;
+    pub(crate) async fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
+        self.finish_block().await?;
         let mut buf = Vec::new();
         let mut maybe_filter = None;
         let mut filter_len = 0;
@@ -738,6 +750,7 @@ impl EncodedSsTableBuilder<'_> {
             let transformed_filter = match &self.block_transformer {
                 Some(t) => t
                     .encode(compressed_filter)
+                    .await
                     .map_err(|_| SlateDBError::BlockTransformError)?,
                 None => compressed_filter,
             };
@@ -766,6 +779,7 @@ impl EncodedSsTableBuilder<'_> {
         let index_block = match &self.block_transformer {
             Some(t) => t
                 .encode(index_block)
+                .await
                 .map_err(|_| SlateDBError::BlockTransformError)?,
             None => index_block,
         };
@@ -881,12 +895,15 @@ mod tests {
         let mut builder = table_store.table_builder();
         builder
             .add_value(&[b'a'; 8], &[b'1'; 8], gen_attrs(1))
+            .await
             .unwrap();
         builder
             .add_value(&[b'b'; 8], &[b'2'; 8], gen_attrs(2))
+            .await
             .unwrap();
         builder
             .add_value(&[b'c'; 8], &[b'3'; 8], gen_attrs(3))
+            .await
             .unwrap();
 
         // when:
@@ -905,6 +922,7 @@ mod tests {
         assert!(builder.next_block().is_none());
         builder
             .add_value(&[b'd'; 8], &[b'4'; 8], gen_attrs(1))
+            .await
             .unwrap();
         let mut iter = next_block_to_iter(&mut builder);
         assert_iterator(
@@ -932,25 +950,32 @@ mod tests {
         let mut builder = table_store.table_builder();
         builder
             .add_value(&[b'a'; 8], &[b'1'; 8], gen_attrs(1))
+            .await
             .unwrap();
         builder
             .add_value(&[b'b'; 8], &[b'2'; 8], gen_attrs(2))
+            .await
             .unwrap();
         builder
             .add_value(&[b'c'; 8], &[b'3'; 8], gen_attrs(3))
+            .await
             .unwrap();
         let first_block = builder.next_block();
 
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build().await.unwrap();
 
         let mut raw_sst = Vec::<u8>::new();
         raw_sst.put_slice(first_block.unwrap().encoded_bytes.as_ref());
         assert_eq!(encoded.unconsumed_blocks.len(), 2);
         encoded.put_remaining(&mut raw_sst);
         let raw_sst = Bytes::copy_from_slice(raw_sst.as_slice());
-        let index = format.read_index_raw(&encoded.info, &raw_sst).unwrap();
+        let index = format
+            .read_index_raw(&encoded.info, &raw_sst)
+            .await
+            .unwrap();
         let block = format
             .read_block_raw(&encoded.info, &index, 0, &raw_sst)
+            .await
             .unwrap();
         let mut iter = BlockIterator::new_ascending(block);
         assert_iterator(
@@ -960,6 +985,7 @@ mod tests {
         .await;
         let block = format
             .read_block_raw(&encoded.info, &index, 1, &raw_sst)
+            .await
             .unwrap();
         let mut iter = BlockIterator::new_ascending(block);
         assert_iterator(
@@ -969,6 +995,7 @@ mod tests {
         .await;
         let block = format
             .read_block_raw(&encoded.info, &index, 2, &raw_sst)
+            .await
             .unwrap();
         let mut iter = BlockIterator::new_ascending(block);
         assert_iterator(
@@ -978,20 +1005,23 @@ mod tests {
         .await;
     }
 
-    #[test]
-    fn test_builder_should_return_blocks_with_correct_data_and_offsets() {
+    #[tokio::test]
+    async fn test_builder_should_return_blocks_with_correct_data_and_offsets() {
         let format = SsTableFormat::default();
 
-        let sst = build_test_sst(&format, 3);
+        let sst = build_test_sst(&format, 3).await;
 
         let bytes = sst.remaining_as_bytes();
-        let index = format.read_index_raw(&sst.info, &bytes).unwrap();
+        let index = format.read_index_raw(&sst.info, &bytes).await.unwrap();
         let block_metas = index.borrow().block_meta();
         assert_eq!(block_metas.len(), sst.unconsumed_blocks.len());
         for i in 0..block_metas.len() {
             let encoded_block = sst.unconsumed_blocks.get(i).unwrap();
             assert_eq!(block_metas.get(i).offset(), encoded_block.offset);
-            let read_block = format.read_block_raw(&sst.info, &index, i, &bytes).unwrap();
+            let read_block = format
+                .read_block_raw(&sst.info, &index, i, &bytes)
+                .await
+                .unwrap();
             assert!(encoded_block.block == read_block);
         }
     }
@@ -1023,9 +1053,10 @@ mod tests {
                     format!("value{}", k).as_bytes(),
                     gen_attrs(k),
                 )
+                .await
                 .unwrap();
         }
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
 
         if let Some(filter) = encoded.filter.clone() {
@@ -1097,9 +1128,15 @@ mod tests {
             None,
         );
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded, false)
@@ -1160,9 +1197,15 @@ mod tests {
             None,
         );
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded, false)
@@ -1243,20 +1286,24 @@ mod tests {
         let mut builder = table_store.table_builder();
         builder
             .add_value(&[b'a'; 2], &[1u8; 2], gen_empty_attrs())
+            .await
             .unwrap();
         builder
             .add_value(&[b'b'; 2], &[2u8; 2], gen_empty_attrs())
+            .await
             .unwrap();
         builder
             .add_value(&[b'c'; 20], &[3u8; 20], gen_attrs(3))
+            .await
             .unwrap();
         builder
             .add_value(&[b'd'; 20], &[4u8; 20], gen_attrs(4))
+            .await
             .unwrap();
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build().await.unwrap();
         let info = encoded.info.clone();
         let bytes = encoded.remaining_as_bytes();
-        let index = format.read_index_raw(&encoded.info, &bytes).unwrap();
+        let index = format.read_index_raw(&encoded.info, &bytes).await.unwrap();
         let blob = BytesBlob { bytes };
 
         // when:
@@ -1289,9 +1336,15 @@ mod tests {
             None,
         );
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
 
         // write sst and validate that the handle returned has the correct content.
@@ -1351,9 +1404,15 @@ mod tests {
             None,
         );
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         let bytes = encoded.remaining_as_bytes();
 
         // Test valid version decodes properly through read_info
@@ -1402,9 +1461,11 @@ mod tests {
         let mut builder = table_store.table_builder();
         for key in 'a'..='z' {
             let key_bytes = [key as u8];
-            builder.add_value(&key_bytes, b"value", gen_empty_attrs())?;
+            builder
+                .add_value(&key_bytes, b"value", gen_empty_attrs())
+                .await?;
         }
-        let encoded = builder.build()?;
+        let encoded = builder.build().await?;
 
         let sst_id = SsTableId::Wal(0);
         let sst_handle = table_store
@@ -1492,14 +1553,15 @@ mod tests {
         key: u8,
     }
 
+    #[async_trait]
     impl BlockTransformer for XorTransformer {
-        fn encode(&self, data: Bytes) -> Result<Bytes, crate::error::Error> {
+        async fn encode(&self, data: Bytes) -> Result<Bytes, crate::error::Error> {
             let transformed: Vec<u8> = data.iter().map(|b| b ^ self.key).collect();
             Ok(Bytes::from(transformed))
         }
 
-        fn decode(&self, data: Bytes) -> Result<Bytes, crate::error::Error> {
-            self.encode(data)
+        async fn decode(&self, data: Bytes) -> Result<Bytes, crate::error::Error> {
+            self.encode(data).await
         }
     }
 
@@ -1520,9 +1582,15 @@ mod tests {
             None,
         );
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded, false)
@@ -1571,9 +1639,15 @@ mod tests {
             None,
         );
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded, false)
             .await

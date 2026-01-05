@@ -552,13 +552,13 @@ impl EncodedSsTableWriter<'_> {
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
     pub(crate) async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
-        let block_size = self.builder.add(entry)?;
+        let block_size = self.builder.add(entry).await?;
         self.drain_blocks().await?;
         Ok(block_size)
     }
 
     pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
-        let mut encoded_sst = self.builder.build()?;
+        let mut encoded_sst = self.builder.build().await?;
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
         }
@@ -808,13 +808,17 @@ mod tests {
 
         // write a wal sst
         let mut sst1 = ts.table_builder();
-        sst1.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
-        let table = sst1.build().unwrap();
+        sst1.add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let table = sst1.build().await.unwrap();
         ts.write_sst(&wal_id, table, false).await.unwrap();
 
         let mut sst2 = ts.table_builder();
-        sst2.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
-        let table2 = sst2.build().unwrap();
+        sst2.add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let table2 = sst2.build().await.unwrap();
 
         // write another wal sst with the same id.
         let result = ts.write_sst(&wal_id, table2, false).await;
@@ -986,13 +990,15 @@ mod tests {
         let mut builder = writer.table_builder();
         builder
             .add(RowEntry::new_value(b"key1", b"value1", 0))
+            .await
             .unwrap();
         builder
             .add(RowEntry::new_value(b"key2", b"value2", 0))
+            .await
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, builder.build().unwrap(), false)
+            .write_sst(&id, builder.build().await.unwrap(), false)
             .await
             .unwrap();
 
@@ -1042,13 +1048,15 @@ mod tests {
         let mut builder = writer.table_builder();
         builder
             .add(RowEntry::new_value(b"key1", b"value1", 0))
+            .await
             .unwrap();
         builder
             .add(RowEntry::new_value(b"key2", b"value2", 0))
+            .await
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, builder.build().unwrap(), false)
+            .write_sst(&id, builder.build().await.unwrap(), false)
             .await
             .unwrap();
 
@@ -1108,19 +1116,24 @@ mod tests {
             Some(wrapper.clone()),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst = build_test_sst(&ts.sst_format, 3);
+        let sst = build_test_sst(&ts.sst_format, 3).await;
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
         ts.write_sst(&id, sst, true).await.unwrap();
 
-        let index = ts.sst_format.read_index_raw(&sst_info, &sst_bytes).unwrap();
+        let index = ts
+            .sst_format
+            .read_index_raw(&sst_info, &sst_bytes)
+            .await
+            .unwrap();
         let block_metas = index.borrow().block_meta();
         for i in 0..block_metas.len() {
             let block_meta = block_metas.get(i);
             let block = ts
                 .sst_format
                 .read_block_raw(&sst_info, &index, i, &sst_bytes)
+                .await
                 .unwrap();
             let cached_block = wrapper
                 .get_block(&(id, block_meta.offset()).into())
@@ -1148,13 +1161,17 @@ mod tests {
             Some(wrapper),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst = build_test_sst(&ts.sst_format, 3);
+        let sst = build_test_sst(&ts.sst_format, 3).await;
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
         ts.write_sst(&id, sst, false).await.unwrap();
 
-        let index = ts.sst_format.read_index_raw(&sst_info, &sst_bytes).unwrap();
+        let index = ts
+            .sst_format
+            .read_index_raw(&sst_info, &sst_bytes)
+            .await
+            .unwrap();
         let block_metas = index.borrow().block_meta();
         for i in 0..block_metas.len() {
             let block_meta = block_metas.get(i);
@@ -1356,7 +1373,7 @@ mod tests {
 
         // Build an SST and compute expected bytes
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst = build_test_sst(&format, 3);
+        let sst = build_test_sst(&format, 3).await;
         let expected_bytes = sst.remaining_as_bytes();
 
         // When writing via TableStore (should retry once)
