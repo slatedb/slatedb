@@ -33,7 +33,7 @@ pub(crate) struct RetryingObjectStore {
 }
 
 impl RetryingObjectStore {
-    pub fn new(
+    pub(crate) fn new(
         inner: Arc<dyn ObjectStore>,
         rand: Arc<DbRand>,
         clock: Arc<dyn SystemClock>,

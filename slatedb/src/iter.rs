@@ -17,7 +17,7 @@ pub(crate) enum IterationOrder {
 /// See: https://github.com/slatedb/slatedb/issues/12
 
 #[async_trait]
-pub trait KeyValueIterator: Send + Sync {
+pub(crate) trait KeyValueIterator: Send + Sync {
     /// Performs any expensive initialization required before regular iteration.
     ///
     /// This method should be idempotent and can be called multiple times, only
@@ -76,7 +76,7 @@ pub trait KeyValueIterator: Send + Sync {
 }
 
 /// Initializes the iterator contained in the option, propagating `None` unchanged.
-pub async fn init_optional_iterator<T: KeyValueIterator>(
+pub(crate) async fn init_optional_iterator<T: KeyValueIterator>(
     iter: Option<T>,
 ) -> Result<Option<T>, SlateDBError> {
     match iter {
