@@ -155,7 +155,8 @@ the second record size is the size of the second record in the object, and so on
 After the compressed list of record sizes and the compression codec, the format contains the size of the compressed
 list as an 8 bytes unsigned integer in little endian,
 followed by the number of records in the WAL object as a 4 bytes unsigned integer in little endian.
-Finally, the last 2 bytes contain the version of the format as an unsigned integer in little endian.
+The last two fields of the format are CRC32 checksum as a 4 bytes unsigned integer
+followed by the version of the format as a 2 bytes unsigned integer, both in little endian.
 
 ```
 +----------------------------------------------------------------+
@@ -178,6 +179,8 @@ Finally, the last 2 bytes contain the version of the format as an unsigned integ
 | (8-bytes unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
 | number of records N (4-bytes unsigned integer, little endian)  |
++----------------------------------------------------------------+
+| CRC32 checksum (4-bytes, unsigned integer, little endian)      |
 +----------------------------------------------------------------+
 | version of format (2-bytes, unsigned integer, little endian)   |
 +----------------------------------------------------------------+
