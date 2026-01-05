@@ -72,6 +72,18 @@ var _ = Describe("DbReader", func() {
 			_, err := dbReader.Get([]byte("non_existent"))
 			Expect(err).To(Equal(slatedb.ErrNotFound))
 		})
+
+		It("should return error if database does not exist", func() {
+			newTmpDir, err := os.MkdirTemp("", "slatedb_db_test_*")
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { Expect(os.RemoveAll(newTmpDir)).NotTo(HaveOccurred()) }()
+
+			envFile, err := createEnvFile(tmpDir)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = slatedb.OpenReader(newTmpDir, slatedb.WithEnvFile[slatedb.DbReaderConfig](envFile))
+			Expect(err).To(MatchError(slatedb.ErrInternalError))
+		})
 	})
 
 	Describe("Operations with Options", func() {
