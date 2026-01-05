@@ -47,7 +47,7 @@ impl RowEntry {
         }
     }
 
-    pub fn estimated_size(&self) -> usize {
+    pub(crate) fn estimated_size(&self) -> usize {
         let mut size = self.key.len() + self.value.len();
         // Add size for sequence number
         size += std::mem::size_of::<u64>();
@@ -169,11 +169,11 @@ impl ValueDeletable {
         }
     }
 
-    pub fn is_tombstone(&self) -> bool {
+    pub(crate) fn is_tombstone(&self) -> bool {
         matches!(self, ValueDeletable::Tombstone)
     }
 
-    pub fn as_bytes(&self) -> Option<Bytes> {
+    pub(crate) fn as_bytes(&self) -> Option<Bytes> {
         match self {
             ValueDeletable::Value(v) | ValueDeletable::Merge(v) => Some(v.clone()),
             ValueDeletable::Tombstone => None,

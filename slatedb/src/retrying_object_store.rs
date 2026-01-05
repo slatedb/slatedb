@@ -20,7 +20,7 @@ pub(crate) struct RetryingObjectStore {
 }
 
 impl RetryingObjectStore {
-    pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
         Self { inner }
     }
 
