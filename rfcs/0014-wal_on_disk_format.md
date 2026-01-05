@@ -144,10 +144,17 @@ b_4 - b_7 = 0 (free)
 
 If the record is a tombstone, the value length and the actual values are omitted.
 
-The list of records is followed by a list of record sizes represented by 4-bytes unsigned integers in little endian.
-The record sizes have the same order as the records. That is, the first record size is the size of the first record
-in the object, the second record size is the size of the second record in the object, and so on.
-After, the record sizes the format contains the number of records in the WAL object as a 4 bytes unsigned integer in little endian.
+The list of records is followed by a compressed list of record sizes.
+The used compression codec is specified after the compressed list of record sizes with a 1 byte unsigned integer
+in little endian.
+Initially, the available compression codecs consist of no compression and a delta encoding that still needs to be
+specified.
+The record sizes in the list have the same order as the records.
+That is, the first record size is the size of the first record in the object,
+the second record size is the size of the second record in the object, and so on.
+After the compressed list of record sizes and the compression codec, the format contains the size of the compressed
+list as an 8 bytes unsigned integer in little endian,
+followed by the number of records in the WAL object as a 4 bytes unsigned integer in little endian.
 Finally, the last 2 bytes contain the version of the format as an unsigned integer in little endian.
 
 ```
@@ -160,13 +167,15 @@ Finally, the last 2 bytes contain the version of the format as an unsigned integ
 +----------------------------------------------------------------+
 | record N (variable length)                                     |
 +----------------------------------------------------------------+
-| size of record 0 (4-bytes unsigned integer, little endian)     |
+| compressed array of N record sizes                             |
+| (variable length,                                              |
+|  before compression each size is                               |
+|  8-bytes unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
-| size of record 1 (4-bytes unsigned integer, little endian)     |
+| compression codec (1-byte unsigned integer, little endian)     |
 +----------------------------------------------------------------+
-| ...                                                            |
-+----------------------------------------------------------------+
-| size of record N (4-bytes unsigned integer, little endian)     |
+| size of the compressed array of sizes                          |
+| (8-bytes unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
 | number of records N (4-bytes unsigned integer, little endian)  |
 +----------------------------------------------------------------+
