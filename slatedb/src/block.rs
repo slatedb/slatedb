@@ -14,7 +14,7 @@ pub(crate) struct Block {
 
 impl Block {
     #[rustfmt::skip]
-    pub fn encode(&self) -> Bytes {
+    pub(crate) fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(self.size());
         buf.put_slice(&self.data);
         for offset in &self.offsets {
@@ -25,7 +25,7 @@ impl Block {
     }
 
     #[rustfmt::skip]
-    pub fn decode(bytes: Bytes) -> Self {
+    pub(crate) fn decode(bytes: Bytes) -> Self {
         // Get number of elements in the block
         let data = bytes.as_ref();
         let entry_offsets_len = (&data[data.len() - SIZEOF_U16..]).get_u16() as usize;
@@ -74,7 +74,7 @@ impl Block {
     }
 }
 
-pub struct BlockBuilder {
+pub(crate) struct BlockBuilder {
     offsets: Vec<u16>,
     data: Vec<u8>,
     block_size: usize,
@@ -97,7 +97,7 @@ fn compute_prefix_chunks<const N: usize>(lhs: &[u8], rhs: &[u8]) -> usize {
 }
 
 impl BlockBuilder {
-    pub fn new(block_size: usize) -> Self {
+    pub(crate) fn new(block_size: usize) -> Self {
         Self {
             offsets: Vec::new(),
             data: Vec::new(),
@@ -115,7 +115,7 @@ impl BlockBuilder {
 
     /// Checks if the entry would fit in the current block without consuming it.
     /// Empty blocks always return true (they accept entries that exceed block_size).
-    pub fn would_fit(&self, entry: &RowEntry) -> bool {
+    pub(crate) fn would_fit(&self, entry: &RowEntry) -> bool {
         if self.is_empty() {
             return true;
         }
@@ -124,7 +124,7 @@ impl BlockBuilder {
     }
 
     #[must_use]
-    pub fn add(&mut self, entry: RowEntry) -> bool {
+    pub(crate) fn add(&mut self, entry: RowEntry) -> bool {
         assert!(!entry.key.is_empty(), "key must not be empty");
 
         if !self.would_fit(&entry) {
@@ -155,7 +155,7 @@ impl BlockBuilder {
     }
 
     #[cfg(test)]
-    pub fn add_value(
+    pub(crate) fn add_value(
         &mut self,
         key: &[u8],
         value: &[u8],
@@ -173,7 +173,7 @@ impl BlockBuilder {
 
     #[allow(dead_code)]
     #[cfg(test)]
-    pub fn add_tombstone(&mut self, key: &[u8], attrs: crate::types::RowAttributes) -> bool {
+    fn add_tombstone(&mut self, key: &[u8], attrs: crate::types::RowAttributes) -> bool {
         let entry = RowEntry::new(
             key.to_vec().into(),
             crate::types::ValueDeletable::Tombstone,
@@ -184,11 +184,11 @@ impl BlockBuilder {
         self.add(entry)
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.offsets.is_empty()
     }
 
-    pub fn build(self) -> Result<Block, SlateDBError> {
+    pub(crate) fn build(self) -> Result<Block, SlateDBError> {
         if self.is_empty() {
             return Err(SlateDBError::EmptyBlock);
         }
