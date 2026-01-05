@@ -520,7 +520,7 @@ impl EncodedSsTableBuilder<'_> {
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
-    pub fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
+    pub(crate) fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
         self.num_keys += 1;
 
         let index_key = compute_index_key(self.current_block_max_key.take(), &entry.key);
@@ -546,7 +546,7 @@ impl EncodedSsTableBuilder<'_> {
     }
 
     #[cfg(test)]
-    pub fn add_value(
+    pub(crate) fn add_value(
         &mut self,
         key: &[u8],
         val: &[u8],
@@ -562,7 +562,7 @@ impl EncodedSsTableBuilder<'_> {
         self.add(entry)
     }
 
-    pub fn next_block(&mut self) -> Option<EncodedSsTableBlock> {
+    pub(crate) fn next_block(&mut self) -> Option<EncodedSsTableBlock> {
         self.blocks.pop_front()
     }
 
@@ -652,7 +652,7 @@ impl EncodedSsTableBuilder<'_> {
     /// +---------------------------------------------------+
     /// * Only present if num_keys >= min_filter_keys.
     ///
-    pub fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
+    pub(crate) fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
         self.finish_block()?;
         let mut buf = Vec::new();
         let mut maybe_filter = None;
