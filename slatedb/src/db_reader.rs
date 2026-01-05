@@ -556,6 +556,7 @@ impl DbReader {
             path,
             object_store,
             block_cache: options.block_cache.clone(),
+            block_transformer: options.block_transformer.clone(),
         };
 
         Self::open_internal(
