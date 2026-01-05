@@ -281,6 +281,7 @@ mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::error;
+    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use object_store::memory::InMemory;
@@ -465,7 +466,11 @@ mod tests {
         // Given a flaky store that times out on the first write
         let base = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
-        let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
+        let retrying = Arc::new(RetryingObjectStore::new(
+            flaky.clone(),
+            Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let store = Arc::new(CompactionsStore::new(&Path::from(ROOT), retrying.clone()));
 
         // When creating new compactions (initial write under retry)
