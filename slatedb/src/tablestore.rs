@@ -24,7 +24,7 @@ use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
 use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, block::Block};
 
-pub struct TableStore {
+pub(crate) struct TableStore {
     object_stores: ObjectStores,
     sst_format: SsTableFormat,
     path_resolver: PathResolver,
@@ -68,7 +68,7 @@ pub(crate) struct SstFileMetadata {
 }
 
 impl TableStore {
-    pub fn new<P: Into<Path>>(
+    pub(crate) fn new<P: Into<Path>>(
         object_stores: ObjectStores,
         sst_format: SsTableFormat,
         root_path: P,
@@ -83,7 +83,7 @@ impl TableStore {
         )
     }
 
-    pub fn new_with_fp_registry(
+    pub(crate) fn new_with_fp_registry(
         object_stores: ObjectStores,
         sst_format: SsTableFormat,
         path_resolver: PathResolver,
@@ -551,13 +551,13 @@ impl EncodedSsTableWriter<'_> {
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
     /// The block size is calculated after applying any compression if enabled.
     /// The block size is None if the builder has not finished compacting a block yet.
-    pub async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
+    pub(crate) async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
         let block_size = self.builder.add(entry)?;
         self.drain_blocks().await?;
         Ok(block_size)
     }
 
-    pub async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
+    pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
         let mut encoded_sst = self.builder.build()?;
         while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
