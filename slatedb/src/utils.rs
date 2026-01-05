@@ -207,31 +207,31 @@ pub(crate) struct MonotonicSeq {
 }
 
 impl MonotonicSeq {
-    pub fn new(initial_value: u64) -> Self {
+    pub(crate) fn new(initial_value: u64) -> Self {
         Self {
             val: AtomicU64::new(initial_value),
         }
     }
 
-    pub fn next(&self) -> u64 {
+    pub(crate) fn next(&self) -> u64 {
         self.val.fetch_add(1, SeqCst) + 1
     }
 
-    pub fn store(&self, value: u64) {
+    pub(crate) fn store(&self, value: u64) {
         self.val.store(value, SeqCst);
     }
 
-    pub fn load(&self) -> u64 {
+    pub(crate) fn load(&self) -> u64 {
         self.val.load(SeqCst)
     }
 
-    pub fn store_if_greater(&self, value: u64) {
+    pub(crate) fn store_if_greater(&self, value: u64) {
         self.val.fetch_max(value, SeqCst);
     }
 }
 
 /// An extension trait that adds a `.send_safely(...)` method to tokio's `UnboundedSender<T>`.
-pub trait SendSafely<T> {
+pub(crate) trait SendSafely<T> {
     /// Attempts to send a message to the channel, and if the channel is closed, returns the error
     /// in `error_reader` if it is set, otherwise panics.
     ///
@@ -269,7 +269,7 @@ impl<T> SendSafely<T> for UnboundedSender<T> {
 }
 
 /// Trait for generating UUIDs and ULIDs from a random number generator.
-pub trait IdGenerator {
+pub(crate) trait IdGenerator {
     fn gen_uuid(&mut self) -> Uuid;
     fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid;
 }
@@ -308,7 +308,7 @@ impl<R: RngCore> IdGenerator for R {
 /// Returns:
 /// - `Ok(T)`: If the future completes within the specified duration.
 /// - `Err(SlateDBError::Timeout)`: If the future does not complete within the specified duration.
-pub async fn timeout<T, Err>(
+pub(crate) async fn timeout<T, Err>(
     clock: Arc<dyn SystemClock>,
     duration: Duration,
     error_fn: impl FnOnce() -> Err,
@@ -520,8 +520,7 @@ where
 /// - &'static str
 ///
 /// Other panic types are handled by printing a generic message with the type name.
-#[allow(dead_code)]
-pub fn panic_string(panic: &Box<dyn Any + Send>) -> String {
+pub(crate) fn panic_string(panic: &Box<dyn Any + Send>) -> String {
     if let Some(result) = panic.downcast_ref::<Result<(), SlateDBError>>() {
         match result {
             Ok(()) => "ok".to_string(),
@@ -621,7 +620,7 @@ pub(crate) fn split_join_result(
 /// assert_eq!(format_bytes_si(1500), "1.50 KB");
 /// assert_eq!(format_bytes_si(1_000_000), "1.00 MB");
 /// ```
-pub fn format_bytes_si(bytes: u64) -> String {
+pub(crate) fn format_bytes_si(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB"];
     const FACTOR: f64 = 1000.0;
 
