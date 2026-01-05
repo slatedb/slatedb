@@ -27,7 +27,7 @@ impl std::fmt::Debug for WalGcTask {
 }
 
 impl WalGcTask {
-    pub fn new(
+    pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,

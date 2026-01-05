@@ -86,7 +86,7 @@ struct WalBufferManagerInner {
 }
 
 impl WalBufferManager {
-    pub fn new(
+    pub(crate) fn new(
         wal_id_incrementor: Arc<dyn WalIdStore + Send + Sync>,
         db_state: Arc<RwLock<DbState>>,
         db_stats: DbStats,
@@ -120,7 +120,7 @@ impl WalBufferManager {
         }
     }
 
-    pub async fn init(
+    pub(crate) async fn init(
         self: &Arc<Self>,
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Result<(), SlateDBError> {
@@ -147,7 +147,7 @@ impl WalBufferManager {
     }
 
     #[cfg(test)]
-    pub fn buffered_wal_entries_count(&self) -> usize {
+    pub(crate) fn buffered_wal_entries_count(&self) -> usize {
         let guard = self.inner.read();
         let flushing_wal_entries_count = guard
             .immutable_wals
@@ -158,19 +158,19 @@ impl WalBufferManager {
         current_wal_entries_count + flushing_wal_entries_count
     }
 
-    pub fn recent_flushed_wal_id(&self) -> u64 {
+    pub(crate) fn recent_flushed_wal_id(&self) -> u64 {
         let inner = self.inner.read();
         inner.recent_flushed_wal_id
     }
 
     #[cfg(test)] // used in compactor.rs
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         let inner = self.inner.read();
         inner.current_wal.is_empty() && inner.immutable_wals.is_empty()
     }
 
     /// Returns the total size of all unflushed WALs in bytes.
-    pub fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
+    pub(crate) fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
         let inner = self.inner.read();
         let current_wal_size = self.table_store.estimate_encoded_size(
             inner.current_wal.metadata().entry_num,
@@ -192,7 +192,7 @@ impl WalBufferManager {
 
     /// Append row entries to the current WAL. return the last seq number of the WAL.
     /// TODO: validate the seq number is always increasing.
-    pub fn append(&self, entries: &[RowEntry]) -> Result<Arc<KVTable>, SlateDBError> {
+    pub(crate) fn append(&self, entries: &[RowEntry]) -> Result<Arc<KVTable>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
 
         let inner = self.inner.write();
@@ -206,7 +206,7 @@ impl WalBufferManager {
     /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
-    pub fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
+    pub(crate) fn maybe_trigger_flush(&self) -> Result<Arc<KVTable>, SlateDBError> {
         // check the size of the current wal
         let (current_wal, need_flush, flush_tx) = {
             let inner = self.inner.read();
@@ -266,7 +266,7 @@ impl WalBufferManager {
     }
 
     #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
-    pub async fn flush(&self) -> Result<(), SlateDBError> {
+    pub(crate) async fn flush(&self) -> Result<(), SlateDBError> {
         let flush_tx = self
             .inner
             .read()
@@ -370,7 +370,7 @@ impl WalBufferManager {
     /// This information of the last applied seq is used to determine if the immutable wals can be recycled.
     ///
     /// It's the caller's duty to ensure the seq is monotonically increasing.
-    pub fn track_last_applied_seq(&self, seq: u64) {
+    pub(crate) fn track_last_applied_seq(&self, seq: u64) {
         {
             let mut inner = self.inner.write();
             inner.last_applied_seq = Some(seq);
@@ -412,7 +412,7 @@ impl WalBufferManager {
     }
 
     #[allow(dead_code)]
-    pub async fn close(&self) -> Result<(), SlateDBError> {
+    pub(crate) async fn close(&self) -> Result<(), SlateDBError> {
         let task_executor = {
             let inner = self.inner.read();
             inner

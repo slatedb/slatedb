@@ -11,3 +11,4 @@ pub use dst::{
     DefaultDstDistribution, DefaultDstLogicalClock, Dst, DstAction, DstDistribution, DstDuration,
     DstOptions, DstWriteOp,
 };
+pub use state::{SQLiteState, State, StateKeyValue};

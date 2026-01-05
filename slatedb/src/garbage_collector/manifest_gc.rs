@@ -23,7 +23,7 @@ impl std::fmt::Debug for ManifestGcTask {
 }
 
 impl ManifestGcTask {
-    pub fn new(
+    pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         stats: Arc<GcStats>,
         manifest_options: Option<GarbageCollectorDirectoryOptions>,
