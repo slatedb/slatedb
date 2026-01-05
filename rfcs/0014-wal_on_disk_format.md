@@ -262,10 +262,10 @@ SlateDB features and components that this RFC interacts with. Check all that app
 <!-- Describe performance and cost implications of this change. -->
 
 - **Latency (reads/writes/compactions):** 
-The latency for writes with durability guarantee mainly depends on the configured size of the encoded WAL object 
-(see `max_wal_bytes_size`) that is used to decide when the in-memory WAL data structure is flushed to object storage.
-Since the new persistence format can batch more records than the currently used SST format given the size of the 
-encoded WAL object, the latency might be higher.
+The latency for writes with durability guarantee mainly depends on the configured flush interval
+(i.e., `flush_interval`) that is used to decide when the in-memory WAL data structure is flushed to object storage.
+The latency of writes might be less since fewer bytes need to be flushed to object store with the new WAL format.
+However, if there is a difference in latency, I expect that the difference will not be significant, in general.
 The latency for writes without durability guarantee might be lower if the in-memory data structure is a simple FIFO
 data structure as recommended in this RFC, since writes to the in-memory WAL are faster.
 A WAL object is read for recovery.
@@ -281,7 +281,8 @@ format given the same encoded size of the WAL object.
 Additionally, the new persistence format allows to recover more records per time unit.
 The throughput of compaction is not affected by the new persistence format.
 - **Object-store request (GET/LIST/PUT) and cost profile:**
-The new persistence format allows to store more records per PUT to and to get more records per GET from object storage. 
+If the WAL is stored on S3 Express to reduce latency, the new format reduces transfer costs
+(i.e. data uploads, currently $0.0032 per GB).
 - **Space, read, and write amplification:**
 All three amplifications are reduced. 
 
