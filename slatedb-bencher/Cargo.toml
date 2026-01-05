@@ -29,3 +29,6 @@ tokio = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 sysinfo = { workspace = true }
+
+[lints]
+workspace = true

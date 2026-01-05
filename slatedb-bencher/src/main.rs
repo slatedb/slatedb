@@ -24,8 +24,8 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 mod args;
-mod db;
-mod system_monitor;
+pub mod db;
+pub mod system_monitor;
 
 const CLEANUP_NAME: &str = ".clean_benchmark_data";
 

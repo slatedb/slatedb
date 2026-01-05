@@ -38,7 +38,7 @@ pub struct CSdbHandleResult {
     pub result: CSdbResult,
 }
 
-pub fn create_handle_error_result(error: CSdbError, message: &str) -> CSdbHandleResult {
+pub(crate) fn create_handle_error_result(error: CSdbError, message: &str) -> CSdbHandleResult {
     let c_message =
         CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
     CSdbHandleResult {
@@ -50,7 +50,7 @@ pub fn create_handle_error_result(error: CSdbError, message: &str) -> CSdbHandle
     }
 }
 
-pub fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
+pub(crate) fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
     CSdbHandleResult {
         handle: handler,
         result: create_success_result(),
@@ -58,7 +58,7 @@ pub fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
 }
 
 // Helper functions for error handling
-pub fn create_error_result(error: CSdbError, message: &str) -> CSdbResult {
+pub(crate) fn create_error_result(error: CSdbError, message: &str) -> CSdbResult {
     let c_message =
         CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
     CSdbResult {
@@ -67,14 +67,14 @@ pub fn create_error_result(error: CSdbError, message: &str) -> CSdbResult {
     }
 }
 
-pub fn create_success_result() -> CSdbResult {
+pub(crate) fn create_success_result() -> CSdbResult {
     CSdbResult {
         error: CSdbError::Success,
         message: std::ptr::null_mut(),
     }
 }
 
-pub fn safe_str_from_ptr(ptr: *const c_char) -> Result<&'static str, CSdbError> {
+pub(crate) fn safe_str_from_ptr(ptr: *const c_char) -> Result<&'static str, CSdbError> {
     if ptr.is_null() {
         return Err(CSdbError::NullPointer);
     }
@@ -86,7 +86,7 @@ pub fn safe_str_from_ptr(ptr: *const c_char) -> Result<&'static str, CSdbError> 
     }
 }
 
-pub fn slate_error_to_code(error: &SlateError) -> CSdbError {
+pub(crate) fn slate_error_to_code(error: &SlateError) -> CSdbError {
     // Use string matching since we can't pattern match on the exact variants
     let error_str = format!("{:?}", error);
     if error_str.contains("NotFound") {

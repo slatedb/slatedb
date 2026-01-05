@@ -5,7 +5,7 @@ use slatedb::Db;
 use std::sync::Arc;
 
 // Object store creation helper
-pub fn create_object_store(
+pub(crate) fn create_object_store(
     url: Option<&str>,
     env_file: Option<String>,
 ) -> Result<Arc<dyn ObjectStore>, crate::error::CSdbResult> {

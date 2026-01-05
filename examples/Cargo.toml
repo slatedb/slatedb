@@ -93,3 +93,6 @@ object_store = { workspace = true, features = ["azure", "gcp"] }
 slatedb.workspace = true
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
