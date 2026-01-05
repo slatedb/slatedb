@@ -19,7 +19,7 @@ use crate::db_state::{CoreDbState, SsTableHandle};
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods, unreachable_pub)]
 #[rustfmt::skip]
 mod root_generated;
-pub use root_generated::{
+pub(crate) use root_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
     SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
 };
@@ -51,12 +51,12 @@ pub(crate) struct SsTableIndexOwned {
 }
 
 impl SsTableIndexOwned {
-    pub fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
+    pub(crate) fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
         flatbuffers::root::<SsTableIndex>(&data)?;
         Ok(Self { data })
     }
 
-    pub fn borrow(&self) -> SsTableIndex<'_> {
+    pub(crate) fn borrow(&self) -> SsTableIndex<'_> {
         let raw = &self.data;
         unsafe { flatbuffers::root_unchecked::<SsTableIndex>(raw) }
     }
@@ -105,7 +105,7 @@ impl SsTableInfoCodec for FlatBufferSsTableInfoCodec {
 }
 
 impl FlatBufferSsTableInfoCodec {
-    pub fn sst_info(info: &FbSsTableInfo) -> SsTableInfo {
+    pub(crate) fn sst_info(info: &FbSsTableInfo) -> SsTableInfo {
         let first_key: Option<Bytes> = info
             .first_key()
             .map(|key| Bytes::copy_from_slice(key.bytes()));
@@ -120,7 +120,7 @@ impl FlatBufferSsTableInfoCodec {
         }
     }
 
-    pub fn create_from_sst_info(info: &SsTableInfo) -> Bytes {
+    pub(crate) fn create_from_sst_info(info: &SsTableInfo) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_sst_info(info)
@@ -177,7 +177,7 @@ impl FlatBufferManifestCodec {
         }
     }
 
-    pub fn manifest(manifest: &ManifestV1) -> Manifest {
+    pub(crate) fn manifest(manifest: &ManifestV1) -> Manifest {
         let l0_last_compacted = manifest.l0_last_compacted().map(|id| id.ulid());
         let mut l0 = VecDeque::new();
 
@@ -269,7 +269,7 @@ impl FlatBufferManifestCodec {
         }
     }
 
-    pub fn create_from_manifest(manifest: &Manifest) -> Bytes {
+    pub(crate) fn create_from_manifest(manifest: &Manifest) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_manifest(manifest)
@@ -292,7 +292,7 @@ impl ObjectCodec<CompactorCompactions> for FlatBufferCompactionsCodec {
 }
 
 impl FlatBufferCompactionsCodec {
-    pub fn decode_compactions(bytes: &Bytes) -> Result<CompactorCompactions, SlateDBError> {
+    pub(crate) fn decode_compactions(bytes: &Bytes) -> Result<CompactorCompactions, SlateDBError> {
         if bytes.len() < 2 {
             return Err(SlateDBError::InvalidCompaction);
         }
@@ -308,7 +308,9 @@ impl FlatBufferCompactionsCodec {
         Self::compactions(&fb)
     }
 
-    pub fn compactions(compactions: &CompactionsV1) -> Result<CompactorCompactions, SlateDBError> {
+    pub(crate) fn compactions(
+        compactions: &CompactionsV1,
+    ) -> Result<CompactorCompactions, SlateDBError> {
         let recent_compactions = compactions
             .recent_compactions()
             .iter()
@@ -348,7 +350,7 @@ impl FlatBufferCompactionsCodec {
         }
     }
 
-    pub fn create_from_compactions(compactions: &CompactorCompactions) -> Bytes {
+    pub(crate) fn create_from_compactions(compactions: &CompactorCompactions) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_compactions(compactions)

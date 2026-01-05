@@ -28,7 +28,7 @@ impl std::fmt::Debug for CompactedGcTask {
 }
 
 impl CompactedGcTask {
-    pub fn new(
+    pub(super) fn new(
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
         table_store: Arc<TableStore>,

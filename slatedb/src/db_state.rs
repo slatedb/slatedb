@@ -430,7 +430,7 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
-    pub fn new(manifest: DirtyObject<Manifest>) -> Self {
+    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {
@@ -441,18 +441,18 @@ impl DbState {
         }
     }
 
-    pub fn state(&self) -> Arc<COWDbState> {
+    pub(crate) fn state(&self) -> Arc<COWDbState> {
         self.state.clone()
     }
 
-    pub fn view(&self) -> DbStateView {
+    pub(crate) fn view(&self) -> DbStateView {
         DbStateView {
             memtable: self.memtable.table().clone(),
             state: self.state.clone(),
         }
     }
 
-    pub fn closed_result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+    pub(crate) fn closed_result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         self.closed_result.reader()
     }
 
@@ -460,11 +460,14 @@ impl DbState {
         self.closed_result.clone()
     }
 
-    pub fn memtable(&self) -> &WritableKVTable {
+    pub(crate) fn memtable(&self) -> &WritableKVTable {
         &self.memtable
     }
 
-    pub fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) -> Result<(), SlateDBError> {
+    pub(crate) fn freeze_memtable(
+        &mut self,
+        recent_flushed_wal_id: u64,
+    ) -> Result<(), SlateDBError> {
         if let Some(result) = self.closed_result.reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
@@ -499,11 +502,11 @@ impl DbState {
         Ok(())
     }
 
-    pub fn merge_remote_manifest(&mut self, remote_manifest: DirtyObject<Manifest>) {
+    pub(crate) fn merge_remote_manifest(&mut self, remote_manifest: DirtyObject<Manifest>) {
         self.modify(|modifier| modifier.merge_remote_manifest(remote_manifest));
     }
 
-    pub fn modify<F, R>(&mut self, fun: F) -> R
+    pub(crate) fn modify<F, R>(&mut self, fun: F) -> R
     where
         F: FnOnce(&mut StateModifier<'_>) -> R,
     {
@@ -526,7 +529,7 @@ impl<'a> StateModifier<'a> {
         Self { db_state, state }
     }
 
-    pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
+    pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
         let l0_last_compacted = &remote_manifest.core().l0_last_compacted;
