@@ -88,7 +88,7 @@ pub extern "C" fn slatedb_reader_open(
 ) -> CSdbReaderHandleResult {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s,
-        Err(err) => return create_reader_handle_error_result(err, "Invalid path")
+        Err(err) => return create_reader_handle_error_result(err, "Invalid path"),
     };
 
     // Parse checkpoint ID if provided
@@ -98,15 +98,14 @@ pub extern "C" fn slatedb_reader_open(
         match safe_str_from_ptr(checkpoint_id) {
             Ok(id_str) => match Uuid::parse_str(id_str) {
                 Ok(uuid) => Some(uuid),
-                Err(err) => return create_reader_handle_error_result(
-                    CSdbError::InvalidArgument,
-                    &format!("Invalid checkpoint_id format '{id_str}': {err}"),
-                )
+                Err(err) => {
+                    return create_reader_handle_error_result(
+                        CSdbError::InvalidArgument,
+                        &format!("Invalid checkpoint_id format '{id_str}': {err}"),
+                    )
+                }
             },
-            Err(err) => return create_reader_handle_error_result(
-                err,
-                "Invalid checkpoint_id",
-            )
+            Err(err) => return create_reader_handle_error_result(err, "Invalid checkpoint_id"),
         }
     };
 
@@ -116,7 +115,9 @@ pub extern "C" fn slatedb_reader_open(
     // Create a dedicated runtime for this DbReader instance
     let rt = match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
-        Err(err) => return create_reader_handle_error_result(CSdbError::InternalError, &err.to_string())
+        Err(err) => {
+            return create_reader_handle_error_result(CSdbError::InternalError, &err.to_string())
+        }
     };
 
     let url_str: Option<&str> = if url.is_null() {
@@ -132,12 +133,19 @@ pub extern "C" fn slatedb_reader_open(
     } else {
         match safe_str_from_ptr(env_file) {
             Ok(s) => Some(s.to_string()),
-            Err(err) => return create_reader_handle_error_result(err, "Invalid pointer for env file"),
+            Err(err) => {
+                return create_reader_handle_error_result(err, "Invalid pointer for env file")
+            }
         }
     };
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
-        Err(err) => return CSdbReaderHandleResult { handle: CSdbReaderHandle::null(), result: err },
+        Err(err) => {
+            return CSdbReaderHandleResult {
+                handle: CSdbReaderHandle::null(),
+                result: err,
+            }
+        }
     };
 
     // Open DbReader
@@ -147,7 +155,7 @@ pub extern "C" fn slatedb_reader_open(
             let ffi = Box::new(SlateDbReaderFFI { rt, reader });
             create_reader_handle_success_result(CSdbReaderHandle(Box::into_raw(ffi)))
         }
-        Err(err) => create_reader_handle_error_result(CSdbError::InternalError, &err.to_string())
+        Err(err) => create_reader_handle_error_result(CSdbError::InternalError, &err.to_string()),
     }
 }
 

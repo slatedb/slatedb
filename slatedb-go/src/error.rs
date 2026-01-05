@@ -1,8 +1,8 @@
 use crate::types::CSdbHandle;
+use crate::CSdbReaderHandle;
 use slatedb::Error as SlateError;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use crate::CSdbReaderHandle;
 
 // Error codes that will be exposed to C/Go
 #[repr(C)]
@@ -64,7 +64,10 @@ pub fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
     }
 }
 
-pub fn create_reader_handle_error_result(error: CSdbError, message: &str) -> CSdbReaderHandleResult {
+pub fn create_reader_handle_error_result(
+    error: CSdbError,
+    message: &str,
+) -> CSdbReaderHandleResult {
     let c_message =
         CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
     CSdbReaderHandleResult {

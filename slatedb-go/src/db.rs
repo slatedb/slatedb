@@ -59,7 +59,12 @@ pub extern "C" fn slatedb_open(
     };
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
-        Err(err) => return CSdbHandleResult { handle: CSdbHandle::null(), result: err }
+        Err(err) => {
+            return CSdbHandleResult {
+                handle: CSdbHandle::null(),
+                result: err,
+            }
+        }
     };
 
     match rt.block_on(async {
