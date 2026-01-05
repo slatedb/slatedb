@@ -290,11 +290,7 @@ All three amplifications are reduced.
 
 <!-- Describe any operational changes required to support this change. -->
 
-- Configuration changes: 
-	- introduce configuration `wal_flush_size: usize` to specify what encoded size in bytes of the WAL triggers a flush to object storage. 
-	The limit is not strict. The flush is triggered as soon as a write to the WAL exceeds the limit.  
-	- min value is `0`: the WAL is flushed at each write
-	- max value is `4 GiB` (i.e., `4,294,967,295` bytes)
+- Configuration changes: No
 - New components/services: No
 - Metrics: No
 - Logging: No
