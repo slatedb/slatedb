@@ -1,3 +1,4 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
@@ -415,21 +416,22 @@ impl CompactorState {
         &mut self,
         mut remote_compactions: DirtyObject<Compactions>,
     ) {
-        let mut merged = Vec::new();
-        let mut seen = HashSet::new();
+        let mut merged = BTreeMap::new();
 
         for compaction in self.compactions.value.iter() {
-            seen.insert(compaction.id());
-            merged.push(compaction.clone());
+            merged.insert(compaction.id(), compaction.clone());
         }
+
         for compaction in remote_compactions.value.iter() {
-            if seen.insert(compaction.id()) {
-                merged.push(compaction.clone());
+            if let Entry::Vacant(v) = merged.entry(compaction.id()) {
+                v.insert(compaction.clone());
             }
         }
 
-        let mut merged_compactions =
-            Compactions::new(self.compactions.value.compactor_epoch).with_compactions(merged);
+        let mut merged_compactions = Compactions {
+            compactor_epoch: self.compactions.value.compactor_epoch,
+            recent_compactions: merged,
+        };
         merged_compactions.retain_active_and_last_finished();
         remote_compactions.value = merged_compactions;
         self.set_compactions(remote_compactions);
