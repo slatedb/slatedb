@@ -61,11 +61,21 @@ The WAL merely needs to maintain records in the order they are ingested to ensur
 
 In object storage, the WAL is stored as a sorted string table (SST). 
 Encoding the SST from a `KVTable` also implies overhead that is unnecessary for the WAL. 
-For example, filters and indices are not needed for a WAL object where the records can be flushed to object 
-store in the same order they were ingested.
+For example, filters and indices are not needed for a WAL object that stores records in the same order they were 
+ingested and also reads those records sequentially in that order.
+
+Separating the format of the WAL from the format of the SST allows the WAL format to model sequential writes in 
+lock-step with the monotonically increasing sequence number. 
+Sequence numbers are is assigned to each ingested record to specify the ingestion order.
+Having a WAL format model sequential writes according to the ingestion order is an advantage 
+when records need to be read in the same order they were ingested.
+This kind of sequential read is the main read pattern of a write-ahead *log* by definition. 
+The most prominent example for this sequential read pattern is the recovery of a database state. 
+With the current SST format that is also used to store WAL objects, 
+the records are sorted by key not by the sequence number making sequential reads by sequence number costly.
 
 For these reasons, the WAL can be implemented with a first-in first-out (FIFO) data structure in memory and with a persistence 
-format that sequentially stores and loads records without any specific indices or filters.   
+format that sequentially stores and loads records without any specific indices or filters.
 
 The overhead of using the skip map and the SST format for the WAL can be seen in the two flamegraphs included in 
 GitHub issue [#1085](https://github.com/slatedb/slatedb/issues/1085). The overhead hinders higher ingest throughput 
@@ -207,7 +217,7 @@ A WAL object is read for recovery.
 If we define the latency of recovery as the time until the in-memory state is re-established then the new persistence 
 format might decrease the latency of recovery because more records can be read from object storage given an encoded size 
 of the WAL object.
-The laterncy of compaction is not affected by the new persistence format.
+The latency of compaction is not affected by the new persistence format.
 - **Throughput (reads/writes/compactions):**
 The throughput of writes with durability guarantee might be higher since the new persistence format has less space 
 overhead without indices and filters. 
