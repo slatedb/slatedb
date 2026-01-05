@@ -50,6 +50,7 @@ pub use garbage_collector::GarbageCollectorBuilder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 pub use seq_tracker::FindOption;
+pub use sst::BlockTransformer;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 

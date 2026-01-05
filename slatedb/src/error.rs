@@ -99,6 +99,9 @@ pub(crate) enum SlateDBError {
     #[error("error compressing block")]
     BlockCompressionError,
 
+    #[error("error transforming block")]
+    BlockTransformError,
+
     #[error("Invalid RowFlags. #{message}. encoded_bits=`{encoded_bits:#b}`, known_bits=`{known_bits:#b}`")]
     InvalidRowFlags {
         encoded_bits: u8,
@@ -495,6 +498,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::BlockDecompressionError => Error::data(msg),
             #[cfg(any(feature = "snappy", feature = "zlib", feature = "zstd"))]
             SlateDBError::BlockCompressionError => Error::data(msg),
+            SlateDBError::BlockTransformError => Error::data(msg),
             SlateDBError::InvalidRowFlags { .. } => Error::data(msg),
             SlateDBError::CheckpointMissing(_) => Error::data(msg),
             SlateDBError::InvalidVersion { .. } => Error::data(msg),
