@@ -640,7 +640,8 @@ impl CompactorEventHandler {
 
     /// Starts (valid) submitted compactions up to the max concurrency limit. Invalid
     /// compactions are marked as failed. Successfully started compactions are marked
-    /// as running.
+    /// as running. State changes are persisted after processing all submitted
+    /// compactions.
     async fn maybe_start_compactions(&mut self) -> Result<(), SlateDBError> {
         let submitted_compactions = self
             .state()
@@ -648,7 +649,31 @@ impl CompactorEventHandler {
             .cloned()
             .collect::<Vec<_>>();
 
-        for compaction in submitted_compactions.iter() {
+        let result = self
+            .start_submitted_compactions(&submitted_compactions)
+            .await;
+
+        if !submitted_compactions.is_empty() {
+            self.state_writer.write_compactions_safely().await?;
+        }
+
+        result
+    }
+
+    /// Starts (valid) submitted compactions up to the max concurrency limit. Invalid
+    /// compactions are marked as failed. Successfully started compactions are marked
+    /// as running. This function modifies the state directly but does not persist it;
+    /// the caller is responsible for persisting state after this function returns.
+    async fn start_submitted_compactions(
+        &mut self,
+        submitted_compactions: &[Compaction],
+    ) -> Result<(), SlateDBError> {
+        for compaction in submitted_compactions {
+            assert!(
+                compaction.status() == CompactionStatus::Submitted,
+                "expected submitted compaction, got {:?}",
+                compaction.status()
+            );
             // Make sure we have capacity to start a new compaction.
             let running_compaction_count = self.running_compaction_count();
             if running_compaction_count >= self.options.max_concurrent_compactions {
@@ -670,7 +695,6 @@ impl CompactorEventHandler {
                 self.state_mut().update_compaction(&compaction.id(), |c| {
                     c.set_status(CompactionStatus::Failed)
                 });
-                self.state_writer.write_compactions_safely().await?;
                 continue;
             }
 
@@ -688,14 +712,9 @@ impl CompactorEventHandler {
                     self.state_mut().update_compaction(&compaction.id(), |c| {
                         c.set_status(CompactionStatus::Failed)
                     });
-                    self.state_writer.write_compactions_safely().await?;
                     return Err(e);
                 }
             }
-        }
-
-        if !submitted_compactions.is_empty() {
-            self.state_writer.write_compactions_safely().await?;
         }
 
         Ok(())
