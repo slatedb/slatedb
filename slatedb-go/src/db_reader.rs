@@ -11,8 +11,9 @@ use crate::config::{
     convert_range_bounds, convert_read_options, convert_reader_options, convert_scan_options,
 };
 use crate::error::{
-    create_error_result, create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
-    CSdbResult,
+    create_error_result, create_reader_handle_error_result, create_reader_handle_success_result,
+    create_success_result, safe_str_from_ptr, slate_error_to_code, CSdbError,
+    CSdbReaderHandleResult, CSdbResult,
 };
 use crate::object_store::create_object_store;
 use crate::types::{CSdbIterator, CSdbReadOptions, CSdbScanOptions, CSdbValue};
@@ -84,13 +85,10 @@ pub extern "C" fn slatedb_reader_open(
     env_file: *const c_char,
     checkpoint_id: *const c_char, // Nullable - use null for latest
     reader_options: *const CSdbReaderOptions,
-) -> CSdbReaderHandle {
+) -> CSdbReaderHandleResult {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s,
-        Err(e) => {
-            log::error!("slatedb_reader_open: Invalid path parameter: {:?}", e);
-            return CSdbReaderHandle::null();
-        }
+        Err(err) => return create_reader_handle_error_result(err, "Invalid path")
     };
 
     // Parse checkpoint ID if provided
@@ -100,22 +98,15 @@ pub extern "C" fn slatedb_reader_open(
         match safe_str_from_ptr(checkpoint_id) {
             Ok(id_str) => match Uuid::parse_str(id_str) {
                 Ok(uuid) => Some(uuid),
-                Err(e) => {
-                    log::error!(
-                        "slatedb_reader_open: Invalid checkpoint ID format '{}': {}",
-                        id_str,
-                        e
-                    );
-                    return CSdbReaderHandle::null();
-                }
+                Err(err) => return create_reader_handle_error_result(
+                    CSdbError::InvalidArgument,
+                    &format!("Invalid checkpoint_id format '{id_str}': {err}"),
+                )
             },
-            Err(e) => {
-                log::error!(
-                    "slatedb_reader_open: Invalid checkpoint_id parameter: {:?}",
-                    e
-                );
-                return CSdbReaderHandle::null();
-            }
+            Err(err) => return create_reader_handle_error_result(
+                err,
+                "Invalid checkpoint_id",
+            )
         }
     };
 
@@ -125,10 +116,7 @@ pub extern "C" fn slatedb_reader_open(
     // Create a dedicated runtime for this DbReader instance
     let rt = match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
-        Err(e) => {
-            log::error!("slatedb_reader_open: Failed to create tokio runtime: {}", e);
-            return CSdbReaderHandle::null();
-        }
+        Err(err) => return create_reader_handle_error_result(CSdbError::InternalError, &err.to_string())
     };
 
     let url_str: Option<&str> = if url.is_null() {
@@ -136,7 +124,7 @@ pub extern "C" fn slatedb_reader_open(
     } else {
         match safe_str_from_ptr(url) {
             Ok(s) => Some(s),
-            Err(_) => return CSdbReaderHandle::null(),
+            Err(err) => return create_reader_handle_error_result(err, "Invalid pointer for url"),
         }
     };
     let env_file_str = if env_file.is_null() {
@@ -144,33 +132,22 @@ pub extern "C" fn slatedb_reader_open(
     } else {
         match safe_str_from_ptr(env_file) {
             Ok(s) => Some(s.to_string()),
-            Err(_) => return CSdbReaderHandle::null(),
+            Err(err) => return create_reader_handle_error_result(err, "Invalid pointer for env file"),
         }
     };
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
-        Err(_) => return CSdbReaderHandle::null(),
+        Err(err) => return CSdbReaderHandleResult { handle: CSdbReaderHandle::null(), result: err },
     };
 
     // Open DbReader
     match rt.block_on(async { DbReader::open(path_str, object_store, checkpoint_uuid, opts).await })
     {
         Ok(reader) => {
-            log::info!(
-                "slatedb_reader_open: Successfully opened DbReader for path '{}'",
-                path_str
-            );
             let ffi = Box::new(SlateDbReaderFFI { rt, reader });
-            CSdbReaderHandle(Box::into_raw(ffi))
+            create_reader_handle_success_result(CSdbReaderHandle(Box::into_raw(ffi)))
         }
-        Err(e) => {
-            log::error!(
-                "slatedb_reader_open: Failed to open DbReader for path '{}': {}",
-                path_str,
-                e
-            );
-            CSdbReaderHandle::null()
-        }
+        Err(err) => create_reader_handle_error_result(CSdbError::InternalError, &err.to_string())
     }
 }
 

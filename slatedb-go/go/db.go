@@ -23,6 +23,7 @@ var (
 	ErrInternalError   = errors.New("internal error")
 	ErrNullPointer     = errors.New("null pointer")
 	ErrInvalidHandle   = errors.New("invalid handle")
+	ErrInvalidProvider = errors.New("invalid provider")
 )
 
 // DB represents a SlateDB database connection
@@ -64,6 +65,8 @@ func resultToError(result C.struct_CSdbResult) error {
 		baseErr = ErrNullPointer
 	case C.InvalidHandle:
 		baseErr = ErrInvalidHandle
+	case C.InvalidProvider:
+		baseErr = ErrInvalidProvider
 	default:
 		baseErr = ErrInternalError
 	}
@@ -97,18 +100,19 @@ func Open(path string, opts ...Option[DbConfig]) (*DB, error) {
 		defer C.free(unsafe.Pointer(cEnvFile))
 	}
 
-	handle := C.slatedb_open(cPath, cURL, cEnvFile)
+	result := C.slatedb_open(cPath, cURL, cEnvFile)
+	defer C.slatedb_free_result(result.result)
 
-	if handle.result.error != C.Success {
-		return nil, resultToError(handle.result)
+	if result.result.error != C.Success {
+		return nil, resultToError(result.result)
 	}
 
 	// Check if handle is null (indicates error)
-	if handle.handle._0 == nil {
+	if result.handle._0 == nil {
 		return nil, errors.New("failed to open database")
 	}
 
-	return &DB{handle: handle.handle}, nil
+	return &DB{handle: result.handle}, nil
 }
 
 // Put stores a key-value pair in the database

@@ -66,14 +66,19 @@ func OpenReader(path string, opts ...Option[DbReaderConfig]) (*DbReader, error) 
 		cOpts = convertToCReaderOptions(cfg.opts)
 	}
 
-	handle := C.slatedb_reader_open(cPath, cURL, cEnvFile, cCheckpointId, cOpts)
+	result := C.slatedb_reader_open(cPath, cURL, cEnvFile, cCheckpointId, cOpts)
+	defer C.slatedb_free_result(result.result)
+
+	if result.result.error != C.Success {
+		return nil, resultToError(result.result)
+	}
 
 	// Check if handle is null (indicates error)
-	if unsafe.Pointer(handle._0) == unsafe.Pointer(uintptr(0)) {
+	if unsafe.Pointer(result.handle._0) == unsafe.Pointer(uintptr(0)) {
 		return nil, errors.New("failed to open database reader")
 	}
 
-	return &DbReader{handle: handle}, nil
+	return &DbReader{handle: result.handle}, nil
 }
 
 // Get retrieves a value by key from the database reader with default options

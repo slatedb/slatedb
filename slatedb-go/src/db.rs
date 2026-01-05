@@ -46,7 +46,7 @@ pub extern "C" fn slatedb_open(
     } else {
         match safe_str_from_ptr(url) {
             Ok(s) => Some(s),
-            Err(err) => return create_handle_error_result(err, "Invalid pointer for config"),
+            Err(err) => return create_handle_error_result(err, "Invalid pointer for url"),
         }
     };
     let env_file_str = if env_file.is_null() {
@@ -59,15 +59,7 @@ pub extern "C" fn slatedb_open(
     };
     let object_store = match create_object_store(url_str, env_file_str) {
         Ok(store) => store,
-        Err(err) => {
-            return CSdbHandleResult {
-                handle: CSdbHandle::null(),
-                result: CSdbResult {
-                    error: err.error,
-                    message: err.message,
-                },
-            }
-        }
+        Err(err) => return CSdbHandleResult { handle: CSdbHandle::null(), result: err }
     };
 
     match rt.block_on(async {

@@ -24,8 +24,9 @@ var _ = Describe("DB", func() {
 
 	Describe("Operations", func() {
 		var (
-			db     *slatedb.DB
-			tmpDir string
+			db      *slatedb.DB
+			tmpDir  string
+			envFile string
 		)
 
 		BeforeEach(func() {
@@ -33,7 +34,7 @@ var _ = Describe("DB", func() {
 			tmpDir, err = os.MkdirTemp("", "slatedb_db_test_*")
 			Expect(err).NotTo(HaveOccurred())
 
-			envFile, err := createEnvFile(tmpDir)
+			envFile, err = createEnvFile(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 
 			db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
@@ -270,6 +271,19 @@ var _ = Describe("DB", func() {
 
 				db = nil // Prevent double close in AfterEach
 			})
+
+			// It("should allow only one writer", func() {
+			// 	fmt.Println("tmpDir", tmpDir)
+			// 	files, _ := os.ReadDir(tmpDir)
+			// 	fmt.Println("files", files)
+			// 	Expect(db.Put([]byte("key"), []byte("value"))).NotTo(HaveOccurred())
+
+			// 	anotherDB, err := slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
+			// 	Expect(err).NotTo(HaveOccurred())
+			// 	Expect(anotherDB).NotTo(BeNil())
+
+			// 	anotherDB.Put([]byte("key1"), []byte("value1"))
+			// })
 		})
 	})
 })
