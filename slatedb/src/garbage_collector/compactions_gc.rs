@@ -43,7 +43,7 @@ impl std::fmt::Debug for CompactionsGcTask {
 }
 
 impl CompactionsGcTask {
-    pub(crate) fn new(
+    pub(super) fn new(
         compactions_store: Arc<CompactionsStore>,
         stats: Arc<GcStats>,
         compactions_options: Option<GarbageCollectorDirectoryOptions>,
