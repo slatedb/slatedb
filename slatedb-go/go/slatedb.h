@@ -100,6 +100,11 @@ typedef struct CSdbReaderHandle {
     struct SlateDbReaderFFI *_0;
 } CSdbReaderHandle;
 
+typedef struct CSdbReaderHandleResult {
+    struct CSdbReaderHandle handle;
+    struct CSdbResult result;
+} CSdbReaderHandleResult;
+
 // DbReader options for FFI
 typedef struct CSdbReaderOptions {
     // How often to poll for manifest updates (in milliseconds)
@@ -401,11 +406,11 @@ struct CSdbHandle slatedb_builder_build(struct DbBuilder_String *builder);
 // - `builder` must be a valid pointer to a DbBuilder that was previously allocated
 void slatedb_builder_free(struct DbBuilder_String *builder);
 
-struct CSdbReaderHandle slatedb_reader_open(const char *path,
-                                            const char *url,
-                                            const char *env_file,
-                                            const char *checkpoint_id,
-                                            const struct CSdbReaderOptions *reader_options);
+struct CSdbReaderHandleResult slatedb_reader_open(const char *path,
+                                                  const char *url,
+                                                  const char *env_file,
+                                                  const char *checkpoint_id,
+                                                  const struct CSdbReaderOptions *reader_options);
 
 // # Safety
 //
