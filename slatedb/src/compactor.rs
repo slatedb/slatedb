@@ -427,7 +427,7 @@ impl CompactorEventHandler {
         let mut total_bytes_processed = 0u64;
         let mut total_elapsed_secs = 0.0f64;
 
-        for compaction in self.state().compactions() {
+        for compaction in self.state().active_compactions() {
             let estimated_source_bytes =
                 Self::calculate_estimated_source_bytes(compaction, db_state);
             total_estimated_bytes += estimated_source_bytes;
@@ -601,11 +601,7 @@ impl CompactorEventHandler {
     /// state up to the the max concurrency limit. This method does not actually start
     /// the compactions; that is done in [`CompactorEventHandler::maybe_start_compactions`].
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
-        let running_compaction_count = self
-            .state()
-            .compactions()
-            .filter(|c| c.status() == CompactionStatus::Running)
-            .count();
+        let running_compaction_count = self.running_compaction_count();
         let available_capacity = self.options.max_concurrent_compactions - running_compaction_count;
 
         if available_capacity == 0 {
@@ -648,19 +644,13 @@ impl CompactorEventHandler {
     async fn maybe_start_compactions(&mut self) -> Result<(), SlateDBError> {
         let submitted_compactions = self
             .state()
-            .compactions()
-            .filter(|c| c.status() == CompactionStatus::Submitted)
+            .compactions_with_status(CompactionStatus::Submitted)
             .cloned()
             .collect::<Vec<_>>();
 
         for compaction in submitted_compactions.iter() {
-            let running_compaction_count = self
-                .state()
-                .compactions()
-                .filter(|c| c.status() == CompactionStatus::Running)
-                .count();
-
             // Make sure we have capacity to start a new compaction.
+            let running_compaction_count = self.running_compaction_count();
             if running_compaction_count >= self.options.max_concurrent_compactions {
                 info!(
                     "skipping compaction since capacity is exceeded [running_compactions={}, max_concurrent_compactions={}, compaction={:?}]",
@@ -799,7 +789,7 @@ impl CompactorEventHandler {
     /// Logs the current DB runs and in-flight compactions.
     fn log_compaction_state(&self) {
         self.state().db_state().log_db_runs();
-        let compactions = self.state().compactions();
+        let compactions = self.state().active_compactions();
         for compaction in compactions {
             if log::log_enabled!(log::Level::Debug) {
                 debug!("in-flight compaction [compaction={:?}]", compaction);
@@ -807,6 +797,13 @@ impl CompactorEventHandler {
                 info!("in-flight compaction [compaction={}]", compaction);
             }
         }
+    }
+
+    fn running_compaction_count(&self) -> usize {
+        self.state()
+            .active_compactions()
+            .filter(|c| c.status() == CompactionStatus::Running)
+            .count()
     }
 }
 
@@ -1950,7 +1947,7 @@ mod tests {
             .add_compaction(compaction)
             .expect("failed to add compaction");
 
-        assert_eq!(fixture.handler.state().compactions().count(), 1);
+        assert_eq!(fixture.handler.state().active_compactions().count(), 1);
     }
 
     struct CompactorEventHandlerTestFixture {
@@ -2232,7 +2229,7 @@ mod tests {
         let state_id = fixture
             .handler
             .state()
-            .compactions()
+            .active_compactions()
             .next()
             .expect("state missing compaction")
             .id();
@@ -2284,7 +2281,7 @@ mod tests {
         fixture.handler.maybe_schedule_compactions().await.unwrap();
 
         assert_eq!(fixture.executor.pop_jobs().len(), 0);
-        let mut compactions = fixture.handler.state().compactions();
+        let mut compactions = fixture.handler.state().active_compactions();
         let scheduled = compactions.next().expect("missing compaction");
         assert_eq!(scheduled.status(), CompactionStatus::Submitted);
         assert!(compactions.next().is_none());
@@ -2319,7 +2316,7 @@ mod tests {
         let jobs = fixture.executor.pop_jobs();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].compaction_id, compaction_id);
-        let compactions = &fixture.handler.state_writer.state.compactions_dirty().value;
+        let compactions = &fixture.handler.state_writer.state.compactions().value;
         assert_eq!(
             compactions
                 .get(&compaction_id)
@@ -2365,7 +2362,7 @@ mod tests {
 
         let jobs = fixture.executor.pop_jobs();
         assert_eq!(jobs.len(), 1);
-        let compactions = &fixture.handler.state_writer.state.compactions_dirty().value;
+        let compactions = &fixture.handler.state_writer.state.compactions().value;
         assert_eq!(
             compactions
                 .get(&first_id)
@@ -2398,7 +2395,7 @@ mod tests {
         fixture.handler.maybe_start_compactions().await.unwrap();
 
         assert_eq!(fixture.executor.pop_jobs().len(), 0);
-        let compactions = &fixture.handler.state_writer.state.compactions_dirty().value;
+        let compactions = &fixture.handler.state_writer.state.compactions().value;
         assert_eq!(
             compactions
                 .get(&compaction_id)

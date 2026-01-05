@@ -179,7 +179,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         let mut compactions = Vec::new();
         let db_state = state.db_state();
         let (l0, srs) = self.compaction_sources(db_state);
-        let conflict_checker = ConflictChecker::new(state.compactions().map(|j| j.spec()));
+        let conflict_checker = ConflictChecker::new(state.active_compactions().map(|j| j.spec()));
         let backpressure_checker = BackpressureChecker::new(
             self.options.include_size_threshold,
             self.options.max_compaction_sources,
@@ -187,7 +187,9 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         );
         let mut checker = CompactionChecker::new(conflict_checker, backpressure_checker);
 
-        while state.compactions().count() + compactions.len() < self.max_concurrent_compactions {
+        while state.active_compactions().count() + compactions.len()
+            < self.max_concurrent_compactions
+        {
             let Some(compaction) = self.pick_next_compaction(&l0, &srs, &checker) else {
                 break;
             };

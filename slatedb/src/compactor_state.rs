@@ -334,6 +334,16 @@ impl Compactions {
         self.recent_compactions.values().filter(|c| c.active())
     }
 
+    /// Returns an iterator over all compactions with the given status.
+    pub(crate) fn iter_with_status(
+        &self,
+        status: CompactionStatus,
+    ) -> impl Iterator<Item = &Compaction> {
+        self.recent_compactions
+            .values()
+            .filter(move |c| c.status() == status)
+    }
+
     /// Keeps the most recently finished compaction and any active compactions, and removes others.
     pub(crate) fn retain_active_and_last_finished(&mut self) {
         let latest_finished = self
@@ -390,12 +400,19 @@ impl CompactorState {
     }
 
     /// Returns an iterator over all in-flight compactions.
-    pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
+    pub(crate) fn active_compactions(&self) -> impl Iterator<Item = &Compaction> {
         self.compactions.value.iter_active()
     }
 
+    pub(crate) fn compactions_with_status(
+        &self,
+        status: CompactionStatus,
+    ) -> impl Iterator<Item = &Compaction> {
+        self.compactions.value.iter_with_status(status)
+    }
+
     /// Returns the dirty compactions tracked by this state.
-    pub(crate) fn compactions_dirty(&self) -> &DirtyObject<Compactions> {
+    pub(crate) fn compactions(&self) -> &DirtyObject<Compactions> {
         &self.compactions
     }
 
@@ -781,7 +798,7 @@ mod tests {
             .expect("failed to add compaction");
 
         // then:
-        let mut compactions = state.compactions();
+        let mut compactions = state.active_compactions();
         let expected = Compaction::new(compaction_id, spec.clone());
         assert_eq!(compactions.next().expect("compaction not found"), &expected);
         assert!(compactions.next().is_none());
@@ -858,7 +875,7 @@ mod tests {
         state.finish_compaction(compaction_id, sr.clone());
 
         // then:
-        assert_eq!(state.compactions().count(), 0)
+        assert_eq!(state.active_compactions().count(), 0)
     }
 
     #[test]

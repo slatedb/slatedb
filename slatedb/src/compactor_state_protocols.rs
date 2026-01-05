@@ -254,7 +254,7 @@ impl CompactorStateWriter {
     /// - `Ok(())` when compactions are successfully written.
     /// - `SlateDBError` if an unrecoverable error occurs.
     pub(crate) async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
-        let mut desired_value = self.state.compactions_dirty().value.clone();
+        let mut desired_value = self.state.compactions().value.clone();
         desired_value.retain_active_and_last_finished();
         loop {
             let mut dirty_compactions = self.compactions.prepare_dirty()?;
@@ -472,7 +472,7 @@ mod tests {
         .unwrap();
 
         // Submitted should remain; Running should become Failed; older finished should be trimmed.
-        let compactions = &writer.state.compactions_dirty().value;
+        let compactions = &writer.state.compactions().value;
         assert_eq!(
             compactions
                 .get(&submitted_id)
@@ -535,7 +535,7 @@ mod tests {
 
         writer.load_compactions().await.unwrap();
 
-        let compactions = &writer.state.compactions_dirty().value;
+        let compactions = &writer.state.compactions().value;
         assert_eq!(
             compactions
                 .get(&submitted_id)
