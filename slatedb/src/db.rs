@@ -34,6 +34,7 @@ use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
+use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -55,6 +56,7 @@ use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::manifest::Manifest;
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
 use crate::oracle::{DbOracle, Oracle};
@@ -65,15 +67,14 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
+use crate::transactional_object::DirtyObject;
 use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use log::{info, trace, warn};
 
-pub mod builder;
-use crate::manifest::Manifest;
-use crate::transactional_object::DirtyObject;
 pub use builder::DbBuilder;
+
+pub(crate) mod builder;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -101,7 +102,7 @@ pub(crate) struct DbInner {
 }
 
 impl DbInner {
-    pub async fn new(
+    pub(crate) async fn new(
         settings: Settings,
         logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
@@ -181,7 +182,7 @@ impl DbInner {
     }
 
     /// Get the value for a given key.
-    pub async fn get_with_options<K: AsRef<[u8]>>(
+    pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
@@ -194,7 +195,7 @@ impl DbInner {
             .await
     }
 
-    pub async fn scan_with_options(
+    pub(crate) async fn scan_with_options(
         &self,
         range: BytesRange,
         options: &ScanOptions,
@@ -252,7 +253,7 @@ impl DbInner {
         return true;
     }
 
-    pub async fn write_with_options(
+    pub(crate) async fn write_with_options(
         &self,
         batch: WriteBatch,
         options: &WriteOptions,

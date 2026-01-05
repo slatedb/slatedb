@@ -46,6 +46,7 @@ pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use garbage_collector::stats as garbage_collector_stats;
+pub use garbage_collector::GarbageCollectorBuilder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 pub use seq_tracker::FindOption;
@@ -53,6 +54,7 @@ pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 
 pub mod admin;
+pub mod cached_object_store;
 pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
@@ -70,7 +72,6 @@ mod block_iterator;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;
-mod cached_object_store;
 mod checkpoint;
 mod clone;
 mod compactions_store;

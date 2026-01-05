@@ -342,7 +342,7 @@ struct FsCacheEvictor {
 }
 
 impl FsCacheEvictor {
-    pub fn new(
+    fn new(
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: usize,
         scan_interval: Option<Duration>,
@@ -439,7 +439,7 @@ impl FsCacheEvictor {
     // sender and receiver. It doesn't close the channel, and both sender and receiver are dropped
     // when the evictor is dropped.
     #[allow(clippy::disallowed_methods)]
-    pub async fn track_entry_accessed(&self, path: std::path::PathBuf, bytes: usize, evict: bool) {
+    async fn track_entry_accessed(&self, path: std::path::PathBuf, bytes: usize, evict: bool) {
         if !self.started() {
             return;
         }
@@ -480,7 +480,7 @@ struct FsCacheEvictorInner {
 }
 
 impl FsCacheEvictorInner {
-    pub fn new(
+    fn new(
         root_folder: std::path::PathBuf,
         max_cache_size_bytes: usize,
         stats: Arc<CachedObjectStoreStats>,
@@ -500,7 +500,7 @@ impl FsCacheEvictorInner {
     // scan the cache folder, and load the cache entries into memory.
     // this function is only called on start up, and it's expected to run interleavely with
     // maybe_evict is being called.
-    pub async fn scan_entries(self: Arc<Self>, evict: bool) {
+    async fn scan_entries(self: Arc<Self>, evict: bool) {
         let root_folder = self.root_folder.clone();
 
         #[allow(clippy::disallowed_methods)]
@@ -543,7 +543,7 @@ impl FsCacheEvictorInner {
     /// track the cache entry access, and evict the cache files when the cache size exceeds the limit if evict is true,
     /// return the bytes of the evicted files. please note that track_entry_accessed might be called concurrently from
     /// the rescanner and evictor tasks, it's expected to be wrapped with a lock to ensure the serial execution.
-    pub async fn track_entry_accessed(
+    async fn track_entry_accessed(
         &self,
         path: std::path::PathBuf,
         bytes: usize,
@@ -774,16 +774,22 @@ impl FsCacheEvictorInner {
         picked: &HashSet<usize>,
         exclude_idx: Option<usize>,
     ) -> Option<usize> {
-        let available = (0..keys.len())
-            .filter(|i| !picked.contains(i) && Some(*i) != exclude_idx)
-            .collect::<Vec<_>>();
+        let excluded_not_picked = exclude_idx.is_some_and(|idx| !picked.contains(&idx));
+        let available_count = keys
+            .len()
+            .saturating_sub(picked.len())
+            .saturating_sub(usize::from(excluded_not_picked));
 
-        if available.is_empty() {
+        if available_count == 0 {
             return None;
         }
 
-        let chosen = rng.random_range(0..available.len());
-        available.get(chosen).copied()
+        loop {
+            let idx = rng.random_range(0..keys.len());
+            if !picked.contains(&idx) && Some(idx) != exclude_idx {
+                return Some(idx);
+            }
+        }
     }
 }
 
