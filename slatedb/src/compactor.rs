@@ -79,13 +79,13 @@ use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
 use crate::merge_operator::MergeOperatorType;
 use crate::rand::DbRand;
-pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
 
 pub use crate::compactor_state::{CompactionSpec, CompactionStatus, CompactorState, SourceId};
 pub use crate::db::builder::CompactorBuilder;
+pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
 
