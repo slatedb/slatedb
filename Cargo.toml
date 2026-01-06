@@ -98,3 +98,4 @@ unexpected_cfgs = { level = "allow", check-cfg = [
     # (see slatedb-dst/src/utils.rs for details)
     'cfg(tokio_unstable)',
 ] }
+unreachable_pub = "warn"
