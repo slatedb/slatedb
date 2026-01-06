@@ -328,6 +328,6 @@ After discussion among maintainers, this RFC was rejected for the following reas
 
 5. **Documentation over API complexity**: Providing clear documentation on key encoding patterns (with links to libraries like [storekey](https://github.com/surrealdb/storekey)) is preferable to exposing a complex API that enables subtle data corruption if misused.
 
-See the [Data Modeling documentation](/docs/operations/data-modeling) for recommended key encoding patterns.
+See the [Data Modeling documentation](https://slatedb.io/docs/operations/data-modeling) for recommended key encoding patterns.
 
 See the [Github Discussion](https://github.com/slatedb/slatedb/pull/1162) for more details.
