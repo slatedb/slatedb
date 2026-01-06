@@ -918,7 +918,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             ObjectStores::new(retrying_main_object_store.clone(), None),
             sst_format,
             path,
-            None,
+            None, // no need for cache in GC
         ));
 
         let scheduler_supplier = self
