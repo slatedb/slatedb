@@ -64,7 +64,7 @@ pub(crate) fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleRes
     }
 }
 
-pub fn create_reader_handle_error_result(
+pub(crate) fn create_reader_handle_error_result(
     error: CSdbError,
     message: &str,
 ) -> CSdbReaderHandleResult {
@@ -79,7 +79,9 @@ pub fn create_reader_handle_error_result(
     }
 }
 
-pub fn create_reader_handle_success_result(handler: CSdbReaderHandle) -> CSdbReaderHandleResult {
+pub(crate) fn create_reader_handle_success_result(
+    handler: CSdbReaderHandle,
+) -> CSdbReaderHandleResult {
     CSdbReaderHandleResult {
         handle: handler,
         result: create_success_result(),

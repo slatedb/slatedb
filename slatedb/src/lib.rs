@@ -58,6 +58,7 @@ pub mod cached_object_store;
 pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
+pub mod compactor;
 pub mod config;
 pub mod db_cache;
 pub mod db_stats;
@@ -75,7 +76,6 @@ mod bytes_range;
 mod checkpoint;
 mod clone;
 mod compactions_store;
-mod compactor;
 mod compactor_executor;
 mod compactor_state;
 mod compactor_state_protocols;
