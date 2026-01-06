@@ -31,14 +31,18 @@ Table of Contents:
 - [Open Questions](#open-questions)
 - [References](#references)
 - [Updates](#updates)
+- [Rejection Analysis](#rejection-analysis)
 
 <!-- TOC end -->
 
-Status: Draft
+Status: Rejected
 
 Authors:
 
 * [Almog Gavra](https://github.com/agavra)
+
+> [!CAUTION]
+> This RFC was rejected. See the [Rejection Analysis](#rejection-analysis) for more details.
 
 <!-- TOC --><a name="summary-motivation"></a>
 ## Summary & Motivation
@@ -305,3 +309,25 @@ The biggest option question is whether to use the `Option<KeyComparatorType>` ap
 <!-- TOC --><a name="updates"></a>
 ## Updates
 
+<!-- TOC --><a name="rejection-analysis"></a>
+## Rejection Analysis
+
+After discussion among maintainers, this RFC was rejected for the following reasons:
+
+1. **Complexity vs. benefit**: Custom comparators add significant implementation complexity (dynamic dispatch on hot paths, validation logic, manifest changes) for marginal benefit (there are alternative ways to structure most keys without custom comparators).
+
+2. **Bug potential**: RocksDB and Pebble have experienced bugs and regressions related to custom comparators. The additional code paths and invariants are difficult to test exhaustively.
+
+3. **Industry precedent**: FoundationDB, DynamoDB, TiKV and CockroachDB intentionally do not expose custom comparators—bytewise comparison only, by design. Users encode keys to sort correctly using their well-documented tuple layer. This approach has proven successful at scale.
+
+4. **Use cases are solvable with encoding**: All motivating use cases can be addressed through proper key encoding:
+   - Floating points: flip sign bit for positives, flip all bits for negatives
+   - Composite keys: use `0x00` delimiters or fixed-length components
+   - Descending order: XOR bytes with `0xFF` or subtract from max value
+   - Geospatial: Z-order and Hilbert curves encode to sortable integers
+
+5. **Documentation over API complexity**: Providing clear documentation on key encoding patterns (with links to libraries like [storekey](https://github.com/surrealdb/storekey)) is preferable to exposing a complex API that enables subtle data corruption if misused.
+
+See the [Data Modeling documentation](/docs/operations/data-modeling) for recommended key encoding patterns.
+
+See the [Github Discussion](https://github.com/slatedb/slatedb/pull/1162) for more details.
