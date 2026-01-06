@@ -66,7 +66,7 @@ ingested and also reads those records sequentially in that order.
 
 Separating the format of the WAL from the format of the SST allows the WAL format to model sequential writes in 
 lock-step with the monotonically increasing sequence number. 
-Sequence numbers are is assigned to each ingested record to specify the ingestion order.
+Sequence numbers are assigned to each ingested record to specify the ingestion order.
 Having a WAL format model sequential writes according to the ingestion order is an advantage 
 when records need to be read in the same order they were ingested.
 This kind of sequential read is the main read pattern of a write-ahead *log* by definition. 
@@ -302,10 +302,23 @@ All three amplifications are reduced.
 <!-- Describe compatibility considerations with existing versions of SlateDB. -->
 
 - Existing data on object storage / on-disk formats
-	- To be determined after agreement on the format
+	- WAL objects in the old format are stored in the `\wal` directory and
+      have the extension `.sst`.
+    - WAL objects in the new format are also stored in the `\wal` directory,
+      but have the extension `.wal`.
+    - slatedb decides which codec to use according to the extension of the WAL objects.
+    - slatedb will only write WAL objects in the new format.
 - Existing public APIs (including bindings): No
 - Rolling upgrades / mixed-version behavior (if applicable)
-	- To be determined after agreement on the format
+  - Clean shutdown (ideal rolling upgrage behavior):
+    slatedb flushed all data in the WAL to a L0 SST on object storage.
+    No WAL object needs to be replayed.
+    New WAL object are written in the new WAL format with extension `.wal`.
+  - Dirty shutdown (erroneous rolling upgrade behavior):
+    slatedb did not flush all data in the WAL to a L0 SST on object storage.
+    WAL objects need to be replayed.
+    If slatedb finds WAL objects with extension `.sst` it will decode them with the old format.
+    New WAL objects are written in the new WAL format with extension `.wal`.
 
 <!-- TOC --><a name="testing"></a>
 ## Testing
@@ -320,7 +333,7 @@ All three amplifications are reduced.
 - Fault-injection/chaos tests: No
 - Deterministic simulation tests: No
 - Formal methods verification: No
-- Performance tests: Yes, to proof the improvements over the flamgraphs in [#1085](https://github.com/slatedb/slatedb/issues/1085)
+- Performance tests: Yes, to proof the improvements over the flamegraphs in [#1085](https://github.com/slatedb/slatedb/issues/1085)
 
 <!-- TOC --><a name="rollout"></a>
 ## Rollout
