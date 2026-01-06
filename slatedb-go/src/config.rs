@@ -13,7 +13,7 @@ use std::ops::Bound;
 // Convert C options to Rust options
 
 // Convert C scan options to Rust ScanOptions
-pub fn convert_scan_options(c_opts: *const CSdbScanOptions) -> ScanOptions {
+pub(crate) fn convert_scan_options(c_opts: *const CSdbScanOptions) -> ScanOptions {
     if c_opts.is_null() {
         return ScanOptions::default();
     }
@@ -33,7 +33,7 @@ pub fn convert_scan_options(c_opts: *const CSdbScanOptions) -> ScanOptions {
 }
 
 // Convert C write options to Rust WriteOptions
-pub fn convert_write_options(c_opts: *const CSdbWriteOptions) -> WriteOptions {
+pub(crate) fn convert_write_options(c_opts: *const CSdbWriteOptions) -> WriteOptions {
     if c_opts.is_null() {
         return WriteOptions {
             await_durable: true,
@@ -47,7 +47,7 @@ pub fn convert_write_options(c_opts: *const CSdbWriteOptions) -> WriteOptions {
 }
 
 // Convert C put options to Rust PutOptions
-pub fn convert_put_options(c_opts: *const CSdbPutOptions) -> PutOptions {
+pub(crate) fn convert_put_options(c_opts: *const CSdbPutOptions) -> PutOptions {
     if c_opts.is_null() {
         return PutOptions::default();
     }
@@ -64,7 +64,7 @@ pub fn convert_put_options(c_opts: *const CSdbPutOptions) -> PutOptions {
 }
 
 // Convert C read options to Rust ReadOptions
-pub fn convert_read_options(c_opts: *const CSdbReadOptions) -> ReadOptions {
+pub(crate) fn convert_read_options(c_opts: *const CSdbReadOptions) -> ReadOptions {
     if c_opts.is_null() {
         return ReadOptions::default();
     }
@@ -85,7 +85,7 @@ pub fn convert_read_options(c_opts: *const CSdbReadOptions) -> ReadOptions {
 
 // Convert C range bounds to Rust range bounds
 // Returns (start_bound, end_bound) tuple that can be used to create ranges
-pub fn convert_range_bounds(
+pub(crate) fn convert_range_bounds(
     start: *const u8,
     start_len: usize,
     end: *const u8,
@@ -109,7 +109,7 @@ pub fn convert_range_bounds(
 }
 
 // Convert C reader options to Rust DbReaderOptions
-pub fn convert_reader_options(c_opts: *const CSdbReaderOptions) -> DbReaderOptions {
+pub(crate) fn convert_reader_options(c_opts: *const CSdbReaderOptions) -> DbReaderOptions {
     if c_opts.is_null() {
         return DbReaderOptions::default();
     }
@@ -146,6 +146,7 @@ pub fn convert_reader_options(c_opts: *const CSdbReaderOptions) -> DbReaderOptio
 
 /// Create default Settings and return as JSON string
 #[no_mangle]
+#[allow(unreachable_pub)]
 pub extern "C" fn slatedb_settings_default() -> *mut c_char {
     let settings = slatedb::config::Settings::default();
     match serde_json::to_string(&settings) {
@@ -159,6 +160,7 @@ pub extern "C" fn slatedb_settings_default() -> *mut c_char {
 
 /// Load Settings from file and return as JSON string
 #[no_mangle]
+#[allow(unreachable_pub)]
 pub extern "C" fn slatedb_settings_from_file(path: *const c_char) -> *mut c_char {
     let path_str = match safe_str_from_ptr(path) {
         Ok(s) => s,
@@ -179,6 +181,7 @@ pub extern "C" fn slatedb_settings_from_file(path: *const c_char) -> *mut c_char
 
 /// Load Settings from environment variables and return as JSON string
 #[no_mangle]
+#[allow(unreachable_pub)]
 pub extern "C" fn slatedb_settings_from_env(prefix: *const c_char) -> *mut c_char {
     let prefix_str = match safe_str_from_ptr(prefix) {
         Ok(s) => s,
@@ -199,6 +202,7 @@ pub extern "C" fn slatedb_settings_from_env(prefix: *const c_char) -> *mut c_cha
 
 /// Load Settings using auto-detection and return as JSON string
 #[no_mangle]
+#[allow(unreachable_pub)]
 pub extern "C" fn slatedb_settings_load() -> *mut c_char {
     match slatedb::config::Settings::load() {
         Ok(settings) => match serde_json::to_string(&settings) {
