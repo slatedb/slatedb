@@ -282,7 +282,7 @@ pub(crate) async fn seed_database(
     Ok(())
 }
 
-pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
+pub(crate) async fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
     let mut rng = rand::rng();
     let mut keygen = OrderedBytesGenerator::new_with_suffix(&[], &[0u8; 16]);
     let mut encoded_sst_builder = format.table_builder();
@@ -292,9 +292,9 @@ pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> Encod
         val.put_bytes(0u8, 32);
         rng.fill_bytes(&mut val);
         let row = RowEntry::new(k, ValueDeletable::Value(val.freeze()), 0u64, None, None);
-        encoded_sst_builder.add(row).unwrap();
+        encoded_sst_builder.add(row).await.unwrap();
     }
-    encoded_sst_builder.build().unwrap()
+    encoded_sst_builder.build().await.unwrap()
 }
 
 /// A compactor that compacts if there are L0s and `should_compact` returns true.

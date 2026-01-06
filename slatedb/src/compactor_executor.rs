@@ -428,17 +428,21 @@ mod tests {
         let mut sst_builder = table_store.table_builder();
         sst_builder
             .add(RowEntry::new_merge(b"foo", b"3", 4))
+            .await
             .unwrap();
         sst_builder
             .add(RowEntry::new_merge(b"foo", b"2", 3))
+            .await
             .unwrap();
         sst_builder
             .add(RowEntry::new_merge(b"foo", b"1", 2))
+            .await
             .unwrap();
         sst_builder
             .add(RowEntry::new_merge(b"foo", b"0", 1))
+            .await
             .unwrap();
-        let encoded_sst = sst_builder.build().unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
             .write_sst(&id, encoded_sst, false)

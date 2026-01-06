@@ -341,10 +341,10 @@ impl WalBufferManager {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = wal.iter();
         while let Some(entry) = iter.next_entry().await? {
-            sst_builder.add(entry)?;
+            sst_builder.add(entry).await?;
         }
 
-        let encoded_sst = sst_builder.build()?;
+        let encoded_sst = sst_builder.build().await?;
         self.table_store
             .write_sst(&SsTableId::Wal(wal_id), encoded_sst, false)
             .await?;

@@ -178,6 +178,7 @@ use crate::error::SlateDBError;
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 use crate::merge_operator::MergeOperatorType;
+use crate::sst::BlockTransformer;
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -904,6 +905,11 @@ pub struct DbReaderOptions {
 
     #[serde(skip)]
     pub merge_operator: Option<MergeOperatorType>,
+
+    /// An optional block transformer for custom encoding/decoding of blocks.
+    /// Can be used for encryption, custom encoding, etc.
+    #[serde(skip)]
+    pub block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
 impl Default for DbReaderOptions {
@@ -914,6 +920,7 @@ impl Default for DbReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             block_cache: default_block_cache(),
             merge_operator: None,
+            block_transformer: None,
         }
     }
 }

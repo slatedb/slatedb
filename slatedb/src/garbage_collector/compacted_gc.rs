@@ -288,9 +288,9 @@ mod tests {
         let id_within_min_age = SsTableId::Compacted(ulid::Ulid::from_parts(7_000, 0));
         let id_active_recent = SsTableId::Compacted(ulid::Ulid::from_parts(8_000, 0));
 
-        let sst_to_delete = build_test_sst(&format, 1);
-        let sst_within_min_age = build_test_sst(&format, 1);
-        let sst_active_recent = build_test_sst(&format, 1);
+        let sst_to_delete = build_test_sst(&format, 1).await;
+        let sst_within_min_age = build_test_sst(&format, 1).await;
+        let sst_active_recent = build_test_sst(&format, 1).await;
 
         table_store
             .write_sst(&id_to_delete, sst_to_delete, false)
@@ -389,9 +389,9 @@ mod tests {
         let id_manifest = SsTableId::Compacted(ulid::Ulid::from_parts(3_000, 0));
         let id_newer = SsTableId::Compacted(ulid::Ulid::from_parts(4_000, 0));
 
-        let sst_to_delete = build_test_sst(&format, 1);
-        let sst_manifest = build_test_sst(&format, 1);
-        let sst_newer = build_test_sst(&format, 1);
+        let sst_to_delete = build_test_sst(&format, 1).await;
+        let sst_manifest = build_test_sst(&format, 1).await;
+        let sst_newer = build_test_sst(&format, 1).await;
 
         table_store
             .write_sst(&id_to_delete, sst_to_delete, false)
@@ -478,9 +478,9 @@ mod tests {
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0)); // job 1
         let id_barrier = SsTableId::Compacted(ulid::Ulid::from_parts(2_000, 0)); // job 2
         let id_to_newer = SsTableId::Compacted(ulid::Ulid::from_parts(3_000, 0)); // job 2, too
-        let sst_to_delete = build_test_sst(&format, 1);
-        let sst_barrier = build_test_sst(&format, 1);
-        let sst_to_newer = build_test_sst(&format, 1);
+        let sst_to_delete = build_test_sst(&format, 1).await;
+        let sst_barrier = build_test_sst(&format, 1).await;
+        let sst_to_newer = build_test_sst(&format, 1).await;
         table_store
             .write_sst(&id_to_delete, sst_to_delete, false)
             .await
@@ -583,7 +583,7 @@ mod tests {
         // Newest L0 in the manifest has a later timestamp (9_000ms).
         let l0_id = SsTableId::Compacted(ulid::Ulid::from_parts(9_000, 0));
         let l0_handle = table_store
-            .write_sst(&l0_id, build_test_sst(&format, 1), false)
+            .write_sst(&l0_id, build_test_sst(&format, 1).await, false)
             .await
             .unwrap();
         let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
@@ -594,7 +594,11 @@ mod tests {
         // output SST (6_000ms), but hasn't updated the manifest yet.
         let compaction_output_id = SsTableId::Compacted(ulid::Ulid::from_parts(6_000, 0));
         table_store
-            .write_sst(&compaction_output_id, build_test_sst(&format, 1), false)
+            .write_sst(
+                &compaction_output_id,
+                build_test_sst(&format, 1).await,
+                false,
+            )
             .await
             .unwrap();
 

@@ -19,10 +19,10 @@ impl DbInner {
         let mut sst_builder = self.table_store.table_builder();
         let mut iter = self.iter_imm_table(imm_table.clone()).await?;
         while let Some(entry) = iter.next_entry().await? {
-            sst_builder.add(entry)?;
+            sst_builder.add(entry).await?;
         }
 
-        let encoded_sst = sst_builder.build()?;
+        let encoded_sst = sst_builder.build().await?;
         let handle = self
             .table_store
             .write_sst(id, encoded_sst, write_cache)

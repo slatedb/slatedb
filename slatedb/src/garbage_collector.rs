@@ -736,8 +736,8 @@ mod tests {
         table_id: &SsTableId,
     ) -> Result<(), SlateDBError> {
         let mut sst = table_store.table_builder();
-        sst.add(RowEntry::new_value(b"key", b"value", 0))?;
-        let table1 = sst.build()?;
+        sst.add(RowEntry::new_value(b"key", b"value", 0)).await?;
+        let table1 = sst.build().await?;
         table_store.write_sst(table_id, table1, false).await?;
         Ok(())
     }
@@ -870,15 +870,19 @@ mod tests {
         // write a wal sst
         let id1 = SsTableId::Wal(1);
         let mut sst1 = table_store.table_builder();
-        sst1.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
+        sst1.add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
 
-        let table1 = sst1.build().unwrap();
+        let table1 = sst1.build().await.unwrap();
         table_store.write_sst(&id1, table1, false).await.unwrap();
 
         let id2 = SsTableId::Wal(2);
         let mut sst2 = table_store.table_builder();
-        sst2.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
-        let table2 = sst2.build().unwrap();
+        sst2.add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let table2 = sst2.build().await.unwrap();
         table_store.write_sst(&id2, table2, false).await.unwrap();
 
         // Set the both WAL SST file to be a day old
@@ -1190,8 +1194,10 @@ mod tests {
     async fn create_sst(table_store: Arc<TableStore>, ts_ms: u64) -> SsTableHandle {
         let sst_id = SsTableId::Compacted(ulid::Ulid::from_parts(ts_ms, 0));
         let mut sst = table_store.table_builder();
-        sst.add(RowEntry::new_value(b"key", b"value", 0)).unwrap();
-        let table = sst.build().unwrap();
+        sst.add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let table = sst.build().await.unwrap();
         table_store.write_sst(&sst_id, table, false).await.unwrap()
     }
 
