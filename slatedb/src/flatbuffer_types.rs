@@ -3,7 +3,9 @@ use std::ops::{Bound, RangeBounds};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use chrono::{DateTime, Utc};
-use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
+use flatbuffers::{
+    FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, VerifierOptions, WIPOffset,
+};
 use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
@@ -44,6 +46,16 @@ use crate::utils::clamp_allocated_size_bytes;
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
 pub(crate) const COMPACTIONS_FORMAT_VERSION: u16 = 1;
 
+/// FlatBuffer verifier options with increased table limit.
+/// The default limit is 1M tables, but with compression enabled, SST files
+/// can have many more blocks than the uncompressed file size would suggest.
+fn verifier_options() -> VerifierOptions {
+    VerifierOptions {
+        max_tables: 1_000_000_000,
+        ..Default::default()
+    }
+}
+
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
 #[derive(PartialEq, Eq, Clone)]
 pub(crate) struct SsTableIndexOwned {
@@ -52,7 +64,7 @@ pub(crate) struct SsTableIndexOwned {
 
 impl SsTableIndexOwned {
     pub(crate) fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
-        flatbuffers::root::<SsTableIndex>(&data)?;
+        flatbuffers::root_with_opts::<SsTableIndex>(&verifier_options(), &data)?;
         Ok(Self { data })
     }
 
@@ -95,7 +107,7 @@ impl SsTableInfoCodec for FlatBufferSsTableInfoCodec {
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<SsTableInfo, SlateDBError> {
-        let info = flatbuffers::root::<FbSsTableInfo>(bytes)?;
+        let info = flatbuffers::root_with_opts::<FbSsTableInfo>(&verifier_options(), bytes)?;
         Ok(Self::sst_info(&info))
     }
 
@@ -146,7 +158,10 @@ impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
             }));
         }
         let unversioned_bytes = bytes.slice(2..);
-        let manifest = flatbuffers::root::<ManifestV1>(unversioned_bytes.as_ref())?;
+        let manifest = flatbuffers::root_with_opts::<ManifestV1>(
+            &verifier_options(),
+            unversioned_bytes.as_ref(),
+        )?;
         Ok(Self::manifest(&manifest))
     }
 }
@@ -304,7 +319,10 @@ impl FlatBufferCompactionsCodec {
             });
         }
         let unversioned_bytes = bytes.slice(2..);
-        let fb = flatbuffers::root::<CompactionsV1>(unversioned_bytes.as_ref())?;
+        let fb = flatbuffers::root_with_opts::<CompactionsV1>(
+            &verifier_options(),
+            unversioned_bytes.as_ref(),
+        )?;
         Self::compactions(&fb)
     }
 
