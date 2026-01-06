@@ -66,9 +66,8 @@ ingested and also reads those records sequentially in that order.
 
 Separating the format of the WAL from the format of the SST allows the WAL format to model sequential writes in 
 lock-step with the monotonically increasing sequence number. 
-Sequence numbers are assigned to each ingested record to specify the ingestion order.
-Having a WAL format model sequential writes according to the ingestion order is an advantage 
-when records need to be read in the same order they were ingested.
+Sequence numbers are assigned to each ingested record according to the write snapshot they belong to.
+Having a WAL format model sequential writes is an advantage when records need to be read in the same order they were ingested.
 This kind of sequential read is the main read pattern of a write-ahead *log* by definition. 
 The most prominent example for this sequential read pattern is the recovery of a database state. 
 With the current SST format that is also used to store WAL objects, 
@@ -144,19 +143,25 @@ b_4 - b_7 = 0 (free)
 
 If the record is a tombstone, the value length and the actual values are omitted.
 
-The list of records is followed by a compressed list of record sizes.
-The used compression codec is specified after the compressed list of record sizes with a 1 byte unsigned integer
-in little endian.
-Initially, the available compression codecs consist of no compression and a delta encoding that still needs to be
-specified.
-The record sizes in the list have the same order as the records.
-That is, the first record size is the size of the first record in the object,
-the second record size is the size of the second record in the object, and so on.
-After the compressed list of record sizes and the compression codec, the format contains the size of the compressed
-list as an 8 bytes unsigned integer in little endian,
-followed by the number of records in the WAL object as a 4 bytes unsigned integer in little endian.
-The last two fields of the format are CRC32 checksum as a 4 bytes unsigned integer
-followed by the version of the format as a 2 bytes unsigned integer, both in little endian.
+The list of records is followed by a compressed list of offsets,
+where each offset points to one record.
+The used compression codec is specified after the compressed list of record offsets
+with a 1 byte unsigned integer.
+Initially, the available compression codecs are no compression and a delta encoding that
+still needs to be specified.
+The record offsets in the list have the same order as the records.
+That is, the 0th offset points to the 0th record in the record list,
+the 1st offset points to the 1st record in the record list, and so on.
+After the compressed list of record offsets and the compression codec, the format contains
+the size of the compressed list as an 4 bytes unsigned integer,
+followed by the number of records in the WAL object as a 4 bytes unsigned integer.
+The number of records is followed by the CRC32 checksum as a 4 bytes unsigned integer.
+The last two fields are the version of the format as a 2 bytes unsigned integer,
+and the type of the object as a 1 byte unsigned integer -- 0x00 for `WAL` in this case.
+Future formats of data objects in slatedb should use the same schema at the end of the
+footer to specify its type and the version of its format.
+All integers are in little endian.
+
 
 ```
 +----------------------------------------------------------------+
@@ -168,21 +173,23 @@ followed by the version of the format as a 2 bytes unsigned integer, both in lit
 +----------------------------------------------------------------+
 | record N (variable length)                                     |
 +----------------------------------------------------------------+
-| compressed array of N record sizes                             |
+| compressed array of N record offsets                           |
 | (variable length,                                              |
-|  before compression each size is                               |
+|  before compression each offset is                             |
 |  8-bytes unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
 | compression codec (1-byte unsigned integer, little endian)     |
 +----------------------------------------------------------------+
-| size of the compressed array of sizes                          |
-| (8-bytes unsigned integer, little endian)                      |
+| size of the compressed array of offsets                        |
+| (4-bytes unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
 | number of records N (4-bytes unsigned integer, little endian)  |
 +----------------------------------------------------------------+
 | CRC32 checksum (4-bytes, unsigned integer, little endian)      |
 +----------------------------------------------------------------+
 | version of format (2-bytes, unsigned integer, little endian)   |
++----------------------------------------------------------------+
+| type of object (1-byte, unsigned integer, little endian)         |
 +----------------------------------------------------------------+
 ```
 
