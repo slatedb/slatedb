@@ -116,12 +116,14 @@ impl CompactorStateWriter {
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Mark any persisted compactions as finished so we don't resume them after restart.
+        // Mark running compactions as failed so we don't resume them after restart.
+        // Submitted compactions are left intact for future scheduling.
         // Keep only the most recent finished compaction for GC safety (#1044).
-        dirty_compactions
-            .value
-            .iter_mut()
-            .for_each(|c| c.set_status(CompactionStatus::Finished));
+        dirty_compactions.value.iter_mut().for_each(|c| {
+            if matches!(c.status(), CompactionStatus::Running) {
+                c.set_status(CompactionStatus::Failed);
+            }
+        });
         dirty_compactions.value.retain_active_and_last_finished();
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
@@ -171,6 +173,28 @@ impl CompactorStateWriter {
         self.manifest.refresh().await?;
         self.state
             .merge_remote_manifest(self.manifest.prepare_dirty()?);
+        Ok(())
+    }
+
+    /// Refreshes the compactions view and updates the local compactor state with any remote
+    /// changes.
+    ///
+    /// ## Returns
+    /// - `Ok(())` after compactions are refreshed, or `SlateDBError` on failure.
+    pub(crate) async fn load_compactions(&mut self) -> Result<(), SlateDBError> {
+        self.compactions.refresh().await?;
+        self.state
+            .merge_remote_compactions(self.compactions.prepare_dirty()?);
+        Ok(())
+    }
+
+    /// Refreshes compactions first, then manifests, to preserve a consistent ordering.
+    ///
+    /// ## Returns
+    /// - `Ok(())` after state is refreshed, or `SlateDBError` on failure.
+    pub(crate) async fn refresh(&mut self) -> Result<(), SlateDBError> {
+        self.load_compactions().await?;
+        self.load_manifest().await?;
         Ok(())
     }
 
@@ -230,7 +254,7 @@ impl CompactorStateWriter {
     /// - `Ok(())` when compactions are successfully written.
     /// - `SlateDBError` if an unrecoverable error occurs.
     pub(crate) async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
-        let mut desired_value = self.state.compactions_dirty().value.clone();
+        let mut desired_value = self.state.compactions().value.clone();
         desired_value.retain_active_and_last_finished();
         loop {
             let mut dirty_compactions = self.compactions.prepare_dirty()?;
@@ -270,6 +294,7 @@ mod tests {
     use crate::admin::AdminBuilder;
     use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
+    use crate::compactor_state::{Compaction, CompactionSpec};
     use crate::db_state::CoreDbState;
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -277,6 +302,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use std::sync::Arc;
+    use ulid::Ulid;
 
     const ROOT: &str = "/compactor-state";
 
@@ -381,6 +407,142 @@ mod tests {
         let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
         assert_eq!(manifest.compactor_epoch, 9);
         assert_eq!(manifest.compactor_epoch, compactions.compactor_epoch);
+    }
+
+    #[tokio::test]
+    async fn test_new_marks_running_failed_and_preserves_submitted() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Seed the compactions store with Submitted/Running/Finished entries.
+        let mut stored_compactions = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        let submitted_id = Ulid::from_parts(1, 0);
+        let failed_old_id = Ulid::from_parts(2, 0);
+        let completed_old_id = Ulid::from_parts(3, 0);
+        let running_id = Ulid::from_parts(4, 0);
+        let mut dirty = stored_compactions.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(
+            submitted_id,
+            CompactionSpec::new(vec![], 0),
+        ));
+        dirty.value.insert(
+            Compaction::new(failed_old_id, CompactionSpec::new(vec![], 0))
+                .with_status(CompactionStatus::Failed),
+        );
+        dirty.value.insert(
+            Compaction::new(completed_old_id, CompactionSpec::new(vec![], 0))
+                .with_status(CompactionStatus::Completed),
+        );
+        dirty.value.insert(
+            Compaction::new(running_id, CompactionSpec::new(vec![], 0))
+                .with_status(CompactionStatus::Running),
+        );
+        stored_compactions.update(dirty).await.unwrap();
+
+        // Initialize a new writer (restart) which should flip Running -> Failed and trim.
+        let options = CompactorOptions::default();
+        let rand = Arc::new(DbRand::new(7));
+
+        let writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store,
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        // Submitted should remain; Running should become Failed; older finished should be trimmed.
+        let compactions = &writer.state.compactions().value;
+        assert_eq!(
+            compactions
+                .get(&submitted_id)
+                .expect("missing submitted compaction")
+                .status(),
+            CompactionStatus::Submitted
+        );
+        assert_eq!(
+            compactions
+                .get(&running_id)
+                .expect("missing running compaction")
+                .status(),
+            CompactionStatus::Failed
+        );
+        assert!(!compactions.contains(&failed_old_id));
+        assert!(!compactions.contains(&completed_old_id));
+    }
+
+    #[tokio::test]
+    async fn test_load_compactions_merges_external_submitted() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let options = CompactorOptions::default();
+        let rand = Arc::new(DbRand::new(7));
+        let mut writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store.clone(),
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        let submitted_id = Ulid::from_parts(10, 0);
+        let mut external = StoredCompactions::load(compactions_store).await.unwrap();
+        let mut dirty = external.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(
+            submitted_id,
+            CompactionSpec::new(vec![], 0),
+        ));
+        external.update(dirty).await.unwrap();
+
+        writer.load_compactions().await.unwrap();
+
+        let compactions = &writer.state.compactions().value;
+        assert_eq!(
+            compactions
+                .get(&submitted_id)
+                .expect("missing submitted compaction")
+                .status(),
+            CompactionStatus::Submitted
+        );
     }
 
     #[tokio::test]
