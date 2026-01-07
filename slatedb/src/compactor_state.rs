@@ -303,7 +303,6 @@ impl Compactions {
         self.recent_compactions.insert(compaction.id, compaction);
     }
 
-    #[cfg(test)]
     /// Returns the tracked compaction for the specified id, if any.
     pub(crate) fn get(&self, compaction_id: &Ulid) -> Option<&Compaction> {
         self.recent_compactions.get(compaction_id)

@@ -26,6 +26,7 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use ulid::Ulid;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
@@ -104,6 +105,20 @@ impl Admin {
             None => Ok(None),
             Some(result) => Ok(Some(serde_json::to_string(&result)?)),
         }
+    }
+
+    /// Read-only access to a compaction by id from the latest compactions file.
+    pub async fn read_compaction(&self, id: Ulid) -> Result<Option<String>, Box<dyn Error>> {
+        let compactions_store = self.compactions_store();
+        let Some((_id, compactions)) = compactions_store.try_read_latest_compactions().await?
+        else {
+            return Ok(None);
+        };
+        let Some(compaction) = compactions.get(&id) else {
+            return Ok(None);
+        };
+
+        Ok(Some(serde_json::to_string(compaction)?))
     }
 
     /// List compactions files within a range
@@ -760,5 +775,37 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_admin_read_compaction() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_read_compaction");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        let mut stored = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+
+        let compaction_id = Ulid::new();
+        let compaction = Compaction::new(
+            compaction_id,
+            CompactionSpec::new(vec![SourceId::SortedRun(3)], 7),
+        );
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(compaction);
+        stored.update(dirty).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+        let compaction_json = admin
+            .read_compaction(compaction_id)
+            .await
+            .unwrap()
+            .expect("expected compaction");
+        let value: serde_json::Value = serde_json::from_str(&compaction_json).unwrap();
+
+        assert_eq!(
+            value.get("id").and_then(|v| v.as_str()).unwrap(),
+            compaction_id.to_string()
+        );
     }
 }
