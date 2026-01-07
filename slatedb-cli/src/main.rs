@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+use ulid::Ulid;
 use uuid::Uuid;
 
 mod args;
@@ -47,6 +48,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         CliCommands::ReadCompactions { id } => exec_read_compactions(&admin, id).await?,
         CliCommands::ListCompactions { start, end } => {
             exec_list_compactions(&admin, start, end).await?
+        }
+        CliCommands::ReadCompaction { id, compactions_id } => {
+            exec_read_compaction(&admin, id, compactions_id).await?
         }
         CliCommands::CreateCheckpoint {
             lifetime,
@@ -133,6 +137,23 @@ async fn exec_list_compactions(
     };
 
     println!("{}", admin.list_compactions(range).await?);
+    Ok(())
+}
+
+async fn exec_read_compaction(
+    admin: &Admin,
+    id: String,
+    compactions_id: Option<u64>,
+) -> Result<(), Box<dyn Error>> {
+    let compaction_id = Ulid::from_string(&id)?;
+    match admin.read_compaction(compaction_id, compactions_id).await? {
+        None => {
+            println!("no compaction found");
+        }
+        Some(compaction) => {
+            println!("{}", compaction);
+        }
+    }
     Ok(())
 }
 
