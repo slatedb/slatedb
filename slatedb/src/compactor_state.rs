@@ -298,7 +298,6 @@ impl Compactions {
     }
 
     /// Inserts a new compaction to be tracked.
-    #[allow(dead_code)]
     pub(crate) fn insert(&mut self, compaction: Compaction) {
         self.recent_compactions.insert(compaction.id, compaction);
     }

@@ -320,7 +320,6 @@ impl Compactor {
     /// - `SlateDBError::InvalidDBState` if the compactions file doesn't exist.
     /// - `SlateDBError::InvalidCompaction` if a full compaction has no sources.
     /// - `SlateDBError` if the compaction could not be persisted.
-    #[allow(dead_code)]
     pub(crate) async fn submit(&self, request: CompactionRequest) -> Result<Ulid, SlateDBError> {
         let spec = match request {
             CompactionRequest::Spec(spec) => spec,
