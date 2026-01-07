@@ -388,7 +388,7 @@ All three amplifications are reduced.
   - Develop new WAL format alongside the old format, guarded by an experimental flag
   - Run performance tests and make adjustments
   - Update docs and switch to the new format by default
-  - Remove old format and experimental flag
+  - Remove obsolete code and experimental flag
 - Feature flags / opt-in: No feature flag, new WAL format will become the default
 - Docs updates:
   - Update design documentation in SlateDB where the WAL is mentioned
