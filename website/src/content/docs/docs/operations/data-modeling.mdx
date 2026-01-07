@@ -32,8 +32,10 @@ All data in SlateDB is stored sorted by key. The in-memory MemTable uses a skip
 list that maintains key order, and on-disk SSTables store keys in sorted order
 within blocks. This sorted structure enables:
 
-- **Efficient range scans**: Iterating over a key range (e.g., all keys starting with `user:123:`) requires no random access—just sequential reads through sorted data.
-- **Binary search**: Point lookups use binary search to find the right SSTable and block, achieving O(log n) complexity instead of scanning all data.
+- **Efficient range scans**: Iterating over a key range (e.g., all keys starting with
+  `user:123:`) requires no random access—just sequential reads through sorted data.
+- **Binary search**: Point lookups use binary search to find the right SSTable and 
+  block, achieving O(log n) complexity instead of scanning all data.
 
 ### Prefix Compression
 
