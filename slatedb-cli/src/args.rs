@@ -168,12 +168,28 @@ pub(crate) enum CliCommands {
         round: FindOption,
     },
 
+    /// Submit a compaction request.
+    #[command(group(
+        ArgGroup::new("compaction_request")
+            .args(["full", "spec"])
+            .required(true)
+    ))]
+    SubmitCompaction {
+        /// Submit a full compaction request.
+        #[arg(long)]
+        full: bool,
+
+        /// JSON-encoded compaction spec.
+        #[arg(long)]
+        spec: Option<String>,
+    },
+
     /// Schedules a period garbage collection job
     #[command(group(
-    ArgGroup::new("gc_config")
-        .args(["manifest", "wal", "compacted", "compactions"])
-        .multiple(true)
-        .required(true)
+        ArgGroup::new("gc_config")
+            .args(["manifest", "wal", "compacted", "compactions"])
+            .multiple(true)
+            .required(true)
     ))]
     ScheduleGarbageCollection {
         /// Configuration for manifest garbage collection should be set in the

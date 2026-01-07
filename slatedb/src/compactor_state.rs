@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 
 use log::{error, info};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
 use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
@@ -16,7 +16,7 @@ use crate::transactional_object::DirtyObject;
 /// A `SourceId` distinguishes between two kinds of inputs a compaction can read:
 /// an existing compacted sorted run (identified by its run id), or an L0 SSTable
 /// (identified by its ULID).
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceId {
     SortedRun(u32),
     Sst(Ulid),
@@ -69,7 +69,7 @@ impl SourceId {
 
 /// Immutable spec that describes a compaction. Currently, this only holds the
 /// input sources and destination SR id for a compaction.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompactionSpec {
     /// Input sources for the compaction.
     sources: Vec<SourceId>,
