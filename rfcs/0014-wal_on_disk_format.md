@@ -107,7 +107,7 @@ The proposed new persistence format for the WAL objects starts with a list of va
 A record consists of:
 - a sequence number represented by an 8-bytes unsigned integer,
 - 8 flags in a 1-byte unsigned integer,
-- optional the expiration timestamp and the creation timestamp of the record, each represented by 8 bytes signed integer,
+- optional the creation timestamp and the expiration timestamp of the record, each represented by 8 bytes signed integer,
 - key length as a 2-bytes unsigned integer followed by the number of bytes set in the key length containing the actual key,
 - value length as a 4-bytes unsigned integer followed by the number of bytes set in the value length containing the actual value.
 
@@ -122,9 +122,9 @@ Record:
 +----------------------------------------------------------------+
 | flags (1-byte unsigned integer, little endian)                 |
 +----------------------------------------------------------------+
-| expire_ts (8-bytes signed integer, little endian)              |
-+----------------------------------------------------------------+
 | create_ts (8-bytes signed integer, little endian)              |
++----------------------------------------------------------------+
+| expire_ts (8-bytes signed integer, little endian)              |
 +----------------------------------------------------------------+
 | key length (2-bytes unsigned integer, little endian)           |
 +----------------------------------------------------------------+
@@ -141,10 +141,10 @@ Flags:
 b_0, b_1 = (0, 0) if the record is a value,
            (0, 1) if the record is a tombstone,
            (1, 0) if the record is a merge operand,
-           (1, 1) free
-b_2 = 1 if the record has an expiration timestamp, 0 otherwise
-b_3 = 1 if the record has a creation timestamp, 0 otherwise
-b_4 - b_7 = 0 (free)
+           (1, 1) reserved
+b_2 = 1 if the record has a creation timestamp, 0 otherwise
+b_3 = 1 if the record has an expiration timestamp, 0 otherwise
+b_4 - b_7 = 0 (reserved)
 ```
 
 If the record is a tombstone, the value length and the actual values are omitted.
