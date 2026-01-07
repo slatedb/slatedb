@@ -6,7 +6,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
-use log::{debug, error, warn};
+use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
 use object_store::{ObjectStore, PutMode, PutOptions};
@@ -239,78 +239,6 @@ impl TableStore {
         let path = self.path(id);
         debug!("deleting SST [path={}]", path);
         object_store.delete(&path).await.map_err(SlateDBError::from)
-    }
-
-    /// Copy a WAL SSTable from the object store to a new id in the object_store.
-    /// Returns an error if an SSTable with the same ID already exists.
-    pub(crate) async fn copy_wal_sst(
-        &self,
-        src_id: &SsTableId,
-        dst_id: &SsTableId,
-    ) -> Result<(), SlateDBError> {
-        fail_point!(self.fp_registry.clone(), "copy-wal-sst-io-error", |_| {
-            Result::Err(slatedb_io_error())
-        });
-
-        assert!(
-            matches!((src_id, dst_id), (SsTableId::Wal(_), SsTableId::Wal(_))),
-            "src_id and dest_id are not wal ids"
-        );
-
-        let object_store = self.object_stores.store_for(src_id);
-        let src_path = self.path(src_id);
-        let dst_path = self.path(dst_id);
-        debug!(
-            "copying SST [src_path={}, dest_path={}]",
-            src_path, dst_path
-        );
-        object_store
-            .copy_if_not_exists(&src_path, &dst_path)
-            .await
-            .map_err(|e| match e {
-                object_store::Error::AlreadyExists { path: _, source: _ } => match src_id {
-                    SsTableId::Wal(_) => {
-                        debug!("path already exists [path={}]", dst_path);
-                        SlateDBError::Fenced
-                    }
-                    SsTableId::Compacted(_) => SlateDBError::from(e),
-                },
-                _ => SlateDBError::from(e),
-            })
-    }
-
-    // Copy WALs corrensponding to the specified id range and rename them starting with dest_id_start.
-    // If there is an error at any point while copying, rollback by deleting all copied WALs and return
-    // the error.
-    // This does not overwrite existing WALs.
-    pub(crate) async fn copy_wal_ssts<R: RangeBounds<u64>>(
-        &self,
-        src_id_range: R,
-        dest_id_start: &SsTableId,
-    ) -> Result<(), SlateDBError> {
-        let wals_to_copy = self.list_wal_ssts(src_id_range).await?;
-
-        let mut new_id = dest_id_start.unwrap_wal_id();
-
-        for wal in wals_to_copy {
-            if let Err(e) = self.copy_wal_sst(&wal.id, &SsTableId::Wal(new_id)).await {
-                // delete copied wals so that failed copy does not leave remnant WALs
-                for id_to_delete in dest_id_start.unwrap_wal_id()..new_id {
-                    if let Err(delete_err) = self.delete_sst(&SsTableId::Wal(id_to_delete)).await {
-                        error!(
-                            "failed to delete WAL SST [id={:?}, error={:?}]",
-                            id_to_delete, delete_err
-                        );
-                    }
-                }
-
-                return Err(e);
-            }
-
-            new_id += 1;
-        }
-
-        Ok(())
     }
 
     /// List all SSTables in the compacted directory.
@@ -672,7 +600,6 @@ fn slatedb_io_error() -> SlateDBError {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use fail_parallel::FailPointRegistry;
     use futures::future;
     use futures::StreamExt;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
@@ -688,7 +615,6 @@ mod tests {
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
     use crate::object_stores::ObjectStores;
-    use crate::paths::PathResolver;
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst::SsTableFormat;
@@ -1557,153 +1483,6 @@ mod tests {
             assert_eq!(count_ssts_in(&wal_store).await, 1);
         } else {
             assert_eq!(count_ssts_in(&main_store).await, 1);
-        }
-    }
-
-    #[rstest]
-    #[case::main_only(make_store(), None)]
-    #[case::main_and_wal(make_store(), Some(make_store()))]
-    #[tokio::test]
-    async fn test_copy_wal_sst(
-        #[case] main_store: Arc<dyn ObjectStore>,
-        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
-    ) {
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store.clone()),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
-
-        let id1 = SsTableId::Wal(123);
-        let data1 = Bytes::from_static(b"wal1");
-        wal_store
-            .clone()
-            .unwrap_or(main_store.clone())
-            .put(&ts.path(&id1), data1.clone().into())
-            .await
-            .unwrap();
-
-        let id2 = SsTableId::Wal(321);
-        ts.copy_wal_sst(&id1, &id2).await.unwrap();
-
-        let ssts = ts.list_wal_ssts(..).await.unwrap();
-        assert_eq!(ssts.len(), 2);
-        assert_eq!(ssts[1].id, id2);
-
-        let get_result = wal_store
-            .clone()
-            .unwrap_or(main_store.clone())
-            .get(&ts.path(&id2))
-            .await
-            .unwrap();
-        assert_eq!(data1, get_result.bytes().await.unwrap());
-
-        if let Some(wal_store) = wal_store {
-            assert_eq!(count_ssts_in(&main_store).await, 0);
-            assert_eq!(count_ssts_in(&wal_store).await, 2);
-        } else {
-            assert_eq!(count_ssts_in(&main_store).await, 2);
-        }
-    }
-
-    #[rstest]
-    #[case::main_only(make_store(), None)]
-    #[case::main_and_wal(make_store(), Some(make_store()))]
-    #[tokio::test]
-    async fn test_copy_wal_ssts(
-        #[case] main_store: Arc<dyn ObjectStore>,
-        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
-    ) {
-        let ts = Arc::new(TableStore::new(
-            ObjectStores::new(main_store.clone(), wal_store.clone()),
-            SsTableFormat::default(),
-            Path::from(ROOT),
-            None,
-        ));
-
-        let mut existing_ids = [
-            SsTableId::Wal(123),
-            SsTableId::Wal(62),
-            SsTableId::Wal(63),
-            SsTableId::Wal(201),
-        ]; // unsorted except last one
-        for id in existing_ids {
-            wal_store
-                .clone()
-                .unwrap_or(main_store.clone())
-                .put(&ts.path(&id), id.unwrap_wal_id().to_string().into())
-                .await
-                .unwrap();
-        }
-
-        let dest_id = SsTableId::Wal(240);
-        ts.copy_wal_ssts(50..200, &dest_id).await.unwrap(); // skip copying last one
-
-        let ssts = ts.list_wal_ssts(..).await.unwrap();
-        assert_eq!(ssts.len(), 7, "3 more wals should have been added to the 4");
-        assert_eq!(ssts[existing_ids.len()].id, dest_id);
-
-        existing_ids.sort_by_key(|id| id.unwrap_wal_id());
-        for (i, id) in existing_ids.iter().enumerate().take(3) {
-            let get_result = wal_store
-                .clone()
-                .unwrap_or(main_store.clone())
-                .get(&ts.path(&SsTableId::Wal(dest_id.unwrap_wal_id() + i as u64)))
-                .await
-                .unwrap();
-            assert_eq!(
-                id.unwrap_wal_id().to_string(),
-                String::from_utf8(get_result.bytes().await.unwrap().into()).unwrap()
-            );
-        }
-
-        if let Some(wal_store) = wal_store {
-            assert_eq!(count_ssts_in(&main_store).await, 0);
-            assert_eq!(count_ssts_in(&wal_store).await, 7);
-        } else {
-            assert_eq!(count_ssts_in(&main_store).await, 7);
-        }
-    }
-
-    #[rstest]
-    #[case::main_only(make_store(), None)]
-    #[case::main_and_wal(make_store(), Some(make_store()))]
-    #[tokio::test]
-    async fn test_copy_wal_ssts_should_rollback_at_failure(
-        #[case] main_store: Arc<dyn ObjectStore>,
-        #[case] wal_store: Option<Arc<dyn ObjectStore>>,
-    ) {
-        let fp_registry = Arc::new(FailPointRegistry::new());
-        let ts = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(main_store.clone(), wal_store.clone()),
-            SsTableFormat::default(),
-            PathResolver::new(ROOT),
-            fp_registry.clone(),
-            None,
-        ));
-
-        let mut existing_ids = [SsTableId::Wal(123), SsTableId::Wal(62), SsTableId::Wal(63)];
-        for id in existing_ids {
-            wal_store
-                .clone()
-                .unwrap_or(main_store.clone())
-                .put(&ts.path(&id), id.unwrap_wal_id().to_string().into())
-                .await
-                .unwrap();
-        }
-
-        let dest_id = SsTableId::Wal(240);
-
-        fail_parallel::cfg(fp_registry, "copy-wal-sst-io-error", "1*off->return").unwrap();
-        ts.copy_wal_ssts(.., &dest_id).await.unwrap_err();
-
-        let ssts = ts.list_wal_ssts(..).await.unwrap();
-        assert_eq!(ssts.len(), 3, "should have rolledback to existing 3");
-
-        existing_ids.sort_by_key(|id| id.unwrap_wal_id());
-        for (i, &id) in existing_ids.iter().enumerate() {
-            assert_eq!(id, ssts[i].id);
         }
     }
 

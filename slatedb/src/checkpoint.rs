@@ -77,7 +77,6 @@ mod tests {
     use crate::test_utils;
     use bytes::Bytes;
     use chrono::TimeDelta;
-    use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -366,36 +365,6 @@ mod tests {
             checkpoints,
             admin.list_checkpoints(None).await.unwrap(),
             "current existing checkpoints should not be overwritten after restore"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_should_rollback_restore_checkpoint_if_wal_copying_fails() {
-        let fp_registry = Arc::new(FailPointRegistry::new());
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let admin = AdminBuilder::new(path.clone(), object_store.clone())
-            .with_fp_registry(fp_registry.clone())
-            .build();
-        let db = Db::builder(path.clone(), object_store.clone())
-            .build()
-            .await
-            .unwrap();
-        let checkpoint = db
-            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
-            .await
-            .unwrap();
-
-        let manifest_store = ManifestStore::new(&path, object_store.clone());
-        let manifest_before_restore_command = manifest_store.read_latest_manifest().await.unwrap();
-
-        fail_parallel::cfg(fp_registry, "copy-wal-sst-io-error", "return").unwrap();
-        admin.restore_checkpoint(checkpoint.id).await.unwrap_err();
-
-        assert_eq!(
-            manifest_before_restore_command,
-            manifest_store.read_latest_manifest().await.unwrap(),
-            "manifest should not have changed after a failed restore_checkpoint"
         );
     }
 

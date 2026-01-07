@@ -3,10 +3,11 @@ use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
-use crate::db_state::SsTableId;
+use crate::db_state::{CoreDbState, SsTableHandle, SsTableId};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
+use crate::iter::KeyValueIterator;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::paths::PathResolver;
 use crate::sst::SsTableFormat;
@@ -17,14 +18,17 @@ use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::{IdGenerator, WatchableOnceCell};
+use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
-use log::error;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use std::collections::VecDeque;
 use std::env;
 use std::env::VarError;
 use std::error::Error;
+use std::ops::Range;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
@@ -388,7 +392,7 @@ impl Admin {
     /// Failing at any point should rollback by deleting the restored manifest, and any of the restored WALs.
     pub async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
         let manifest_store = Arc::new(self.manifest_store());
-        let wal_store = self.table_store();
+        let wal_store = Arc::new(self.table_store());
         let fencing_wal = self.fence_writers(&wal_store).await?;
 
         let mut current_manifest =
@@ -400,6 +404,15 @@ impl Admin {
 
         let manifest_to_restore = manifest_store.read_manifest(checkpoint.manifest_id).await?;
 
+        let l0_handles = self
+            .replay_wal_to_l0(
+                manifest_to_restore.core.replay_after_wal_id + 1
+                    ..manifest_to_restore.core.next_wal_sst_id,
+                current_manifest.db_state(),
+                wal_store.clone(),
+            )
+            .await?;
+
         current_manifest
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
@@ -410,8 +423,10 @@ impl Admin {
                 // valid.
                 dirty.value.core.checkpoints = stored_manifest.object().core.checkpoints.clone();
 
+                dirty.value.core.l0.extend(l0_handles.iter().cloned());
                 dirty.value.core.replay_after_wal_id = fencing_wal;
                 dirty.value.core.next_wal_sst_id = fencing_wal + 1;
+
                 // advance epochs to fence any other clients that might still be running
                 dirty.value.writer_epoch = stored_manifest.object().writer_epoch + 1;
                 dirty.value.compactor_epoch = stored_manifest.object().compactor_epoch + 1;
@@ -419,27 +434,6 @@ impl Admin {
                 Ok(Some(dirty))
             })
             .await?;
-
-        if let Err(e) = wal_store
-            .copy_wal_ssts(
-                manifest_to_restore.core.replay_after_wal_id
-                    ..manifest_to_restore.core.next_wal_sst_id,
-                &SsTableId::Wal(fencing_wal + 1),
-            )
-            .await
-        {
-            if let Err(delete_err) = manifest_store
-                .delete_manifest_unchecked(current_manifest.id())
-                .await
-            {
-                error!(
-                    "error deleting manifest [id={:?}, error={}]",
-                    current_manifest.id(),
-                    delete_err
-                );
-            }
-            return Err(e.into());
-        }
 
         Ok(())
     }
@@ -504,6 +498,43 @@ impl Admin {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    async fn replay_wal_to_l0(
+        &self,
+        wal_id_range: Range<u64>,
+        current_state: &CoreDbState,
+        table_store: Arc<TableStore>,
+    ) -> Result<VecDeque<SsTableHandle>, crate::Error> {
+        // TODO: This might need a configurable l0_sst_size_bytes limit on the min_memtable_bytes
+        // setting instead of using the default.
+        let mut replay_iter = WalReplayIterator::range(
+            wal_id_range,
+            current_state,
+            WalReplayOptions::default(),
+            Arc::clone(&table_store),
+        )
+        .await?;
+
+        let mut sst_handles = VecDeque::new();
+
+        while let Some(replayed_table) = replay_iter.next().await? {
+            let id = SsTableId::Compacted(self.rand.rng().gen_ulid(self.system_clock.as_ref()));
+            let mut sst_builder = table_store.table_builder();
+            let mut iter = replayed_table.table.table().iter();
+            while let Some(entry) = iter.next_entry().await? {
+                sst_builder.add(entry).await?;
+            }
+
+            let encoded_sst = sst_builder.build().await?;
+
+            // TODO: This might need a configurable l0_max_ssts check and maybe running
+            // a compaction job (or return error).
+            let handle = table_store.write_sst(&id, encoded_sst, false).await?;
+            sst_handles.push_back(handle);
+        }
+
+        Ok(sst_handles)
     }
 
     fn manifest_store(&self) -> ManifestStore {
@@ -762,30 +793,6 @@ mod tests {
     use object_store::ObjectStore;
     use ulid::Ulid;
 
-    #[tokio::test]
-    async fn test_admin_fence_writers() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_kv_store";
-
-        // open db and assert that it can write.
-        let db = Db::builder(path, object_store.clone())
-            .build()
-            .await
-            .unwrap();
-        db.put(b"1", b"1").await.unwrap();
-
-        let admin = Admin::builder(path, object_store).build();
-
-        let table_store = admin.table_store();
-        let wal_id = admin.fence_writers(&table_store).await.unwrap();
-
-        assert_eq!(table_store.last_seen_wal_id().await.unwrap(), wal_id);
-
-        // assert that db can no longer write.
-        let err = db.put(b"1", b"1").await.unwrap_err();
-        assert_eq!(err.to_string(), "Closed error: detected newer DB client");
-    }
-
     #[test]
     fn test_load_object_store_from_env() {
         figment::Jail::expect_with(|jail| {
@@ -902,5 +909,29 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_admin_fence_writers() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+
+        // open db and assert that it can write.
+        let db = Db::builder(path, object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"1", b"1").await.unwrap();
+
+        let admin = Admin::builder(path, object_store).build();
+
+        let table_store = admin.table_store();
+        let wal_id = admin.fence_writers(&table_store).await.unwrap();
+
+        assert_eq!(table_store.last_seen_wal_id().await.unwrap(), wal_id);
+
+        // assert that db can no longer write.
+        let err = db.put(b"1", b"1").await.unwrap_err();
+        assert_eq!(err.to_string(), "Closed error: detected newer DB client");
     }
 }
