@@ -1,6 +1,7 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
+use crate::compactor::CompactionRequest;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::dispatcher::MessageHandlerExecutor;
@@ -119,6 +120,27 @@ impl Admin {
         };
 
         Ok(Some(serde_json::to_string(compaction)?))
+    }
+
+    /// Submit a compaction request and return the submitted compaction as JSON.
+    pub async fn submit_compaction(
+        &self,
+        request: CompactionRequest,
+    ) -> Result<String, Box<dyn Error>> {
+        let compactor = crate::CompactorBuilder::new(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.seed())
+        .build();
+
+        let compaction_id = compactor.submit(request).await?;
+        let Some(compaction_json) = self.read_compaction(compaction_id).await? else {
+            return Err(Box::new(SlateDBError::InvalidDBState));
+        };
+
+        Ok(compaction_json)
     }
 
     /// List compactions files within a range
@@ -652,6 +674,7 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
+    use crate::compactor::CompactionRequest;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -806,6 +829,43 @@ mod tests {
         assert_eq!(
             value.get("id").and_then(|v| v.as_str()).unwrap(),
             compaction_id.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_submit_compaction() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_submit_compaction");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+        let spec = CompactionSpec::new(vec![SourceId::SortedRun(3)], 3);
+        let compaction_json = admin
+            .submit_compaction(CompactionRequest::Spec(spec))
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&compaction_json).unwrap();
+        let sources = value
+            .get("spec")
+            .and_then(|v| v.get("sources"))
+            .and_then(|v| v.as_array())
+            .unwrap();
+
+        assert_eq!(
+            value
+                .get("spec")
+                .and_then(|v| v.get("destination"))
+                .and_then(|v| v.as_u64())
+                .unwrap(),
+            3
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            value.get("status").and_then(|v| v.as_str()).unwrap(),
+            "Submitted"
         );
     }
 }
