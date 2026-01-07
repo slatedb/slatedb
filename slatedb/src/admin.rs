@@ -88,6 +88,9 @@ impl Admin {
     }
 
     /// Read-only access to the latest compactions file
+    ///
+    /// ## Arguments
+    /// - `maybe_id`: Optional ID of the compactions file to read. If None, reads from the latest.
     pub async fn read_compactions(
         &self,
         maybe_id: Option<u64>,
@@ -108,14 +111,35 @@ impl Admin {
         }
     }
 
-    /// Read-only access to a compaction by id from the latest compactions file.
-    pub async fn read_compaction(&self, id: Ulid) -> Result<Option<String>, Box<dyn Error>> {
+    /// Read-only access to a compaction by id from a specific or latest compactions file.
+    ///
+    /// ## Arguments
+    /// - `compaction_id`: The ULID of the compaction to read.
+    /// - `maybe_id`: Optional ID of the compactions file to read from. If None, reads from the latest.
+    ///
+    /// ## Returns
+    /// - `Ok(Some(String))`: The compaction as a JSON string if found.
+    /// - `Ok(None)`: If the compactions file or compaction ID does not exist.
+    pub async fn read_compaction(
+        &self,
+        compaction_id: Ulid,
+        maybe_id: Option<u64>,
+    ) -> Result<Option<String>, Box<dyn Error>> {
         let compactions_store = self.compactions_store();
-        let Some((_id, compactions)) = compactions_store.try_read_latest_compactions().await?
-        else {
+        let compactions = if let Some(compactions_id) = maybe_id {
+            compactions_store
+                .try_read_compactions(compactions_id)
+                .await?
+        } else {
+            compactions_store
+                .try_read_latest_compactions()
+                .await?
+                .map(|(_id, compactions)| compactions)
+        };
+        let Some(compactions) = compactions else {
             return Ok(None);
         };
-        let Some(compaction) = compactions.get(&id) else {
+        let Some(compaction) = compactions.get(&compaction_id) else {
             return Ok(None);
         };
 
@@ -136,7 +160,7 @@ impl Admin {
         .build();
 
         let compaction_id = compactor.submit(request).await?;
-        let Some(compaction_json) = self.read_compaction(compaction_id).await? else {
+        let Some(compaction_json) = self.read_compaction(compaction_id, None).await? else {
             return Err(Box::new(SlateDBError::InvalidDBState));
         };
 
@@ -820,7 +844,7 @@ mod tests {
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
         let compaction_json = admin
-            .read_compaction(compaction_id)
+            .read_compaction(compaction_id, None)
             .await
             .unwrap()
             .expect("expected compaction");
