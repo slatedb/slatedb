@@ -22,7 +22,6 @@ use fail_parallel::FailPointRegistry;
 use log::error;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use std::collections::HashSet;
 use std::env;
 use std::env::VarError;
 use std::error::Error;
@@ -385,7 +384,6 @@ impl Admin {
     ///
     /// Fails with SlateDBError::InvalidDeletion if there are any active checkpoints that will be
     /// lost after the restore.
-    /// TODO: Add option flag to retain existing checkpoints after restore, instead of failing.
     ///
     /// Failing at any point should rollback by deleting the restored manifest, and any of the restored WALs.
     pub async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
@@ -402,27 +400,15 @@ impl Admin {
 
         let manifest_to_restore = manifest_store.read_manifest(checkpoint.manifest_id).await?;
 
-        let retained_checkpoint_ids: HashSet<_> = manifest_to_restore
-            .core
-            .checkpoints
-            .iter()
-            .map(|c| c.id)
-            .collect();
         current_manifest
             .maybe_apply_update(|stored_manifest| {
-                // Ensure there are no other active checkpoints before deleting
-                for cp in stored_manifest.object().core.checkpoints.iter() {
-                    match cp.expire_time {
-                        Some(expire_time) if self.system_clock.now() >= expire_time => continue,
-                        _ => {}
-                    }
-                    if !retained_checkpoint_ids.contains(&cp.id) {
-                        return Err(SlateDBError::InvalidDeletion);
-                    }
-                }
-
                 let mut dirty = stored_manifest.prepare_dirty()?;
                 dirty.value = manifest_to_restore.clone();
+
+                // do not restore old checkpoints as they can be invalid at this point in time.
+                // instead keep the checkpoints of the current manifest which should all still be
+                // valid.
+                dirty.value.core.checkpoints = stored_manifest.object().core.checkpoints.clone();
 
                 dirty.value.core.replay_after_wal_id = fencing_wal;
                 dirty.value.core.next_wal_sst_id = fencing_wal + 1;
