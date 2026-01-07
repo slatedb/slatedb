@@ -1,6 +1,14 @@
+import json
+
 import pytest
 
-from slatedb import InvalidError, SlateDB, SlateDBAdmin, SlateDBReader
+from slatedb import (
+    InvalidError,
+    SlateDB,
+    SlateDBAdmin,
+    SlateDBCompactionRequest,
+    SlateDBReader,
+)
 
 
 def test_admin_create_checkpoint_without_name(db_path, env_file):
@@ -16,6 +24,7 @@ def test_admin_create_checkpoint_without_name(db_path, env_file):
     assert isinstance(result["id"], str) and len(result["id"]) > 0
     assert isinstance(result["manifest_id"], int)
 
+
 def test_admin_create_checkpoint_with_name(db_path, env_file):
     """Admin can create a detached checkpoint with a name and return id + manifest_id."""
     db = SlateDB(db_path, env_file=env_file)
@@ -25,6 +34,7 @@ def test_admin_create_checkpoint_with_name(db_path, env_file):
     result = admin.create_checkpoint(name="my_checkpoint")
     assert result is not None
     assert isinstance(result["id"], str) and len(result["id"]) > 0
+
 
 def test_admin_list_checkpoints(db_path, env_file):
     """Admin can list checkpoints, and list includes newly created ones."""
@@ -40,6 +50,7 @@ def test_admin_list_checkpoints(db_path, env_file):
     cps = admin.list_checkpoints(name=None)
     # Expect at least one checkpoint and that the created id is present
     assert any(c["id"] == created["id"] for c in cps)
+
 
 def test_admin_list_checkpoints_with_name(db_path, env_file):
     """Admin can list checkpoints, and list includes newly created ones."""
@@ -103,6 +114,7 @@ def test_admin_create_checkpoint_with_options(db_path, env_file):
     with pytest.raises(InvalidError):
         admin.create_checkpoint(source="not-a-uuid")
 
+
 def test_admin_manifest_read_and_list(db_path, env_file):
     # Create some data
     db = SlateDB(db_path, env_file=env_file)
@@ -120,6 +132,35 @@ def test_admin_manifest_read_and_list(db_path, env_file):
     listing2 = admin.list_manifests(start=0, end=2**63 - 1)
     assert isinstance(listing2, str)
 
+
+def test_admin_compactions_read_list_submit(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"c1", b"v1")
+    db.close()
+
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    compactions = admin.read_compactions()
+    assert compactions is None or isinstance(compactions, str)
+    listing = admin.list_compactions()
+    assert isinstance(listing, str)
+
+    request = SlateDBCompactionRequest.spec(
+        json.dumps({"sources": [{"SortedRun": 3}], "destination": 3})
+    )
+    submitted = admin.submit_compaction(request)
+    assert isinstance(submitted, str)
+    submitted_payload = json.loads(submitted)
+    compaction_id = submitted_payload["id"]
+
+    read_back = admin.read_compaction(compaction_id)
+    assert read_back is not None
+
+    if compactions is not None:
+        compactions_id = json.loads(compactions)[0]
+        read_specific = admin.read_compaction(compaction_id, compactions_id=compactions_id)
+        assert read_specific is not None
+
+
 @pytest.mark.asyncio
 async def test_admin_manifest_read_and_list_async(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
@@ -131,6 +172,29 @@ async def test_admin_manifest_read_and_list_async(db_path, env_file):
     assert m is None or isinstance(m, str)
     listing = await admin.list_manifests_async()
     assert isinstance(listing, str)
+
+
+@pytest.mark.asyncio
+async def test_admin_compactions_read_list_submit_async(db_path, env_file):
+    db = SlateDB(db_path, env_file=env_file)
+    db.put(b"c2", b"v2")
+    db.close()
+
+    admin = SlateDBAdmin(db_path, env_file=env_file)
+    compactions = await admin.read_compactions_async()
+    assert compactions is None or isinstance(compactions, str)
+    listing = await admin.list_compactions_async()
+    assert isinstance(listing, str)
+
+    request = SlateDBCompactionRequest.spec(
+        json.dumps({"sources": [{"SortedRun": 4}], "destination": 4})
+    )
+    submitted = await admin.submit_compaction_async(request)
+    submitted_payload = json.loads(submitted)
+    compaction_id = submitted_payload["id"]
+    read_back = await admin.read_compaction_async(compaction_id)
+    assert read_back is not None
+
 
 @pytest.mark.asyncio
 async def test_admin_create_checkpoint_and_list_async_with_no_name(db_path, env_file):
@@ -144,6 +208,7 @@ async def test_admin_create_checkpoint_and_list_async_with_no_name(db_path, env_
     cps = await admin.list_checkpoints_async(name=None)
     assert any(c["id"] == res["id"] for c in cps)
 
+
 @pytest.mark.asyncio
 async def test_admin_create_checkpoint_and_list_async_with_name(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
@@ -156,6 +221,7 @@ async def test_admin_create_checkpoint_and_list_async_with_name(db_path, env_fil
     cps = await admin.list_checkpoints_async(name="my_checkpoint")
     assert any(c["id"] == res["id"] for c in cps)
 
+
 def test_admin_refresh_and_delete_checkpoint(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
     db.put(b"rk", b"v")
@@ -167,6 +233,7 @@ def test_admin_refresh_and_delete_checkpoint(db_path, env_file):
     # delete (ensure it doesn't raise)
     admin.delete_checkpoint(res["id"])
 
+
 @pytest.mark.asyncio
 async def test_admin_refresh_and_delete_checkpoint_async(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
@@ -177,6 +244,7 @@ async def test_admin_refresh_and_delete_checkpoint_async(db_path, env_file):
     await admin.refresh_checkpoint_async(res["id"], lifetime=1000)
     await admin.delete_checkpoint_async(res["id"])
 
+
 def test_admin_sequence_time_mapping(db_path, env_file):
     # Just verify methods return int|None without raising
     db = SlateDB(db_path, env_file=env_file)
@@ -186,9 +254,11 @@ def test_admin_sequence_time_mapping(db_path, env_file):
     ts = admin.get_timestamp_for_sequence(0, round_up=False)
     assert ts is None or isinstance(ts, int)
     import time
+
     now = int(time.time() * 1000)
     seq = admin.get_sequence_for_timestamp(now, round_up=False)
     assert seq is None or isinstance(seq, int)
+
 
 @pytest.mark.asyncio
 async def test_admin_sequence_time_mapping_async(db_path, env_file):
@@ -199,9 +269,11 @@ async def test_admin_sequence_time_mapping_async(db_path, env_file):
     ts = await admin.get_timestamp_for_sequence_async(0, round_up=False)
     assert ts is None or isinstance(ts, int)
     import time
+
     now = int(time.time() * 1000)
     seq = await admin.get_sequence_for_timestamp_async(now, round_up=False)
     assert seq is None or isinstance(seq, int)
+
 
 @pytest.mark.asyncio
 async def test_admin_create_clone_sync_and_async(db_path, env_file, tmp_path):
@@ -227,6 +299,7 @@ async def test_admin_create_clone_sync_and_async(db_path, env_file, tmp_path):
     assert child2.get(b"cK") == b"cV"
     child2.close()
 
+
 def test_admin_run_gc_variants(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
     db.put(b"gk", b"gv")
@@ -236,6 +309,7 @@ def test_admin_run_gc_variants(db_path, env_file):
     admin.run_gc_once(manifest_min_age=0, wal_min_age=0, compacted_min_age=0)
     # schedule background with no options (no-ops but should not raise)
     admin.run_gc()
+
 
 @pytest.mark.asyncio
 async def test_admin_run_gc_variants_async(db_path, env_file):
