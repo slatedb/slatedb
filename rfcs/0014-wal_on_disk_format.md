@@ -10,6 +10,9 @@ Table of Contents:
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
 - [Design](#design)
+   * [Format](#format)
+   * [Serialization](#serialization)
+   * [Deserialization](#deserialization)
 - [Impact Analysis](#impact-analysis)
    * [Core API & Query Semantics](#core-api-query-semantics)
    * [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
@@ -77,8 +80,8 @@ For these reasons, the WAL can be implemented with a first-in first-out (FIFO) d
 format that sequentially stores and loads records without any specific indices or filters.
 
 The overhead of using the skip map and the SST format for the WAL can be seen in the two flamegraphs included in 
-GitHub issue [#1085](https://github.com/slatedb/slatedb/issues/1085). The overhead hinders higher ingest throughput 
-into slateDB.
+GitHub issue [#1085](https://github.com/slatedb/slatedb/issues/1085).
+The overhead hinders higher ingest throughput into SlateDB.
 
 <!-- What problem are we solving? What user or system pain exists today? Include concrete examples and why “do nothing” is insufficient. -->
 
@@ -96,17 +99,20 @@ Merely, some desirable properties will be mentioned.
 <!-- TOC --><a name="design"></a>
 ## Design
 
+<!-- TOC --><a name="format"></a>
+### Format
+
 The proposed new persistence format for the WAL objects starts with a list of variable-length records.
 
 A record consists of:
 - a sequence number represented by an 8-bytes unsigned integer,
 - 8 flags in a 1-byte unsigned integer,
-- optional expiration timestamp and creation timestamp of the record each represented by 8 bytes signed integer,
+- optional the expiration timestamp and the creation timestamp of the record, each represented by 8 bytes signed integer,
 - key length as a 2-bytes unsigned integer followed by the number of bytes set in the key length containing the actual key,
 - value length as a 4-bytes unsigned integer followed by the number of bytes set in the value length containing the actual value.
 
 All the integers are in little endian.
-The flags specify the type of the record and whether the records contain a expiration and/or creation timestamp.
+The flags specify the type of the record and whether the records contain the expiration and/or creation timestamp.
 The timestamps are milliseconds since the unix epoch.
 
 Record:
@@ -133,8 +139,8 @@ Record:
 Flags:
 ```
 b_0, b_1 = (0, 0) if the record is a value,
-           (0,1) if the record is a tombstone,
-           (1,0) if the record is a merge operand,
+           (0, 1) if the record is a tombstone,
+           (1, 0) if the record is a merge operand,
            (1, 1) free
 b_2 = 1 if the record has an expiration timestamp, 0 otherwise
 b_3 = 1 if the record has a creation timestamp, 0 otherwise
@@ -145,23 +151,21 @@ If the record is a tombstone, the value length and the actual values are omitted
 
 The list of records is followed by a compressed list of offsets,
 where each offset points to one record.
-The used compression codec is specified after the compressed list of record offsets
-with a 1 byte unsigned integer.
+Since the compressed list of offsets might be of variable length,
+it is followed by the size of the compressed list as a 4 bytes unsigned integer.
+After the size of the compressed list, the used compression codec is specified as a 1 byte unsigned integer.
 Initially, the available compression codecs are no compression and a delta encoding that
-still needs to be specified.
+still needs to be determined/specified.
 The record offsets in the list have the same order as the records.
-That is, the 0th offset points to the 0th record in the record list,
+That is, the 0th offset points to the 0th record,
 the 1st offset points to the 1st record in the record list, and so on.
-After the compressed list of record offsets and the compression codec, the format contains
-the size of the compressed list as an 4 bytes unsigned integer,
-followed by the number of records in the WAL object as a 4 bytes unsigned integer.
-The number of records is followed by the CRC32 checksum as a 4 bytes unsigned integer.
+Then the format stores the CRC32 checksum of the records and the list of offsets
+including the size and the compression codec as a 4 bytes unsigned integer.
 The last two fields are the version of the format as a 2 bytes unsigned integer,
 and the type of the object as a 1 byte unsigned integer -- 0x00 for `WAL` in this case.
-Future formats of data objects in slatedb should use the same schema at the end of the
+Future formats of data objects in SlateDB should use the same schema at the end of the
 footer to specify its type and the version of its format.
 All integers are in little endian.
-
 
 ```
 +----------------------------------------------------------------+
@@ -178,23 +182,52 @@ All integers are in little endian.
 |  before compression each offset is                             |
 |  8-bytes unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
-| compression codec (1-byte unsigned integer, little endian)     |
-+----------------------------------------------------------------+
 | size of the compressed array of offsets                        |
 | (4-bytes unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
-| number of records N (4-bytes unsigned integer, little endian)  |
+| compression codec (1-byte unsigned integer, little endian)     |
 +----------------------------------------------------------------+
 | CRC32 checksum (4-bytes, unsigned integer, little endian)      |
 +----------------------------------------------------------------+
 | version of format (2-bytes, unsigned integer, little endian)   |
 +----------------------------------------------------------------+
-| type of object (1-byte, unsigned integer, little endian)         |
+| type of object (1-byte, unsigned integer, little endian)       |
 +----------------------------------------------------------------+
 ```
 
 Ideally, the in-memory data structure for the WAL stores the incoming records in ingestion order, so that the records do not need
 to be re-ordered before the flush. A simple FIFO data structure like a queue is recommended.
+
+<!-- TOC --><a name="serialization"></a>
+### Serialization
+
+Records are serialized into the record format.
+All needed data to serialize the records into the format is present in the records.
+The serialized bytes of the records are added one after the other in ingestion order into the WAL object.
+For each serialized record, the offset from the beginning of the WAL object to the start of the serialized
+record is maintained in a list.
+Once all serialized records that should be stored in the WAL object are added,
+the list of offsets is compressed with a codec and the compressed list is added to the WAL object.
+Then the size of the compressed list is added to the WAL object
+followed by the identifier of the used compression codec.
+A CRC32 checksum is computed over the records, the offsets, the size of the offsets, as well as the compression codec
+and the checksum is added to the WAL object.
+Finally, the version of the format (i.e., `1`) and the type of the object (i.e., `0x00`) are added to the WAL object.
+
+<!-- TOC --><a name="deserialization"></a>
+### Deserialization
+
+The WAL object is read from the end.
+First, the type of the object and the version are deserialized and verified to know whether the object is indeed a
+WAL object and with what version the WAL object was serialized.
+Then, the CRC checksum is verified that the WAL object is valid.
+Next, the compression codec identifier for the list of offsets is deserialized.
+After that, the size of the compressed list of offsets is deserialized.
+The size is subtracted from the current offset of the WAL object to find the offset of the WAL object
+where the compressed list starts.
+The bytes from the starting point to the field that holds the size are decompressed with the compression
+codec found in the WAL object in the previous step.
+Now, all information are available to sequentially read and deserialize all records.
 
 <!-- TOC --><a name="impact-analysis"></a>
 ## Impact Analysis
@@ -277,15 +310,19 @@ The latency for writes without durability guarantee might be lower if the in-mem
 data structure as recommended in this RFC, since writes to the in-memory WAL are faster.
 A WAL object is read for recovery.
 If we define the latency of recovery as the time until the in-memory state is re-established then the new persistence 
-format might decrease the latency of recovery because more records can be read from object storage given an encoded size 
-of the WAL object.
+format might decrease the latency of recovery because the records in the WAL do not need to be re-sorted according
+to the sequence number.
 The latency of compaction is not affected by the new persistence format.
 - **Throughput (reads/writes/compactions):**
-The throughput of writes with durability guarantee might be higher since the new persistence format has less space 
-overhead without indices and filters. 
-Thus, with the new format slateDB can write more WAL records per time unit to object storage compared to the current 
-format given the same encoded size of the WAL object.
-Additionally, the new persistence format allows to recover more records per time unit.
+Since the new persistence format has less space overhead without indices and filters,
+a WAL object can be sent faster to object storage for large WAL objects
+(small object are dominated by the first-byte latency).
+Thus, with the new format SlateDB can write more WAL records per time unit to object storage
+compared to the current format.
+The difference might not be significant, though.
+Additionally, the new persistence format might allow to recover more records per time unit
+since the records can be replayed faster (no re-sorting)
+and fewer bytes need to read from object storage (no filter and index blocks).
 The throughput of compaction is not affected by the new persistence format.
 - **Object-store request (GET/LIST/PUT) and cost profile:**
 If the WAL is stored on S3 Express to reduce latency, the new format reduces transfer costs
@@ -313,18 +350,18 @@ All three amplifications are reduced.
       have the extension `.sst`.
     - WAL objects in the new format are also stored in the `\wal` directory,
       but have the extension `.wal`.
-    - slatedb decides which codec to use according to the extension of the WAL objects.
-    - slatedb will only write WAL objects in the new format.
+    - SlateDB decides which codec to use according to the extension of the WAL objects.
+    - SlateDB will only write WAL objects in the new format.
 - Existing public APIs (including bindings): No
 - Rolling upgrades / mixed-version behavior (if applicable)
-  - Clean shutdown (ideal rolling upgrage behavior):
-    slatedb flushed all data in the WAL to a L0 SST on object storage.
+  - Clean shutdown (ideal rolling upgrade behavior):
+    SlateDB flushed all data in the WAL to a L0 SST on object storage.
     No WAL object needs to be replayed.
-    New WAL object are written in the new WAL format with extension `.wal`.
+    New WAL objects are written in the new WAL format with extension `.wal`.
   - Dirty shutdown (erroneous rolling upgrade behavior):
-    slatedb did not flush all data in the WAL to a L0 SST on object storage.
+    SlateDB did not flush all data in the WAL to a L0 SST on object storage.
     WAL objects need to be replayed.
-    If slatedb finds WAL objects with extension `.sst` it will decode them with the old format.
+    If SlateDB finds WAL objects with extension `.sst` it will decode them with the old format.
     New WAL objects are written in the new WAL format with extension `.wal`.
 
 <!-- TOC --><a name="testing"></a>
@@ -348,19 +385,37 @@ All three amplifications are reduced.
 <!-- Describe the plan for rolling out this change to production. -->
 
 - Milestones / phases:
-- Feature flags / opt-in:
+  - Develop new WAL format alongside the old format, guarded by an experimental flag
+  - Run performance tests and make adjustments
+  - Update docs and switch to the new format by default
+  - Remove old format and experimental flag
+- Feature flags / opt-in: No feature flag, new WAL format will become the default
 - Docs updates:
+  - Update design documentation in SlateDB where the WAL is mentioned
+  - Check remaining documentation for mentions of the WAL
 
 <!-- TOC --><a name="alternatives"></a>
 ## Alternatives
 
-List the serious alternatives and why they were rejected (including “status quo”). Include trade-offs and risks.
+- By keeping the current WAL format we would not fix the performance issues seen in the flamegraph in GitHub issue [#1085](https://github.com/slatedb/slatedb/issues/1085)
+- Designing the new WAL format as version 2 of the SST format would blur the distinction between WAL objects
+  that are used for writing and durability and SST objects that are optimized for reading the data.
+- Using sizes of records instead of the offsets of records in the new WAL format would complicate the possible future
+  addition of indices to the records in the WAL (e.g. for multi-writer support).
+- Adding a configuration for the maximal size of the WAL instead of using the size of the L0 SSTs would increase the
+  surface of the configuration without obvious benefits.
+- Adding a magic number to the WAL format to distinguish it from files external to SlateDB did not seem to be necessary
+  since the likelihood of having external files in SlateDB directories seems low.
+- Coding the sequence number as a delta of a minimum sequence number instead of writing the full 8 bytes number
+  in each record would save space, but it would not be straight-forward.
+  All records in the same write batch have the same sequence number and a write batch can contain an arbitrary number
+  of records.
+  To use deltas of the sequence numbers, we need to maintain information about write batch boundaries which seemed
+  not worth the effort.
 
 <!-- TOC --><a name="open-questions"></a>
 ## Open Questions
-
-- Should the WAL be compressed when flushed? Or at least should compression be configurable?
-- Migration from the SST format to the new format is still to be determined.
+No
 
 <!-- TOC --><a name="references"></a>
 ## References
