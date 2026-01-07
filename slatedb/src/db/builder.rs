@@ -122,12 +122,12 @@ use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
 use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
+use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::compactor_executor::TokioCompactionExecutor;
-use crate::compactor_stats::CompactionStats;
 use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
@@ -151,7 +151,7 @@ use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::sst::SsTableFormat;
+use crate::sst::{BlockTransformer, SsTableFormat};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
@@ -175,6 +175,7 @@ pub struct DbBuilder<P: Into<Path>> {
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
     merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -195,6 +196,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             seed: None,
             sst_block_size: None,
             merge_operator: None,
+            block_transformer: None,
         }
     }
 
@@ -309,16 +311,49 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the block transformer to use for the database. The block transformer
+    /// allows custom encoding/decoding of block data before storage and after
+    /// retrieval. This can be used for encryption or other transformations.
+    ///
+    /// The transformer is applied after compression on write and before
+    /// decompression on read. The checksum is calculated on the transformed data.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_transformer` - An Arc-wrapped block transformer implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
-        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> = self
-            .wal_object_store
-            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
+        let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
+        let system_clock = self
+            .system_clock
+            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
+
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+            self.main_object_store,
+            rand.clone(),
+            system_clock.clone(),
+        ));
+        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
+            self.wal_object_store.map(|s| {
+                Arc::new(RetryingObjectStore::new(
+                    s,
+                    rand.clone(),
+                    system_clock.clone(),
+                )) as Arc<dyn ObjectStore>
+            });
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
@@ -332,8 +367,6 @@ impl<P: Into<Path>> DbBuilder<P> {
                 path, self.settings
             );
         }
-
-        let rand = Arc::new(self.seed.map(DbRand::new).unwrap_or_default());
 
         let logical_clock = self
             .logical_clock
@@ -349,10 +382,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             ))
         });
 
-        let system_clock = self
-            .system_clock
-            .unwrap_or_else(|| Arc::new(DefaultSystemClock::new()));
-
         let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
 
         // Setup the components
@@ -362,6 +391,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             filter_bits_per_key: self.settings.filter_bits_per_key,
             compression_codec: self.settings.compression_codec,
             block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
+            block_transformer: self.block_transformer.clone(),
             ..SsTableFormat::default()
         };
 
@@ -586,6 +616,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             let gc_options = self.settings.garbage_collector_options.unwrap_or_default();
             let gc = GarbageCollector::new(
                 manifest_store.clone(),
+                compactions_store.clone(),
                 uncached_table_store.clone(),
                 gc_options,
                 inner.stat_registry.clone(),
@@ -693,6 +724,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     options: GarbageCollectorOptions,
     stat_registry: Arc<StatRegistry>,
     system_clock: Arc<dyn SystemClock>,
+    rand: Arc<DbRand>,
 }
 
 impl<P: Into<Path>> GarbageCollectorBuilder<P> {
@@ -704,6 +736,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             options: GarbageCollectorOptions::default(),
             stat_registry: Arc::new(StatRegistry::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
+            rand: Arc::new(DbRand::default()),
         }
     }
 
@@ -726,6 +759,12 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         self
     }
 
+    /// Sets the random number generator seed to use for the garbage collector.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Arc::new(DbRand::new(seed));
+        self
+    }
+
     /// Sets the WAL object store to use for the garbage collector.
     #[allow(unused)]
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
@@ -736,11 +775,23 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
     /// Builds and returns a GarbageCollector instance.
     pub fn build(self) -> GarbageCollector {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
-        let retrying_wal_object_store = self
-            .wal_object_store
-            .map(|s| Arc::new(RetryingObjectStore::new(s)) as Arc<dyn ObjectStore>);
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+            self.main_object_store,
+            self.rand.clone(),
+            self.system_clock.clone(),
+        ));
+        let retrying_wal_object_store = self.wal_object_store.map(|s| {
+            Arc::new(RetryingObjectStore::new(
+                s,
+                self.rand.clone(),
+                self.system_clock.clone(),
+            )) as Arc<dyn ObjectStore>
+        });
         let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
             &path,
             retrying_main_object_store.clone(),
         ));
@@ -755,6 +806,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         ));
         GarbageCollector::new(
             manifest_store,
+            compactions_store,
             table_store,
             self.options,
             self.stat_registry,
@@ -769,7 +821,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
 pub struct CompactorBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,
-    tokio_handle: Handle,
+    compaction_runtime: Handle,
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
     rand: Arc<DbRand>,
@@ -777,6 +829,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     system_clock: Arc<dyn SystemClock>,
     closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
     merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
 #[allow(unused)]
@@ -785,7 +838,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         Self {
             path,
             main_object_store,
-            tokio_handle: Handle::current(),
+            compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: None,
             rand: Arc::new(DbRand::default()),
@@ -793,13 +846,14 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             system_clock: Arc::new(DefaultSystemClock::default()),
             closed_result: WatchableOnceCell::new(),
             merge_operator: None,
+            block_transformer: None,
         }
     }
 
     /// Sets the tokio handle to use for background tasks.
     #[allow(unused)]
-    pub fn with_tokio_handle(mut self, tokio_handle: Handle) -> Self {
-        self.tokio_handle = tokio_handle;
+    pub fn with_runtime(mut self, compaction_runtime: Handle) -> Self {
+        self.compaction_runtime = compaction_runtime;
         self
     }
 
@@ -823,8 +877,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     }
 
     /// Sets the random number generator to use for the compactor.
-    pub fn with_rand(mut self, rand: Arc<DbRand>) -> Self {
-        self.rand = rand;
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rand = Arc::new(DbRand::new(seed));
         self
     }
 
@@ -843,10 +897,20 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the block transformer to use for the compactor.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
-        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(self.main_object_store));
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
+            self.main_object_store,
+            self.rand.clone(),
+            self.system_clock.clone(),
+        ));
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
             retrying_main_object_store.clone(),
@@ -855,9 +919,13 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
+        let sst_format = SsTableFormat {
+            block_transformer: self.block_transformer.clone(),
+            ..SsTableFormat::default()
+        };
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(retrying_main_object_store.clone(), None),
-            SsTableFormat::default(), // read only SSTs can use default
+            sst_format,
             path,
             None, // no need for cache in GC
         ));
@@ -872,7 +940,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             table_store,
             self.options,
             scheduler_supplier,
-            self.tokio_handle,
+            self.compaction_runtime,
             self.rand,
             self.stat_registry,
             self.system_clock,

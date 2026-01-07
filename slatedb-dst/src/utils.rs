@@ -25,6 +25,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use crate::dst::DstDuration;
+use crate::dst::DstLogicalClock;
 use crate::object_store::ClockedObjectStore;
 use crate::DefaultDstDistribution;
 use crate::Dst;
@@ -49,7 +50,7 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
 pub async fn build_dst(
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
-    logical_clock: Arc<dyn LogicalClock>,
+    logical_clock: Arc<dyn DstLogicalClock>,
     rand: Rc<DbRand>,
     dst_opts: DstOptions,
 ) -> Result<Dst, Error> {
@@ -64,6 +65,7 @@ pub async fn build_dst(
     Dst::new(
         db,
         system_clock,
+        logical_clock,
         rand.clone(),
         Box::new(DefaultDstDistribution::new(rand, dst_opts.clone())),
         dst_opts,
@@ -124,16 +126,28 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         compression_codec,
         garbage_collector_options: Some(GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(900),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
+            }),
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
         }),
         compactor_options: Some(CompactorOptions::default()),
@@ -189,7 +203,7 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
 pub async fn run_simulation(
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
-    logical_clock: Arc<dyn LogicalClock>,
+    logical_clock: Arc<dyn DstLogicalClock>,
     rand: Rc<DbRand>,
     dst_duration: DstDuration,
     dst_opts: DstOptions,

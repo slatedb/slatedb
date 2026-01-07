@@ -27,7 +27,7 @@ impl std::fmt::Debug for WalGcTask {
 }
 
 impl WalGcTask {
-    pub fn new(
+    pub(super) fn new(
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,
@@ -72,12 +72,12 @@ impl GcTask for WalGcTask {
     ///  - older than the minimum age specified in the options
     ///  - older than the last compacted WAL SST.
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
-        let active_manifests = self.manifest_store.read_active_manifests().await?;
-        let latest_manifest = active_manifests
-            .last_key_value()
-            .ok_or(SlateDBError::LatestTransactionalObjectVersionMissing)?
-            .1;
-
+        let (latest_manifest_id, latest_manifest) =
+            self.manifest_store.read_latest_manifest().await?;
+        let active_manifests = self
+            .manifest_store
+            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .await?;
         let last_compacted_wal_sst_id = latest_manifest.core.replay_after_wal_id;
         let min_age = self.wal_sst_min_age();
         let sst_ids_to_delete = self

@@ -1,5 +1,6 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
+use crate::compactions_store::CompactionsStore;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::db_state::SsTableId;
@@ -30,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
@@ -91,6 +93,37 @@ impl Admin {
         Ok(serde_json::to_string(&manifests)?)
     }
 
+    /// Read-only access to the latest compactions file
+    pub async fn read_compactions(
+        &self,
+        maybe_id: Option<u64>,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        let compactions_store = self.compactions_store();
+        let id_compactions = if let Some(id) = maybe_id {
+            compactions_store
+                .try_read_compactions(id)
+                .await?
+                .map(|compactions| (id, compactions))
+        } else {
+            compactions_store.try_read_latest_compactions().await?
+        };
+
+        match id_compactions {
+            None => Ok(None),
+            Some(result) => Ok(Some(serde_json::to_string(&result)?)),
+        }
+    }
+
+    /// List compactions files within a range
+    pub async fn list_compactions<R: RangeBounds<u64>>(
+        &self,
+        range: R,
+    ) -> Result<String, Box<dyn Error>> {
+        let compactions_store = self.compactions_store();
+        let compactions = compactions_store.list_compactions(range).await?;
+        Ok(serde_json::to_string(&compactions)?)
+    }
+
     /// List checkpoints, optionally filtering by name. When name is provided, only checkpoints
     /// with this exact name will be returned.
     ///
@@ -145,6 +178,7 @@ impl Admin {
         .with_system_clock(self.system_clock.clone())
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
+        .with_seed(self.rand.seed())
         .build();
         gc.run_gc_once().await;
         Ok(())
@@ -166,6 +200,7 @@ impl Admin {
         .with_system_clock(self.system_clock.clone())
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
+        .with_seed(self.rand.seed())
         .build();
 
         let (_, rx) = mpsc::unbounded_channel();
@@ -185,6 +220,42 @@ impl Admin {
             .join_task(GC_TASK_NAME)
             .await
             .map_err(Into::<crate::Error>::into)
+    }
+
+    /// Run the compactor in the foreground until the provided cancellation token is cancelled.
+    ///
+    /// This method blocks until `cancellation_token` is cancelled, at which point it requests a
+    /// graceful shutdown and waits for the compactor to stop.
+    pub async fn run_compactor(
+        &self,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), crate::Error> {
+        let compactor = crate::CompactorBuilder::new(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.seed())
+        .build();
+
+        let mut run_task = tokio::spawn({
+            let compactor = compactor.clone();
+            async move { compactor.run().await }
+        });
+
+        tokio::select! {
+            result = &mut run_task => {
+                return match result {
+                    Ok(inner) => inner,
+                    Err(join_err) => Err(crate::Error::internal("compactor task failed".to_string()).with_source(Box::new(join_err))),
+                };
+            }
+            _ = cancellation_token.cancelled() => {
+                // fall through to shutdown logic
+            }
+        }
+
+        compactor.stop().await
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
@@ -431,6 +502,24 @@ impl Admin {
         Ok(manifest.core.sequence_tracker.find_seq(ts, opt))
     }
 
+    // Writes an empty WAL SST to storage to fence other writers. Returns the id of the WAL
+    // uploaded.
+    async fn fence_writers(&self, wal_store: &TableStore) -> Result<u64, SlateDBError> {
+        let mut empty_wal_id = wal_store.last_seen_wal_id().await?;
+
+        loop {
+            let empty_sst = wal_store.table_builder().build().await?;
+            match wal_store
+                .write_sst(&SsTableId::Wal(empty_wal_id), empty_sst, false)
+                .await
+            {
+                Ok(_) => return Ok(empty_wal_id),
+                Err(SlateDBError::Fenced) => empty_wal_id += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     fn manifest_store(&self) -> ManifestStore {
         ManifestStore::new(
             &self.path,
@@ -456,22 +545,11 @@ impl Admin {
         }
     }
 
-    // Writes an empty WAL SST to storage to fence other writers. Returns the id of the WAL
-    // uploaded.
-    async fn fence_writers(&self, wal_store: &TableStore) -> Result<u64, SlateDBError> {
-        let mut empty_wal_id = wal_store.last_seen_wal_id().await?;
-
-        loop {
-            let empty_sst = wal_store.table_builder().build()?;
-            match wal_store
-                .write_sst(&SsTableId::Wal(empty_wal_id), empty_sst, false)
-                .await
-            {
-                Ok(_) => return Ok(empty_wal_id),
-                Err(SlateDBError::Fenced) => empty_wal_id += 1,
-                Err(e) => return Err(e),
-            }
-        }
+    fn compactions_store(&self) -> CompactionsStore {
+        CompactionsStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
     }
 
     /// Clone a database. If no db already exists at the specified path, then this will create
@@ -612,75 +690,31 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
 
-/// Loads an AWS S3 Object store instance.
-///
-/// | Env Variable | Doc | Required |
-/// |--------------|-----|----------|
-/// | AWS_ACCESS_KEY_ID | The access key for a role with permissions to access the store | No |
-/// | AWS_SECRET_ACCESS_KEY | The access key secret for the above ID | No |
-/// | AWS_SESSION_TOKEN | The session token for the above ID | No |
-/// | AWS_BUCKET | The bucket to use within S3 | Yes |
-/// | AWS_REGION | The AWS region to use | Yes |
-/// | AWS_ENDPOINT | The endpoint to use for S3 (disables https) | No |
+/// Loads an AWS S3 Object store instance. The environment variables consumed are
+/// the same as those supported by [`AmazonS3Builder::from_env`]. Refer to the
+/// builder documentation for the full list and meaning of supported variables:
+/// <https://docs.rs/object_store/latest/object_store/aws/struct.AmazonS3Builder.html#method.with_config>
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     use object_store::aws::{S3ConditionalPut, S3CopyIfNotExists};
 
-    // Mandatory environment variables
-    let bucket = env::var("AWS_BUCKET").expect("AWS_BUCKET must be set");
-    let region = env::var("AWS_REGION").expect("AWS_REGION must be set");
-
-    // Optional environment variables (credentials / session token)
-    let key = env::var("AWS_ACCESS_KEY_ID").ok();
-    let secret = env::var("AWS_SECRET_ACCESS_KEY").ok();
-    let session_token = env::var("AWS_SESSION_TOKEN").ok();
-    let endpoint = env::var("AWS_ENDPOINT").ok();
-
-    // Start building the S3 object store builder with required params.
-    let mut builder = object_store::aws::AmazonS3Builder::from_env()
+    let builder = object_store::aws::AmazonS3Builder::from_env()
         .with_conditional_put(S3ConditionalPut::ETagMatch)
         .with_copy_if_not_exists(S3CopyIfNotExists::Header(
             "If-None-Match".to_string(),
             "*".to_string(),
-        ))
-        .with_bucket_name(bucket)
-        .with_region(region);
-
-    // If explicit credentials are supplied, configure them; otherwise rely on the AWS SDK
-    // default credential provider chain (which covers IMDS / IRSA).
-    if let (Some(access_key), Some(secret_key)) = (key, secret) {
-        builder = builder
-            .with_access_key_id(access_key)
-            .with_secret_access_key(secret_key);
-
-        if let Some(token) = session_token {
-            builder = builder.with_token(token);
-        }
-    }
-
-    if let Some(endpoint) = endpoint {
-        builder = builder.with_allow_http(true).with_endpoint(endpoint);
-    }
+        ));
 
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
 
-/// Loads an Azure Object store instance.
-///
-/// | Env Variable | Doc | Required |
-/// |--------------|-----|----------|
-/// | AZURE_ACCOUNT | The azure storage account name | Yes |
-/// | AZURE_KEY | The azure storage account key| Yes |
-/// | AZURE_CONTAINER | The storage container name| Yes |
+/// Loads an Azure Object store instance. The environment variables consumed are
+/// the same as those supported by [`MicrosoftAzureBuilder::from_env`]. Refer to
+/// the builder documentation for the full list and meaning of supported variables:
+/// <https://docs.rs/object_store/latest/object_store/azure/struct.MicrosoftAzureBuilder.html#method.with_config>
 #[cfg(feature = "azure")]
 pub fn load_azure() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    let account = env::var("AZURE_ACCOUNT").expect("AZURE_ACCOUNT must be set");
-    let key = env::var("AZURE_KEY").expect("AZURE_KEY must be set");
-    let container = env::var("AZURE_CONTAINER").expect("AZURE_CONTAINER must be set");
-    let builder = object_store::azure::MicrosoftAzureBuilder::new()
-        .with_account(account)
-        .with_access_key(key)
-        .with_container_name(container);
+    let builder = object_store::azure::MicrosoftAzureBuilder::from_env();
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
 
@@ -732,11 +766,15 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 mod tests {
     use std::sync::Arc;
 
-    use crate::admin::load_object_store_from_env;
     use crate::admin::Admin;
+    use crate::admin::{load_object_store_from_env, AdminBuilder};
+    use crate::compactions_store::{CompactionsStore, StoredCompactions};
+    use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::Db;
     use object_store::memory::InMemory;
+    use object_store::path::Path;
     use object_store::ObjectStore;
+    use ulid::Ulid;
 
     #[tokio::test]
     async fn test_admin_fence_writers() {
@@ -784,5 +822,99 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[tokio::test]
+    async fn test_admin_read_compactions() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_read_compactions");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        let mut stored = StoredCompactions::create(compactions_store.clone(), 7)
+            .await
+            .unwrap();
+
+        let compaction_id = Ulid::new();
+        let compaction = Compaction::new(
+            compaction_id,
+            CompactionSpec::new(vec![SourceId::SortedRun(3)], 7),
+        );
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(compaction);
+        stored.update(dirty).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+
+        let latest = admin
+            .read_compactions(None)
+            .await
+            .unwrap()
+            .expect("expected compactions");
+        let latest_value: serde_json::Value = serde_json::from_str(&latest).unwrap();
+        let latest_pair = latest_value.as_array().expect("expected [id, compactions]");
+        assert_eq!(latest_pair[0].as_u64().unwrap(), 2);
+
+        let latest_compactions = latest_pair[1].as_object().unwrap();
+        assert_eq!(
+            latest_compactions
+                .get("compactor_epoch")
+                .and_then(|v| v.as_u64())
+                .unwrap(),
+            7
+        );
+        let recent = latest_compactions
+            .get("recent_compactions")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(recent.len(), 1);
+        let compaction_id_str = compaction_id.to_string();
+        let stored_compaction = recent
+            .get(compaction_id_str.as_str())
+            .expect("expected compaction entry");
+        assert_eq!(
+            stored_compaction
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap(),
+            compaction_id_str
+        );
+
+        let first = admin
+            .read_compactions(Some(1))
+            .await
+            .unwrap()
+            .expect("expected compactions");
+        let first_value: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let first_pair = first_value.as_array().expect("expected [id, compactions]");
+        assert_eq!(first_pair[0].as_u64().unwrap(), 1);
+        let first_compactions = first_pair[1].as_object().unwrap();
+        let first_recent = first_compactions
+            .get("recent_compactions")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(first_recent.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_compactions() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_list_compactions");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        let mut stored = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+        let listed = admin.list_compactions(..).await.unwrap();
+        let listed_value: Vec<serde_json::Value> = serde_json::from_str(&listed).unwrap();
+        let ids: Vec<u64> = listed_value
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|id| id.as_u64()))
+            .collect();
+
+        assert_eq!(ids, vec![1, 2]);
     }
 }

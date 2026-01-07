@@ -18,13 +18,15 @@ var _ = Describe("DB", func() {
 	It("should return error if CLOUD_PROVIDER is undefined", func() {
 		db, err := slatedb.Open("path/to/db")
 		Expect(err).To(HaveOccurred())
+		Expect(err).Should(MatchError(ContainSubstring("undefined environment variable")))
 		Expect(db).To(BeNil())
 	})
 
 	Describe("Operations", func() {
 		var (
-			db     *slatedb.DB
-			tmpDir string
+			db      *slatedb.DB
+			tmpDir  string
+			envFile string
 		)
 
 		BeforeEach(func() {
@@ -32,7 +34,7 @@ var _ = Describe("DB", func() {
 			tmpDir, err = os.MkdirTemp("", "slatedb_db_test_*")
 			Expect(err).NotTo(HaveOccurred())
 
-			envFile, err := createEnvFile(tmpDir)
+			envFile, err = createEnvFile(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 
 			db, err = slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
@@ -268,6 +270,17 @@ var _ = Describe("DB", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				db = nil // Prevent double close in AfterEach
+			})
+
+			It("should allow only one writer", func() {
+				Expect(db.Put([]byte("key"), []byte("value"))).NotTo(HaveOccurred())
+
+				anotherDB, err := slatedb.Open(tmpDir, slatedb.WithEnvFile[slatedb.DbConfig](envFile))
+				Expect(err).NotTo(HaveOccurred())
+				defer func() { Expect(anotherDB.Close()).NotTo(HaveOccurred()) }()
+
+				Expect(anotherDB.Put([]byte("key1"), []byte("value1"))).NotTo(HaveOccurred())
+				Expect(db.Put([]byte("key2"), []byte("value2"))).To(HaveOccurred())
 			})
 		})
 	})

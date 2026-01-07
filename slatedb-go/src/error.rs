@@ -1,4 +1,5 @@
 use crate::types::CSdbHandle;
+use crate::CSdbReaderHandle;
 use slatedb::Error as SlateError;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -33,26 +34,62 @@ impl std::fmt::Display for CSdbResult {
 }
 
 #[repr(C)]
-pub struct CSdbHandleResult(CSdbHandle, CSdbResult);
+pub struct CSdbHandleResult {
+    pub handle: CSdbHandle,
+    pub result: CSdbResult,
+}
 
-pub fn create_handle_error_result(error: CSdbError, message: &str) -> CSdbHandleResult {
+#[repr(C)]
+pub struct CSdbReaderHandleResult {
+    pub handle: CSdbReaderHandle,
+    pub result: CSdbResult,
+}
+
+pub(crate) fn create_handle_error_result(error: CSdbError, message: &str) -> CSdbHandleResult {
     let c_message =
         CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
-    CSdbHandleResult(
-        CSdbHandle::null(),
-        CSdbResult {
+    CSdbHandleResult {
+        handle: CSdbHandle::null(),
+        result: CSdbResult {
             error,
             message: c_message.into_raw(),
         },
-    )
+    }
 }
 
-pub fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
-    CSdbHandleResult(handler, create_success_result())
+pub(crate) fn create_handle_success_result(handler: CSdbHandle) -> CSdbHandleResult {
+    CSdbHandleResult {
+        handle: handler,
+        result: create_success_result(),
+    }
+}
+
+pub(crate) fn create_reader_handle_error_result(
+    error: CSdbError,
+    message: &str,
+) -> CSdbReaderHandleResult {
+    let c_message =
+        CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
+    CSdbReaderHandleResult {
+        handle: CSdbReaderHandle::null(),
+        result: CSdbResult {
+            error,
+            message: c_message.into_raw(),
+        },
+    }
+}
+
+pub(crate) fn create_reader_handle_success_result(
+    handler: CSdbReaderHandle,
+) -> CSdbReaderHandleResult {
+    CSdbReaderHandleResult {
+        handle: handler,
+        result: create_success_result(),
+    }
 }
 
 // Helper functions for error handling
-pub fn create_error_result(error: CSdbError, message: &str) -> CSdbResult {
+pub(crate) fn create_error_result(error: CSdbError, message: &str) -> CSdbResult {
     let c_message =
         CString::new(message).unwrap_or_else(|_| CString::new("Invalid UTF-8").unwrap());
     CSdbResult {
@@ -61,14 +98,14 @@ pub fn create_error_result(error: CSdbError, message: &str) -> CSdbResult {
     }
 }
 
-pub fn create_success_result() -> CSdbResult {
+pub(crate) fn create_success_result() -> CSdbResult {
     CSdbResult {
         error: CSdbError::Success,
         message: std::ptr::null_mut(),
     }
 }
 
-pub fn safe_str_from_ptr(ptr: *const c_char) -> Result<&'static str, CSdbError> {
+pub(crate) fn safe_str_from_ptr(ptr: *const c_char) -> Result<&'static str, CSdbError> {
     if ptr.is_null() {
         return Err(CSdbError::NullPointer);
     }
@@ -80,7 +117,7 @@ pub fn safe_str_from_ptr(ptr: *const c_char) -> Result<&'static str, CSdbError> 
     }
 }
 
-pub fn slate_error_to_code(error: &SlateError) -> CSdbError {
+pub(crate) fn slate_error_to_code(error: &SlateError) -> CSdbError {
     // Use string matching since we can't pattern match on the exact variants
     let error_str = format!("{:?}", error);
     if error_str.contains("NotFound") {

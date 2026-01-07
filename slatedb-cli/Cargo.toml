@@ -28,3 +28,6 @@ rstest = { workspace = true }
 name = "slatedb"
 path = "src/main.rs"
 bench = false
+
+[lints]
+workspace = true

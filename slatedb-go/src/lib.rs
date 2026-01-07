@@ -13,7 +13,7 @@ pub mod memory; // Make this public so extern "C" functions are exported
 
 // Re-export types that need to be visible to C
 pub use db_reader::{CSdbReaderHandle, CSdbReaderOptions};
-pub use error::{CSdbError, CSdbResult};
+pub use error::{CSdbError, CSdbHandleResult, CSdbReaderHandleResult, CSdbResult};
 pub use types::{
     CSdbHandle, CSdbKeyValue, CSdbPutOptions, CSdbReadOptions, CSdbScanOptions, CSdbScanResult,
     CSdbValue, CSdbWriteOptions,

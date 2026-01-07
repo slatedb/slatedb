@@ -8,5 +8,7 @@ pub mod utils;
 
 #[allow(unused_imports)]
 pub use dst::{
-    DefaultDstDistribution, Dst, DstAction, DstDistribution, DstDuration, DstOptions, DstWriteOp,
+    DefaultDstDistribution, DefaultDstLogicalClock, Dst, DstAction, DstDistribution, DstDuration,
+    DstOptions, DstWriteOp,
 };
+pub use state::{SQLiteState, State, StateKeyValue};

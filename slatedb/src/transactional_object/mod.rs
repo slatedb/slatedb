@@ -254,6 +254,27 @@ pub(crate) struct FenceableTransactionalObject<T: Clone, Id: Copy = MonotonicId>
 }
 
 impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
+    /// Initializes a fenceable object by claiming the next available epoch.
+    ///
+    /// This keeps retrying until it successfully claims an epoch. If another
+    /// client advances the epoch concurrently, it refreshes and tries again.
+    ///
+    /// ## Arguments
+    /// - `delegate`: The underlying transactional object to wrap.
+    /// - `object_update_timeout`: Upper bound for a single update attempt.
+    /// - `system_clock`: Clock used by the timeout mechanism.
+    /// - `get_epoch`: Extracts the epoch from the object value.
+    /// - `set_epoch`: Updates the epoch on the object value.
+    ///
+    /// ## Returns
+    /// A `FenceableTransactionalObject` whose `local_epoch` has been claimed
+    /// and persisted to the underlying object.
+    ///
+    /// ## Errors
+    /// - [`TransactionalObjectError::ObjectUpdateTimeout`] if an update attempt
+    ///   cannot complete within `object_update_timeout`.
+    /// - Propagates any other [`TransactionalObjectError`] from refresh/update
+    ///   operations.
     pub(crate) async fn init(
         mut delegate: SimpleTransactionalObject<T, MonotonicId>,
         object_update_timeout: Duration,
@@ -284,6 +305,73 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                             return Ok(Self {
                                 delegate,
                                 local_epoch,
+                                get_epoch,
+                            })
+                        }
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    /// Initializes a fenceable object by attempting to claim a specific epoch.
+    ///
+    /// Unlike `init`, this does not select a new epoch. If the given `epoch`
+    /// cannot be claimed because the stored epoch is already greater than or
+    /// equal to it, this returns `Fenced`.
+    ///
+    /// ## Arguments
+    /// - `delegate`: The underlying transactional object to wrap.
+    /// - `object_update_timeout`: Upper bound for a single update attempt.
+    /// - `system_clock`: Clock used by the timeout mechanism.
+    /// - `epoch`: The exact epoch to claim.
+    /// - `get_epoch`: Extracts the epoch from the object value.
+    /// - `set_epoch`: Updates the epoch on the object value.
+    ///
+    /// ## Returns
+    /// A `FenceableTransactionalObject` with `local_epoch == epoch` after the
+    /// epoch has been persisted to the underlying object.
+    ///
+    /// ## Errors
+    /// - [`TransactionalObjectError::Fenced`] if the stored epoch is already
+    ///   greater than or equal to `epoch`.
+    /// - `ObjectUpdateTimeout` if an update attempt cannot complete within
+    ///   `object_update_timeout`.
+    /// - Propagates any other [`TransactionalObjectError`] from refresh/update
+    ///   operations.
+    pub(crate) async fn init_with_epoch(
+        mut delegate: SimpleTransactionalObject<T, MonotonicId>,
+        object_update_timeout: Duration,
+        system_clock: Arc<dyn SystemClock>,
+        epoch: u64,
+        get_epoch: fn(&T) -> u64,
+        set_epoch: fn(&mut T, u64),
+    ) -> Result<Self, TransactionalObjectError> {
+        utils::timeout(
+            system_clock.clone(),
+            object_update_timeout,
+            || TransactionalObjectError::ObjectUpdateTimeout {
+                timeout: object_update_timeout,
+            },
+            async {
+                loop {
+                    let stored_epoch = get_epoch(delegate.object());
+                    if epoch <= stored_epoch {
+                        return Err(TransactionalObjectError::Fenced);
+                    }
+                    let mut dirty = delegate.prepare_dirty()?;
+                    set_epoch(&mut dirty.value, epoch);
+                    match delegate.update(dirty).await {
+                        Err(TransactionalObjectError::ObjectVersionExists) => {
+                            delegate.refresh().await?;
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                        Ok(()) => {
+                            return Ok(Self {
+                                delegate,
+                                local_epoch: epoch,
                                 get_epoch,
                             })
                         }
@@ -725,5 +813,60 @@ mod tests {
 
         // B can refresh
         assert!(fb.refresh().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_fenceable_record_init_with_epoch_sets_epoch() {
+        let store = new_store();
+        let sr = SimpleTransactionalObject::<TestVal>::init(
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
+            TestVal {
+                epoch: 0,
+                payload: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let fr = FenceableTransactionalObject::init_with_epoch(
+            sr,
+            TokioDuration::from_secs(5),
+            Arc::new(DefaultSystemClock::new()),
+            7,
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+        )
+        .await
+        .unwrap();
+
+        let (_, v1) = store.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(7, v1.epoch);
+        assert_eq!(7, fr.local_epoch());
+    }
+
+    #[tokio::test]
+    async fn test_fenceable_record_init_with_epoch_rejects_stale_epoch() {
+        let store = new_store();
+        let sr = SimpleTransactionalObject::<TestVal>::init(
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
+            TestVal {
+                epoch: 3,
+                payload: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = FenceableTransactionalObject::init_with_epoch(
+            sr,
+            TokioDuration::from_secs(5),
+            Arc::new(DefaultSystemClock::new()),
+            3,
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+        )
+        .await;
+
+        assert!(matches!(result, Err(TransactionalObjectError::Fenced)));
     }
 }

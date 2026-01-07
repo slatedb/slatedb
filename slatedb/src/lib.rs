@@ -35,7 +35,7 @@ pub use object_store;
 pub use batch::WriteBatch;
 pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
-pub use compactor::stats as compactor_stats;
+pub use compactor::CompactorBuilder;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder};
 pub use db_cache::stats as db_cache_stats;
@@ -43,19 +43,23 @@ pub use db_iter::DbIterator;
 pub use db_read::DbRead;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
-pub use db_transaction::DBTransaction;
+pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use garbage_collector::stats as garbage_collector_stats;
+pub use garbage_collector::GarbageCollectorBuilder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
 pub use seq_tracker::FindOption;
+pub use sst::BlockTransformer;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 
 pub mod admin;
+pub mod cached_object_store;
 pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;
+pub mod compactor;
 pub mod config;
 pub mod db_cache;
 pub mod db_stats;
@@ -70,13 +74,12 @@ mod block_iterator;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;
-mod cached_object_store;
 mod checkpoint;
 mod clone;
 mod compactions_store;
-mod compactor;
 mod compactor_executor;
 mod compactor_state;
+mod compactor_state_protocols;
 #[allow(dead_code)]
 mod comparable_range;
 mod db;

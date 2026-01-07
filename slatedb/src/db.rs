@@ -27,14 +27,14 @@ use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
-use object_store::registry::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
-use object_store::ObjectStore;
+use object_store::{parse_url_opts, ObjectStore};
 
 use crate::compactor::COMPACTOR_TASK_NAME;
-use crate::db_transaction::DBTransaction;
+use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
+use log::{info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -56,6 +56,7 @@ use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::manifest::Manifest;
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
 use crate::oracle::{DbOracle, Oracle};
@@ -66,15 +67,14 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{MonotonicSeq, SendSafely};
+use crate::transactional_object::DirtyObject;
+use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use log::{info, trace, warn};
 
-pub mod builder;
-use crate::manifest::Manifest;
-use crate::transactional_object::DirtyObject;
 pub use builder::DbBuilder;
+
+pub(crate) mod builder;
 
 pub(crate) struct DbInner {
     pub(crate) state: Arc<RwLock<DbState>>,
@@ -102,7 +102,7 @@ pub(crate) struct DbInner {
 }
 
 impl DbInner {
-    pub async fn new(
+    pub(crate) async fn new(
         settings: Settings,
         logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
@@ -182,7 +182,7 @@ impl DbInner {
     }
 
     /// Get the value for a given key.
-    pub async fn get_with_options<K: AsRef<[u8]>>(
+    pub(crate) async fn get_with_options<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
@@ -195,7 +195,7 @@ impl DbInner {
             .await
     }
 
-    pub async fn scan_with_options(
+    pub(crate) async fn scan_with_options(
         &self,
         range: BytesRange,
         options: &ScanOptions,
@@ -253,7 +253,7 @@ impl DbInner {
         return true;
     }
 
-    pub async fn write_with_options(
+    pub(crate) async fn write_with_options(
         &self,
         batch: WriteBatch,
         options: &WriteOptions,
@@ -318,20 +318,20 @@ impl DbInner {
 
             trace!(
                 "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
-                total_mem_size_bytes,
-                wal_size_bytes,
-                imm_memtable_size_bytes,
-                self.settings.max_unflushed_bytes,
+                format_bytes_si(total_mem_size_bytes as u64),
+                format_bytes_si(wal_size_bytes as u64),
+                format_bytes_si(imm_memtable_size_bytes as u64),
+                format_bytes_si(self.settings.max_unflushed_bytes as u64),
             );
 
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.inc();
                 warn!(
                     "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
-                    total_mem_size_bytes,
-                    wal_size_bytes,
-                    imm_memtable_size_bytes,
-                    self.settings.max_unflushed_bytes,
+                    format_bytes_si(total_mem_size_bytes as u64),
+                    format_bytes_si(wal_size_bytes as u64),
+                    format_bytes_si(imm_memtable_size_bytes as u64),
+                    format_bytes_si(self.settings.max_unflushed_bytes as u64),
                 );
 
                 let maybe_oldest_unflushed_memtable = {
@@ -560,6 +560,7 @@ impl DbInner {
     }
 }
 
+#[derive(Clone)]
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: Arc<MessageHandlerExecutor>,
@@ -1427,7 +1428,7 @@ impl Db {
     /// - `isolation_level`: the isolation level for the transaction
     ///
     /// ## Returns
-    /// - `Result<DBTransaction, crate::Error>`: the transaction handle
+    /// - `Result<DbTransaction, crate::Error>`: the transaction handle
     ///
     /// ## Examples
     ///
@@ -1447,10 +1448,10 @@ impl Db {
     pub async fn begin(
         &self,
         isolation_level: IsolationLevel,
-    ) -> Result<DBTransaction, crate::Error> {
+    ) -> Result<DbTransaction, crate::Error> {
         self.inner.check_closed()?;
         let seq = self.inner.oracle.last_committed_seq();
-        let txn = DBTransaction::new(
+        let txn = DbTransaction::new(
             self.inner.clone(),
             self.inner.txn_manager.clone(),
             seq,
@@ -1467,14 +1468,16 @@ impl Db {
     /// ## Returns
     /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
     pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
-        let registry = DefaultObjectStoreRegistry::new();
         let url = url
             .try_into()
             .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
-        let (object_store, path) = registry.resolve(&url).map_err(SlateDBError::from)?;
+        // Lowercase env keys because parse_url_opts only recognizes lower case option keys.
+        let env_vars = std::env::vars().map(|(key, value)| (key.to_ascii_lowercase(), value));
+        let (object_store, path) = parse_url_opts(&url, env_vars).map_err(SlateDBError::from)?;
         let object_store: Arc<dyn ObjectStore> = if path.as_ref().is_empty() {
-            object_store
+            Arc::from(object_store)
         } else {
+            let object_store = Arc::from(object_store);
             Arc::new(PrefixStore::new(object_store, path))
         };
         Ok(object_store)
@@ -1534,13 +1537,12 @@ mod tests {
     use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::test_utils::{assert_iterator, OnDemandCompactionSchedulerSupplier, TestClock};
-    use crate::types::RowEntry;
-    use crate::{
-        proptest_util, test_utils, CloseReason, KeyValue, MergeOperator, MergeOperatorError,
+    use crate::test_utils::{
+        assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator, TestClock,
     };
+    use crate::types::RowEntry;
+    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use async_trait::async_trait;
-    use bytes::BytesMut;
     use chrono::TimeDelta;
     #[cfg(feature = "test-util")]
     use chrono::{TimeZone, Utc};
@@ -3488,7 +3490,7 @@ mod tests {
         };
 
         let mut froze_memtable = false;
-        for _ in 0..200 {
+        for _ in 0..6000 {
             {
                 let guard = db.inner.state.read();
                 if !guard.state().imm_memtable.is_empty() {
@@ -3948,22 +3950,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_merges_from_snapshot_across_compaction() {
-        struct TestMergeOperator {}
-
-        impl MergeOperator for TestMergeOperator {
-            fn merge(
-                &self,
-                _key: &Bytes,
-                existing_value: Option<Bytes>,
-                value: Bytes,
-            ) -> Result<Bytes, MergeOperatorError> {
-                let mut result = BytesMut::new();
-                existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
-                result.extend_from_slice(value.as_ref());
-                Ok(result.freeze())
-            }
-        }
-
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/testdb";
         let should_compact_l0 = Arc::new(AtomicBool::new(false));
@@ -3973,7 +3959,7 @@ mod tests {
         )));
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
-            .with_merge_operator(Arc::new(TestMergeOperator {}))
+            .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
@@ -5353,27 +5339,6 @@ mod tests {
         assert_eq!(v, Some(Bytes::from(b"bar".as_ref())));
     }
 
-    // Merge operator test helpers
-    struct StringConcatMergeOperator;
-
-    impl crate::merge_operator::MergeOperator for StringConcatMergeOperator {
-        fn merge(
-            &self,
-            _key: &Bytes,
-            existing_value: Option<Bytes>,
-            value: Bytes,
-        ) -> Result<Bytes, crate::merge_operator::MergeOperatorError> {
-            match existing_value {
-                Some(existing) => {
-                    let mut merged = existing.to_vec();
-                    merged.extend_from_slice(&value);
-                    Ok(Bytes::from(merged))
-                }
-                None => Ok(value),
-            }
-        }
-    }
-
     #[tokio::test]
     async fn should_merge_operand_into_empty_key() {
         // Given: Database with merge operator, empty key
@@ -5603,6 +5568,10 @@ mod tests {
                 min_age: Duration::from_millis(0),
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age: Duration::from_millis(0),
+            }),
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
                 interval: None,
                 min_age: Duration::from_millis(0),
             }),

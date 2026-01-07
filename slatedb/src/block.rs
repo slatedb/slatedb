@@ -14,7 +14,7 @@ pub(crate) struct Block {
 
 impl Block {
     #[rustfmt::skip]
-    pub fn encode(&self) -> Bytes {
+    pub(crate) fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(self.size());
         buf.put_slice(&self.data);
         for offset in &self.offsets {
@@ -25,7 +25,7 @@ impl Block {
     }
 
     #[rustfmt::skip]
-    pub fn decode(bytes: Bytes) -> Self {
+    pub(crate) fn decode(bytes: Bytes) -> Self {
         // Get number of elements in the block
         let data = bytes.as_ref();
         let entry_offsets_len = (&data[data.len() - SIZEOF_U16..]).get_u16() as usize;
@@ -74,7 +74,7 @@ impl Block {
     }
 }
 
-pub struct BlockBuilder {
+pub(crate) struct BlockBuilder {
     offsets: Vec<u16>,
     data: Vec<u8>,
     block_size: usize,
@@ -97,7 +97,7 @@ fn compute_prefix_chunks<const N: usize>(lhs: &[u8], rhs: &[u8]) -> usize {
 }
 
 impl BlockBuilder {
-    pub fn new(block_size: usize) -> Self {
+    pub(crate) fn new(block_size: usize) -> Self {
         Self {
             offsets: Vec::new(),
             data: Vec::new(),
@@ -106,21 +106,35 @@ impl BlockBuilder {
         }
     }
 
-    #[rustfmt::skip]
     #[inline]
-    fn estimated_size(&self) -> usize {
+    fn size(&self) -> usize {
         SIZEOF_U16           // number of key-value pairs in the block
         + self.offsets.len() * SIZEOF_U16 // offsets
-        + self.data.len()    // key-value pairs
+        + self.data.len() // key-value pairs
+    }
+
+    /// Checks if the entry would fit in the current block without consuming it.
+    /// Empty blocks always return true (they accept entries that exceed block_size).
+    pub(crate) fn would_fit(&self, entry: &RowEntry) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
+        self.size() + entry.encoded_size(key_prefix_len) <= self.block_size
     }
 
     #[must_use]
-    pub fn add(&mut self, entry: RowEntry) -> bool {
+    pub(crate) fn add(&mut self, entry: RowEntry) -> bool {
         assert!(!entry.key.is_empty(), "key must not be empty");
+
+        if !self.would_fit(&entry) {
+            return false;
+        }
+
         let key_prefix_len = compute_prefix(&self.first_key, &entry.key);
         let key_suffix = entry.key.slice(key_prefix_len..);
 
-        let sst_row_entry = &SstRowEntry::new(
+        let sst_row_entry = SstRowEntry::new(
             key_prefix_len,
             key_suffix,
             entry.seq,
@@ -129,15 +143,9 @@ impl BlockBuilder {
             entry.expire_ts,
         );
 
-        // If adding the key-value pair would exceed the block size limit, don't add it.
-        // (Unless the block is empty, in which case, allow the block to exceed the limit.)
-        if self.estimated_size() + sst_row_entry.size() > self.block_size && !self.is_empty() {
-            return false;
-        }
-
         self.offsets.push(self.data.len() as u16);
         let codec = SstRowCodecV0::new();
-        codec.encode(&mut self.data, sst_row_entry);
+        codec.encode(&mut self.data, &sst_row_entry);
 
         if self.first_key.is_empty() {
             self.first_key = Bytes::copy_from_slice(entry.key.as_ref());
@@ -147,7 +155,7 @@ impl BlockBuilder {
     }
 
     #[cfg(test)]
-    pub fn add_value(
+    pub(crate) fn add_value(
         &mut self,
         key: &[u8],
         value: &[u8],
@@ -165,7 +173,7 @@ impl BlockBuilder {
 
     #[allow(dead_code)]
     #[cfg(test)]
-    pub fn add_tombstone(&mut self, key: &[u8], attrs: crate::types::RowAttributes) -> bool {
+    fn add_tombstone(&mut self, key: &[u8], attrs: crate::types::RowAttributes) -> bool {
         let entry = RowEntry::new(
             key.to_vec().into(),
             crate::types::ValueDeletable::Tombstone,
@@ -176,11 +184,11 @@ impl BlockBuilder {
         self.add(entry)
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.offsets.is_empty()
     }
 
-    pub fn build(self) -> Result<Block, SlateDBError> {
+    pub(crate) fn build(self) -> Result<Block, SlateDBError> {
         if self.is_empty() {
             return Err(SlateDBError::EmptyBlock);
         }

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use IterationOrder::Descending;
 
-pub trait BlockLike: Send + Sync {
+pub(crate) trait BlockLike: Send + Sync {
     fn data(&self) -> &Bytes;
     fn offsets(&self) -> &[u16];
 }
@@ -43,7 +43,7 @@ impl BlockLike for Arc<Block> {
     }
 }
 
-pub struct BlockIterator<B: BlockLike> {
+pub(crate) struct BlockIterator<B: BlockLike> {
     block: B,
     off_off: usize,
     // first key in the block, because slateDB does not support multi version of keys
@@ -89,7 +89,7 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
 }
 
 impl<B: BlockLike> BlockIterator<B> {
-    pub fn new(block: B, ordering: IterationOrder) -> Self {
+    pub(crate) fn new(block: B, ordering: IterationOrder) -> Self {
         BlockIterator {
             first_key: BlockIterator::decode_first_key(&block),
             block,
@@ -98,7 +98,7 @@ impl<B: BlockLike> BlockIterator<B> {
         }
     }
 
-    pub fn new_ascending(block: B) -> Self {
+    pub(crate) fn new_ascending(block: B) -> Self {
         Self::new(block, Ascending)
     }
 
@@ -134,7 +134,7 @@ impl<B: BlockLike> BlockIterator<B> {
         )))
     }
 
-    pub fn decode_first_key(block: &B) -> Bytes {
+    fn decode_first_key(block: &B) -> Bytes {
         let mut buf = block.data().slice(..);
         let overlap_len = buf.get_u16() as usize;
         assert_eq!(overlap_len, 0, "first key overlap should be 0");

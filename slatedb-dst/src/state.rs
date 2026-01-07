@@ -1,19 +1,21 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use crate::{error::DstError, DstWriteOp};
-use rusqlite::{Connection, OptionalExtension};
-use slatedb::Error;
+use rusqlite::{params, Connection, OptionalExtension};
+use slatedb::{clock::LogicalClock, config::Ttl, Error};
 
 const CREATE_STATE_SQL: &str =
-    "CREATE TABLE IF NOT EXISTS dst_state (key BLOB PRIMARY KEY, val BLOB)";
+    "CREATE TABLE IF NOT EXISTS dst_state (key BLOB PRIMARY KEY, val BLOB, expire_ts INTEGER)";
 const INSERT_STATE_SQL: &str =
-    "INSERT INTO dst_state (key, val) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET val = ?2";
+    "INSERT INTO dst_state (key, val, expire_ts) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET val = ?2, expire_ts = ?3";
 const DELETE_STATE_SQL: &str = "DELETE FROM dst_state WHERE key = ?1";
-const SELECT_STATE_SQL: &str = "SELECT val FROM dst_state WHERE key = ?1";
+const SELECT_STATE_SQL: &str =
+    "SELECT val FROM dst_state WHERE key = ?1 AND (expire_ts IS NULL OR expire_ts > ?2)";
 const SCAN_STATE_SQL: &str =
-    "SELECT key, val FROM dst_state WHERE key >= ?1 AND key < ?2 ORDER BY key ASC";
-const COUNT_STATE_SQL: &str = "SELECT COUNT(*) FROM dst_state";
-const KEYS_STATE_SQL: &str = "SELECT key FROM dst_state";
+    "SELECT key, val FROM dst_state WHERE key >= ?1 AND key < ?2 AND (expire_ts IS NULL OR expire_ts > ?3) ORDER BY key ASC";
+const COUNT_STATE_SQL: &str =
+    "SELECT COUNT(*) FROM dst_state WHERE expire_ts IS NULL OR expire_ts > ?1";
+const KEYS_STATE_SQL: &str = "SELECT key FROM dst_state WHERE expire_ts IS NULL OR expire_ts > ?1";
 
 /// A key-value pair in the DST state.
 pub type StateKeyValue = (Vec<u8>, Vec<u8>);
@@ -31,18 +33,29 @@ pub trait State {
 /// A DST state that uses SQLite as the backend.
 pub struct SQLiteState {
     conn: Connection,
+    logical_clock: Arc<dyn LogicalClock>,
 }
 
 impl SQLiteState {
     /// Create a new SQLite state.
     ///
     /// If `path` is `None`, the state will be stored in memory.
-    pub fn new(path: Option<&'static str>) -> Result<Self, Error> {
+    pub fn new(
+        path: Option<&'static str>,
+        logical_clock: Arc<dyn LogicalClock>,
+    ) -> Result<Self, Error> {
         let path = path.unwrap_or(":memory:");
         let conn = Connection::open(path).map_err(DstError::SQLiteStateError)?;
         conn.execute(CREATE_STATE_SQL, ())
             .map_err(DstError::SQLiteStateError)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            logical_clock,
+        })
+    }
+
+    fn now(&self) -> i64 {
+        self.logical_clock.now()
     }
 }
 
@@ -55,18 +68,23 @@ impl State for SQLiteState {
     ///
     /// This function is transactional, applying all the write operations in the batch atomically.
     fn write_batch(&mut self, batch: &[DstWriteOp]) -> Result<(), Error> {
+        let now = self.now();
         let tx = self
             .conn
             .transaction()
             .map_err(DstError::SQLiteStateError)?;
-        for (key, val, _) in batch {
+        for (key, val, options) in batch {
             if let Some(val) = val {
-                tx.execute(INSERT_STATE_SQL, (key, val))
-                    .map_err(DstError::SQLiteStateError)?;
+                let expiry_ts = match options.ttl {
+                    Ttl::NoExpiry => None,
+                    Ttl::ExpireAfter(ttl) => Some(now + ttl as i64),
+                    _ => unimplemented!(),
+                };
+                tx.execute(INSERT_STATE_SQL, params![key, val, expiry_ts])
             } else {
                 tx.execute(DELETE_STATE_SQL, (key,))
-                    .map_err(DstError::SQLiteStateError)?;
             }
+            .map_err(DstError::SQLiteStateError)?;
         }
         tx.commit().map_err(DstError::SQLiteStateError)?;
         Ok(())
@@ -81,7 +99,7 @@ impl State for SQLiteState {
             .map_err(DstError::SQLiteStateError)?;
 
         let value: Option<Vec<u8>> = stmt
-            .query_row((key,), |row| row.get(0))
+            .query_row((key, self.now()), |row| row.get(0))
             .optional()
             .map_err(DstError::SQLiteStateError)?;
         Ok(value)
@@ -96,7 +114,7 @@ impl State for SQLiteState {
             .map_err(DstError::SQLiteStateError)?;
 
         let mut rows = stmt
-            .query((start_key, end_key))
+            .query((start_key, end_key, self.now()))
             .map_err(DstError::SQLiteStateError)?;
 
         let mut results = Vec::new();
@@ -117,7 +135,7 @@ impl State for SQLiteState {
             .map_err(DstError::SQLiteStateError)?;
 
         let count: i64 = stmt
-            .query_one((), |row| row.get(0))
+            .query_one((self.now(),), |row| row.get(0))
             .map_err(DstError::SQLiteStateError)?;
         Ok(count)
     }
@@ -129,7 +147,9 @@ impl State for SQLiteState {
             .conn
             .prepare(KEYS_STATE_SQL)
             .map_err(DstError::SQLiteStateError)?;
-        let mut rows = stmt.query(()).map_err(DstError::SQLiteStateError)?;
+        let mut rows = stmt
+            .query((self.now(),))
+            .map_err(DstError::SQLiteStateError)?;
 
         let mut keys = Vec::new();
         while let Some(row) = rows.next().map_err(DstError::SQLiteStateError)? {

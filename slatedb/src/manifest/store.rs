@@ -75,6 +75,10 @@ impl FenceableManifest {
         Ok(Self { inner: fr, clock })
     }
 
+    pub(crate) fn local_epoch(&self) -> u64 {
+        self.inner.local_epoch()
+    }
+
     pub(crate) async fn refresh(&mut self) -> Result<&Manifest, SlateDBError> {
         Ok(self.inner.refresh().await?)
     }
@@ -535,26 +539,31 @@ impl ManifestStore {
         Ok(manifests)
     }
 
-    /// Active manifests include the latest manifest and all manifests referenced
-    /// by checkpoints in the latest manifest.
-    pub(crate) async fn read_active_manifests(
+    /// Read the manifests referenced by the supplied manifest (including itself).
+    pub(crate) async fn read_referenced_manifests(
         &self,
+        manifest_id: u64,
+        manifest: &Manifest,
     ) -> Result<BTreeMap<u64, Manifest>, SlateDBError> {
-        let (latest_manifest_id, latest_manifest) = self.read_latest_manifest().await?;
+        let mut referenced_manifests = BTreeMap::new();
+        referenced_manifests.insert(manifest_id, manifest.clone());
 
-        let mut active_manifests = BTreeMap::new();
-        active_manifests.insert(latest_manifest_id, latest_manifest.clone());
-
-        for checkpoint in &latest_manifest.core.checkpoints {
+        let checkpoint_manifest_ids = manifest
+            .core
+            .checkpoints
+            .iter()
+            .map(|checkpoint| checkpoint.manifest_id)
+            .collect::<Vec<_>>();
+        for checkpoint_manifest_id in checkpoint_manifest_ids {
             if let std::collections::btree_map::Entry::Vacant(entry) =
-                active_manifests.entry(checkpoint.manifest_id)
+                referenced_manifests.entry(checkpoint_manifest_id)
             {
-                let checkpoint_manifest = self.read_manifest(checkpoint.manifest_id).await?;
+                let checkpoint_manifest = self.read_manifest(checkpoint_manifest_id).await?;
                 entry.insert(checkpoint_manifest);
             }
         }
 
-        Ok(active_manifests)
+        Ok(referenced_manifests)
     }
 
     pub(crate) async fn try_read_latest_manifest(
@@ -618,6 +627,7 @@ mod tests {
     use crate::error;
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
+    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use crate::transactional_object::TransactionalObject;
@@ -944,7 +954,11 @@ mod tests {
         // Given a flaky store that times out on the first write
         let base = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
-        let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
+        let retrying = Arc::new(RetryingObjectStore::new(
+            flaky.clone(),
+            Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let ms = Arc::new(ManifestStore::new(&Path::from(ROOT), retrying.clone()));
 
         // When creating a new DB (initial manifest write under retry)
@@ -1062,7 +1076,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_active_manifests_should_consider_checkpoints() {
+    async fn test_read_referenced_manifests_includes_checkpointed_manifests() {
         let ms = new_memory_manifest_store();
         let state = CoreDbState::new();
         let mut sm = StoredManifest::create_new_db(
@@ -1073,44 +1087,125 @@ mod tests {
         .await
         .unwrap();
 
-        let initial_manifest = sm.inner.object().clone();
-        let initial_manifest_id = sm.inner.id().into();
-        let active_manifests = ms.read_active_manifests().await.unwrap();
-        assert_eq!(1, active_manifests.len());
+        let initial_manifest = sm.manifest().clone();
+        let initial_manifest_id = sm.id();
+
+        // Baseline: with no checkpoints, only the latest manifest is referenced.
+        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let referenced = ms
+            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .await
+            .unwrap();
+
+        assert_eq!(1, referenced.len());
         assert_eq!(
             Some(&initial_manifest),
-            active_manifests.get(&initial_manifest_id)
+            referenced.get(&initial_manifest_id)
         );
 
-        // Add a checkpoint referencing the latest manifest
+        // Add a checkpoint pointing at the initial manifest so both should be returned.
         let mut dirty = sm.prepare_dirty().unwrap();
         dirty
             .value
             .core
             .checkpoints
-            .push(new_checkpoint(sm.inner.id().into()));
+            .push(new_checkpoint(initial_manifest_id));
         sm.update(dirty).await.unwrap();
-        let active_manifests = ms.read_active_manifests().await.unwrap();
-        assert_eq!(2, active_manifests.len());
+
+        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let referenced = ms
+            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .await
+            .unwrap();
+
+        assert_eq!(2, referenced.len());
         assert_eq!(
             Some(&initial_manifest),
-            active_manifests.get(&initial_manifest_id)
+            referenced.get(&initial_manifest_id)
         );
-        assert_eq!(
-            Some(&sm.manifest()),
-            active_manifests.get(&sm.id()).as_ref()
-        );
+        assert_eq!(Some(&latest_manifest), referenced.get(&latest_manifest_id));
 
-        // Remove the checkpoint and verify that only the latest manifest is active
+        // Remove checkpoints to ensure only the latest manifest remains referenced.
         let mut dirty = sm.prepare_dirty().unwrap();
         dirty.value.core.checkpoints.clear();
         sm.update(dirty).await.unwrap();
-        let active_manifests = ms.read_active_manifests().await.unwrap();
-        assert_eq!(1, active_manifests.len());
-        assert_eq!(
-            Some(&sm.manifest()),
-            active_manifests.get(&sm.id()).as_ref()
-        );
+
+        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let referenced = ms
+            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .await
+            .unwrap();
+
+        assert_eq!(1, referenced.len());
+        assert_eq!(Some(&latest_manifest), referenced.get(&latest_manifest_id));
+    }
+
+    #[tokio::test]
+    async fn test_read_referenced_manifests_dedupes_checkpoint_ids() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(
+            ms.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let checkpoint_manifest_id = sm.id();
+        let mut dirty = sm.prepare_dirty().unwrap();
+        dirty
+            .value
+            .core
+            .checkpoints
+            .push(new_checkpoint(checkpoint_manifest_id));
+        dirty
+            .value
+            .core
+            .checkpoints
+            .push(new_checkpoint(checkpoint_manifest_id));
+        sm.update(dirty).await.unwrap();
+
+        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let referenced = ms
+            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .await
+            .unwrap();
+
+        // 1 for the active manifest and 1 for the checkpointed manifest (deduped)
+        assert_eq!(2, referenced.len());
+    }
+
+    #[tokio::test]
+    async fn test_read_referenced_manifests_missing_manifest_returns_error() {
+        let ms = new_memory_manifest_store();
+        let state = CoreDbState::new();
+        let mut sm = StoredManifest::create_new_db(
+            ms.clone(),
+            state.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let missing_manifest_id = sm.id() + 42;
+        let mut dirty = sm.prepare_dirty().unwrap();
+        dirty
+            .value
+            .core
+            .checkpoints
+            .push(new_checkpoint(missing_manifest_id));
+        sm.update(dirty).await.unwrap();
+
+        let (latest_manifest_id, latest_manifest) = ms.read_latest_manifest().await.unwrap();
+        let result = ms
+            .read_referenced_manifests(latest_manifest_id, &latest_manifest)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SlateDBError::ManifestMissing(id)) if id == missing_manifest_id
+        ));
     }
 
     #[tokio::test]

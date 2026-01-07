@@ -75,7 +75,7 @@ impl TransactionState {
 /// Manages the lifecycle of transaction states and provides isolation-level-aware conflict detection.
 /// Supports both Snapshot Isolation (SI) and Serializable Snapshot Isolation (SSI).
 /// TODO: have a quota for max active transactions.
-pub struct TransactionManager {
+pub(crate) struct TransactionManager {
     inner: Arc<RwLock<TransactionManagerInner>>,
     /// Random number generator for generating transaction IDs
     db_rand: Arc<DbRand>,
@@ -99,7 +99,7 @@ struct TransactionManagerInner {
 }
 
 impl TransactionManager {
-    pub fn new(db_rand: Arc<DbRand>) -> Self {
+    pub(crate) fn new(db_rand: Arc<DbRand>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
@@ -110,7 +110,7 @@ impl TransactionManager {
     }
 
     /// Register a transaction state
-    pub fn new_txn(&self, seq: u64, read_only: bool) -> Uuid {
+    pub(crate) fn new_txn(&self, seq: u64, read_only: bool) -> Uuid {
         let txn_id = self.db_rand.rng().gen_uuid();
 
         let txn_state = TransactionState {
@@ -132,7 +132,7 @@ impl TransactionManager {
 
     /// Register a transaction state with a specific txn id (for testing only)
     #[cfg(test)]
-    pub fn new_txn_with_id(&self, seq: u64, read_only: bool, txn_id: Uuid) -> Uuid {
+    fn new_txn_with_id(&self, seq: u64, read_only: bool, txn_id: Uuid) -> Uuid {
         let txn_state = TransactionState {
             read_only,
             started_seq: seq,
@@ -155,7 +155,7 @@ impl TransactionManager {
     /// Please note that a committed txn can also run into drop_txn() on `drop()`, this
     /// method does nothing on such case.
     /// Here's a chance to recycle the recent committed txns.
-    pub fn drop_txn(&self, txn_id: &Uuid) {
+    pub(crate) fn drop_txn(&self, txn_id: &Uuid) {
         let mut inner = self.inner.write();
         inner.active_txns.remove(txn_id);
         inner.recycle_recent_committed_txns();
@@ -163,7 +163,7 @@ impl TransactionManager {
 
     /// Track write keys for a transaction. This is used for conflict detection.
     /// Keys should be tracked before calling commit-related methods.
-    pub fn track_write_keys(&self, txn_id: &Uuid, write_keys: &HashSet<Bytes>) {
+    pub(crate) fn track_write_keys(&self, txn_id: &Uuid, write_keys: &HashSet<Bytes>) {
         let mut inner = self.inner.write();
         if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
             txn_state.track_write_keys(write_keys.iter().cloned());
@@ -171,17 +171,19 @@ impl TransactionManager {
     }
 
     /// Track a key read operation (for SSI)
-    #[allow(unused)]
-    pub fn track_read_keys(&self, txn_id: &Uuid, read_keys: &HashSet<Bytes>) {
+    pub(crate) fn track_read_keys(
+        &self,
+        txn_id: &Uuid,
+        read_keys: impl IntoIterator<Item = Bytes>,
+    ) {
         let mut inner = self.inner.write();
         if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
-            txn_state.track_read_keys(read_keys.iter().cloned());
+            txn_state.track_read_keys(read_keys);
         }
     }
 
     /// Track a range scan operation (for SSI)
-    #[allow(unused)]
-    pub fn track_read_range(&self, txn_id: &Uuid, range: BytesRange) {
+    pub(crate) fn track_read_range(&self, txn_id: &Uuid, range: BytesRange) {
         let mut inner = self.inner.write();
         if let Some(txn_state) = inner.active_txns.get_mut(txn_id) {
             txn_state.track_read_range(range);
@@ -193,7 +195,7 @@ impl TransactionManager {
     ///
     /// For Snapshot isolation: Only checks write-write conflicts
     /// For SerializableSnapshot isolation: Checks both write-write and read-write conflicts
-    pub fn check_has_conflict(&self, txn_id: &Uuid) -> bool {
+    pub(crate) fn check_has_conflict(&self, txn_id: &Uuid) -> bool {
         let inner = self.inner.read();
         let txn_state = match inner.active_txns.get(txn_id) {
             None => return false,
@@ -222,7 +224,7 @@ impl TransactionManager {
     ///
     /// The transaction will be moved from active_txns to recent_committed_txns
     /// for future conflict checking with other transactions.
-    pub fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
+    pub(crate) fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
 
@@ -246,7 +248,11 @@ impl TransactionManager {
     /// Track a write batch for conflict detection. This is used for regular write operations
     /// that are not part of an explicit transaction but still need to be tracked for conflict
     /// detection with concurrent transactions.
-    pub fn track_recent_committed_write_batch(&self, keys: &HashSet<Bytes>, committed_seq: u64) {
+    pub(crate) fn track_recent_committed_write_batch(
+        &self,
+        keys: &HashSet<Bytes>,
+        committed_seq: u64,
+    ) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
 
@@ -273,7 +279,7 @@ impl TransactionManager {
     ///
     /// min_active_seq will be persisted to the `recent_snapshot_min_seq` in the manifest
     /// when a new L0 is flushed.
-    pub fn min_active_seq(&self) -> Option<u64> {
+    pub(crate) fn min_active_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
         inner
             .active_txns
@@ -1313,7 +1319,7 @@ mod tests {
                 TxnOperation::TrackReadKeys { txn_id, keys } => {
                     let key_set: HashSet<Bytes> =
                         keys.iter().map(|k| Bytes::from(k.clone())).collect();
-                    manager.track_read_keys(txn_id, &key_set);
+                    manager.track_read_keys(txn_id, key_set);
                     ExecutionEffect::Nothing
                 }
                 TxnOperation::TrackReadRange {

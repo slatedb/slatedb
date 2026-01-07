@@ -28,7 +28,7 @@ pub(crate) struct SequencedKey {
 }
 
 impl SequencedKey {
-    pub fn new(user_key: Bytes, seq: u64) -> Self {
+    pub(crate) fn new(user_key: Bytes, seq: u64) -> Self {
         Self { user_key, seq }
     }
 }

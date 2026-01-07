@@ -75,6 +75,10 @@
 //! [garbage_collector_options.compacted_options]
 //! interval = "300s"
 //! min_age = "86400s"
+//!
+//! [garbage_collector_options.compactions_options]
+//! interval = "300s"
+//! min_age = "86400s"
 //! ```
 //!
 //! Representing `Settings` with JSON:
@@ -114,6 +118,10 @@
 //!    "compacted_options": {
 //!      "interval": "300s",
 //!      "min_age": "86400s"
+//!    },
+//!    "compactions_options": {
+//!      "interval": "300s",
+//!      "min_age": "86400s"
 //!    }
 //!  }
 //!}
@@ -151,6 +159,9 @@
 //!   compacted_options:
 //!     interval: '300s'
 //!     min_age: '86400s'
+//!   compactions_options:
+//!     interval: '300s'
+//!     min_age: '86400s'
 //! ```
 //!
 use duration_str::{deserialize_duration, deserialize_option_duration};
@@ -167,6 +178,7 @@ use crate::error::SlateDBError;
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 use crate::merge_operator::MergeOperatorType;
+use crate::sst::BlockTransformer;
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -893,6 +905,11 @@ pub struct DbReaderOptions {
 
     #[serde(skip)]
     pub merge_operator: Option<MergeOperatorType>,
+
+    /// An optional block transformer for custom encoding/decoding of blocks.
+    /// Can be used for encryption, custom encoding, etc.
+    #[serde(skip)]
+    pub block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
 impl Default for DbReaderOptions {
@@ -903,6 +920,7 @@ impl Default for DbReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             block_cache: default_block_cache(),
             merge_operator: None,
+            block_transformer: None,
         }
     }
 }
@@ -924,6 +942,7 @@ pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
         return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
             crate::db_cache::foyer::FoyerCacheOptions {
                 max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+                ..Default::default()
             },
         )));
     }
@@ -947,6 +966,7 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
         return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
             crate::db_cache::foyer::FoyerCacheOptions {
                 max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
+                ..Default::default()
             },
         )));
     }
@@ -1044,7 +1064,7 @@ impl std::fmt::Debug for CompactorOptions {
 }
 
 /// Options for the Size-Tiered Compaction Scheduler
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct SizeTieredCompactionSchedulerOptions {
     /// The minimum number of sources to include together in a single compaction step.
     pub min_compaction_sources: usize,
@@ -1079,6 +1099,10 @@ pub struct GarbageCollectorOptions {
 
     /// Garbage collection options for the compacted directory.
     pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
+
+    /// Garbage collection options for the compactions directory, which
+    /// contains compactor job state `.compactions` files.
+    pub compactions_options: Option<GarbageCollectorDirectoryOptions>,
 }
 
 impl GarbageCollectorOptions {
@@ -1086,6 +1110,7 @@ impl GarbageCollectorOptions {
         self.manifest_options.is_none()
             && self.wal_options.is_none()
             && self.compacted_options.is_none()
+            && self.compactions_options.is_none()
     }
 }
 
@@ -1117,12 +1142,14 @@ pub struct GarbageCollectorDirectoryOptions {
 /// * Manifest options: interval of 60 seconds, min age of 1 day
 /// * WAL options: interval of 60 seconds, min age of 1 minute
 /// * Compacted options: interval of 60 seconds, min age of 1 day
+/// * Compactions options: interval of 60 seconds, min age of 1 day
 impl Default for GarbageCollectorOptions {
     fn default() -> Self {
         Self {
             manifest_options: None,
             wal_options: None,
             compacted_options: None,
+            compactions_options: None,
         }
     }
 }

@@ -20,10 +20,10 @@ use ::slatedb::config::{
     ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
 use ::slatedb::object_store::ObjectStore;
-use ::slatedb::DBTransaction;
 use ::slatedb::Db;
 use ::slatedb::DbReader;
 use ::slatedb::DbSnapshot;
+use ::slatedb::DbTransaction;
 use ::slatedb::Error;
 use ::slatedb::IsolationLevel;
 use ::slatedb::MergeOperator;
@@ -105,6 +105,8 @@ fn build_gc_options_from_kwargs(
     wal_min_age: Option<u64>,
     compacted_interval: Option<u64>,
     compacted_min_age: Option<u64>,
+    compactions_interval: Option<u64>,
+    compactions_min_age: Option<u64>,
     require_interval: bool,
     for_once: bool,
 ) -> PyResult<GarbageCollectorOptions> {
@@ -149,6 +151,12 @@ fn build_gc_options_from_kwargs(
         compacted_options: build_dir(
             compacted_interval,
             compacted_min_age,
+            require_interval,
+            for_once,
+        )?,
+        compactions_options: build_dir(
+            compactions_interval,
+            compactions_min_age,
             require_interval,
             for_once,
         )?,
@@ -1443,11 +1451,11 @@ impl PySlateDBSnapshot {
 
 #[pyclass(name = "SlateDBTransaction")]
 struct PySlateDBTransaction {
-    inner: Option<DBTransaction>, // None after commit/rollback
+    inner: Option<DbTransaction>, // None after commit/rollback
 }
 
 impl PySlateDBTransaction {
-    fn inner_ref(&self) -> PyResult<&DBTransaction> {
+    fn inner_ref(&self) -> PyResult<&DbTransaction> {
         self.inner
             .as_ref()
             .ok_or_else(|| ClosedError::new_err("transaction is closed"))
@@ -2670,7 +2678,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc_once(
         &self,
         manifest_interval: Option<u64>,
@@ -2679,6 +2687,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<()> {
         let admin = self.inner.clone();
         let rt = get_runtime();
@@ -2689,6 +2699,8 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             false,
             true,
         )?;
@@ -2700,7 +2712,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc_once_async<'py>(
         &self,
         py: Python<'py>,
@@ -2710,6 +2722,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         let opts = build_gc_options_from_kwargs(
@@ -2719,6 +2733,8 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             false,
             true,
         )?;
@@ -2730,7 +2746,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc(
         &self,
         manifest_interval: Option<u64>,
@@ -2739,6 +2755,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<()> {
         let admin = self.inner.clone();
         let rt = get_runtime();
@@ -2749,13 +2767,15 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             true,
             false,
         )?;
         rt.block_on(async move { admin.run_gc(opts).await.map_err(map_error) })
     }
 
-    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None))]
+    #[pyo3(signature = (*, manifest_interval = None, manifest_min_age = None, wal_interval = None, wal_min_age = None, compacted_interval = None, compacted_min_age = None, compactions_interval = None, compactions_min_age = None))]
     fn run_gc_async<'py>(
         &self,
         py: Python<'py>,
@@ -2765,6 +2785,8 @@ impl PySlateDBAdmin {
         wal_min_age: Option<u64>,
         compacted_interval: Option<u64>,
         compacted_min_age: Option<u64>,
+        compactions_interval: Option<u64>,
+        compactions_min_age: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         let opts = build_gc_options_from_kwargs(
@@ -2774,6 +2796,8 @@ impl PySlateDBAdmin {
             wal_min_age,
             compacted_interval,
             compacted_min_age,
+            compactions_interval,
+            compactions_min_age,
             true,
             false,
         )?;

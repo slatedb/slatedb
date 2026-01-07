@@ -58,7 +58,7 @@ pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
     assert_eq!(actual_entry, expected_entry.clone())
 }
 
-pub fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
+pub(crate) fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
     assert_eq!(kv.key, key);
     assert_eq!(kv.value, val);
 }
@@ -171,6 +171,7 @@ use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
 use crate::sst::{EncodedSsTable, SsTableFormat};
+use crate::{MergeOperator, MergeOperatorError};
 pub(crate) use assert_debug_snapshot;
 
 pub(crate) fn decode_codec_entries(
@@ -281,7 +282,7 @@ pub(crate) async fn seed_database(
     Ok(())
 }
 
-pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
+pub(crate) async fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
     let mut rng = rand::rng();
     let mut keygen = OrderedBytesGenerator::new_with_suffix(&[], &[0u8; 16]);
     let mut encoded_sst_builder = format.table_builder();
@@ -291,9 +292,9 @@ pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> Encod
         val.put_bytes(0u8, 32);
         rng.fill_bytes(&mut val);
         let row = RowEntry::new(k, ValueDeletable::Value(val.freeze()), 0u64, None, None);
-        encoded_sst_builder.add(row).unwrap();
+        encoded_sst_builder.add(row).await.unwrap();
     }
-    encoded_sst_builder.build().unwrap()
+    encoded_sst_builder.build().await.unwrap()
 }
 
 /// A compactor that compacts if there are L0s and `should_compact` returns true.
@@ -384,6 +385,9 @@ pub(crate) struct FlakyObjectStore {
     put_opts_attempts: AtomicUsize,
     // Put options: if set, always return Precondition error (non-retryable)
     put_precondition_always: std::sync::atomic::AtomicBool,
+    // Put options: if set, write succeeds but returns AlreadyExists error
+    // This simulates a timeout that occurs after the write completes but before the response
+    put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool,
     // Head: transient failures on first N attempts
     fail_first_head: AtomicUsize,
     head_attempts: AtomicUsize,
@@ -408,6 +412,7 @@ impl FlakyObjectStore {
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
+            put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
             head_attempts: AtomicUsize::new(0),
             fail_first_list: AtomicUsize::new(0),
@@ -421,6 +426,14 @@ impl FlakyObjectStore {
 
     pub(crate) fn with_put_precondition_always(self) -> Self {
         self.put_precondition_always.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// Configure the store to write data successfully but return an AlreadyExists error.
+    /// This simulates a timeout that occurs after the write completes but before the response.
+    pub(crate) fn with_put_succeeds_but_returns_already_exists(self) -> Self {
+        self.put_succeeds_but_returns_already_exists
+            .store(true, Ordering::SeqCst);
         self
     }
 
@@ -541,6 +554,21 @@ impl ObjectStore for FlakyObjectStore {
                 source: Box::new(std::io::Error::other("injected precondition")),
             });
         }
+        // Simulate: write succeeds but returns AlreadyExists error (timeout after write)
+        if self
+            .put_succeeds_but_returns_already_exists
+            .load(Ordering::SeqCst)
+        {
+            // Actually write the data
+            let _ = self.inner.put_opts(location, payload, opts).await?;
+            // But return an error as if we didn't get the response
+            return Err(object_store::Error::AlreadyExists {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::other(
+                    "injected already exists after successful write",
+                )),
+            });
+        }
         if self
             .fail_first_put_opts
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
@@ -654,5 +682,21 @@ impl ObjectStore for FlakyObjectStore {
 
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
         self.inner.rename_if_not_exists(from, to).await
+    }
+}
+
+pub(crate) struct StringConcatMergeOperator;
+
+impl MergeOperator for StringConcatMergeOperator {
+    fn merge(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        value: Bytes,
+    ) -> Result<Bytes, MergeOperatorError> {
+        let mut result = BytesMut::new();
+        existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
+        result.extend_from_slice(value.as_ref());
+        Ok(result.freeze())
     }
 }

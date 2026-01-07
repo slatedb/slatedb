@@ -13,7 +13,6 @@ use chrono::Utc;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
-#[cfg(test)]
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,6 +112,7 @@ pub(crate) struct FenceableCompactions {
 // the compactor epoch when initialized. It also detects when the current writer has been
 // fenced and fails all operations with SlateDBError::Fenced.
 impl FenceableCompactions {
+    #[cfg(test)]
     pub(crate) async fn init(
         stored_compactions: StoredCompactions,
         compactions_update_timeout: Duration,
@@ -122,6 +122,24 @@ impl FenceableCompactions {
             stored_compactions.inner,
             compactions_update_timeout,
             system_clock,
+            |c: &Compactions| c.compactor_epoch,
+            |c: &mut Compactions, e: u64| c.compactor_epoch = e,
+        )
+        .await?;
+        Ok(Self { inner: fr })
+    }
+
+    pub(crate) async fn init_with_epoch(
+        stored_compactions: StoredCompactions,
+        compactions_update_timeout: Duration,
+        system_clock: Arc<dyn SystemClock>,
+        compactor_epoch: u64,
+    ) -> Result<Self, SlateDBError> {
+        let fr = FenceableTransactionalObject::init_with_epoch(
+            stored_compactions.inner,
+            compactions_update_timeout,
+            system_clock,
+            compactor_epoch,
             |c: &Compactions| c.compactor_epoch,
             |c: &mut Compactions, e: u64| c.compactor_epoch = e,
         )
@@ -194,7 +212,6 @@ impl CompactionsStore {
     }
 
     /// Delete a compactions file from the object store.
-    #[cfg(test)]
     pub(crate) async fn delete_compactions(&self, id: u64) -> Result<(), SlateDBError> {
         Ok(self.inner.delete(MonotonicId::new(id)).await?)
     }
@@ -203,7 +220,6 @@ impl CompactionsStore {
     /// range is the current compactions state.
     /// # Arguments
     /// * `id_range` - The range of IDs to list
-    #[cfg(test)]
     pub(crate) async fn list_compactions<R: RangeBounds<u64>>(
         &self,
         id_range: R,
@@ -226,7 +242,6 @@ impl CompactionsStore {
         Ok(compactions)
     }
 
-    #[cfg(test)]
     pub(crate) async fn try_read_latest_compactions(
         &self,
     ) -> Result<Option<(u64, Compactions)>, SlateDBError> {
@@ -266,6 +281,7 @@ mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::error;
+    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use object_store::memory::InMemory;
@@ -450,7 +466,11 @@ mod tests {
         // Given a flaky store that times out on the first write
         let base = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
-        let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
+        let retrying = Arc::new(RetryingObjectStore::new(
+            flaky.clone(),
+            Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let store = Arc::new(CompactionsStore::new(&Path::from(ROOT), retrying.clone()));
 
         // When creating new compactions (initial write under retry)

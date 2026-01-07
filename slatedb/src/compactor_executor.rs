@@ -387,31 +387,15 @@ mod tests {
     use super::*;
     use crate::bytes_range::BytesRange;
     use crate::clock::DefaultSystemClock;
-    use crate::config::{FlushOptions, FlushType};
     use crate::sst_iter::SstView;
     use crate::stats::StatRegistry;
-    use crate::types::ValueDeletable;
-    use crate::{Db, MergeOperator, MergeOperatorError};
-    use bytes::{Bytes, BytesMut};
+    use crate::test_utils::StringConcatMergeOperator;
+    use crate::types::{RowEntry, ValueDeletable};
+    use crate::Db;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::time::Duration;
-
-    struct TestMergeOperator {}
-
-    impl MergeOperator for TestMergeOperator {
-        fn merge(
-            &self,
-            _key: &Bytes,
-            existing_value: Option<Bytes>,
-            value: Bytes,
-        ) -> Result<Bytes, MergeOperatorError> {
-            let mut result = BytesMut::new();
-            existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
-            result.extend_from_slice(value.as_ref());
-            Ok(result.freeze())
-        }
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compaction_job_should_retain_merges_newer_than_retention_min_seq_num() {
@@ -437,25 +421,36 @@ mod tests {
             Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
             clock,
             manifest_store.clone(),
-            Some(Arc::new(TestMergeOperator {})),
+            Some(Arc::new(StringConcatMergeOperator {})),
         );
 
-        // write some merges and get the seq number after the second merge
-        db.merge(b"foo", b"0").await.unwrap();
-        db.merge(b"foo", b"1").await.unwrap();
-        let snapshot = db.snapshot().await.unwrap();
-        let started_seq = snapshot.started_seq();
-        db.merge(b"foo", b"2").await.unwrap();
-        db.merge(b"foo", b"3").await.unwrap();
-        db.flush_with_options(FlushOptions {
-            flush_type: FlushType::MemTable,
-        })
-        .await
-        .unwrap();
+        // write some merges
+        let mut sst_builder = table_store.table_builder();
+        sst_builder
+            .add(RowEntry::new_merge(b"foo", b"3", 4))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_merge(b"foo", b"2", 3))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_merge(b"foo", b"1", 2))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_merge(b"foo", b"0", 1))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let id = SsTableId::Compacted(Ulid::new());
+        let l0 = table_store
+            .write_sst(&id, encoded_sst, false)
+            .await
+            .unwrap();
+        let retention_min_seq_num = 2;
+
         // start a compaction of a single sst
-        let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
-        assert_eq!(1, manifest.core.l0.len());
-        let l0 = manifest.core.l0[0].clone();
         let compaction = StartCompactionJobArgs {
             id: Ulid::new(),
             compaction_id: Ulid::new(),
@@ -464,7 +459,7 @@ mod tests {
             sorted_runs: vec![],
             compaction_logical_clock_tick: 0,
             is_dest_last_run: false,
-            retention_min_seq: Some(started_seq),
+            retention_min_seq: Some(retention_min_seq_num),
             estimated_source_bytes: 0,
         };
         executor.start_compaction_job(compaction);
@@ -497,21 +492,21 @@ mod tests {
             next.value,
             ValueDeletable::Merge(Bytes::from(b"3".as_slice()))
         );
-        assert_eq!(next.seq, started_seq + 2);
+        assert_eq!(next.seq, retention_min_seq_num + 2);
         let next = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"2".as_slice()))
         );
-        assert_eq!(next.seq, started_seq + 1);
+        assert_eq!(next.seq, retention_min_seq_num + 1);
         let next = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"foo".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Merge(Bytes::from(b"01".as_slice()))
         );
-        assert_eq!(next.seq, started_seq);
+        assert_eq!(next.seq, retention_min_seq_num);
         assert!(iter.next_entry().await.unwrap().is_none());
     }
 }

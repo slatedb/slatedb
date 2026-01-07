@@ -61,7 +61,7 @@ pub(crate) struct SstRowEntry {
 }
 
 impl SstRowEntry {
-    pub fn new(
+    pub(crate) fn new(
         key_prefix_len: usize,
         key_suffix: Bytes,
         seq: u64,
@@ -93,7 +93,7 @@ impl SstRowEntry {
         }
     }
 
-    pub fn flags(&self) -> RowFlags {
+    pub(crate) fn flags(&self) -> RowFlags {
         let mut flags = match &self.value {
             ValueDeletable::Value(_) => RowFlags::default(),
             ValueDeletable::Merge(_) => RowFlags::MERGE_OPERAND,
@@ -108,7 +108,8 @@ impl SstRowEntry {
         flags
     }
 
-    pub fn size(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn size(&self) -> usize {
         let mut size = 2  // u16 key_prefix_len
         + 2 // u16 key_suffix_len
         + self.key_suffix.len() // key_suffix
@@ -129,7 +130,7 @@ impl SstRowEntry {
 
     /// Keys in a Block are stored with prefix stripped off to compress the storage size. This function
     /// restores the full key by prepending the prefix to the key suffix.
-    pub fn restore_full_key(&self, prefix: &Bytes) -> Bytes {
+    pub(crate) fn restore_full_key(&self, prefix: &Bytes) -> Bytes {
         let mut full_key = BytesMut::with_capacity(self.key_prefix_len + self.key_suffix.len());
         full_key.extend_from_slice(&prefix[..self.key_prefix_len]);
         full_key.extend_from_slice(&self.key_suffix);
@@ -140,12 +141,12 @@ impl SstRowEntry {
 pub(crate) struct SstRowCodecV0 {}
 
 impl SstRowCodecV0 {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {}
     }
 
     /// estimated_entries_size include the size of seqnum,create_ts(if exist),expire_ts(exist),key,value
-    pub fn estimate_encoded_size(entry_num: usize, estimated_entries_size: usize) -> usize {
+    pub(crate) fn estimate_encoded_size(entry_num: usize, estimated_entries_size: usize) -> usize {
         let key_prefix_len_size = std::mem::size_of::<u16>();
         let key_suffix_len_size = std::mem::size_of::<u16>();
         let value_len_size = std::mem::size_of::<u32>();
@@ -155,7 +156,7 @@ impl SstRowCodecV0 {
         ans
     }
 
-    pub fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntry) {
+    pub(crate) fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntry) {
         output.put_u16(row.key_prefix_len.try_into().expect("key_prefix_len > u16"));
         output.put_u16(
             row.key_suffix
@@ -196,7 +197,7 @@ impl SstRowCodecV0 {
         }
     }
 
-    pub fn decode(&self, data: &mut Bytes) -> Result<SstRowEntry, SlateDBError> {
+    pub(crate) fn decode(&self, data: &mut Bytes) -> Result<SstRowEntry, SlateDBError> {
         let key_prefix_len = data.get_u16() as usize;
         let key_suffix_len = data.get_u16() as usize;
         let key_suffix = data.slice(..key_suffix_len);

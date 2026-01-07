@@ -68,8 +68,8 @@ typedef struct CSdbWriteOptions {
 } CSdbWriteOptions;
 
 typedef struct CSdbHandleResult {
-    struct CSdbHandle _0;
-    struct CSdbResult _1;
+    struct CSdbHandle handle;
+    struct CSdbResult result;
 } CSdbHandleResult;
 
 typedef struct CSdbReadOptions {
@@ -99,6 +99,11 @@ typedef struct CSdbScanOptions {
 typedef struct CSdbReaderHandle {
     struct SlateDbReaderFFI *_0;
 } CSdbReaderHandle;
+
+typedef struct CSdbReaderHandleResult {
+    struct CSdbReaderHandle handle;
+    struct CSdbResult result;
+} CSdbReaderHandleResult;
 
 // DbReader options for FFI
 typedef struct CSdbReaderOptions {
@@ -163,6 +168,8 @@ typedef struct CSdbScanResult {
 #define Compaction_VT_SPEC_TYPE 6
 
 #define Compaction_VT_SPEC 8
+
+#define Compaction_VT_STATUS 10
 
 #define CompactionsV1_VT_COMPACTOR_EPOCH 4
 
@@ -399,11 +406,11 @@ struct CSdbHandle slatedb_builder_build(struct DbBuilder_String *builder);
 // - `builder` must be a valid pointer to a DbBuilder that was previously allocated
 void slatedb_builder_free(struct DbBuilder_String *builder);
 
-struct CSdbReaderHandle slatedb_reader_open(const char *path,
-                                            const char *url,
-                                            const char *env_file,
-                                            const char *checkpoint_id,
-                                            const struct CSdbReaderOptions *reader_options);
+struct CSdbReaderHandleResult slatedb_reader_open(const char *path,
+                                                  const char *url,
+                                                  const char *env_file,
+                                                  const char *checkpoint_id,
+                                                  const struct CSdbReaderOptions *reader_options);
 
 // # Safety
 //

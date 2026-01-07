@@ -154,6 +154,10 @@ export default defineConfig({
 							link: 'https://docs.rs/slatedb/latest/slatedb/config',
 							attrs: { target: '_blank' }
 						},
+						{
+							label: 'Data Modeling',
+							link: '/docs/operations/data-modeling/',
+						},
 						/*
 						{
 							label: 'Errors',
@@ -199,6 +203,10 @@ export default defineConfig({
 						{
 							label: 'Checkpoint & Restore',
 							link: '/docs/tutorials/checkpoint/',
+						},
+						{
+							label: 'Standalone Compactor',
+							link: '/docs/tutorials/standalone-compactor/',
 						}
 					]
 				},
