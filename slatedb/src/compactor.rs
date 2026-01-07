@@ -320,11 +320,17 @@ impl Compactor {
     /// - `SlateDBError::InvalidDBState` if the compactions file doesn't exist.
     /// - `SlateDBError::InvalidCompaction` if a full compaction has no sources.
     /// - `SlateDBError` if the compaction could not be persisted.
-    pub(crate) async fn submit(&self, request: CompactionRequest) -> Result<Ulid, SlateDBError> {
+    pub async fn submit(
+        request: CompactionRequest,
+        manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
+        rand: Arc<DbRand>,
+        system_clock: Arc<dyn SystemClock>,
+    ) -> Result<Ulid, crate::Error> {
         let spec = match request {
             CompactionRequest::Spec(spec) => spec,
             CompactionRequest::Full => {
-                let (_, manifest) = self.manifest_store.read_latest_manifest().await?;
+                let (_, manifest) = manifest_store.read_latest_manifest().await?;
                 let db_state = &manifest.core;
                 let sources = db_state
                     .l0
@@ -338,18 +344,18 @@ impl Compactor {
                     )
                     .collect::<Vec<_>>();
                 if sources.is_empty() {
-                    return Err(SlateDBError::InvalidCompaction);
+                    return Err(crate::Error::from(SlateDBError::InvalidCompaction));
                 }
                 let destination = db_state.compacted.iter().map(|sr| sr.id).min().unwrap_or(0);
                 CompactionSpec::new(sources, destination)
             }
         };
-        let compaction_id = self.rand.rng().gen_ulid(self.system_clock.as_ref());
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction = Compaction::new(compaction_id, spec);
         let mut stored_compactions =
-            match StoredCompactions::try_load(self.compactions_store.clone()).await? {
+            match StoredCompactions::try_load(compactions_store.clone()).await? {
                 Some(stored) => stored,
-                None => return Err(SlateDBError::InvalidDBState),
+                None => return Err(crate::Error::from(SlateDBError::InvalidDBState)),
             };
 
         loop {
@@ -360,7 +366,7 @@ impl Compactor {
                 Err(SlateDBError::TransactionalObjectVersionExists) => {
                     stored_compactions.refresh().await?;
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(crate::Error::from(err)),
             }
         }
     }
@@ -987,7 +993,6 @@ mod tests {
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
-    use crate::utils::WatchableOnceCell;
     use bytes::Bytes;
 
     const PATH: &str = "/test/db";
@@ -2034,7 +2039,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_persists_compaction() {
         let os = Arc::new(InMemory::new());
-        let (manifest_store, compactions_store, table_store) = build_test_stores(os.clone());
+        let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         StoredManifest::create_new_db(
@@ -2054,27 +2059,16 @@ mod tests {
         .await
         .unwrap();
 
-        let compactor = Compactor::new(
+        let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);
+        let compaction_id = Compactor::submit(
+            CompactionRequest::Spec(spec.clone()),
             manifest_store,
             compactions_store.clone(),
-            table_store,
-            compactor_options(),
-            Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-                SizeTieredCompactionSchedulerOptions::default(),
-            )),
-            Handle::current(),
             Arc::new(DbRand::default()),
-            Arc::new(StatRegistry::new()),
-            system_clock,
-            WatchableOnceCell::new(),
-            None,
-        );
-
-        let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);
-        let compaction_id = compactor
-            .submit(CompactionRequest::Spec(spec.clone()))
-            .await
-            .unwrap();
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
 
         let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
         let stored = compactions
@@ -2088,7 +2082,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_full_compaction_uses_all_sources() {
         let os = Arc::new(InMemory::new());
-        let (manifest_store, compactions_store, table_store) = build_test_stores(os.clone());
+        let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
         StoredManifest::create_new_db(
@@ -2143,23 +2137,15 @@ mod tests {
         .await
         .unwrap();
 
-        let compactor = Compactor::new(
+        let compaction_id = Compactor::submit(
+            CompactionRequest::Full,
             manifest_store,
             compactions_store.clone(),
-            table_store,
-            compactor_options(),
-            Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-                SizeTieredCompactionSchedulerOptions::default(),
-            )),
-            Handle::current(),
             Arc::new(DbRand::default()),
-            Arc::new(StatRegistry::new()),
-            system_clock,
-            WatchableOnceCell::new(),
-            None,
-        );
-
-        let compaction_id = compactor.submit(CompactionRequest::Full).await.unwrap();
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
 
         let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
         let stored = compactions

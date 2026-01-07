@@ -1,7 +1,7 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
-use crate::compactor::CompactionRequest;
+use crate::compactor::{CompactionRequest, Compactor};
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::dispatcher::MessageHandlerExecutor;
@@ -155,15 +155,16 @@ impl Admin {
         &self,
         request: CompactionRequest,
     ) -> Result<String, Box<dyn Error>> {
-        let compactor = crate::CompactorBuilder::new(
-            self.path.clone(),
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        let manifest_store = Arc::new(self.manifest_store());
+        let compactions_store = Arc::new(self.compactions_store());
+        let compaction_id = Compactor::submit(
+            request,
+            manifest_store,
+            compactions_store,
+            Arc::new(DbRand::new(self.rand.seed())),
+            self.system_clock.clone(),
         )
-        .with_system_clock(self.system_clock.clone())
-        .with_seed(self.rand.seed())
-        .build();
-
-        let compaction_id = compactor.submit(request).await?;
+        .await?;
         let Some(compaction_json) = self.read_compaction(compaction_id, None).await? else {
             return Err(Box::new(SlateDBError::InvalidDBState));
         };
