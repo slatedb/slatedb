@@ -91,6 +91,10 @@ impl Admin {
     ///
     /// ## Arguments
     /// - `maybe_id`: Optional ID of the compactions file to read. If None, reads from the latest.
+    ///
+    /// ## Returns
+    /// - `Ok(Some(String))`: The compactions as a JSON string if found.
+    /// - `Ok(None)`: If the compactions file does not exist.
     pub async fn read_compactions(
         &self,
         maybe_id: Option<u64>,

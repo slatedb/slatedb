@@ -139,11 +139,6 @@ def test_admin_compactions_read_list_submit(db_path, env_file):
     db.close()
 
     admin = SlateDBAdmin(db_path, env_file=env_file)
-    compactions = admin.read_compactions()
-    assert compactions is None or isinstance(compactions, str)
-    listing = admin.list_compactions()
-    assert isinstance(listing, str)
-
     request = SlateDBCompactionRequest.spec(
         json.dumps({"sources": [{"SortedRun": 3}], "destination": 3})
     )
@@ -154,11 +149,10 @@ def test_admin_compactions_read_list_submit(db_path, env_file):
 
     read_back = admin.read_compaction(compaction_id)
     assert read_back is not None
-
-    if compactions is not None:
-        compactions_id = json.loads(compactions)[0]
-        read_specific = admin.read_compaction(compaction_id, compactions_id=compactions_id)
-        assert read_specific is not None
+    read_back = json.loads(read_back)
+    assert read_back["id"] == compaction_id
+    assert read_back["status"] == "Submitted"
+    assert read_back["spec"]["sources"] == [{"SortedRun": 3}]
 
 
 @pytest.mark.asyncio
@@ -177,23 +171,24 @@ async def test_admin_manifest_read_and_list_async(db_path, env_file):
 @pytest.mark.asyncio
 async def test_admin_compactions_read_list_submit_async(db_path, env_file):
     db = SlateDB(db_path, env_file=env_file)
-    db.put(b"c2", b"v2")
+    db.put(b"c1", b"v1")
     db.close()
 
     admin = SlateDBAdmin(db_path, env_file=env_file)
-    compactions = await admin.read_compactions_async()
-    assert compactions is None or isinstance(compactions, str)
-    listing = await admin.list_compactions_async()
-    assert isinstance(listing, str)
-
     request = SlateDBCompactionRequest.spec(
-        json.dumps({"sources": [{"SortedRun": 4}], "destination": 4})
+        json.dumps({"sources": [{"SortedRun": 3}], "destination": 3})
     )
     submitted = await admin.submit_compaction_async(request)
+    assert isinstance(submitted, str)
     submitted_payload = json.loads(submitted)
     compaction_id = submitted_payload["id"]
+
     read_back = await admin.read_compaction_async(compaction_id)
     assert read_back is not None
+    read_back = json.loads(read_back)
+    assert read_back["id"] == compaction_id
+    assert read_back["status"] == "Submitted"
+    assert read_back["spec"]["sources"] == [{"SortedRun": 3}]
 
 
 @pytest.mark.asyncio
