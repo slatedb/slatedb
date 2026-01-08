@@ -1,0 +1,285 @@
+---
+title: Data Modeling
+description: Best practices for designing keys in SlateDB
+---
+
+SlateDB uses bytewise lexicographic ordering for all keys. This is the same
+approach used by FoundationDB, DynamoDB, and RocksDB (by default). Custom
+comparators are intentionally not supported. This is a deliberate design decision
+that reduces complexity and avoids bugs observed in other implementations.
+
+This means you are responsible for constructing keys that sort correctly under
+byte comparison. This document provides patterns for encoding common data types
+and designing effective key schemas.
+
+## Key Constraints
+
+Before diving into encoding patterns, be aware of SlateDB's key and value limits:
+
+| Constraint | Limit |
+|------------|-------|
+| Maximum key size | 65,535 bytes |
+| Maximum value size | 4,294,967,295 bytes |
+| Minimum key size | 1 byte (keys cannot be empty) |
+
+## How Keys Are Used
+
+Understanding how SlateDB uses keys internally helps explain why key design matters for performance.
+
+### Sorted Storage
+
+All data in SlateDB is stored sorted by key. The in-memory MemTable uses a skip
+list that maintains key order, and on-disk SSTables store keys in sorted order
+within blocks. This sorted structure enables:
+
+- **Efficient range scans**: Iterating over a key range (e.g., all keys starting with
+  `user:123:`) requires no random access—just sequential reads through sorted data.
+- **Binary search**: Point lookups use binary search to find the right SSTable and 
+  block, achieving O(log n) complexity instead of scanning all data.
+
+### Prefix Compression
+
+Within each SST block, SlateDB uses prefix compression: keys that share a common
+prefix with the first key in the block store only their unique suffix. For
+example, if a block contains:
+
+```
+user:123:profile
+user:123:settings
+user:123:preferences
+```
+
+The common prefix `user:123:` is stored once, and subsequent keys store only
+`settings`, `preferences`, etc. This means keys with shared prefixes compress
+better and use less storage. It also means that there is less of a storage
+penalty for repeated key prefixes.
+
+### Block Caching
+
+SlateDB caches SST blocks in memory. Each block contains multiple adjacent keys.
+When you read one key, the entire block is cached—subsequent reads for nearby
+keys (in sort order) are served from cache without hitting object storage.
+
+**Implication**: Keys that are accessed together should be close together in
+sort order. This is why hierarchical key designs (like `tenant:user:resource`)
+work well—related data shares prefixes and lands in the same blocks.
+
+### Forward-Only Iteration
+
+SlateDB currently supports only forward (ascending) iteration. If your access
+pattern requires descending order (e.g., "most recent first"), you must encode
+keys to sort in reverse order. See the [Descending Order](#descending-order)
+pattern below.
+
+## Encoding Primitive Types
+
+### Unsigned Integers
+
+Use big-endian (network byte order) encoding. The most significant byte comes
+first, which ensures correct lexicographic ordering.
+
+```rust
+// Encoding a u64
+let value: u64 = 42;
+let encoded = value.to_be_bytes();
+// Result: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A]
+```
+
+### Signed Integers
+
+For signed integers, big-endian encoding alone doesn't work because negative
+numbers have their sign bit set, making them appear "larger" than positive
+numbers in byte comparison.
+
+The solution is to flip the sign bit (XOR the most significant byte with `0x80`):
+
+```rust
+fn encode_i64(value: i64) -> [u8; 8] {
+    let mut bytes = value.to_be_bytes();
+    bytes[0] ^= 0x80; // Flip sign bit
+    bytes
+}
+```
+
+This transforms the two's complement representation into an unsigned-comparable
+form where negative numbers sort before positive numbers.
+
+### Floating Point Numbers
+
+IEEE 754 floating point numbers require special handling:
+
+- For **positive** floats: flip the sign bit only (XOR first byte with `0x80`)
+- For **negative** floats: flip ALL bits (XOR each byte with `0xFF`)
+
+```rust
+fn encode_f64(value: f64) -> [u8; 8] {
+    let mut bytes = value.to_be_bytes();
+    if bytes[0] & 0x80 == 0 {
+        // Positive: flip sign bit
+        bytes[0] ^= 0x80;
+    } else {
+        // Negative: flip all bits
+        for byte in &mut bytes {
+            *byte ^= 0xFF;
+        }
+    }
+    bytes
+}
+```
+
+This ensures the correct ordering: `-inf < -max < ... < -0 < +0 < ... < +max < +inf`
+
+:::note
+NaN values require special handling. A common approach is to sort them after
++infinity by detecting and encoding them with a special prefix.
+:::
+
+### Strings
+
+UTF-8 encoded strings are naturally ordered by Unicode code point, which is usually what you want.
+
+For locale-aware sorting (e.g., case-insensitive, or treating `ä` as equivalent to `a`):
+
+1. Apply a collation transformation using a library like ICU
+2. Store the collation key as the sort key
+3. Store the original string in the value if you need to retrieve it
+
+## Composite Keys
+
+Many applications need keys composed of multiple components (e.g., `tenant_id + user_id + timestamp`).
+
+### Choosing a Delimiter
+
+The recommended delimiter is `0x00` (null byte):
+
+- Sorts before all other byte values
+- Natural choice for "end of component" semantics
+
+**Critical requirement**: The delimiter must not appear within any component
+value. If your components are strings that never contain null bytes, you can
+use `0x00` directly.
+
+### Escaping for Binary-Safe Keys
+
+If components can contain arbitrary binary data (including null bytes), use an
+escape mechanism. Following FoundationDB's tuple layer pattern:
+
+- `0x00 0x00` = component terminator
+- `0x00 0xFF` = literal null byte within a component
+
+When encoding: replace each `0x00` in the data with `0x00 0xFF`, then append `0x00 0x00` to terminate.
+
+### Variable-Length Components
+
+Two approaches:
+
+1. **Null-terminated with escaping**: Use `0x00` terminator with the escape sequences above
+   - Preserves sort order within components
+   - Slightly more complex encoding/decoding
+
+2. **Length-prefixed**: Prepend a fixed-size length before each component
+   - No escaping needed
+   - Doesn't preserve sort order of the content itself (lengths sort first)
+
+**Optimization**: Place variable-length components last when possible—no
+delimiter is needed for the final component.
+
+### Fixed-Length Components
+
+No delimiter is needed between consecutive fixed-length components. Just
+concatenate them directly:
+
+```rust
+// topic_id (4 bytes) + offset (8 bytes) = 12 byte key
+let mut key = Vec::with_capacity(12);
+key.extend_from_slice(&topic_id.to_be_bytes());
+key.extend_from_slice(&offset.to_be_bytes());
+```
+
+This saves space and simplifies encoding.
+
+### Hierarchical Keys
+
+Structure keys to enable efficient prefix scans:
+
+```
+usa#california#san_francisco#mission
+usa#california#san_francisco#soma
+usa#california#los_angeles#hollywood
+usa#texas#austin#downtown
+```
+
+With this structure:
+- Scan `usa#` to get all California and Texas data
+- Scan `usa#california#` to get all California cities
+- Scan `usa#california#san_francisco#` to get all SF neighborhoods
+
+Each level of the hierarchy is independently scannable with a prefix query.
+
+## Common Patterns
+
+### Descending Order
+
+For "most recent first" or "highest value first" access patterns:
+
+```rust
+// Option 1: Bit inversion
+fn encode_descending(value: u64) -> [u8; 8] {
+    let mut bytes = value.to_be_bytes();
+    for byte in &mut bytes {
+        *byte ^= 0xFF;
+    }
+    bytes
+}
+
+// Option 2: Subtraction from max
+fn encode_descending_alt(value: u64) -> [u8; 8] {
+    (u64::MAX - value).to_be_bytes()
+}
+```
+
+### Timestamps
+
+For chronological order, use big-endian encoding of Unix timestamps:
+
+```rust
+let timestamp_millis: u64 = 1704067200000;
+let key = timestamp_millis.to_be_bytes();
+```
+
+For reverse chronological order (most recent first):
+
+```rust
+let key = (u64::MAX - timestamp_millis).to_be_bytes();
+```
+
+### UUIDs
+
+- **UUIDv7**: Time-ordered and naturally lexicographically sortable (recommended for new applications)
+- **UUIDv4**: Random distribution, does not sort meaningfully by time
+- **UUIDv1**: Can be made time-ordered with byte reordering, but UUIDv7 is simpler
+
+### Geospatial Data
+
+Z-order (Morton) curves and Hilbert curves can encode 2D or 3D coordinates as
+fixed-length integers that preserve spatial locality. These space-filling curve
+encodings are lexicographically sortable and work well as keys or key
+components.
+
+## Key Design Tips
+
+- **Keep keys short**: Shorter keys mean less memory usage, faster comparisons, and better cache efficiency
+- **Design for access patterns**: Structure keys so your most common queries are efficient range scans
+- **Co-locate related data**: Items frequently accessed together should share key prefixes
+
+## Libraries and References
+
+Rather than implementing encodings yourself, consider using a library:
+
+- [storekey](https://github.com/surrealdb/storekey) - Rust crate providing a binary encoding format that ensures lexicographic sort order
+
+For more detailed encoding algorithms and patterns:
+
+- [FoundationDB Data Modeling](https://apple.github.io/foundationdb/data-modeling.html) - Comprehensive guide covering tuple encoding, integers, floats, and composite types
+- [DynamoDB Sort Key Best Practices](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-sort-keys.html) - Hierarchical key patterns and version control
+
