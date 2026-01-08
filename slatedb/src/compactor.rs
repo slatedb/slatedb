@@ -320,7 +320,7 @@ impl Compactor {
     /// - `SlateDBError::InvalidDBState` if the compactions file doesn't exist.
     /// - `SlateDBError::InvalidCompaction` if a full compaction has no sources.
     /// - `SlateDBError` if the compaction could not be persisted.
-    pub async fn submit(
+    pub(crate) async fn submit(
         request: CompactionRequest,
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
