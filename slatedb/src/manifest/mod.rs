@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 pub(crate) mod store;
 
+// TODO: should probably move these into manifest/mod.rs (this file)
 pub use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
 
 #[derive(Clone, Serialize, PartialEq, Debug)]

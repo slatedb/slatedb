@@ -23,8 +23,8 @@ use SsTableId::{Compacted, Wal};
 
 #[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableHandle {
-    pub(crate) id: SsTableId,
-    pub(crate) info: SsTableInfo,
+    pub id: SsTableId,
+    pub info: SsTableInfo,
 
     /// The range of keys that are visible to the user. If non-empty, this handle represents a projection
     /// over the SST file.
@@ -92,6 +92,15 @@ impl SsTableHandle {
 
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
         Self::new_compacted(self.id, self.info.clone(), Some(visible_range))
+    }
+
+    /// The range of keys that are visible to the user.
+    ///
+    /// ## Returns
+    /// - `Some(BytesRange)` if there is a projection applied to this SST.
+    /// - `None` if the entire SST is visible.
+    pub fn visible_range(&self) -> Option<impl RangeBounds<Bytes>> {
+        self.visible_range.clone()
     }
 
     // Compacted (non-WAL) SSTs are never empty. They are created by compaction or
@@ -180,7 +189,7 @@ pub enum SsTableId {
 
 impl SsTableId {
     #[allow(clippy::panic)]
-    pub(crate) fn unwrap_wal_id(&self) -> u64 {
+    pub fn unwrap_wal_id(&self) -> u64 {
         match self {
             Wal(wal_id) => *wal_id,
             Compacted(_) => panic!("found compacted id when unwrapping WAL ID"),
@@ -188,7 +197,7 @@ impl SsTableId {
     }
 
     #[allow(clippy::panic)]
-    pub(crate) fn unwrap_compacted_id(&self) -> Ulid {
+    pub fn unwrap_compacted_id(&self) -> Ulid {
         match self {
             Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
             Compacted(ulid) => *ulid,
@@ -207,12 +216,12 @@ impl Debug for SsTableId {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
 pub struct SsTableInfo {
-    pub(crate) first_key: Option<Bytes>,
-    pub(crate) index_offset: u64,
-    pub(crate) index_len: u64,
-    pub(crate) filter_offset: u64,
-    pub(crate) filter_len: u64,
-    pub(crate) compression_codec: Option<CompressionCodec>,
+    pub first_key: Option<Bytes>,
+    pub index_offset: u64,
+    pub index_len: u64,
+    pub filter_offset: u64,
+    pub filter_len: u64,
+    pub compression_codec: Option<CompressionCodec>,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -234,12 +243,12 @@ impl Clone for Box<dyn SsTableInfoCodec> {
 
 #[derive(Clone, PartialEq, Serialize, Debug)]
 pub struct SortedRun {
-    pub(crate) id: u32,
-    pub(crate) ssts: Vec<SsTableHandle>,
+    pub id: u32,
+    pub ssts: Vec<SsTableHandle>,
 }
 
 impl SortedRun {
-    pub(crate) fn estimate_size(&self) -> u64 {
+    pub fn estimate_size(&self) -> u64 {
         self.ssts.iter().map(|sst| sst.estimate_size()).sum()
     }
 
@@ -331,31 +340,31 @@ impl COWDbState {
 /// represent the in-memory state of the manifest
 #[derive(Clone, PartialEq, Serialize, Debug)]
 pub struct ManifestCore {
-    pub(crate) initialized: bool,
-    pub(crate) l0_last_compacted: Option<Ulid>,
-    pub(crate) l0: VecDeque<SsTableHandle>,
-    pub(crate) compacted: Vec<SortedRun>,
-    pub(crate) next_wal_sst_id: u64,
+    pub initialized: bool,
+    pub l0_last_compacted: Option<Ulid>,
+    pub l0: VecDeque<SsTableHandle>,
+    pub compacted: Vec<SortedRun>,
+    pub next_wal_sst_id: u64,
     /// the WAL ID after which the WAL replay should start. Default to 0,
     /// which means all the WAL IDs should be greater than or equal to 1.
     /// When a new L0 is flushed, we update this field to the recent
     /// flushed WAL ID.
-    pub(crate) replay_after_wal_id: u64,
+    pub replay_after_wal_id: u64,
     /// the `last_l0_clock_tick` includes all data in L0 and below --
     /// WAL entries will have their latest ticks recovered on replay
     /// into the in-memory state
-    pub(crate) last_l0_clock_tick: i64,
+    pub last_l0_clock_tick: i64,
     /// it's persisted in the manifest, and only updated when a new L0
     /// SST is created in the manifest.
-    pub(crate) last_l0_seq: u64,
+    pub last_l0_seq: u64,
     /// Minimum sequence number across all recent in-memory snapshots. The compactor
     /// needs this to determine whether it's safe to drop duplicate key writes. If a
     /// recent snapshot still references an older version of a key, it should not be
     /// recycled. This field is updated when a new L0 is flushed.
-    pub(crate) recent_snapshot_min_seq: u64,
-    pub(crate) sequence_tracker: SequenceTracker,
-    pub(crate) checkpoints: Vec<Checkpoint>,
-    pub(crate) wal_object_store_uri: Option<String>,
+    pub recent_snapshot_min_seq: u64,
+    pub sequence_tracker: SequenceTracker,
+    pub checkpoints: Vec<Checkpoint>,
+    pub wal_object_store_uri: Option<String>,
 }
 
 impl ManifestCore {
