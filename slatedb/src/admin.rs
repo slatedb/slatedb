@@ -760,6 +760,7 @@ mod tests {
             .await
             .unwrap()
             .expect("expected compactions");
+        eprintln!("latest compactions: {}", latest);
         let latest_value: serde_json::Value = serde_json::from_str(&latest).unwrap();
         let latest_pair = latest_value.as_array().expect("expected [id, compactions]");
         assert_eq!(latest_pair[0].as_u64().unwrap(), 2);
@@ -773,6 +774,8 @@ mod tests {
             7
         );
         let recent = latest_compactions
+            .get("core")
+            .expect("expected core")
             .get("recent_compactions")
             .and_then(|v| v.as_object())
             .unwrap();
@@ -799,6 +802,8 @@ mod tests {
         assert_eq!(first_pair[0].as_u64().unwrap(), 1);
         let first_compactions = first_pair[1].as_object().unwrap();
         let first_recent = first_compactions
+            .get("core")
+            .expect("expected core")
             .get("recent_compactions")
             .and_then(|v| v.as_object())
             .unwrap();
