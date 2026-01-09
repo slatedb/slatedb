@@ -272,22 +272,42 @@ impl Display for Compaction {
     }
 }
 
-/// Container for compactions tracked by the compactor alongside its epoch.
+/// Represents an immutable in-memory view of .compactions file that is suitable
+/// to expose to end-users.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct Compactions {
-    // The current compactor's epoch.
-    pub(crate) compactor_epoch: u64,
+pub struct CompactionsCore {
     /// The set of recent compactions tracked by this compactor. These may
     /// be pending, in progress, or recently completed (either with success
     /// or failure).
     recent_compactions: BTreeMap<Ulid, Compaction>,
 }
 
+impl CompactionsCore {
+    pub(crate) fn new() -> Self {
+        Self {
+            recent_compactions: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn with_compactions(mut self, compactions: BTreeMap<Ulid, Compaction>) -> Self {
+        self.recent_compactions = compactions;
+        self
+    }
+}
+
+/// Container for compactions tracked by the compactor alongside its epoch.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct Compactions {
+    // The current compactor's epoch.
+    pub(crate) compactor_epoch: u64,
+    pub(crate) core: CompactionsCore,
+}
+
 impl Compactions {
     pub(crate) fn new(compactor_epoch: u64) -> Self {
         Self {
             compactor_epoch,
-            recent_compactions: BTreeMap::new(),
+            core: CompactionsCore::new(),
         }
     }
 
@@ -296,43 +316,45 @@ impl Compactions {
             .into_iter()
             .map(|c| (c.id(), c))
             .collect::<BTreeMap<Ulid, Compaction>>();
-        self.recent_compactions = recent_compactions;
+        self.core.recent_compactions = recent_compactions;
         self
     }
 
     /// Inserts a new compaction to be tracked.
     pub(crate) fn insert(&mut self, compaction: Compaction) {
-        self.recent_compactions.insert(compaction.id, compaction);
+        self.core
+            .recent_compactions
+            .insert(compaction.id, compaction);
     }
 
     /// Returns the tracked compaction for the specified id, if any.
     pub(crate) fn get(&self, compaction_id: &Ulid) -> Option<&Compaction> {
-        self.recent_compactions.get(compaction_id)
+        self.core.recent_compactions.get(compaction_id)
     }
 
     pub(crate) fn get_mut(&mut self, compaction_id: &Ulid) -> Option<&mut Compaction> {
-        self.recent_compactions.get_mut(compaction_id)
+        self.core.recent_compactions.get_mut(compaction_id)
     }
 
     /// Returns true if the specified compaction id is being tracked.
     #[cfg(test)]
     pub(crate) fn contains(&self, compaction_id: &Ulid) -> bool {
-        self.recent_compactions.contains_key(compaction_id)
+        self.core.recent_compactions.contains_key(compaction_id)
     }
 
     /// Returns an iterator over all tracked compactions.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Compaction> {
-        self.recent_compactions.values()
+        self.core.recent_compactions.values()
     }
 
     /// Returns an iterator over mutable compactions.
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Compaction> {
-        self.recent_compactions.values_mut()
+        self.core.recent_compactions.values_mut()
     }
 
     /// Returns an iterator over all active (submitted or running) compactions.
     pub(crate) fn iter_active(&self) -> impl Iterator<Item = &Compaction> {
-        self.recent_compactions.values().filter(|c| c.active())
+        self.core.recent_compactions.values().filter(|c| c.active())
     }
 
     /// Returns an iterator over all compactions with the given status.
@@ -340,7 +362,8 @@ impl Compactions {
         &self,
         status: CompactionStatus,
     ) -> impl Iterator<Item = &Compaction> {
-        self.recent_compactions
+        self.core
+            .recent_compactions
             .values()
             .filter(move |c| c.status() == status)
     }
@@ -348,6 +371,7 @@ impl Compactions {
     /// Keeps the most recently finished compaction and any active compactions, and removes others.
     pub(crate) fn retain_active_and_last_finished(&mut self) {
         let latest_finished = self
+            .core
             .recent_compactions
             .iter()
             .filter_map(|(_, c)| {
@@ -359,7 +383,8 @@ impl Compactions {
             })
             .max();
 
-        self.recent_compactions
+        self.core
+            .recent_compactions
             .retain(|id, compaction| compaction.active() || Some(id) == latest_finished.as_ref());
     }
 }
@@ -448,7 +473,7 @@ impl CompactorState {
 
         let mut merged_compactions = Compactions {
             compactor_epoch: self.compactions.value.compactor_epoch,
-            recent_compactions: merged,
+            core: CompactionsCore::new().with_compactions(merged),
         };
         merged_compactions.retain_active_and_last_finished();
         remote_compactions.value = merged_compactions;
@@ -534,6 +559,7 @@ impl CompactorState {
 
         self.compactions
             .value
+            .core
             .recent_compactions
             .insert(compaction.id(), compaction);
         Ok(())
@@ -547,6 +573,7 @@ impl CompactorState {
         if let Some(compaction) = self
             .compactions
             .value
+            .core
             .recent_compactions
             .get_mut(compaction_id)
         {
