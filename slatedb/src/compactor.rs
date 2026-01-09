@@ -137,11 +137,7 @@ pub trait CompactionScheduler: Send + Sync {
     ///
     /// ## Returns
     /// - `Ok(())` if valid, or an [`Error`] if invalid.
-    fn validate(
-        &self,
-        _state: &CompactorState,
-        _spec: &CompactionSpec,
-    ) -> Result<(), Error> {
+    fn validate(&self, _state: &CompactorState, _spec: &CompactionSpec) -> Result<(), Error> {
         Ok(())
     }
 }

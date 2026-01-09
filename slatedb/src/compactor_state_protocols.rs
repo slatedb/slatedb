@@ -35,6 +35,19 @@ pub(crate) struct CompactorStateView {
     pub(crate) manifest: (u64, Manifest),
 }
 
+/// Converts a full [`CompactorState`] into a read-only view.
+impl From<CompactorState> for CompactorStateView {
+    fn from(state: CompactorState) -> Self {
+        CompactorStateView {
+            compactions: Some((
+                state.compactions().id().into(),
+                state.compactions().value.clone(),
+            )),
+            manifest: (state.manifest().id().into(), state.manifest().value.clone()),
+        }
+    }
+}
+
 /// Reader that enforces compactions-first ordering when fetching state.
 pub(crate) struct CompactorStateReader {
     /// Shared manifest store to read the latest manifest.
