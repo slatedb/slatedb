@@ -182,6 +182,8 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         let (l0, srs) = self.compaction_sources(db_state);
         let active_compactions = state
             .compactions()
+            .into_iter()
+            .flat_map(|c| c.recent_compactions())
             .filter(|c| c.active())
             .collect::<Vec<_>>();
         let conflict_checker = ConflictChecker::new(active_compactions.iter().map(|j| j.spec()));

@@ -16,7 +16,8 @@ use log::{debug, info};
 
 use crate::clock::SystemClock;
 use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
-use crate::compactor_state::{Compaction, CompactionStatus, Compactions, CompactorState};
+use crate::compactor::CompactionsCore;
+use crate::compactor_state::{CompactionStatus, Compactions, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
@@ -37,15 +38,12 @@ pub struct CompactorStateView {
 }
 
 impl CompactorStateView {
-    /// Returns an iterator over all compactions in the view, if any.
-    pub fn compactions(&self) -> impl Iterator<Item = &Compaction> {
-        self.compactions
-            .as_ref()
-            .map(|(_, compactions)| compactions.iter())
-            .into_iter()
-            .flatten()
+    /// Returns a read-only view of the .compactions file if present.
+    pub fn compactions(&self) -> Option<&CompactionsCore> {
+        self.compactions.as_ref().map(|(_, c)| &c.core)
     }
 
+    /// Returns a read-only view of the .manifest file.
     pub(crate) fn db_state(&self) -> &CoreDbState {
         &self.manifest.1.core
     }

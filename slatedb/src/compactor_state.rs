@@ -293,6 +293,13 @@ impl CompactionsCore {
         self.recent_compactions = compactions;
         self
     }
+
+    /// Returns an iterator over all recent compactions. Recent compactions include all
+    /// active (submitted or running) compactions as well as the most recently finished
+    /// compaction (failed or completed).
+    pub fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
+        self.recent_compactions.values()
+    }
 }
 
 /// Container for compactions tracked by the compactor alongside its epoch.
