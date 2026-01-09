@@ -65,7 +65,7 @@ use tracing::instrument;
 use ulid::Ulid;
 
 use crate::clock::SystemClock;
-use crate::compactions_store::CompactionsStore;
+use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
@@ -144,6 +144,15 @@ pub trait CompactionScheduler: Send + Sync {
     ) -> Result<(), Error> {
         Ok(())
     }
+}
+
+/// Request to submit a compaction for execution.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompactionRequest {
+    /// Compact all current L0 SSTs and sorted runs.
+    Full,
+    /// Use a caller-provided compaction spec.
+    Spec(CompactionSpec),
 }
 
 // Progress is tracked per Compaction via its `bytes_processed` field.
@@ -302,6 +311,64 @@ impl Compactor {
             .shutdown_task(COMPACTOR_TASK_NAME)
             .await
             .map_err(|e| e.into())
+    }
+
+    /// Submits a compaction request by persisting it to the compactions store.
+    ///
+    /// ## Returns
+    /// - `Ok(Ulid)` with the submitted compaction id.
+    /// - `SlateDBError::InvalidDBState` if the compactions file doesn't exist.
+    /// - `SlateDBError::InvalidCompaction` if a full compaction has no sources.
+    /// - `SlateDBError` if the compaction could not be persisted.
+    pub(crate) async fn submit(
+        request: CompactionRequest,
+        manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
+        rand: Arc<DbRand>,
+        system_clock: Arc<dyn SystemClock>,
+    ) -> Result<Ulid, crate::Error> {
+        let spec = match request {
+            CompactionRequest::Spec(spec) => spec,
+            CompactionRequest::Full => {
+                let (_, manifest) = manifest_store.read_latest_manifest().await?;
+                let db_state = &manifest.core;
+                let sources = db_state
+                    .l0
+                    .iter()
+                    .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+                    .chain(
+                        db_state
+                            .compacted
+                            .iter()
+                            .map(|sr| SourceId::SortedRun(sr.id)),
+                    )
+                    .collect::<Vec<_>>();
+                if sources.is_empty() {
+                    return Err(crate::Error::from(SlateDBError::InvalidCompaction));
+                }
+                let destination = db_state.compacted.iter().map(|sr| sr.id).min().unwrap_or(0);
+                CompactionSpec::new(sources, destination)
+            }
+        };
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let compaction = Compaction::new(compaction_id, spec);
+        let mut stored_compactions =
+            match StoredCompactions::try_load(compactions_store.clone()).await? {
+                Some(stored) => stored,
+                None => return Err(crate::Error::from(SlateDBError::InvalidDBState)),
+            };
+
+        loop {
+            let mut dirty = stored_compactions.prepare_dirty()?;
+            dirty.value.insert(compaction.clone());
+            match stored_compactions.update(dirty).await {
+                Ok(()) => return Ok(compaction_id),
+                Err(SlateDBError::TransactionalObjectVersionExists) => {
+                    stored_compactions.refresh().await?;
+                }
+                Err(err) => return Err(crate::Error::from(err)),
+            }
+        }
     }
 }
 
@@ -887,7 +954,7 @@ pub mod stats {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::future::Future;
     use std::sync::atomic;
     use std::sync::Arc;
@@ -901,7 +968,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
-    use crate::clock::DefaultSystemClock;
+    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
     use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
@@ -912,7 +979,7 @@ mod tests {
         PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
-    use crate::db_state::{CoreDbState, SortedRun};
+    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -1967,6 +2034,133 @@ mod tests {
             .expect("failed to add compaction");
 
         assert_eq!(fixture.handler.state().active_compactions().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_submit_persists_compaction() {
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        let stored_manifest = StoredManifest::load(manifest_store.clone(), system_clock.clone())
+            .await
+            .unwrap();
+        StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
+
+        let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);
+        let compaction_id = Compactor::submit(
+            CompactionRequest::Spec(spec.clone()),
+            manifest_store,
+            compactions_store.clone(),
+            Arc::new(DbRand::default()),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        let stored = compactions
+            .get(&compaction_id)
+            .expect("missing submitted compaction");
+
+        assert_eq!(stored.spec(), &spec);
+        assert_eq!(stored.status(), CompactionStatus::Submitted);
+    }
+
+    #[tokio::test]
+    async fn test_submit_full_compaction_uses_all_sources() {
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            CoreDbState::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store.clone(), system_clock.clone())
+                .await
+                .unwrap();
+
+        let l0_newest = Ulid::new();
+        let l0_oldest = Ulid::new();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        let l0_info = SsTableInfo {
+            first_key: Some(Bytes::from_static(b"a")),
+            ..SsTableInfo::default()
+        };
+        let sr_info = SsTableInfo {
+            first_key: Some(Bytes::from_static(b"m")),
+            ..SsTableInfo::default()
+        };
+        dirty.value.core.l0 = VecDeque::from(vec![
+            SsTableHandle::new(SsTableId::Compacted(l0_newest), l0_info.clone()),
+            SsTableHandle::new(SsTableId::Compacted(l0_oldest), l0_info.clone()),
+        ]);
+        dirty.value.core.compacted = vec![
+            SortedRun {
+                id: 2,
+                ssts: vec![SsTableHandle::new(
+                    SsTableId::Compacted(Ulid::new()),
+                    sr_info.clone(),
+                )],
+            },
+            SortedRun {
+                id: 1,
+                ssts: vec![SsTableHandle::new(
+                    SsTableId::Compacted(Ulid::new()),
+                    sr_info.clone(),
+                )],
+            },
+        ];
+        stored_manifest.update(dirty).await.unwrap();
+
+        StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
+
+        let compaction_id = Compactor::submit(
+            CompactionRequest::Full,
+            manifest_store,
+            compactions_store.clone(),
+            Arc::new(DbRand::default()),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let (_, compactions) = compactions_store.read_latest_compactions().await.unwrap();
+        let stored = compactions
+            .get(&compaction_id)
+            .expect("missing submitted compaction");
+        let expected_sources = vec![
+            SourceId::Sst(l0_newest),
+            SourceId::Sst(l0_oldest),
+            SourceId::SortedRun(2),
+            SourceId::SortedRun(1),
+        ];
+
+        assert_eq!(stored.spec().sources(), &expected_sources);
+        assert_eq!(stored.spec().destination(), 1);
+        assert_eq!(stored.status(), CompactionStatus::Submitted);
     }
 
     struct CompactorEventHandlerTestFixture {

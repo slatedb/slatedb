@@ -3351,6 +3351,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "ulid",
  "uuid",
 ]
 
@@ -3403,8 +3404,10 @@ dependencies = [
  "once_cell",
  "pyo3",
  "pyo3-async-runtimes",
+ "serde_json",
  "slatedb",
  "tokio",
+ "ulid",
  "uuid",
 ]
 
