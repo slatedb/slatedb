@@ -257,13 +257,17 @@ impl Clone for Box<dyn SsTableInfoCodec> {
     }
 }
 
+/// A sorted run consisting of multiple compacted SSTables.
 #[derive(Clone, PartialEq, Serialize, Debug)]
 pub struct SortedRun {
+    /// The unique identifier for this sorted run.
     pub id: u32,
+    /// The list of SSTables in this sorted run.
     pub ssts: Vec<SsTableHandle>,
 }
 
 impl SortedRun {
+    /// Estimate the total size of all SSTables in this sorted run.
     pub fn estimate_size(&self) -> u64 {
         self.ssts.iter().map(|sst| sst.estimate_size()).sum()
     }
