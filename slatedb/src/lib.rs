@@ -64,6 +64,8 @@ pub mod config;
 pub mod db_cache;
 pub mod db_stats;
 pub mod size_tiered_compaction;
+#[cfg(feature = "bencher")]
+pub mod skipmap_bench;
 pub mod stats;
 
 mod batch;
@@ -116,6 +118,7 @@ mod retention_iterator;
 mod retrying_object_store;
 mod row_codec;
 mod seq_tracker;
+mod skipmap;
 mod sorted_run_iterator;
 mod sst;
 mod sst_iter;

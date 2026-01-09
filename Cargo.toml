@@ -82,6 +82,7 @@ criterion = "0.5.1"
 ctor = "0.5.0"
 filetime = "0.2"
 insta = "1.39.0"
+loom = "0.7"
 pprof = "0.14.0"
 proptest = "1.7.0"
 rstest = "0.26.1"
@@ -92,6 +93,8 @@ tokio-test = "0.4.4"
 unexpected_cfgs = { level = "allow", check-cfg = [
     # Enables deterministic simulation tests in slatedb-dst
     'cfg(dst)',
+    # Enables loom for concurrent testing
+    'cfg(loom)',
     # Enables slow tests
     'cfg(slow)',
     # Enables tokio unstable features, which are required for DST
