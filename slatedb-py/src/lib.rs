@@ -38,6 +38,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use std::backtrace::Backtrace;
 use std::sync::Arc;
 use std::time::Duration;
+use std::u64;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -2554,12 +2555,17 @@ impl PySlateDBAdmin {
     }
 
     #[pyo3(signature = (id))]
-    fn restore_checkpoint(&self, id: String) -> PyResult<()> {
+    fn restore_checkpoint(&self, id: String, sst_size: Option<usize>) -> PyResult<()> {
         let admin = self.inner.clone();
         let rt = get_runtime();
         let uuid = Uuid::parse_str(&id)
             .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
-        rt.block_on(async move { admin.restore_checkpoint(uuid).await.map_err(map_error) })
+        rt.block_on(async move {
+            admin
+                .restore_checkpoint(uuid, sst_size)
+                .await
+                .map_err(map_error)
+        })
     }
 
     #[pyo3(signature = (id))]
@@ -2567,12 +2573,16 @@ impl PySlateDBAdmin {
         &self,
         py: Python<'py>,
         id: String,
+        sst_size: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         let uuid = Uuid::parse_str(&id)
             .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
         future_into_py(py, async move {
-            admin.restore_checkpoint(uuid).await.map_err(map_error)
+            admin
+                .restore_checkpoint(uuid, sst_size)
+                .await
+                .map_err(map_error)
         })
     }
 

@@ -350,7 +350,7 @@ mod tests {
             .unwrap(); // to test that its not removed after travelling back in time
         let checkpoints = admin.list_checkpoints(None).await.unwrap();
 
-        admin.restore_checkpoint(checkpoint.id).await.unwrap();
+        admin.restore_checkpoint(checkpoint.id, None).await.unwrap();
 
         let db = Db::builder(path.clone(), object_store.clone())
             .build()

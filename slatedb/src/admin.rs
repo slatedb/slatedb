@@ -380,17 +380,23 @@ impl Admin {
             .map_err(Into::into)
     }
 
-    /// Restores the checkpoint by duplicating the checkpointed manifest as the latest and copying
-    /// the necessary WALs to be the latest active WALs.
+    /// Restores the checkpoint by duplicating the checkpointed manifest as the latest and replays
+    /// the necessary WALs to new l0 ssts.
     ///
-    /// Fences any writers through uploading a fencing WAL at the start of the operation. Fences
-    /// any other clients through advancing the new manifest's epochs.
+    /// sst_size (bytes) defaults to 64Mb if None.
     ///
-    /// Fails with SlateDBError::InvalidDeletion if there are any active checkpoints that will be
-    /// lost after the restore.
+    /// Prevents concurrent operations by:
+    /// - Fencing writers through uploading a fencing WAL at the start of the operation
+    /// - Fencing other clients through advancing the new manifest's epochs
     ///
-    /// Failing at any point should rollback by deleting the restored manifest, and any of the restored WALs.
-    pub async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
+    /// This function preserves checkpoints from the current (latest) manifest rather than
+    /// restoring checkpoints from the checkpointed manifest, as those historical checkpoints
+    /// may no longer be valid at the current point in time.
+    pub async fn restore_checkpoint(
+        &self,
+        id: Uuid,
+        sst_size: Option<usize>,
+    ) -> Result<(), crate::Error> {
         let manifest_store = Arc::new(self.manifest_store());
         let wal_store = Arc::new(self.table_store());
         let fencing_wal = self.fence_writers(&wal_store).await?;
@@ -410,7 +416,7 @@ impl Admin {
                     ..manifest_to_restore.core.next_wal_sst_id,
                 current_manifest.db_state(),
                 wal_store.clone(),
-                None,
+                sst_size,
             )
             .await?;
 

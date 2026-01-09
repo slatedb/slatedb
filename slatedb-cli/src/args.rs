@@ -134,6 +134,11 @@ pub(crate) enum CliCommands {
         #[arg(short, long)]
         #[clap(value_parser = uuid::Uuid::parse_str)]
         id: Uuid,
+
+        /// The max size in bytes of the l0 ssts that will be generated from replaying the WALs of
+        /// this checkpoint.
+        #[arg(short, long)]
+        sst_size: usize,
     },
 
     /// Runs a garbage collection for a specific resource type once
