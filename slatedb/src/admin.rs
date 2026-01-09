@@ -760,7 +760,6 @@ mod tests {
             .await
             .unwrap()
             .expect("expected compactions");
-        eprintln!("latest compactions: {}", latest);
         let latest_value: serde_json::Value = serde_json::from_str(&latest).unwrap();
         let latest_pair = latest_value.as_array().expect("expected [id, compactions]");
         assert_eq!(latest_pair[0].as_u64().unwrap(), 2);

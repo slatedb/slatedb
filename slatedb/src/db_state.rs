@@ -21,9 +21,13 @@ use ulid::Ulid;
 use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
+/// A handle to an SSTable, including its ID, metadata, and visible key ranges.
 #[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableHandle {
+    /// The unique identifier for this SSTable. The table can be either a WAL SST or a compacted SST.
     pub id: SsTableId,
+
+    /// Metadata information about this SSTable.
     pub info: SsTableInfo,
 
     /// The range of keys that are visible to the user. If non-empty, this handle represents a projection
@@ -181,9 +185,13 @@ impl AsRef<SsTableHandle> for SsTableHandle {
     }
 }
 
+/// An identifier for an SSTable, which can be either a WAL SST or a compacted SST.
 #[derive(Clone, PartialEq, Hash, Eq, Copy, Serialize)]
 pub enum SsTableId {
+    /// A WAL SST identified by its unique WAL ID.
     Wal(u64),
+
+    /// A compacted SST identified by its ULID.
     Compacted(Ulid),
 }
 
@@ -214,13 +222,21 @@ impl Debug for SsTableId {
     }
 }
 
+/// Metadata information about an SSTable. See [`crate::sst::EncodedSsTableBuilder`] for
+/// more information on the format of the SSTable and its metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
 pub struct SsTableInfo {
+    /// The first key in the SSTable, if any.
     pub first_key: Option<Bytes>,
+    /// The offset of the index block within the SSTable file.
     pub index_offset: u64,
+    /// The length of the index block within the SSTable file.
     pub index_len: u64,
+    /// The offset of the filter block within the SSTable file.
     pub filter_offset: u64,
+    /// The length of the filter block within the SSTable file.
     pub filter_len: u64,
+    /// The compression codec used for the SSTable, if any.
     pub compression_codec: Option<CompressionCodec>,
 }
 
@@ -337,33 +353,58 @@ impl COWDbState {
     }
 }
 
-/// represent the in-memory state of the manifest
+/// Represents an immutable in-memory view of .manifest file that is suitable
+/// to expose to end-users.
 #[derive(Clone, PartialEq, Serialize, Debug)]
 pub struct ManifestCore {
+    /// Flag to indicate whether initialization has finished. When creating the initial manifest for
+    /// a root db (one that is not a clone), this flag will be set to true. When creating the initial
+    /// manifest for a clone db, this flag will be set to false and then updated to true once clone
+    /// initialization has completed.
     pub initialized: bool,
+
+    /// The last compacted l0.
     pub l0_last_compacted: Option<Ulid>,
+
+    /// A list of the L0 SSTs that are valid to read in the `compacted` folder.
     pub l0: VecDeque<SsTableHandle>,
+
+    /// A list of the sorted runs that are valid to read in the `compacted` folder.
     pub compacted: Vec<SortedRun>,
+
+    /// The next WAL SST ID to be assigned when creating a new WAL SST. The manifest FlatBuffer
+    /// contains `wal_id_last_seen`, which is always one less than this value.
     pub next_wal_sst_id: u64,
+
     /// the WAL ID after which the WAL replay should start. Default to 0,
     /// which means all the WAL IDs should be greater than or equal to 1.
     /// When a new L0 is flushed, we update this field to the recent
     /// flushed WAL ID.
     pub replay_after_wal_id: u64,
+
     /// the `last_l0_clock_tick` includes all data in L0 and below --
     /// WAL entries will have their latest ticks recovered on replay
-    /// into the in-memory state
+    /// into the in-memory state.
     pub last_l0_clock_tick: i64,
+
     /// it's persisted in the manifest, and only updated when a new L0
     /// SST is created in the manifest.
     pub last_l0_seq: u64,
+
     /// Minimum sequence number across all recent in-memory snapshots. The compactor
     /// needs this to determine whether it's safe to drop duplicate key writes. If a
     /// recent snapshot still references an older version of a key, it should not be
     /// recycled. This field is updated when a new L0 is flushed.
     pub recent_snapshot_min_seq: u64,
+
+    /// A sequence tracker that maps sequence numbers to timestamps as defined in
+    /// RFC-0012.
     pub sequence_tracker: SequenceTracker,
+
+    /// A list of checkpoints that are currently open.
     pub checkpoints: Vec<Checkpoint>,
+
+    /// The URI of the object store dedicated specifically for WAL, if any.
     pub wal_object_store_uri: Option<String>,
 }
 
@@ -528,7 +569,7 @@ impl DbState {
 
 pub(crate) struct StateModifier<'a> {
     db_state: &'a mut DbState,
-    pub state: COWDbState,
+    pub(crate) state: COWDbState,
 }
 
 impl<'a> StateModifier<'a> {
