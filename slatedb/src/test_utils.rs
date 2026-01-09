@@ -1,6 +1,7 @@
 use crate::clock::LogicalClock;
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
-use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
+use crate::compactor_state::{CompactionSpec, SourceId};
+use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
@@ -301,17 +302,17 @@ pub(crate) async fn build_test_sst(format: &SsTableFormat, num_blocks: usize) ->
 /// All SSTs from L0 and all sorted runs are always compacted into sorted run 0.
 #[derive(Clone)]
 pub(crate) struct OnDemandCompactionScheduler {
-    pub(crate) should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>,
+    pub(crate) should_compact: Arc<dyn Fn(&CompactorStateView) -> bool + Send + Sync>,
 }
 
 impl OnDemandCompactionScheduler {
-    fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
+    fn new(should_compact: Arc<dyn Fn(&CompactorStateView) -> bool + Send + Sync>) -> Self {
         Self { should_compact }
     }
 }
 
 impl CompactionScheduler for OnDemandCompactionScheduler {
-    fn propose(&self, state: &CompactorState) -> Vec<CompactionSpec> {
+    fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
         if !(self.should_compact)(state) {
             return vec![];
         }
@@ -342,7 +343,9 @@ pub(crate) struct OnDemandCompactionSchedulerSupplier {
 }
 
 impl OnDemandCompactionSchedulerSupplier {
-    pub(crate) fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
+    pub(crate) fn new(
+        should_compact: Arc<dyn Fn(&CompactorStateView) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             scheduler: OnDemandCompactionScheduler::new(should_compact),
         }

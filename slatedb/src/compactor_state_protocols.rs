@@ -16,8 +16,9 @@ use log::{debug, info};
 
 use crate::clock::SystemClock;
 use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
-use crate::compactor_state::{CompactionStatus, Compactions, CompactorState};
+use crate::compactor_state::{Compaction, CompactionStatus, Compactions, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
+use crate::db_state::CoreDbState;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
@@ -35,9 +36,24 @@ pub(crate) struct CompactorStateView {
     pub(crate) manifest: (u64, Manifest),
 }
 
+impl CompactorStateView {
+    /// Returns an iterator over all compactions in the view, if any.
+    pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
+        self.compactions
+            .as_ref()
+            .map(|(_, compactions)| compactions.iter())
+            .into_iter()
+            .flatten()
+    }
+
+    pub(crate) fn db_state(&self) -> &CoreDbState {
+        &self.manifest.1.core
+    }
+}
+
 /// Converts a full [`CompactorState`] into a read-only view.
-impl From<CompactorState> for CompactorStateView {
-    fn from(state: CompactorState) -> Self {
+impl From<&CompactorState> for CompactorStateView {
+    fn from(state: &CompactorState) -> Self {
         CompactorStateView {
             compactions: Some((
                 state.compactions().id().into(),
@@ -308,12 +324,12 @@ mod tests {
     use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{
-        Compaction, CompactionSpec, CompactionStatus, CompactorState, Compactions,
+        Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
     };
     use crate::db_state::CoreDbState;
     use crate::error::SlateDBError;
-    use crate::manifest::Manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::Manifest;
     use crate::transactional_object::test_utils::new_dirty_object;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -383,8 +399,8 @@ mod tests {
         let mut compactions = Compactions::new(manifest.compactor_epoch);
         let compaction_id = Ulid::from_parts(10, 0);
         let spec = CompactionSpec::new(vec![], 7);
-        let compaction = Compaction::new(compaction_id, spec.clone())
-            .with_status(CompactionStatus::Running);
+        let compaction =
+            Compaction::new(compaction_id, spec.clone()).with_status(CompactionStatus::Running);
         compactions.insert(compaction);
 
         let manifest_id = 3u64;
@@ -394,14 +410,18 @@ mod tests {
             new_dirty_object(compactions_id, compactions.clone()),
         );
 
-        let view = CompactorStateView::from(state);
+        let view = CompactorStateView::from(&state);
 
         assert_eq!(view.manifest.0, manifest_id);
         assert_eq!(view.manifest.1, manifest);
 
-        let (view_compactions_id, view_compactions) = view.compactions.expect("missing compactions");
+        let (view_compactions_id, view_compactions) =
+            view.compactions.expect("missing compactions");
         assert_eq!(view_compactions_id, compactions_id);
-        assert_eq!(view_compactions.compactor_epoch, compactions.compactor_epoch);
+        assert_eq!(
+            view_compactions.compactor_epoch,
+            compactions.compactor_epoch
+        );
 
         let view_compaction = view_compactions
             .get(&compaction_id)

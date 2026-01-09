@@ -71,7 +71,7 @@ use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
 };
 use crate::compactor_state::Compaction;
-use crate::compactor_state_protocols::CompactorStateWriter;
+use crate::compactor_state_protocols::{CompactorStateView, CompactorStateWriter};
 use crate::config::CompactorOptions;
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -116,11 +116,11 @@ pub trait CompactionScheduler: Send + Sync {
     /// Proposes compaction specs for the current state.
     ///
     /// ## Arguments
-    /// - `state`: Process-local view of the DB's manifest and in-flight compactions.
+    /// - `state`: Process-local view of the DB's manifest and compactions.
     ///
     /// ## Returns
     /// - A list of [`CompactionSpec`] describing what to compact and where to write.
-    fn propose(&self, state: &CompactorState) -> Vec<CompactionSpec>;
+    fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec>;
 
     /// Validates a candidate compaction spec against scheduler-specific invariants. The
     /// default implementation accepts everything. Schedulers can override to enforce
@@ -132,12 +132,12 @@ pub trait CompactionScheduler: Send + Sync {
     /// specific invariants.
     ///
     /// ## Arguments
-    /// - `_state`: Current [`CompactorState`].
+    /// - `_state`: Process-local view of the DB's manifest and compactions.
     /// - `_spec`: Proposed [`CompactionSpec`].
     ///
     /// ## Returns
     /// - `Ok(())` if valid, or an [`Error`] if invalid.
-    fn validate(&self, _state: &CompactorState, _spec: &CompactionSpec) -> Result<(), Error> {
+    fn validate(&self, _state: &CompactorStateView, _spec: &CompactionSpec) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -654,7 +654,7 @@ impl CompactorEventHandler {
         }
 
         self.scheduler
-            .validate(self.state(), compaction)
+            .validate(&self.state().into(), compaction)
             .map_err(|_e| SlateDBError::InvalidCompaction)
     }
 
@@ -674,7 +674,7 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
-        let mut specs = self.scheduler.propose(self.state());
+        let mut specs = self.scheduler.propose(&self.state().into());
 
         // Add new compactions up to the max concurrency limit
         let num_specs_added = specs
@@ -968,7 +968,7 @@ mod tests {
     use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
     use crate::compactor_executor::{CompactionExecutor, TokioCompactionExecutor};
     use crate::compactor_state::CompactionStatus;
-    use crate::compactor_state::{CompactorState, SourceId};
+    use crate::compactor_state::SourceId;
     use crate::config::{
         PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
@@ -3164,7 +3164,7 @@ mod tests {
     }
 
     impl CompactionScheduler for MockScheduler {
-        fn propose(&self, _state: &CompactorState) -> Vec<CompactionSpec> {
+        fn propose(&self, _state: &CompactorStateView) -> Vec<CompactionSpec> {
             let mut inner = self.inner.lock();
             std::mem::take(&mut inner.compaction)
         }
