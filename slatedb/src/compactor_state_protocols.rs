@@ -29,7 +29,7 @@ use crate::DbRand;
 ///
 /// This view intentionally avoids `DirtyObject` because reads should not create or mutate
 /// remote state (e.g., a missing `.compactions` file on a fresh DB).
-pub(crate) struct CompactorStateView {
+pub struct CompactorStateView {
     /// The latest compactions state if present. The u64 is the compactions file version.
     pub(crate) compactions: Option<(u64, Compactions)>,
     /// The latest manifest. The u64 is the manifest file version.
@@ -38,7 +38,7 @@ pub(crate) struct CompactorStateView {
 
 impl CompactorStateView {
     /// Returns an iterator over all compactions in the view, if any.
-    pub(crate) fn compactions(&self) -> impl Iterator<Item = &Compaction> {
+    pub fn compactions(&self) -> impl Iterator<Item = &Compaction> {
         self.compactions
             .as_ref()
             .map(|(_, compactions)| compactions.iter())

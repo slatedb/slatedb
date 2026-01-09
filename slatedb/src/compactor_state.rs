@@ -150,7 +150,7 @@ impl CompactionStatus {
 /// A compaction is the unit tracked by the compactor: it has a stable `id` (ULID) and a `spec`
 /// (what to compact and where).
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub(crate) struct Compaction {
+pub struct Compaction {
     /// Stable id (ULID) used to track this compaction across messages and attempts.
     id: Ulid,
     /// What to compact (sources) and where to write (destination).
@@ -214,12 +214,12 @@ impl Compaction {
     }
 
     /// The stable id (ULID) used to track this compaction across messages and attempts.
-    pub(crate) fn id(&self) -> Ulid {
+    pub fn id(&self) -> Ulid {
         self.id
     }
 
     /// Returns the immutable compaction spec describing inputs and destination.
-    pub(crate) fn spec(&self) -> &CompactionSpec {
+    pub fn spec(&self) -> &CompactionSpec {
         &self.spec
     }
 
@@ -229,19 +229,22 @@ impl Compaction {
     }
 
     /// Gets the bytes processed so far.
-    pub(crate) fn bytes_processed(&self) -> u64 {
+    pub fn bytes_processed(&self) -> u64 {
         self.bytes_processed
     }
 
-    pub(crate) fn status(&self) -> CompactionStatus {
+    /// Returns the current status of this compaction.
+    pub fn status(&self) -> CompactionStatus {
         self.status
     }
 
+    /// Sets the current status of this compaction.
     pub(crate) fn set_status(&mut self, status: CompactionStatus) {
         self.status = status;
     }
 
-    pub(crate) fn active(&self) -> bool {
+    /// Returns true if the compaction is active (submitted or running).
+    pub fn active(&self) -> bool {
         self.status.active()
     }
 }

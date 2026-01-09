@@ -71,7 +71,7 @@ use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
 };
 use crate::compactor_state::Compaction;
-use crate::compactor_state_protocols::{CompactorStateView, CompactorStateWriter};
+use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
@@ -84,6 +84,7 @@ use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
 
 pub use crate::compactor_state::{CompactionSpec, CompactionStatus, CompactorState, SourceId};
+pub use crate::compactor_state_protocols::CompactorStateView;
 pub use crate::db::builder::CompactorBuilder;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
