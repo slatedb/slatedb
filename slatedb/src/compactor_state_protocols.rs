@@ -307,10 +307,14 @@ mod tests {
     use crate::admin::AdminBuilder;
     use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
-    use crate::compactor_state::{Compaction, CompactionSpec};
+    use crate::compactor_state::{
+        Compaction, CompactionSpec, CompactionStatus, CompactorState, Compactions,
+    };
     use crate::db_state::CoreDbState;
     use crate::error::SlateDBError;
+    use crate::manifest::Manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::transactional_object::test_utils::new_dirty_object;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -368,6 +372,42 @@ mod tests {
 
         let compactions_result = first_writer.compactions.refresh().await;
         assert!(matches!(compactions_result, Err(SlateDBError::Fenced)));
+    }
+
+    #[test]
+    fn test_compactor_state_to_view() {
+        let mut manifest = Manifest::initial(CoreDbState::new());
+        manifest.compactor_epoch = 11;
+        manifest.core.l0_last_compacted = Some(Ulid::from_parts(5, 0));
+
+        let mut compactions = Compactions::new(manifest.compactor_epoch);
+        let compaction_id = Ulid::from_parts(10, 0);
+        let spec = CompactionSpec::new(vec![], 7);
+        let compaction = Compaction::new(compaction_id, spec.clone())
+            .with_status(CompactionStatus::Running);
+        compactions.insert(compaction);
+
+        let manifest_id = 3u64;
+        let compactions_id = 8u64;
+        let state = CompactorState::new(
+            new_dirty_object(manifest_id, manifest.clone()),
+            new_dirty_object(compactions_id, compactions.clone()),
+        );
+
+        let view = CompactorStateView::from(state);
+
+        assert_eq!(view.manifest.0, manifest_id);
+        assert_eq!(view.manifest.1, manifest);
+
+        let (view_compactions_id, view_compactions) = view.compactions.expect("missing compactions");
+        assert_eq!(view_compactions_id, compactions_id);
+        assert_eq!(view_compactions.compactor_epoch, compactions.compactor_epoch);
+
+        let view_compaction = view_compactions
+            .get(&compaction_id)
+            .expect("missing compaction");
+        assert_eq!(view_compaction.status(), CompactionStatus::Running);
+        assert_eq!(view_compaction.spec(), &spec);
     }
 
     #[tokio::test]
