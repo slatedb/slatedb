@@ -159,8 +159,13 @@ still needs to be determined/specified.
 The record offsets in the list have the same order as the records.
 That is, the 0th offset points to the 0th record,
 the 1st offset points to the 1st record in the record list, and so on.
-Then the format stores the CRC32 checksum of the records and the list of offsets
-including the size and the compression codec as a 4 bytes unsigned integer.
+Then, the format stores the CRC32 checksum of the records and the list of offsets
+including the size and the compression codecs as a 4 bytes unsigned integer.
+The specification of the compression codec for the offset list is followed by the specification of the
+compression codec used to compress records and offsets as a 1 byte unsigned integer.
+All the fields from the start to the compression codec for the offset list, inclusive
+are compressed with that compression codec.
+The available compression codecs for records and offsets are no compression, snappy, zlib, lz4, and zstd.
 The last two fields are the version of the format as a 2 bytes unsigned integer,
 and the type of the object as a 1 byte unsigned integer -- 0x00 for `WAL` in this case.
 Future formats of data objects in SlateDB should use the same schema at the end of the
@@ -185,9 +190,13 @@ All integers are in little endian.
 | size of the compressed array of offsets                        |
 | (4-bytes unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
-| compression codec (1-byte unsigned integer, little endian)     |
+| compression codec offets                                       |
+| (1-byte unsigned integer, little endian)                       |
 +----------------------------------------------------------------+
 | CRC32 checksum (4-bytes, unsigned integer, little endian)      |
++----------------------------------------------------------------+
+| compression codec for offsets + records + checksum             |
+| (1-byte, unsigned integer, little endian)                      |
 +----------------------------------------------------------------+
 | version of format (2-bytes, unsigned integer, little endian)   |
 +----------------------------------------------------------------+
