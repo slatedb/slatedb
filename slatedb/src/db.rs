@@ -1523,7 +1523,7 @@ mod tests {
         CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
         ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl,
     };
-    use crate::db::builder::GarbageCollectorBuilder;
+    use crate::db::builder::{CompactorRuntime, GarbageCollectorBuilder};
     use crate::db_state::CoreDbState;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::iter::KeyValueIterator;
@@ -2910,7 +2910,9 @@ mod tests {
                         manifest_update_timeout: Duration::from_secs(300),
                     }),
                 ))
-                .with_compaction_scheduler_supplier(compaction_scheduler)
+                .with_compactor_runtime(
+                    CompactorRuntime::new().with_scheduler_supplier(compaction_scheduler),
+                )
                 .build()
                 .await
                 .unwrap(),
@@ -3960,7 +3962,9 @@ mod tests {
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
             .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_runtime(
+                CompactorRuntime::new().with_scheduler_supplier(compaction_scheduler),
+            )
             .build()
             .await
             .unwrap();
@@ -4506,7 +4510,9 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_compaction_scheduler_supplier(compaction_scheduler.clone())
+            .with_compactor_runtime(
+                CompactorRuntime::new().with_scheduler_supplier(compaction_scheduler.clone()),
+            )
             .build()
             .await
             .unwrap();
