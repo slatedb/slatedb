@@ -410,6 +410,7 @@ impl Admin {
                     ..manifest_to_restore.core.next_wal_sst_id,
                 current_manifest.db_state(),
                 wal_store.clone(),
+                None,
             )
             .await?;
 
@@ -505,13 +506,19 @@ impl Admin {
         wal_id_range: Range<u64>,
         current_state: &CoreDbState,
         table_store: Arc<TableStore>,
+        l0_sst_size: Option<usize>,
     ) -> Result<VecDeque<SsTableHandle>, crate::Error> {
-        // TODO: This might need a configurable l0_sst_size_bytes limit on the min_memtable_bytes
-        // setting instead of using the default.
+        let wal_replay_options = match l0_sst_size {
+            Some(min_memtable_bytes) => WalReplayOptions {
+                min_memtable_bytes,
+                ..WalReplayOptions::default()
+            },
+            None => WalReplayOptions::default(),
+        };
         let mut replay_iter = WalReplayIterator::range(
             wal_id_range,
             current_state,
-            WalReplayOptions::default(),
+            wal_replay_options,
             Arc::clone(&table_store),
         )
         .await?;
@@ -787,6 +794,10 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
+    use crate::db_state::SsTableId;
+    use crate::iter::KeyValueIterator;
+    use crate::sst_iter::{SstIterator, SstIteratorOptions};
+    use crate::types::RowEntry;
     use crate::Db;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -933,5 +944,62 @@ mod tests {
         // assert that db can no longer write.
         let err = db.put(b"1", b"1").await.unwrap_err();
         assert_eq!(err.to_string(), "Closed error: detected newer DB client");
+    }
+
+    #[tokio::test]
+    async fn test_admin_replay_wal_to_l0() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_kv_store";
+        let admin = Admin::builder(path, object_store.clone()).build();
+        let table_store = Arc::new(admin.table_store());
+        let manifest_store = admin.manifest_store();
+
+        // initialize a db to create a manifest
+        let db = Db::builder(path, object_store).build().await.unwrap();
+        db.close().await.unwrap();
+
+        let row_entries = vec![
+            RowEntry::new_value(b"key1", b"value1", 1),
+            RowEntry::new_value(b"key2", b"value2", 2),
+            RowEntry::new_value(b"key3", b"value3", 3),
+        ];
+
+        // setup wals
+        let mut writer = table_store.table_writer(SsTableId::Wal(100));
+        writer.add(row_entries[0].clone()).await.unwrap();
+        writer.add(row_entries[1].clone()).await.unwrap();
+        writer.close().await.unwrap();
+        let mut writer = table_store.table_writer(SsTableId::Wal(101));
+        writer.add(row_entries[2].clone()).await.unwrap();
+        writer.close().await.unwrap();
+
+        // replay the wal entries to l0
+        let (_, manifest) = manifest_store
+            .try_read_latest_manifest()
+            .await
+            .unwrap()
+            .unwrap();
+        let sst_handles = admin
+            .replay_wal_to_l0(100..101, &manifest.core, table_store.clone(), None)
+            .await
+            .unwrap();
+
+        // check that entries in wals are added to l0
+        let mut row_entry_iter = row_entries.into_iter();
+        for sst_handle in sst_handles.iter() {
+            let mut actual_row_entry_iter = SstIterator::new_borrowed_initialized(
+                ..,
+                sst_handle,
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+            while let Some(entry) = actual_row_entry_iter.next_entry().await.unwrap() {
+                assert_eq!(row_entry_iter.next().unwrap(), entry)
+            }
+        }
     }
 }
