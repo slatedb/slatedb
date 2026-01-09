@@ -5,7 +5,6 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
-use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId};
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
@@ -14,6 +13,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 pub(crate) mod store;
+
+pub use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {

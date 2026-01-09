@@ -63,6 +63,7 @@ pub mod compactor;
 pub mod config;
 pub mod db_cache;
 pub mod db_stats;
+pub mod manifest;
 pub mod size_tiered_compaction;
 pub mod stats;
 
@@ -98,7 +99,6 @@ mod flatbuffer_types;
 mod flush;
 mod garbage_collector;
 mod iter;
-mod manifest;
 mod map_iter;
 mod mem_table;
 mod mem_table_flush;

@@ -22,13 +22,13 @@ use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
 #[derive(Clone, PartialEq, Serialize)]
-pub(crate) struct SsTableHandle {
-    pub id: SsTableId,
-    pub info: SsTableInfo,
+pub struct SsTableHandle {
+    pub(crate) id: SsTableId,
+    pub(crate) info: SsTableInfo,
 
     /// The range of keys that are visible to the user. If non-empty, this handle represents a projection
     /// over the SST file.
-    pub visible_range: Option<BytesRange>,
+    pub(crate) visible_range: Option<BytesRange>,
 
     /// The effective range of keys that are visible to the user, which is the intersection of the
     /// physical range (first_key..unbounded) and any projection range. If a projection is specified,
@@ -173,7 +173,7 @@ impl AsRef<SsTableHandle> for SsTableHandle {
 }
 
 #[derive(Clone, PartialEq, Hash, Eq, Copy, Serialize)]
-pub(crate) enum SsTableId {
+pub enum SsTableId {
     Wal(u64),
     Compacted(Ulid),
 }
@@ -206,7 +206,7 @@ impl Debug for SsTableId {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
-pub(crate) struct SsTableInfo {
+pub struct SsTableInfo {
     pub(crate) first_key: Option<Bytes>,
     pub(crate) index_offset: u64,
     pub(crate) index_len: u64,
@@ -233,7 +233,7 @@ impl Clone for Box<dyn SsTableInfoCodec> {
 }
 
 #[derive(Clone, PartialEq, Serialize, Debug)]
-pub(crate) struct SortedRun {
+pub struct SortedRun {
     pub(crate) id: u32,
     pub(crate) ssts: Vec<SsTableHandle>,
 }
@@ -330,7 +330,7 @@ impl COWDbState {
 
 /// represent the in-memory state of the manifest
 #[derive(Clone, PartialEq, Serialize, Debug)]
-pub(crate) struct ManifestCore {
+pub struct ManifestCore {
     pub(crate) initialized: bool,
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SsTableHandle>,
