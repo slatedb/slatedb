@@ -323,14 +323,14 @@ pub(crate) struct COWDbState {
 }
 
 impl COWDbState {
-    pub(crate) fn core(&self) -> &CoreDbState {
+    pub(crate) fn core(&self) -> &ManifestCore {
         self.manifest.core()
     }
 }
 
 /// represent the in-memory state of the manifest
 #[derive(Clone, PartialEq, Serialize, Debug)]
-pub(crate) struct CoreDbState {
+pub(crate) struct ManifestCore {
     pub(crate) initialized: bool,
     pub(crate) l0_last_compacted: Option<Ulid>,
     pub(crate) l0: VecDeque<SsTableHandle>,
@@ -358,7 +358,7 @@ pub(crate) struct CoreDbState {
     pub(crate) wal_object_store_uri: Option<String>,
 }
 
-impl CoreDbState {
+impl ManifestCore {
     pub(crate) fn new() -> Self {
         Self {
             initialized: true,
@@ -382,7 +382,7 @@ impl CoreDbState {
         this
     }
 
-    pub(crate) fn init_clone_db(&self) -> CoreDbState {
+    pub(crate) fn init_clone_db(&self) -> ManifestCore {
         let mut clone = self.clone();
         clone.initialized = false;
         clone.checkpoints.clear();
@@ -424,7 +424,7 @@ impl DbStateReader for DbStateView {
         &self.state.imm_memtable
     }
 
-    fn core(&self) -> &CoreDbState {
+    fn core(&self) -> &ManifestCore {
         self.state.core()
     }
 }
@@ -547,7 +547,7 @@ impl<'a> StateModifier<'a> {
         };
 
         let my_db_state = self.state.core();
-        remote_manifest.value.core = CoreDbState {
+        remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
             l0_last_compacted: remote_manifest.value.core.l0_last_compacted,
             l0: new_l0,

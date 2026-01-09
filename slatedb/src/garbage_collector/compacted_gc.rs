@@ -234,7 +234,7 @@ mod tests {
     use crate::clock::DefaultSystemClock;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-    use crate::db_state::{CoreDbState, SsTableId};
+    use crate::db_state::{ManifestCore, SsTableId};
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
@@ -259,7 +259,7 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -360,7 +360,7 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -467,7 +467,7 @@ mod tests {
         ));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -562,7 +562,7 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             Arc::new(DefaultSystemClock::new()),
         )
         .await

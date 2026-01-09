@@ -549,7 +549,7 @@ impl CompactorEventHandler {
     /// Calculates the estimated total source bytes for a compaction.
     fn calculate_estimated_source_bytes(
         compaction: &Compaction,
-        db_state: &crate::db_state::CoreDbState,
+        db_state: &crate::db_state::ManifestCore,
     ) -> u64 {
         use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
         use std::collections::HashMap;
@@ -976,7 +976,7 @@ mod tests {
         PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
-    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -2041,7 +2041,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -2084,7 +2084,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -2235,7 +2235,7 @@ mod tests {
             }
         }
 
-        async fn latest_db_state(&mut self) -> CoreDbState {
+        async fn latest_db_state(&mut self) -> ManifestCore {
             self.manifest.refresh().await.unwrap().core.clone()
         }
 
@@ -3077,7 +3077,7 @@ mod tests {
 
     /// Waits until all writes have made their way to L1 or below. No data is allowed in
     /// in-memory WALs, in-memory memtables, or L0 SSTs on object storage.
-    async fn await_compaction(db: &Db) -> Option<CoreDbState> {
+    async fn await_compaction(db: &Db) -> Option<ManifestCore> {
         run_for(Duration::from_secs(10), || async {
             let (empty_wal, empty_memtable, core_db_state) = {
                 let db_state = db.inner.state.read();
@@ -3103,7 +3103,7 @@ mod tests {
     async fn await_compacted_compaction(
         manifest_store: Arc<ManifestStore>,
         old_compacted: Vec<SortedRun>,
-    ) -> Option<CoreDbState> {
+    ) -> Option<ManifestCore> {
         run_for(Duration::from_secs(10), || async {
             let db_state = get_db_state(manifest_store.clone()).await;
             if !db_state.compacted.eq(&old_compacted) {
@@ -3114,7 +3114,7 @@ mod tests {
         .await
     }
 
-    async fn get_db_state(manifest_store: Arc<ManifestStore>) -> CoreDbState {
+    async fn get_db_state(manifest_store: Arc<ManifestStore>) -> ManifestCore {
         let stored_manifest =
             StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
                 .await

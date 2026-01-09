@@ -19,7 +19,7 @@ use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCom
 use crate::compactor::CompactionsCore;
 use crate::compactor_state::{CompactionStatus, Compactions, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
-use crate::db_state::CoreDbState;
+use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
@@ -44,7 +44,7 @@ impl CompactorStateView {
     }
 
     /// Returns a read-only view of the .manifest file.
-    pub(crate) fn db_state(&self) -> &CoreDbState {
+    pub(crate) fn db_state(&self) -> &ManifestCore {
         &self.manifest.1.core
     }
 }
@@ -324,7 +324,7 @@ mod tests {
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
     };
-    use crate::db_state::CoreDbState;
+    use crate::db_state::ManifestCore;
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
@@ -352,7 +352,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_compactor_state_to_view() {
-        let mut manifest = Manifest::initial(CoreDbState::new());
+        let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.compactor_epoch = 11;
         manifest.core.l0_last_compacted = Some(Ulid::from_parts(5, 0));
 
@@ -443,7 +443,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -495,7 +495,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -577,7 +577,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -631,7 +631,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -687,7 +687,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await

@@ -6,7 +6,7 @@ use log::{error, info};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use crate::db_state::{CoreDbState, SortedRun, SsTableHandle};
+use crate::db_state::{ManifestCore, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 use crate::transactional_object::DirtyObject;
@@ -182,7 +182,7 @@ impl Compaction {
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
-    pub(crate) fn get_sorted_runs(&self, db_state: &CoreDbState) -> Vec<SortedRun> {
+    pub(crate) fn get_sorted_runs(&self, db_state: &ManifestCore) -> Vec<SortedRun> {
         let srs_by_id: HashMap<u32, &SortedRun> =
             db_state.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
@@ -198,7 +198,7 @@ impl Compaction {
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
-    pub(crate) fn get_ssts(&self, db_state: &CoreDbState) -> Vec<SsTableHandle> {
+    pub(crate) fn get_ssts(&self, db_state: &ManifestCore) -> Vec<SsTableHandle> {
         let ssts_by_id: HashMap<Ulid, &SsTableHandle> = db_state
             .l0
             .iter()
@@ -423,7 +423,7 @@ impl CompactorState {
     }
 
     /// Returns the current in-memory core DB state derived from the manifest.
-    pub(crate) fn db_state(&self) -> &CoreDbState {
+    pub(crate) fn db_state(&self) -> &ManifestCore {
         self.manifest.core()
     }
 
@@ -514,7 +514,7 @@ impl CompactorState {
         }
 
         // write out the merged core db state and manifest
-        let merged = CoreDbState {
+        let merged = ManifestCore {
             initialized: remote_manifest.value.core.initialized,
             l0_last_compacted: my_db_state.l0_last_compacted,
             l0: merged_l0s,

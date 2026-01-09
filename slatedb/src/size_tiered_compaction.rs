@@ -5,7 +5,7 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
-use crate::db_state::CoreDbState;
+use crate::db_state::ManifestCore;
 
 use crate::error::Error;
 use log::warn;
@@ -372,7 +372,7 @@ impl SizeTieredCompactionScheduler {
 
     fn compaction_sources(
         &self,
-        db_state: &CoreDbState,
+        db_state: &ManifestCore,
     ) -> (Vec<CompactionSource>, Vec<CompactionSource>) {
         (
             db_state
@@ -428,7 +428,7 @@ mod tests {
     use crate::compactor_state::{
         Compaction, CompactionSpec, Compactions, CompactorState, SourceId,
     };
-    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
@@ -832,8 +832,8 @@ mod tests {
         SortedRun { id, ssts }
     }
 
-    fn create_db_state(l0: VecDeque<SsTableHandle>, srs: Vec<SortedRun>) -> CoreDbState {
-        CoreDbState {
+    fn create_db_state(l0: VecDeque<SsTableHandle>, srs: Vec<SortedRun>) -> ManifestCore {
+        ManifestCore {
             initialized: true,
             l0_last_compacted: None,
             l0,
@@ -849,7 +849,7 @@ mod tests {
         }
     }
 
-    fn create_compactor_state(db_state: CoreDbState) -> CompactorState {
+    fn create_compactor_state(db_state: ManifestCore) -> CompactorState {
         let mut dirty = new_dirty_manifest();
         dirty.value.core = db_state;
         let compactions = new_dirty_object(1u64, Compactions::new(dirty.value.compactor_epoch));
