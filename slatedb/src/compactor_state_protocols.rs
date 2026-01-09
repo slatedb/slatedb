@@ -44,7 +44,7 @@ impl CompactorStateView {
     }
 
     /// Returns a read-only view of the .manifest file.
-    pub(crate) fn db_state(&self) -> &ManifestCore {
+    pub fn manifest(&self) -> &ManifestCore {
         &self.manifest.1.core
     }
 }

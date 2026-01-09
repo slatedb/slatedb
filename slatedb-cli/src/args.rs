@@ -1,5 +1,5 @@
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
-use slatedb::FindOption;
+use slatedb::seq_tracker::FindOption;
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;

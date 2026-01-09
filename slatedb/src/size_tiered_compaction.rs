@@ -178,7 +178,7 @@ impl Default for SizeTieredCompactionScheduler {
 impl CompactionScheduler for SizeTieredCompactionScheduler {
     fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
         let mut compactions = Vec::new();
-        let db_state = state.db_state();
+        let db_state = state.manifest();
         let (l0, srs) = self.compaction_sources(db_state);
         let active_compactions = state
             .compactions()
@@ -212,13 +212,13 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
     ) -> Result<(), crate::error::Error> {
         // Logical order of sources: [L0 (newest → oldest), then SRs (highest id → 0)]
         let sources_logical_order: Vec<SourceId> = state
-            .db_state()
+            .manifest()
             .l0
             .iter()
             .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
             .chain(
                 state
-                    .db_state()
+                    .manifest()
                     .compacted
                     .iter()
                     .map(|sr| SourceId::SortedRun(sr.id)),

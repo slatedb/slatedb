@@ -317,7 +317,7 @@ impl CompactionScheduler for OnDemandCompactionScheduler {
             return vec![];
         }
 
-        let db_state = state.db_state();
+        let db_state = state.manifest();
 
         // always compact into sorted run 0
         let next_sr_id = 0;

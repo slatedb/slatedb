@@ -1088,9 +1088,9 @@ mod tests {
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| {
                 // compact when there are at least 2 SSTs in L0 (one for key 'a' and one for key 'b')
-                state.db_state().l0.len() == 2 ||
+                state.manifest().l0.len() == 2 ||
                 // or when there is one SST in L0 and one in L1 (one for delete key 'a' and one for compacted key 'a'+'b')
-                (state.db_state().l0.len() == 1 && state.db_state().compacted.len() == 1)
+                (state.manifest().l0.len() == 1 && state.manifest().compacted.len() == 1)
             },
         )));
 
@@ -1186,9 +1186,9 @@ mod tests {
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| {
                 // compact when there are at least 2 SSTs in L0
-                state.db_state().l0.len() == 2 ||
+                state.manifest().l0.len() == 2 ||
                 // or when there is one SST in L0 and one in L1
-                (state.db_state().l0.len() == 1 && state.db_state().compacted.len() == 1)
+                (state.manifest().l0.len() == 1 && state.manifest().compacted.len() == 1)
             },
         )));
 
@@ -1283,7 +1283,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.db_state().l0.len() >= 2,
+            |state| state.manifest().l0.len() >= 2,
         )));
         let options = db_options(Some(compactor_options()));
 
@@ -1355,7 +1355,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| !state.db_state().l0.is_empty(),
+            |state| !state.manifest().l0.is_empty(),
         )));
         let options = db_options(Some(compactor_options()));
 
@@ -1429,7 +1429,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.db_state().l0.len() >= 2,
+            |state| state.manifest().l0.len() >= 2,
         )));
         let options = db_options(Some(compactor_options()));
 
@@ -1497,7 +1497,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.db_state().l0.len() >= 3,
+            |state| state.manifest().l0.len() >= 3,
         )));
         let options = db_options(Some(compactor_options()));
 
@@ -1572,7 +1572,7 @@ mod tests {
         let insert_clock = Arc::new(TestClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.db_state().l0.len() >= 2,
+            |state| state.manifest().l0.len() >= 2,
         )));
 
         let mut options = db_options(Some(compactor_options()));
@@ -1653,7 +1653,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.db_state().l0.len() >= 2,
+            |state| state.manifest().l0.len() >= 2,
         )));
         let options = db_options(Some(compactor_options()));
 
@@ -1707,7 +1707,7 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
-            |state| state.db_state().l0.len() >= 2,
+            |state| state.manifest().l0.len() >= 2,
         )));
         let options = db_options(Some(compactor_options()));
 
