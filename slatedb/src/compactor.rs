@@ -113,16 +113,16 @@ pub trait CompactionSchedulerSupplier: Send + Sync {
 /// Implementations return one or more candidate compaction specs, which the compactor then
 /// validates and submits to the executor.
 pub trait CompactionScheduler: Send + Sync {
-    /// Proposes compactions for the current state.
+    /// Proposes compaction specs for the current state.
     ///
     /// ## Arguments
     /// - `state`: Process-local view of the DB's manifest and in-flight compactions.
     ///
     /// ## Returns
     /// - A list of [`CompactionSpec`] describing what to compact and where to write.
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactionSpec>;
+    fn propose(&self, state: &CompactorState) -> Vec<CompactionSpec>;
 
-    /// Validates a candidate compaction against scheduler-specific invariants. The
+    /// Validates a candidate compaction spec against scheduler-specific invariants. The
     /// default implementation accepts everything. Schedulers can override to enforce
     /// policy-specific constraints prior to execution (e.g. level rules, overlaps).
     ///
@@ -133,14 +133,14 @@ pub trait CompactionScheduler: Send + Sync {
     ///
     /// ## Arguments
     /// - `_state`: Current [`CompactorState`].
-    /// - `_compaction`: Proposed [`CompactionSpec`].
+    /// - `_spec`: Proposed [`CompactionSpec`].
     ///
     /// ## Returns
     /// - `Ok(())` if valid, or an [`Error`] if invalid.
-    fn validate_compaction(
+    fn validate(
         &self,
         _state: &CompactorState,
-        _compaction: &CompactionSpec,
+        _spec: &CompactionSpec,
     ) -> Result<(), Error> {
         Ok(())
     }
@@ -154,8 +154,6 @@ pub enum CompactionRequest {
     /// Use a caller-provided compaction spec.
     Spec(CompactionSpec),
 }
-
-// Progress is tracked per Compaction via its `bytes_processed` field.
 
 /// Messages exchanged between the compactor event loop and its collaborators.
 #[derive(Debug)]
@@ -660,7 +658,7 @@ impl CompactorEventHandler {
         }
 
         self.scheduler
-            .validate_compaction(self.state(), compaction)
+            .validate(self.state(), compaction)
             .map_err(|_e| SlateDBError::InvalidCompaction)
     }
 
@@ -680,7 +678,7 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
-        let mut specs = self.scheduler.maybe_schedule_compaction(self.state());
+        let mut specs = self.scheduler.propose(self.state());
 
         // Add new compactions up to the max concurrency limit
         let num_specs_added = specs
@@ -3170,7 +3168,7 @@ mod tests {
     }
 
     impl CompactionScheduler for MockScheduler {
-        fn maybe_schedule_compaction(&self, _state: &CompactorState) -> Vec<CompactionSpec> {
+        fn propose(&self, _state: &CompactorState) -> Vec<CompactionSpec> {
             let mut inner = self.inner.lock();
             std::mem::take(&mut inner.compaction)
         }

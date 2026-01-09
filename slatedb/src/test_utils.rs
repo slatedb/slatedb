@@ -311,7 +311,7 @@ impl OnDemandCompactionScheduler {
 }
 
 impl CompactionScheduler for OnDemandCompactionScheduler {
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactionSpec> {
+    fn propose(&self, state: &CompactorState) -> Vec<CompactionSpec> {
         if !(self.should_compact)(state) {
             return vec![];
         }

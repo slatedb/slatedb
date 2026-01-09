@@ -175,7 +175,7 @@ impl Default for SizeTieredCompactionScheduler {
 }
 
 impl CompactionScheduler for SizeTieredCompactionScheduler {
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactionSpec> {
+    fn propose(&self, state: &CompactorState) -> Vec<CompactionSpec> {
         let mut compactions = Vec::new();
         let db_state = state.db_state();
         let (l0, srs) = self.compaction_sources(db_state);
@@ -200,7 +200,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         compactions
     }
 
-    fn validate_compaction(
+    fn validate(
         &self,
         state: &CompactorState,
         compaction: &CompactionSpec,
@@ -441,7 +441,7 @@ mod tests {
             create_compactor_state(create_db_state(l0.iter().cloned().collect(), Vec::new()));
 
         // when:
-        let requests: Vec<CompactionSpec> = scheduler.maybe_schedule_compaction(&state);
+        let requests: Vec<CompactionSpec> = scheduler.propose(&state);
 
         // then:
         assert_eq!(requests.len(), 1);
@@ -465,7 +465,7 @@ mod tests {
         ));
 
         // when:
-        let requests: Vec<CompactionSpec> = scheduler.maybe_schedule_compaction(&state);
+        let requests: Vec<CompactionSpec> = scheduler.propose(&state);
 
         // then:
         assert_eq!(requests.len(), 1);
@@ -481,7 +481,7 @@ mod tests {
         let state = create_compactor_state(create_db_state(l0.iter().cloned().collect(), vec![]));
 
         // when:
-        let compactions = scheduler.maybe_schedule_compaction(&state);
+        let compactions = scheduler.propose(&state);
 
         // then:
         assert_eq!(compactions.len(), 0);
@@ -503,7 +503,7 @@ mod tests {
         ));
 
         // when:
-        let compactions = scheduler.maybe_schedule_compaction(&state);
+        let compactions = scheduler.propose(&state);
 
         // then:
         assert_eq!(compactions.len(), 1);
@@ -529,7 +529,7 @@ mod tests {
         ));
 
         // when:
-        let compactions = scheduler.maybe_schedule_compaction(&state);
+        let compactions = scheduler.propose(&state);
 
         // then:
         assert_eq!(compactions.len(), 1);
@@ -565,7 +565,7 @@ mod tests {
             .expect("failed to add job");
 
         // when:
-        let requests = scheduler.maybe_schedule_compaction(&state);
+        let requests = scheduler.propose(&state);
 
         // then:
         assert_eq!(requests.len(), 0);
@@ -581,7 +581,7 @@ mod tests {
         ));
 
         // when:
-        let compactions = scheduler.maybe_schedule_compaction(&state);
+        let compactions = scheduler.propose(&state);
 
         // then:
         assert!(compactions.is_empty());
@@ -610,7 +610,7 @@ mod tests {
         ));
 
         // when:
-        let compactions = scheduler.maybe_schedule_compaction(&state);
+        let compactions = scheduler.propose(&state);
         let expected_compaction = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
 
         // then:
@@ -650,7 +650,7 @@ mod tests {
             .expect("failed to add job");
 
         // when:
-        let requests = scheduler.maybe_schedule_compaction(&state);
+        let requests = scheduler.propose(&state);
 
         // then:
         assert!(requests.is_empty());
@@ -687,7 +687,7 @@ mod tests {
             .expect("failed to add job");
 
         // when:
-        let compactions = scheduler.maybe_schedule_compaction(&state);
+        let compactions = scheduler.propose(&state);
 
         // then:
         assert!(compactions.is_empty());
@@ -713,7 +713,7 @@ mod tests {
         ));
 
         // when:
-        let compactions = scheduler.maybe_schedule_compaction(&state);
+        let compactions = scheduler.propose(&state);
 
         // then:
         assert_eq!(compactions.len(), 3);
@@ -740,7 +740,7 @@ mod tests {
         l0_sst.push_front(last_sst.unwrap());
         // when:
         let compaction = create_l0_compaction(l0_sst.make_contiguous(), 0);
-        let result = scheduler.validate_compaction(&state, &compaction);
+        let result = scheduler.validate(&state, &compaction);
 
         // then:
         assert!(result.is_err());
@@ -759,7 +759,7 @@ mod tests {
         l0_sst.pop_back();
         // when:
         let compaction = create_l0_compaction(l0_sst.make_contiguous(), 0);
-        let result = scheduler.validate_compaction(&state, &compaction);
+        let result = scheduler.validate(&state, &compaction);
 
         // then:
         assert!(result.is_err());
@@ -778,7 +778,7 @@ mod tests {
         new_sources.push(SourceId::SortedRun(5));
         let new_request = CompactionSpec::new(new_sources, request.destination());
         // when:
-        let result = scheduler.validate_compaction(&state, &new_request);
+        let result = scheduler.validate(&state, &new_request);
 
         // then:
         assert!(result.is_err());
@@ -796,7 +796,7 @@ mod tests {
         let srs = state.db_state().compacted.clone();
         let compaction = create_sr_compaction(srs.iter().map(|sr| sr.id).collect());
         // when:
-        let result = scheduler.validate_compaction(&state, &compaction);
+        let result = scheduler.validate(&state, &compaction);
 
         // then:
         assert!(result.is_err());
