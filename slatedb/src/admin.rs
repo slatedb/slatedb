@@ -773,6 +773,8 @@ mod tests {
             7
         );
         let recent = latest_compactions
+            .get("core")
+            .expect("expected core")
             .get("recent_compactions")
             .and_then(|v| v.as_object())
             .unwrap();
@@ -799,6 +801,8 @@ mod tests {
         assert_eq!(first_pair[0].as_u64().unwrap(), 1);
         let first_compactions = first_pair[1].as_object().unwrap();
         let first_recent = first_compactions
+            .get("core")
+            .expect("expected core")
             .get("recent_compactions")
             .and_then(|v| v.as_object())
             .unwrap();

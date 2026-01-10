@@ -1524,7 +1524,7 @@ mod tests {
         ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl,
     };
     use crate::db::builder::GarbageCollectorBuilder;
-    use crate::db_state::CoreDbState;
+    use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -5134,9 +5134,9 @@ mod tests {
 
     async fn wait_for_manifest_condition(
         sm: &mut StoredManifest,
-        cond: impl Fn(&CoreDbState) -> bool,
+        cond: impl Fn(&ManifestCore) -> bool,
         timeout: Duration,
-    ) -> CoreDbState {
+    ) -> ManifestCore {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
             let manifest = sm.refresh().await.unwrap();

@@ -35,7 +35,7 @@ pub enum FindOption {
 /// When capacity is reached, downsamples by removing every other entry to maintain bounded memory.
 /// Data is compressed using Gorilla encoding (delta-of-deltas) for efficient storage.
 #[derive(Debug, Clone)]
-pub(crate) struct SequenceTracker {
+pub struct SequenceTracker {
     /// Sorted array of sequence numbers
     sequence_numbers: Vec<u64>,
     /// Sorted array of timestamps (as Unix timestamp seconds)
@@ -145,7 +145,7 @@ impl SequenceTracker {
     }
 
     /// Find the timestamp for a given sequence number
-    pub(crate) fn find_ts(&self, seq: u64, find_opt: FindOption) -> Option<DateTime<Utc>> {
+    pub fn find_ts(&self, seq: u64, find_opt: FindOption) -> Option<DateTime<Utc>> {
         if self.sequence_numbers.is_empty() {
             return None;
         }
@@ -165,7 +165,7 @@ impl SequenceTracker {
     }
 
     /// Find the sequence number for a given timestamp
-    pub(crate) fn find_seq(&self, ts: DateTime<Utc>, find_opt: FindOption) -> Option<u64> {
+    pub fn find_seq(&self, ts: DateTime<Utc>, find_opt: FindOption) -> Option<u64> {
         let ts_secs = ts.timestamp();
 
         if self.timestamps.is_empty() {

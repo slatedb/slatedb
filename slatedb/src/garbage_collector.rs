@@ -300,7 +300,7 @@ mod tests {
 
     use crate::utils::WatchableOnceCell;
     use crate::{
-        db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId},
+        db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId},
         manifest::store::{ManifestStore, StoredManifest},
         sst::SsTableFormat,
         tablestore::TableStore,
@@ -311,7 +311,7 @@ mod tests {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
 
         // Create a manifest
-        let state = CoreDbState::new();
+        let state = ManifestCore::new();
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             state.clone(),
@@ -362,7 +362,7 @@ mod tests {
         // Create a manifest
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -402,7 +402,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -457,7 +457,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -547,7 +547,7 @@ mod tests {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
 
         // Manifest 1
-        let state = CoreDbState::new();
+        let state = ManifestCore::new();
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             state.clone(),
@@ -618,7 +618,7 @@ mod tests {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
 
         // Manifest 1
-        let state = CoreDbState::new();
+        let state = ManifestCore::new();
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             state.clone(),
@@ -684,7 +684,7 @@ mod tests {
         // Create a manifest
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             Arc::new(DefaultSystemClock::new()),
         )
         .await
@@ -762,7 +762,7 @@ mod tests {
         );
 
         // Create a manifest
-        let mut state = CoreDbState::new();
+        let mut state = ManifestCore::new();
         state.replay_after_wal_id = id2.unwrap_wal_id();
         StoredManifest::create_new_db(
             manifest_store.clone(),
@@ -816,7 +816,7 @@ mod tests {
         write_sst(table_store.clone(), &id3).await.unwrap();
 
         // Manifest 1 with table 1 eligible for deletion
-        let mut state = CoreDbState::new();
+        let mut state = ManifestCore::new();
         state.replay_after_wal_id = 1;
         state.next_wal_sst_id = 4;
         let mut stored_manifest = StoredManifest::create_new_db(
@@ -898,7 +898,7 @@ mod tests {
         );
 
         // Create a manifest
-        let mut state = CoreDbState::new();
+        let mut state = ManifestCore::new();
         state.replay_after_wal_id = id2.unwrap_wal_id();
         StoredManifest::create_new_db(
             manifest_store.clone(),
@@ -972,7 +972,7 @@ mod tests {
             create_sst(table_store.clone(), unexpired_base_ms + 3).await;
 
         // Create a manifest
-        let mut state = CoreDbState::new();
+        let mut state = ManifestCore::new();
         state.l0.push_back(l0_sst_handle.clone());
         state.l0.push_back(active_expired_l0_sst_handle.clone());
         // Dont' push inactive_expired_l0_sst_handle
@@ -1074,7 +1074,7 @@ mod tests {
         let inactive_sst_handle = create_sst(table_store.clone(), expired_base_ms).await;
 
         // Create an initial manifest with active and active checkpoint tables
-        let mut state = CoreDbState::new();
+        let mut state = ManifestCore::new();
         state.l0.push_back(active_l0_sst_handle.clone());
         state.l0.push_back(active_checkpoint_l0_sst_handle.clone());
         state.compacted.push(SortedRun {
@@ -1351,7 +1351,7 @@ mod tests {
         // Create two manifests where the first is old enough to GC
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             Arc::new(DefaultSystemClock::new()),
         )
         .await

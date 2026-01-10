@@ -6,7 +6,7 @@ use slatedb::compactor::{CompactionRequest, CompactionSpec};
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
-use slatedb::FindOption;
+use slatedb::seq_tracker::FindOption;
 use std::error::Error;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
