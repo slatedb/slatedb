@@ -37,7 +37,7 @@ const KNOWN_FLAGS: u8 = RECORD_TYPE_MASK | FLAG_HAS_EXPIRE_TS_FLAG | FLAG_HAS_CR
 ///
 /// [[WalEntry]] provides methods to transform a [[RowEntry]] to a [[WalEntry]] and back.
 ///
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct WalEntry {
     bytes: Bytes,
 }
@@ -45,11 +45,11 @@ pub(crate) struct WalEntry {
 
 impl From<RowEntry> for WalEntry {
     fn from(row_entry: RowEntry) -> Self {
-        let seqnum_size = 8usize;
-        let flags_size = 1usize;
-        let ts_size = 8usize;
-        let key_len_size = 2usize;
-        let value_len_size = 4usize;
+        let seqnum_size = size_of::<u64>();
+        let flags_size = size_of::<u8>();
+        let ts_size = size_of::<i64>();
+        let key_len_size = size_of::<u16>();
+        let value_len_size = size_of::<u32>();
         let mut size = seqnum_size + flags_size + key_len_size + row_entry.key.len();
         if row_entry.create_ts.is_some() {
             size += ts_size;
@@ -84,10 +84,10 @@ impl From<RowEntry> for WalEntry {
         if let Some(expire_ts) = row_entry.expire_ts {
             buf.put_i64_le(expire_ts);
         }
-        buf.put_u16_le(row_entry.key.len() as u16);
+        buf.put_u16_le(u16::try_from(row_entry.key.len()).expect("key length should be less than u16::MAX_LEN"));
         buf.put_slice(&row_entry.key);
         if let Some(value_bytes) = row_entry.value.as_bytes() {
-            buf.put_u32_le(value_bytes.len() as u32);
+            buf.put_u32_le(u32::try_from(row_entry.value.len()).expect("value length should be less than u32::MAX_LEN"));
             buf.put_slice(&value_bytes);
         }
 
@@ -125,17 +125,20 @@ impl TryFrom<WalEntry> for RowEntry {
             None
         };
         let key_len = buf.get_u16_le() as usize;
-        let key = buf.copy_to_bytes(key_len);
+        let key = buf.slice(0..key_len);
+        buf.advance(key_len);
         let value = match record_type {
             RECORD_TYPE_TOMBSTONE_FLAGS => ValueDeletable::Tombstone,
             RECORD_TYPE_VALUE_FLAGS => {
                 let value_len = buf.get_u32_le() as usize;
-                let value_bytes = buf.copy_to_bytes(value_len);
+                let value_bytes = buf.slice(0..value_len);
+                buf.advance(value_len);
                 ValueDeletable::Value(value_bytes)
             }
             RECORD_TYPE_MERGE_FLAGS => {
                 let value_len = buf.get_u32_le() as usize;
-                let value_bytes = buf.copy_to_bytes(value_len);
+                let value_bytes = buf.slice(0..value_len);
+                buf.advance(value_len);
                 ValueDeletable::Merge(value_bytes)
             }
             _ => {
@@ -199,9 +202,11 @@ mod tests {
         assert_eq!(buf.get_u64_le(), entry.seq);
         assert_eq!(buf.get_u8(), RECORD_TYPE_VALUE_FLAGS);
         assert_eq!(buf.get_u16_le(), key.len() as u16);
-        assert_eq!(&buf.copy_to_bytes(key.len())[..], key.as_bytes());
+        assert_eq!(&buf.slice(0..key.len())[..], key.as_bytes());
+        buf.advance(key.len());
         assert_eq!(buf.get_u32_le(), value.len() as u32);
-        assert_eq!(&buf.copy_to_bytes(value.len())[..], value.as_bytes());
+        assert_eq!(&buf.slice(0..value.len())[..], value.as_bytes());
+        buf.advance(value.len());
 
         let result: RowEntry = wal_entry.try_into().unwrap();
         assert_eq!(result, entry);
@@ -227,7 +232,8 @@ mod tests {
         assert_eq!(buf.get_u64_le(), seqnum);
         assert_eq!(buf.get_u8(), RECORD_TYPE_TOMBSTONE_FLAGS);
         assert_eq!(buf.get_u16_le(), key.len() as u16);
-        assert_eq!(&buf.copy_to_bytes(3)[..], key.as_bytes());
+        assert_eq!(&buf.slice(0..key.len())[..], key.as_bytes());
+        buf.advance(key.len());
         assert!(buf.is_empty());
 
         let result: RowEntry = wal_entry.try_into().unwrap();
@@ -263,9 +269,11 @@ mod tests {
         assert_eq!(buf.get_u64_le(), seqnum);
         assert_eq!(buf.get_u8(), RECORD_TYPE_MERGE_FLAGS);
         assert_eq!(buf.get_u16_le(), key.len() as u16);
-        assert_eq!(&buf.copy_to_bytes(key.len())[..], key.as_bytes());
+        assert_eq!(&buf.slice(0..key.len())[..], key.as_bytes());
+        buf.advance(key.len());
         assert_eq!(buf.get_u32_le(), operand.len() as u32);
-        assert_eq!(&buf.copy_to_bytes(7)[..], operand.as_bytes());
+        assert_eq!(&buf.slice(0..operand.len())[..], operand.as_bytes());
+        buf.advance(operand.len());
 
         let result: RowEntry = wal_entry.try_into().unwrap();
         assert_eq!(result, entry);
@@ -303,9 +311,11 @@ mod tests {
         assert_eq!(buf.get_u8(), RECORD_TYPE_VALUE_FLAGS | FLAG_HAS_EXPIRE_TS_FLAG);
         assert_eq!(buf.get_i64_le(), expire_ts);
         assert_eq!(buf.get_u16_le(), key.len() as u16);
-        assert_eq!(&buf.copy_to_bytes(key.len())[..], key.as_bytes());
+        assert_eq!(&buf.slice(0..key.len())[..], key.as_bytes());
+        buf.advance(key.len());
         assert_eq!(buf.get_u32_le(), value.len() as u32);
-        assert_eq!(&buf.copy_to_bytes(value.len())[..], value.as_bytes());
+        assert_eq!(&buf.slice(0..value.len())[..], value.as_bytes());
+        buf.advance(value.len());
 
         let result: RowEntry = wal_entry.try_into().unwrap();
         assert_eq!(result, entry);
@@ -343,9 +353,11 @@ mod tests {
         assert_eq!(buf.get_u8(), RECORD_TYPE_VALUE_FLAGS | FLAG_HAS_CREATE_TS_FLAG);
         assert_eq!(buf.get_i64_le(), create_ts);
         assert_eq!(buf.get_u16_le(), key.len() as u16);
-        assert_eq!(&buf.copy_to_bytes(key.len())[..], key.as_bytes());
+        assert_eq!(&buf.slice(0..key.len())[..], key.as_bytes());
+        buf.advance(key.len());
         assert_eq!(buf.get_u32_le(), value.len() as u32);
-        assert_eq!(&buf.copy_to_bytes(value.len())[..], value.as_bytes());
+        assert_eq!(&buf.slice(0..value.len())[..], value.as_bytes());
+        buf.advance(value.len());
 
         let result: RowEntry = wal_entry.try_into().unwrap();
         assert_eq!(result, entry);
@@ -389,9 +401,11 @@ mod tests {
         assert_eq!(buf.get_i64_le(), create_ts);
         assert_eq!(buf.get_i64_le(), expire_ts);
         assert_eq!(buf.get_u16_le(), key.len() as u16);
-        assert_eq!(&buf.copy_to_bytes(key.len())[..], key.as_bytes());
+        assert_eq!(&buf.slice(0..key.len())[..], key.as_bytes());
+        buf.advance(key.len());
         assert_eq!(buf.get_u32_le(), value.len() as u32);
-        assert_eq!(&buf.copy_to_bytes(value.len())[..], value.as_bytes());
+        assert_eq!(&buf.slice(0..value.len())[..], value.as_bytes());
+        buf.advance(value.len());
 
         let result: RowEntry = wal_entry.try_into().unwrap();
         assert_eq!(result, entry);
@@ -432,7 +446,8 @@ mod tests {
         assert_eq!(buf.get_i64_le(), create_ts);
         assert_eq!(buf.get_i64_le(), expire_ts);
         assert_eq!(buf.get_u16_le(), key.len() as u16);
-        assert_eq!(&buf.copy_to_bytes(key.len())[..], key.as_bytes());
+        assert_eq!(&buf.slice(0..key.len())[..], key.as_bytes());
+        buf.advance(key.len());
         assert!(buf.is_empty());
 
         let result: RowEntry = wal_entry.try_into().unwrap();
@@ -477,9 +492,11 @@ mod tests {
         assert_eq!(buf.get_i64_le(), create_ts);
         assert_eq!(buf.get_i64_le(), expire_ts);
         assert_eq!(buf.get_u16_le(), key.len() as u16);
-        assert_eq!(&buf.copy_to_bytes(key.len())[..], key.as_bytes());
+        assert_eq!(&buf.slice(0..key.len()), key.as_bytes());
+        buf.advance(key.len());
         assert_eq!(buf.get_u32_le(), value.len() as u32);
-        assert_eq!(&buf.copy_to_bytes(value.len())[..], value.as_bytes());
+        assert_eq!(&buf.slice(0..value.len())[..], value.as_bytes());
+        buf.advance(value.len());
 
         let wal_entry2 = WalEntry::from(bytes);
         let result: RowEntry = wal_entry2.try_into().unwrap();
