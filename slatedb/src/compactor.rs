@@ -60,6 +60,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use log::{debug, error, info, warn};
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tracing::instrument;
 use ulid::Ulid;
@@ -189,7 +190,7 @@ pub trait CompactionScheduler: Send + Sync {
 }
 
 /// Request to submit a compaction for execution.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CompactionRequest {
     /// Compact all current L0 SSTs and sorted runs.
     Full,

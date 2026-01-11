@@ -2,7 +2,7 @@ use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use chrono::{TimeZone, Utc};
 use object_store::path::Path;
 use slatedb::admin::{self, Admin, AdminBuilder};
-use slatedb::compactor::{CompactionRequest, CompactionSpec};
+use slatedb::compactor::CompactionRequest;
 use slatedb::config::{
     CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
@@ -73,8 +73,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             compacted,
             compactions,
         } => schedule_gc(&admin, manifest, wal, compacted, compactions).await?,
-        CliCommands::SubmitCompaction { full, spec } => {
-            exec_submit_compaction(&admin, full, spec).await?
+        CliCommands::SubmitCompaction { request } => {
+            exec_submit_compaction(&admin, request).await?
         }
 
         CliCommands::SeqToTs { seq, round } => {
@@ -146,16 +146,10 @@ async fn exec_list_compactions(
 
 async fn exec_submit_compaction(
     admin: &Admin,
-    full: bool,
-    spec: Option<CompactionSpec>,
+    request: CompactionRequest,
 ) -> Result<(), Box<dyn Error>> {
-    let compaction_request = if full {
-        CompactionRequest::Full
-    } else {
-        let parsed_spec = spec.ok_or("missing --spec JSON")?;
-        CompactionRequest::Spec(parsed_spec)
-    };
-    let compaction_json = admin.submit_compaction(compaction_request).await?;
+    // TODO convert CompactionRequest to CompactionSpec
+    let compaction_json = admin.submit_compaction(compaction_spec).await?;
     println!("{}", compaction_json);
     Ok(())
 }
