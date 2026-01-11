@@ -129,3 +129,4 @@ mod utils;
 mod wal_buffer;
 mod wal_id;
 mod wal_replay;
+mod wal_entry;
