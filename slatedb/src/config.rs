@@ -58,6 +58,11 @@
 //! max_sst_size = 1073741824
 //! max_concurrent_compactions = 4
 //!
+//! [compactor_options.scheduler_options]
+//! min_compaction_sources = "4"
+//! max_compaction_sources = "8"
+//! include_size_threshold = "4.0"
+//!
 //! [object_store_cache_options]
 //! root_folder = "/tmp/slatedb-cache"
 //! max_cache_size_bytes = 17179869184
@@ -97,7 +102,12 @@
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_sst_size": 1073741824,
-//!    "max_concurrent_compactions": 4
+//!    "max_concurrent_compactions": 4,
+//!    "scheduler_options": {
+//!      "min_compaction_sources": "4",
+//!      "max_compaction_sources": "8",
+//!      "include_size_threshold": "4.0"
+//!    }
 //!  },
 //!  "compression_codec": null,
 //!  "object_store_cache_options": {
@@ -143,6 +153,10 @@
 //!   poll_interval: '5s'
 //!   max_sst_size: 1073741824
 //!   max_concurrent_compactions: 4
+//!   scheduler_options:
+//!     min_compaction_sources: "4"
+//!     max_compaction_sources: "8"
+//!     include_size_threshold: "4.0"
 //! compression_codec: null
 //! object_store_cache_options:
 //!   root_folder: /tmp/slatedb-cache
@@ -167,7 +181,9 @@
 use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
+use log::warn;
 use serde::{Deserialize, Serialize, Serializer};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
@@ -1030,6 +1046,10 @@ pub struct CompactorOptions {
 
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
+
+    /// Scheduler-specific options expressed as string key/value pairs.
+    #[serde(default)]
+    pub scheduler_options: HashMap<String, String>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -1043,22 +1063,23 @@ impl Default for CompactorOptions {
             manifest_update_timeout: Duration::from_secs(300),
             max_sst_size: 256 * 1024 * 1024,
             max_concurrent_compactions: 4,
+            scheduler_options: HashMap::new(),
         }
     }
 }
 
 // Implement Debug manually for CompactorOptions.
-// This is needed because CompactorOptions contains a boxed trait object
-// (`Arc<dyn CompactionSchedulerSupplier>`), which doesn't implement Debug.
 impl std::fmt::Debug for CompactorOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompactorOptions")
             .field("poll_interval", &self.poll_interval)
+            .field("manifest_update_timeout", &self.manifest_update_timeout)
             .field("max_sst_size", &self.max_sst_size)
             .field(
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,
             )
+            .field("scheduler_options", &self.scheduler_options)
             .finish()
     }
 }
@@ -1085,6 +1106,73 @@ impl Default for SizeTieredCompactionSchedulerOptions {
             max_compaction_sources: 8,
             include_size_threshold: 4.0,
         }
+    }
+}
+
+impl From<&HashMap<String, String>> for SizeTieredCompactionSchedulerOptions {
+    fn from(map: &HashMap<String, String>) -> Self {
+        let mut options = SizeTieredCompactionSchedulerOptions::default();
+        for (key, value) in map {
+            match key.as_str() {
+                "min_compaction_sources" => match value.parse::<usize>() {
+                    Ok(parsed) => options.min_compaction_sources = parsed,
+                    Err(err) => {
+                        warn!(
+                            "invalid scheduler option value for min_compaction_sources: '{}': {}",
+                            value, err
+                        );
+                    }
+                },
+                "max_compaction_sources" => match value.parse::<usize>() {
+                    Ok(parsed) => options.max_compaction_sources = parsed,
+                    Err(err) => {
+                        warn!(
+                            "invalid scheduler option value for max_compaction_sources: '{}': {}",
+                            value, err
+                        );
+                    }
+                },
+                "include_size_threshold" => match value.parse::<f32>() {
+                    Ok(parsed) => options.include_size_threshold = parsed,
+                    Err(err) => {
+                        warn!(
+                            "invalid scheduler option value for include_size_threshold: '{}': {}",
+                            value, err
+                        );
+                    }
+                },
+                _ => {
+                    warn!("unknown scheduler option '{}'; ignoring", key);
+                }
+            }
+        }
+
+        options
+    }
+}
+
+impl From<HashMap<String, String>> for SizeTieredCompactionSchedulerOptions {
+    fn from(map: HashMap<String, String>) -> Self {
+        Self::from(&map)
+    }
+}
+
+impl From<SizeTieredCompactionSchedulerOptions> for HashMap<String, String> {
+    fn from(options: SizeTieredCompactionSchedulerOptions) -> Self {
+        let mut map = HashMap::new();
+        map.insert(
+            "min_compaction_sources".to_string(),
+            options.min_compaction_sources.to_string(),
+        );
+        map.insert(
+            "max_compaction_sources".to_string(),
+            options.max_compaction_sources.to_string(),
+        );
+        map.insert(
+            "include_size_threshold".to_string(),
+            options.include_size_threshold.to_string(),
+        );
+        map
     }
 }
 

@@ -1004,7 +1004,6 @@ mod tests {
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
-    use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
@@ -1035,20 +1034,23 @@ mod tests {
         // given:
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
-        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-            SizeTieredCompactionSchedulerOptions {
-                min_compaction_sources: 1,
-                max_compaction_sources: 999,
-                include_size_threshold: 4.0,
-            },
-        ));
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 1,
+            max_compaction_sources: 999,
+            include_size_threshold: 4.0,
+        }
+        .into();
+        options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options must be set")
+            .scheduler_options = scheduler_options;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_logical_clock(logical_clock)
-            .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
             .unwrap();
@@ -1832,21 +1834,22 @@ mod tests {
         let os = Arc::new(InMemory::new());
         let insert_clock = Arc::new(TestClock::new());
 
-        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-            SizeTieredCompactionSchedulerOptions {
-                // We'll do exactly two flushes in this test, resulting in 2 L0 files.
-                min_compaction_sources: 2,
-                max_compaction_sources: 2,
-                include_size_threshold: 4.0,
-            },
-        ));
-
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 2,
+            include_size_threshold: 4.0,
+        }
+        .into();
         let mut options = db_options(Some(compactor_options()));
         options.default_ttl = Some(50);
+        options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options missing")
+            .scheduler_options = scheduler_options;
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_logical_clock(insert_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
             .build()
             .await
             .unwrap();
@@ -3013,22 +3016,24 @@ mod tests {
         // given:
         let os = Arc::new(InMemory::new());
         let logical_clock = Arc::new(TestClock::new());
-        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-            SizeTieredCompactionSchedulerOptions {
-                min_compaction_sources: 1,
-                max_compaction_sources: 999,
-                include_size_threshold: 4.0,
-            },
-        ));
-
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 1,
+            max_compaction_sources: 999,
+            include_size_threshold: 4.0,
+        }
+        .into();
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
         options.compression_codec = Some(CompressionCodec::Zstd);
+        options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options missing")
+            .scheduler_options = scheduler_options;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_logical_clock(logical_clock)
-            .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_sst_block_size(SstBlockSize::Other(128))
             .build()
             .await
@@ -3240,6 +3245,7 @@ mod tests {
         CompactorOptions {
             poll_interval: Duration::from_millis(100),
             max_concurrent_compactions: 1,
+            scheduler_options: Default::default(),
             ..CompactorOptions::default()
         }
     }

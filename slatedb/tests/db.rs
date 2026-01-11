@@ -89,16 +89,23 @@ async fn test_concurrent_writers_and_readers() {
         Arc::new(InMemory::new()) as Arc<dyn ObjectStore>
     };
 
+    let compactor_options = CompactorOptions {
+        poll_interval: Duration::from_millis(100),
+        scheduler_options: SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 1,
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    };
+
     let config = Settings::from_env_with_default(
         "SLATEDB_TEST_",
         Settings {
             flush_interval: Some(Duration::from_millis(100)),
             manifest_poll_interval: Duration::from_millis(100),
             manifest_update_timeout: Duration::from_secs(300),
-            compactor_options: Some(CompactorOptions {
-                poll_interval: Duration::from_millis(100),
-                ..Default::default()
-            }),
+            compactor_options: Some(compactor_options),
             // Allow 16KB of unflushed data
             max_unflushed_bytes: 16 * 1024,
             min_filter_keys: 0,
@@ -108,12 +115,7 @@ async fn test_concurrent_writers_and_readers() {
         },
     )
     .expect("failed to load db settings from environment");
-    let supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-        SizeTieredCompactionSchedulerOptions {
-            min_compaction_sources: 1,
-            ..Default::default()
-        },
-    ));
+    let supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
     // Build the DB with exponential backoff to tolerate transient object store errors.
     let retry_builder = ExponentialBuilder::default()
         .without_max_times()
