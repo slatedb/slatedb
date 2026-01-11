@@ -143,6 +143,49 @@ pub trait CompactionScheduler: Send + Sync {
     fn validate(&self, _state: &CompactorStateView, _spec: &CompactionSpec) -> Result<(), Error> {
         Ok(())
     }
+
+    /// Generate a compaction based on a compaction request.
+    ///
+    /// - If the request is a `CompactionRequest::Spec`, it simply returns the provided spec.
+    /// - If the request is a `CompactionRequest::Full`, it generates a compaction spec that
+    ///   includes all current L0 SSTs and sorted runs as sources, and selects the lowest
+    ///   existing sorted run ID as the destination.
+    ///
+    /// ## Arguments
+    /// - `state`: Process-local view of the DB's manifest and compactions.
+    /// - `request`: The compaction request to plan.
+    ///
+    /// ## Returns
+    /// - A list of [`CompactionSpec`] describing what to compact and where to write.
+    /// - An [`Error`] if the request is invalid.
+    fn generate(
+        &self,
+        state: &CompactorStateView,
+        request: &CompactionRequest,
+    ) -> Result<Vec<CompactionSpec>, Error> {
+        match request {
+            CompactionRequest::Spec(spec) => Ok(vec![spec.clone()]),
+            CompactionRequest::Full => {
+                let manifest = state.manifest();
+                let sources = manifest
+                    .l0
+                    .iter()
+                    .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
+                    .chain(
+                        manifest
+                            .compacted
+                            .iter()
+                            .map(|sr| SourceId::SortedRun(sr.id)),
+                    )
+                    .collect::<Vec<_>>();
+                if sources.is_empty() {
+                    return Err(crate::Error::from(SlateDBError::InvalidCompaction));
+                }
+                let destination = manifest.compacted.iter().map(|sr| sr.id).min().unwrap_or(0);
+                Ok(vec![CompactionSpec::new(sources, destination)])
+            }
+        }
+    }
 }
 
 /// Request to submit a compaction for execution.
@@ -980,6 +1023,7 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::Manifest;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
@@ -2158,6 +2202,76 @@ mod tests {
         assert_eq!(stored.spec().sources(), &expected_sources);
         assert_eq!(stored.spec().destination(), 1);
         assert_eq!(stored.status(), CompactionStatus::Submitted);
+    }
+
+    #[test]
+    fn test_plan_spec_returns_spec_clone() {
+        let scheduler = MockScheduler::new();
+        let state = CompactorStateView {
+            compactions: None,
+            manifest: (0, Manifest::initial(ManifestCore::new())),
+        };
+        let spec = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
+
+        let planned = scheduler
+            .generate(&state, &CompactionRequest::Spec(spec.clone()))
+            .unwrap();
+
+        assert_eq!(planned, vec![spec]);
+    }
+
+    #[test]
+    fn test_plan_full_uses_all_sources_and_min_destination() {
+        let scheduler = MockScheduler::new();
+        let l0_first = Ulid::from_parts(1, 0);
+        let l0_second = Ulid::from_parts(2, 0);
+        let mut core = ManifestCore::new();
+        let l0_info = SsTableInfo {
+            first_key: Some(Bytes::from_static(b"a")),
+            ..SsTableInfo::default()
+        };
+        let sr_info = SsTableInfo {
+            first_key: Some(Bytes::from_static(b"m")),
+            ..SsTableInfo::default()
+        };
+        core.l0 = VecDeque::from(vec![
+            SsTableHandle::new(SsTableId::Compacted(l0_first), l0_info.clone()),
+            SsTableHandle::new(SsTableId::Compacted(l0_second), l0_info.clone()),
+        ]);
+        core.compacted = vec![
+            SortedRun {
+                id: 5,
+                ssts: vec![SsTableHandle::new(
+                    SsTableId::Compacted(Ulid::from_parts(10, 0)),
+                    sr_info.clone(),
+                )],
+            },
+            SortedRun {
+                id: 2,
+                ssts: vec![SsTableHandle::new(
+                    SsTableId::Compacted(Ulid::from_parts(11, 0)),
+                    sr_info.clone(),
+                )],
+            },
+        ];
+        let state = CompactorStateView {
+            compactions: None,
+            manifest: (0, Manifest::initial(core)),
+        };
+
+        let planned = scheduler
+            .generate(&state, &CompactionRequest::Full)
+            .unwrap();
+
+        let expected_sources = vec![
+            SourceId::Sst(l0_first),
+            SourceId::Sst(l0_second),
+            SourceId::SortedRun(5),
+            SourceId::SortedRun(2),
+        ];
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].sources(), &expected_sources);
+        assert_eq!(planned[0].destination(), 2);
     }
 
     struct CompactorEventHandlerTestFixture {
