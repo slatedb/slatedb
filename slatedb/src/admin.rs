@@ -1,7 +1,7 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
-use crate::compactor::{CompactionRequest, Compactor};
+use crate::compactor::{CompactionSpec, Compactor};
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::dispatcher::MessageHandlerExecutor;
@@ -151,15 +151,10 @@ impl Admin {
     }
 
     /// Submit a compaction request and return the submitted compaction as JSON.
-    pub async fn submit_compaction(
-        &self,
-        request: CompactionRequest,
-    ) -> Result<String, Box<dyn Error>> {
-        let manifest_store = Arc::new(self.manifest_store());
+    pub async fn submit_compaction(&self, spec: CompactionSpec) -> Result<String, Box<dyn Error>> {
         let compactions_store = Arc::new(self.compactions_store());
         let compaction_id = Compactor::submit(
-            request,
-            manifest_store,
+            spec,
             compactions_store,
             Arc::new(DbRand::new(self.rand.seed())),
             self.system_clock.clone(),
@@ -703,7 +698,6 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
-    use crate::compactor::CompactionRequest;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -876,10 +870,7 @@ mod tests {
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
         let spec = CompactionSpec::new(vec![SourceId::SortedRun(3)], 3);
-        let compaction_json = admin
-            .submit_compaction(CompactionRequest::Spec(spec))
-            .await
-            .unwrap();
+        let compaction_json = admin.submit_compaction(spec).await.unwrap();
         let value: serde_json::Value = serde_json::from_str(&compaction_json).unwrap();
         let sources = value
             .get("spec")

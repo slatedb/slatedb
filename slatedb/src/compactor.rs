@@ -353,7 +353,7 @@ impl Compactor {
             .map_err(|e| e.into())
     }
 
-    /// Submits a compaction request by persisting it to the compactions store.
+    /// Persist a [`CompactionSpec`] as a new [`Compaction`] in the compactions store.
     ///
     /// ## Returns
     /// - `Ok(Ulid)` with the submitted compaction id.
@@ -361,35 +361,11 @@ impl Compactor {
     /// - `SlateDBError::InvalidCompaction` if a full compaction has no sources.
     /// - `SlateDBError` if the compaction could not be persisted.
     pub(crate) async fn submit(
-        request: CompactionRequest,
-        manifest_store: Arc<ManifestStore>,
+        spec: CompactionSpec,
         compactions_store: Arc<CompactionsStore>,
         rand: Arc<DbRand>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Ulid, crate::Error> {
-        let spec = match request {
-            CompactionRequest::Spec(spec) => spec,
-            CompactionRequest::Full => {
-                let (_, manifest) = manifest_store.read_latest_manifest().await?;
-                let db_state = &manifest.core;
-                let sources = db_state
-                    .l0
-                    .iter()
-                    .map(|sst| SourceId::Sst(sst.id.unwrap_compacted_id()))
-                    .chain(
-                        db_state
-                            .compacted
-                            .iter()
-                            .map(|sr| SourceId::SortedRun(sr.id)),
-                    )
-                    .collect::<Vec<_>>();
-                if sources.is_empty() {
-                    return Err(crate::Error::from(SlateDBError::InvalidCompaction));
-                }
-                let destination = db_state.compacted.iter().map(|sr| sr.id).min().unwrap_or(0);
-                CompactionSpec::new(sources, destination)
-            }
-        };
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction = Compaction::new(compaction_id, spec);
         let mut stored_compactions =
@@ -2102,8 +2078,7 @@ mod tests {
 
         let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);
         let compaction_id = Compactor::submit(
-            CompactionRequest::Spec(spec.clone()),
-            manifest_store,
+            spec.clone(),
             compactions_store.clone(),
             Arc::new(DbRand::default()),
             system_clock.clone(),
@@ -2178,9 +2153,19 @@ mod tests {
         .await
         .unwrap();
 
+        let scheduler = MockScheduler::new();
+        let specs = scheduler
+            .generate(
+                &CompactorStateView {
+                    compactions: None,
+                    manifest: (0, stored_manifest.manifest().clone()),
+                },
+                &CompactionRequest::Full,
+            )
+            .unwrap();
+        assert_eq!(specs.len(), 1);
         let compaction_id = Compactor::submit(
-            CompactionRequest::Full,
-            manifest_store,
+            specs[0].clone(),
             compactions_store.clone(),
             Arc::new(DbRand::default()),
             system_clock.clone(),
