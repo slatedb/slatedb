@@ -855,7 +855,7 @@ impl Provider for Settings {
     fn data(
         &self,
     ) -> Result<figment::value::Map<figment::Profile, figment::value::Dict>, figment::Error> {
-        figment::providers::Serialized::defaults(Settings::default()).data()
+        figment::providers::Serialized::defaults(self.clone()).data()
     }
 }
 
@@ -1291,6 +1291,24 @@ mod tests {
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_db_options_env_with_default_respects_overrides() {
+        figment::Jail::expect_with(|_jail| {
+            let options = Settings::from_env_with_default(
+                "SLATEDB_",
+                Settings {
+                    flush_interval: Some(Duration::from_millis(40)),
+                    ..Default::default()
+                },
+            )
+            .expect("failed to load db options from environment");
+
+            assert_eq!(Some(Duration::from_millis(40)), options.flush_interval);
+
             Ok(())
         });
     }
