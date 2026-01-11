@@ -15,7 +15,7 @@ import (
 )
 
 type config interface {
-	DbConfig | DbReaderConfig
+	DbConfig | DbReaderConfig | QueryConfig
 }
 
 type DbConfig struct {
@@ -28,6 +28,10 @@ type DbReaderConfig struct {
 	envFile      *string
 	checkpointId *string
 	opts         *DbReaderOptions
+}
+
+type QueryConfig struct {
+	timeout *int64
 }
 
 type Option[T config] func(*T)
@@ -63,6 +67,12 @@ func WithCheckpointId(checkpointId string) Option[DbReaderConfig] {
 func WithDbReaderOptions(opts DbReaderOptions) Option[DbReaderConfig] {
 	return func(cfg *DbReaderConfig) {
 		cfg.opts = &opts
+	}
+}
+
+func WithQueryTimeout(timeout int64) Option[QueryConfig] {
+	return func(cfg *QueryConfig) {
+		cfg.timeout = &timeout
 	}
 }
 

@@ -1,8 +1,10 @@
 use serde_json;
 use slatedb::Db;
+use slatedb::Error as SlateError;
 use std::collections::HashMap;
 use std::os::raw::c_char;
 use tokio::runtime::Builder;
+use tokio::time::{self, Duration};
 
 use crate::config::{
     convert_put_options, convert_range_bounds, convert_read_options, convert_scan_options,
@@ -273,6 +275,7 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
     end_key_len: usize,
     scan_options: *const CSdbScanOptions,
     iterator_ptr: *mut *mut CSdbIterator,
+    timeout: *const u64,
 ) -> CSdbResult {
     if handle.is_null() {
         return create_error_result(CSdbError::NullPointer, "Database handle is null");
@@ -293,12 +296,25 @@ pub unsafe extern "C" fn slatedb_scan_with_options(
     // Convert scan options
     let scan_opts = convert_scan_options(scan_options);
 
+    async fn sleep(timeout: u64) -> SlateError {
+        time::sleep(Duration::from_millis(timeout)).await;
+        SlateError::unavailable("Query timeout".to_string())
+    }
+    tokio::pin!(sleep);
+
     // Create the iterator using the bounds
-    match db_ffi.block_on(
-        db_ffi
-            .db
-            .scan_with_options((start_bound, end_bound), &scan_opts),
-    ) {
+    match db_ffi.block_on(async {
+        tokio::select! {
+            v = db_ffi
+                .db
+                .scan_with_options((start_bound, end_bound), &scan_opts) => {
+                    v
+                }
+            v = sleep(*timeout), if *timeout > 0 => {
+                Err(v)
+            }
+        }
+    }) {
         Ok(iter) => {
             // Create FFI wrapper
             let iter_ffi = CSdbIterator::new_db(handle_ptr, iter);
