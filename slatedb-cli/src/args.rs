@@ -1,4 +1,5 @@
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
+use slatedb::compactor::CompactionSpec;
 use slatedb::seq_tracker::FindOption;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -180,8 +181,8 @@ pub(crate) enum CliCommands {
         full: bool,
 
         /// JSON-encoded compaction spec.
-        #[arg(long)]
-        spec: Option<String>,
+        #[arg(long, value_parser = parse_compaction_spec)]
+        spec: Option<CompactionSpec>,
     },
 
     /// Schedules a period garbage collection job
@@ -272,6 +273,10 @@ pub(crate) struct GcSchedule {
 
 pub(crate) fn parse_args() -> CliArgs {
     CliArgs::parse()
+}
+
+fn parse_compaction_spec(s: &str) -> Result<CompactionSpec, String> {
+    serde_json::from_str(s).map_err(|e| format!("Invalid compaction spec JSON: {e}"))
 }
 
 fn parse_find_option(s: &str) -> Result<FindOption, String> {

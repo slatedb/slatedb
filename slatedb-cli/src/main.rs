@@ -147,13 +147,12 @@ async fn exec_list_compactions(
 async fn exec_submit_compaction(
     admin: &Admin,
     full: bool,
-    spec: Option<String>,
+    spec: Option<CompactionSpec>,
 ) -> Result<(), Box<dyn Error>> {
     let compaction_request = if full {
         CompactionRequest::Full
     } else {
-        let spec_json = spec.ok_or("missing --spec JSON")?;
-        let parsed_spec: CompactionSpec = serde_json::from_str(&spec_json)?;
+        let parsed_spec = spec.ok_or("missing --spec JSON")?;
         CompactionRequest::Spec(parsed_spec)
     };
     let compaction_json = admin.submit_compaction(compaction_request).await?;
