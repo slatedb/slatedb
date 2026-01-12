@@ -14,7 +14,7 @@
 )]
 
 use ::slatedb::admin::{load_object_store_from_env, Admin};
-use ::slatedb::compactor::{CompactionRequest, CompactionSpec};
+use ::slatedb::compactor::{CompactionRequest, CompactionSpec, SourceId};
 use ::slatedb::config::{
     CheckpointOptions, CheckpointScope, DbReaderOptions, DurabilityLevel, FlushOptions, FlushType,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
@@ -71,6 +71,77 @@ fn map_error(err: Error) -> PyErr {
         ::slatedb::ErrorKind::Internal => InternalError::new_err(msg),
         _ => InternalError::new_err(msg),
     }
+}
+
+async fn compaction_spec_from_request(
+    admin: &Admin,
+    request: CompactionRequest,
+) -> PyResult<CompactionSpec> {
+    match request {
+        CompactionRequest::Spec(spec) => Ok(spec),
+        CompactionRequest::Full => {
+            let manifest_json = admin
+                .read_manifest(None)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?
+                .ok_or_else(|| InvalidError::new_err("no manifest file found"))?;
+            compaction_spec_from_manifest_json(&manifest_json)
+        }
+    }
+}
+
+fn compaction_spec_from_manifest_json(manifest_json: &str) -> PyResult<CompactionSpec> {
+    let value: serde_json::Value = serde_json::from_str(manifest_json)
+        .map_err(|e| InvalidError::new_err(format!("invalid manifest JSON: {e}")))?;
+    let manifest = value
+        .as_array()
+        .and_then(|items| items.get(1))
+        .ok_or_else(|| InvalidError::new_err("invalid manifest payload: expected [id, manifest]"))?;
+    let core = manifest
+        .get("core")
+        .ok_or_else(|| InvalidError::new_err("invalid manifest payload: missing core"))?;
+    let l0 = core
+        .get("l0")
+        .and_then(|entries| entries.as_array())
+        .ok_or_else(|| InvalidError::new_err("invalid manifest payload: missing l0"))?;
+    let mut sources = Vec::new();
+    for sst in l0 {
+        let compacted_id = sst
+            .get("id")
+            .and_then(|id| id.get("Compacted"))
+            .and_then(|id| id.as_str())
+            .ok_or_else(|| {
+                InvalidError::new_err("invalid manifest payload: expected compacted SST id")
+            })?;
+        let ulid = Ulid::from_string(compacted_id)
+            .map_err(|e| InvalidError::new_err(format!("invalid SST ULID: {e}")))?;
+        sources.push(SourceId::Sst(ulid));
+    }
+    let compacted = core
+        .get("compacted")
+        .and_then(|entries| entries.as_array())
+        .ok_or_else(|| InvalidError::new_err("invalid manifest payload: missing compacted"))?;
+    let mut destination: Option<u32> = None;
+    for run in compacted {
+        let id = run
+            .get("id")
+            .and_then(|id| id.as_u64())
+            .ok_or_else(|| {
+                InvalidError::new_err("invalid manifest payload: expected sorted run id")
+            })?;
+        let id = u32::try_from(id).map_err(|_| {
+            InvalidError::new_err("invalid manifest payload: sorted run id out of range")
+        })?;
+        destination = Some(destination.map_or(id, |current| current.min(id)));
+        sources.push(SourceId::SortedRun(id));
+    }
+    if sources.is_empty() {
+        return Err(InvalidError::new_err(
+            "full compaction request has no sources",
+        ));
+    }
+
+    Ok(CompactionSpec::new(sources, destination.unwrap_or(0)))
 }
 
 async fn load_db_from_url(
@@ -2474,10 +2545,18 @@ impl PySlateDBAdmin {
             .map_err(|e| InvalidError::new_err(format!("invalid compaction ULID: {e}")))?;
         let rt = get_runtime();
         rt.block_on(async move {
-            admin
+            let compaction = admin
                 .read_compaction(compaction_id, compactions_id)
                 .await
-                .map_err(|e| InvalidError::new_err(e.to_string()))
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            let compaction_json = match compaction {
+                Some(compaction) => Some(
+                    serde_json::to_string(&compaction)
+                        .map_err(|e| InvalidError::new_err(e.to_string()))?,
+                ),
+                None => None,
+            };
+            Ok(compaction_json)
         })
     }
 
@@ -2492,10 +2571,18 @@ impl PySlateDBAdmin {
         let compaction_id = Ulid::from_string(&id)
             .map_err(|e| InvalidError::new_err(format!("invalid compaction ULID: {e}")))?;
         future_into_py(py, async move {
-            admin
+            let compaction = admin
                 .read_compaction(compaction_id, compactions_id)
                 .await
-                .map_err(|e| InvalidError::new_err(e.to_string()))
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            let compaction_json = match compaction {
+                Some(compaction) => Some(
+                    serde_json::to_string(&compaction)
+                        .map_err(|e| InvalidError::new_err(e.to_string()))?,
+                ),
+                None => None,
+            };
+            Ok(compaction_json)
         })
     }
 
@@ -2505,10 +2592,12 @@ impl PySlateDBAdmin {
         let request = request.inner.clone();
         let rt = get_runtime();
         rt.block_on(async move {
-            admin
-                .submit_compaction(request)
+            let compaction_spec = compaction_spec_from_request(&admin, request).await?;
+            let compaction = admin
+                .submit_compaction(compaction_spec)
                 .await
-                .map_err(|e| InvalidError::new_err(e.to_string()))
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
         })
     }
 
@@ -2521,10 +2610,12 @@ impl PySlateDBAdmin {
         let admin = self.inner.clone();
         let request = request.inner.clone();
         future_into_py(py, async move {
-            admin
-                .submit_compaction(request)
+            let compaction_spec = compaction_spec_from_request(&admin, request).await?;
+            let compaction = admin
+                .submit_compaction(compaction_spec)
                 .await
-                .map_err(|e| InvalidError::new_err(e.to_string()))
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
         })
     }
 
