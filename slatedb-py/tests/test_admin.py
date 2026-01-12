@@ -3,10 +3,10 @@ import json
 import pytest
 
 from slatedb import (
+    CompactionSpec,
     InvalidError,
     SlateDB,
     SlateDBAdmin,
-    CompactionSpec,
     SlateDBReader,
 )
 
