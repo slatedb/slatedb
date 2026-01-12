@@ -507,6 +507,7 @@ impl Admin {
         }
     }
 
+    // Replays WALs in the id range into SSTs and flushes them to l0. Returns the handles of the newly generated and flushed SSTs.
     async fn replay_wal_to_l0(
         &self,
         wal_id_range: Range<u64>,
