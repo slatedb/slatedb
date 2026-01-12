@@ -2722,7 +2722,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (id, sst_size))]
+    #[pyo3(signature = (id, sst_size = None))]
     fn restore_checkpoint_async<'py>(
         &self,
         py: Python<'py>,
