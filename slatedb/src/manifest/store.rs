@@ -488,7 +488,6 @@ impl ManifestStore {
     }
 
     /// Delete a manifest from the object store.
-    /// Checks that the manifest is not active (not latest and does not have active checkpoints)
     pub(crate) async fn delete_manifest(&self, id: u64) -> Result<(), SlateDBError> {
         let (active_id, manifest) = self.read_latest_manifest().await?;
         if active_id == id {
@@ -504,11 +503,6 @@ impl ManifestStore {
             return Err(SlateDBError::InvalidDeletion);
         }
 
-        self.delete_manifest_unchecked(id).await
-    }
-
-    // Delete a manfest from the object store without checks.
-    pub(crate) async fn delete_manifest_unchecked(&self, id: u64) -> Result<(), SlateDBError> {
         debug!("deleting manifest [id={}]", id);
         Ok(self.inner.delete(MonotonicId::new(id)).await?)
     }

@@ -4,13 +4,12 @@ use crate::compactions_store::CompactionsStore;
 use crate::compactor::{CompactionRequest, Compactor};
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
-use crate::db_state::{CoreDbState, SsTableHandle, SsTableId};
+use crate::db_state::{ManifestCore, SsTableHandle, SsTableId};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::iter::KeyValueIterator;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::paths::PathResolver;
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
 
@@ -56,8 +55,6 @@ pub struct Admin {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
     pub(crate) rand: Arc<DbRand>,
-    /// The fail point registry to use to inject failures in tests
-    pub(crate) fp_registry: Option<Arc<FailPointRegistry>>,
 }
 
 impl Admin {
@@ -577,7 +574,7 @@ impl Admin {
     async fn replay_wal_to_l0(
         &self,
         wal_id_range: Range<u64>,
-        current_state: &CoreDbState,
+        current_state: &ManifestCore,
         table_store: Arc<TableStore>,
         l0_sst_size: Option<usize>,
     ) -> Result<VecDeque<SsTableHandle>, crate::Error> {
@@ -625,21 +622,12 @@ impl Admin {
     }
 
     fn table_store(&self) -> TableStore {
-        match self.fp_registry.as_ref() {
-            Some(fp_registry) => TableStore::new_with_fp_registry(
-                self.object_stores.clone(),
-                SsTableFormat::default(),
-                PathResolver::new(self.path.clone()),
-                fp_registry.clone(),
-                None,
-            ),
-            None => TableStore::new(
-                self.object_stores.clone(),
-                SsTableFormat::default(),
-                self.path.clone(),
-                None,
-            ),
-        }
+        TableStore::new(
+            self.object_stores.clone(),
+            SsTableFormat::default(),
+            self.path.clone(),
+            None,
+        )
     }
 
     fn compactions_store(&self) -> CompactionsStore {
