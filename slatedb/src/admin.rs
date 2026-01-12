@@ -1,6 +1,7 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
+use crate::compactor::{CompactionRequest, Compactor};
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::dispatcher::MessageHandlerExecutor;
@@ -26,6 +27,7 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use ulid::Ulid;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
@@ -86,6 +88,13 @@ impl Admin {
     }
 
     /// Read-only access to the latest compactions file
+    ///
+    /// ## Arguments
+    /// - `maybe_id`: Optional ID of the compactions file to read. If None, reads from the latest.
+    ///
+    /// ## Returns
+    /// - `Ok(Some(String))`: The compactions as a JSON string if found.
+    /// - `Ok(None)`: If the compactions file does not exist.
     pub async fn read_compactions(
         &self,
         maybe_id: Option<u64>,
@@ -104,6 +113,63 @@ impl Admin {
             None => Ok(None),
             Some(result) => Ok(Some(serde_json::to_string(&result)?)),
         }
+    }
+
+    /// Read-only access to a compaction by id from a specific or latest compactions file.
+    ///
+    /// ## Arguments
+    /// - `compaction_id`: The ULID of the compaction to read.
+    /// - `maybe_id`: Optional ID of the compactions file to read from. If None, reads from the latest.
+    ///
+    /// ## Returns
+    /// - `Ok(Some(String))`: The compaction as a JSON string if found.
+    /// - `Ok(None)`: If the compactions file or compaction ID does not exist.
+    pub async fn read_compaction(
+        &self,
+        compaction_id: Ulid,
+        maybe_id: Option<u64>,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        let compactions_store = self.compactions_store();
+        let compactions = if let Some(compactions_id) = maybe_id {
+            compactions_store
+                .try_read_compactions(compactions_id)
+                .await?
+        } else {
+            compactions_store
+                .try_read_latest_compactions()
+                .await?
+                .map(|(_id, compactions)| compactions)
+        };
+        let Some(compactions) = compactions else {
+            return Ok(None);
+        };
+        let Some(compaction) = compactions.get(&compaction_id) else {
+            return Ok(None);
+        };
+
+        Ok(Some(serde_json::to_string(compaction)?))
+    }
+
+    /// Submit a compaction request and return the submitted compaction as JSON.
+    pub async fn submit_compaction(
+        &self,
+        request: CompactionRequest,
+    ) -> Result<String, Box<dyn Error>> {
+        let manifest_store = Arc::new(self.manifest_store());
+        let compactions_store = Arc::new(self.compactions_store());
+        let compaction_id = Compactor::submit(
+            request,
+            manifest_store,
+            compactions_store,
+            Arc::new(DbRand::new(self.rand.seed())),
+            self.system_clock.clone(),
+        )
+        .await?;
+        let Some(compaction_json) = self.read_compaction(compaction_id, None).await? else {
+            return Err(Box::new(SlateDBError::InvalidDBState));
+        };
+
+        Ok(compaction_json)
     }
 
     /// List compactions files within a range
@@ -637,6 +703,7 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
+    use crate::compactor::CompactionRequest;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -706,6 +773,8 @@ mod tests {
             7
         );
         let recent = latest_compactions
+            .get("core")
+            .expect("expected core")
             .get("recent_compactions")
             .and_then(|v| v.as_object())
             .unwrap();
@@ -732,6 +801,8 @@ mod tests {
         assert_eq!(first_pair[0].as_u64().unwrap(), 1);
         let first_compactions = first_pair[1].as_object().unwrap();
         let first_recent = first_compactions
+            .get("core")
+            .expect("expected core")
             .get("recent_compactions")
             .and_then(|v| v.as_object())
             .unwrap();
@@ -760,5 +831,74 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_admin_read_compaction() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_read_compaction");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        let mut stored = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+
+        let compaction_id = Ulid::new();
+        let compaction = Compaction::new(
+            compaction_id,
+            CompactionSpec::new(vec![SourceId::SortedRun(3)], 7),
+        );
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(compaction);
+        stored.update(dirty).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+        let compaction_json = admin
+            .read_compaction(compaction_id, None)
+            .await
+            .unwrap()
+            .expect("expected compaction");
+        let value: serde_json::Value = serde_json::from_str(&compaction_json).unwrap();
+
+        assert_eq!(
+            value.get("id").and_then(|v| v.as_str()).unwrap(),
+            compaction_id.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_submit_compaction() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_submit_compaction");
+        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
+        StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), object_store).build();
+        let spec = CompactionSpec::new(vec![SourceId::SortedRun(3)], 3);
+        let compaction_json = admin
+            .submit_compaction(CompactionRequest::Spec(spec))
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&compaction_json).unwrap();
+        let sources = value
+            .get("spec")
+            .and_then(|v| v.get("sources"))
+            .and_then(|v| v.as_array())
+            .unwrap();
+
+        assert_eq!(
+            value
+                .get("spec")
+                .and_then(|v| v.get("destination"))
+                .and_then(|v| v.as_u64())
+                .unwrap(),
+            3
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            value.get("status").and_then(|v| v.as_str()).unwrap(),
+            "Submitted"
+        );
     }
 }
