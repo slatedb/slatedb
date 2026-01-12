@@ -5656,13 +5656,16 @@ mod tests {
         db.close().await.expect("failed to close DB");
     }
 
-    /// Tests that when reading from L0 with DurabilityLevel::Remote, we see the value
-    /// that was durable at the time of the read, not newer non-durable values.
+    /// Tests that when reading from L0 with DurabilityLevel::Remote, we observe data at
+    /// an earlier durability watermark until the watermark is updated, at which point we
+    /// observe data at the new watermark.
     ///
     /// This test validates the fix in flush.rs that ensures the retention iterator
     /// considers the durable watermark when flushing memtable to L0. Without this fix,
     /// the L0 SST would only contain the latest value (seq2), and remote readers would
     /// incorrectly fail to find the durable value (seq1).
+    ///
+    /// See: https://github.com/slatedb/slatedb/pull/1189#issuecomment-3736149180
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn should_return_durable_value_when_reading_from_l0_with_remote_durability() {
         // Given: a DB with failpoint registry
@@ -5729,18 +5732,18 @@ mod tests {
                 .await
         });
 
-        // Wait for L0 to appear in state (indicating flush has written SST and updated local state)
-        let wait_for_l0 = || {
-            let state = db.inner.state.read();
-            !state.state().core().l0.is_empty()
-        };
-        for _ in 0..100 {
-            if wait_for_l0() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(wait_for_l0(), "L0 should exist after memtable flush");
+        // Wait for L0 to appear in manifest (indicating flush has written SST)
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| !s.l0.is_empty(),
+            Duration::from_secs(30),
+        )
+        .await;
 
         // Verify durable seq hasn't advanced yet (we're paused at failpoint)
         assert_eq!(
