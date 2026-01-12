@@ -151,7 +151,7 @@ impl Admin {
         Ok(Some(compaction.clone()))
     }
 
-    /// Read-only access to the current compactor state view.
+    /// Returns a read-only view of the current compactor state.
     pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, Box<dyn Error>> {
         let manifest_store = Arc::new(ManifestStore::new(
             &self.path,
@@ -162,7 +162,11 @@ impl Admin {
         Ok(reader.read_view().await?)
     }
 
-    /// Submit a compaction request and return the submitted compaction.
+    /// Generate a compaction from a spec and submit it.
+    ///
+    /// ## Returns
+    /// - `Ok(Compaction)`: The submitted compaction.
+    /// - `Err`: If there was an error during submission or reading the submitted compaction.
     pub async fn submit_compaction(
         &self,
         spec: CompactionSpec,

@@ -180,7 +180,15 @@ pub(crate) enum CliCommands {
         #[arg(long, default_value = "size-tiered")]
         scheduler: String,
 
-        /// Submit a full compaction request.
+        /// Submit a full JSON-encoded compaction request.
+        ///
+        /// ## Examples
+        /// ```json
+        /// "Full"
+        /// ```
+        /// ```json
+        /// {"Spec":{"sources":[{"SortedRun":3},{"Sst":"01H8FQ5K6K7QK6EJ0E9HNF1J2B"}],"destination":7}}
+        /// ```
         #[arg(long, value_parser = parse_compaction_request)]
         request: CompactionRequest,
     },
