@@ -4,7 +4,7 @@ use crate::clock::{
 };
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_read::DbRead;
-use crate::db_state::CoreDbState;
+use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
@@ -84,7 +84,7 @@ impl DbStateReader for CheckpointState {
         &self.imm_memtable
     }
 
-    fn core(&self) -> &CoreDbState {
+    fn core(&self) -> &ManifestCore {
         &self.manifest.core
     }
 }
@@ -206,7 +206,7 @@ impl DbReaderInner {
             .await
     }
 
-    fn should_reestablish_checkpoint(&self, latest: &CoreDbState) -> bool {
+    fn should_reestablish_checkpoint(&self, latest: &ManifestCore) -> bool {
         let read_guard = self.state.read();
         let current_state = read_guard.core();
         latest.replay_after_wal_id > current_state.replay_after_wal_id
@@ -391,7 +391,7 @@ impl DbReaderInner {
     async fn replay_wal_into(
         table_store: Arc<TableStore>,
         reader_options: &DbReaderOptions,
-        core: &CoreDbState,
+        core: &ManifestCore,
         into_tables: &mut VecDeque<Arc<ImmutableMemtable>>,
         replay_new_wals: bool,
     ) -> Result<(u64, u64), SlateDBError> {
@@ -922,7 +922,7 @@ mod tests {
     use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_reader::{DbReader, DbReaderOptions};
-    use crate::db_state::CoreDbState;
+    use crate::db_state::ManifestCore;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
@@ -1049,7 +1049,7 @@ mod tests {
         let test_provider = TestProvider::new(path, Arc::clone(&object_store));
         let manifest_store = test_provider.manifest_store();
 
-        let parent_manifest = Manifest::initial(CoreDbState::new());
+        let parent_manifest = Manifest::initial(ManifestCore::new());
         let parent_path = "/tmp/parent_store".to_string();
         let source_checkpoint_id = uuid::Uuid::new_v4();
 

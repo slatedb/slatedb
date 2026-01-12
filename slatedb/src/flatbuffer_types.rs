@@ -15,7 +15,7 @@ use crate::compactor_state::{
     Compactions as CompactorCompactions, SourceId,
 };
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
-use crate::db_state::{CoreDbState, SsTableHandle};
+use crate::db_state::{ManifestCore, SsTableHandle};
 
 #[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods, unreachable_pub)]
@@ -250,7 +250,7 @@ impl FlatBufferManifestCodec {
                 .expect("Invalid encoding of sequence tracker in manifest."),
             None => SequenceTracker::new(),
         };
-        let core = CoreDbState {
+        let core = ManifestCore {
             initialized: manifest.initialized(),
             l0_last_compacted,
             l0,
@@ -775,7 +775,7 @@ mod tests {
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, SourceId,
     };
-    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
     };
@@ -795,7 +795,7 @@ mod tests {
     #[test]
     fn test_should_encode_decode_manifest_checkpoints() {
         // given:
-        let mut core = CoreDbState::new();
+        let mut core = ManifestCore::new();
         core.checkpoints = vec![
             checkpoint::Checkpoint {
                 id: uuid::Uuid::new_v4(),
@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn test_should_encode_decode_external_dbs() {
         // given:
-        let mut manifest = Manifest::initial(CoreDbState::new());
+        let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.external_dbs = vec![
             ExternalDb {
                 path: "/path/to/external/first".to_string(),
@@ -870,7 +870,7 @@ mod tests {
         }
 
         // given:
-        let mut manifest = Manifest::initial(CoreDbState::new());
+        let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.core.l0 = VecDeque::from(vec![
             new_sst_handle(b"a", None),
             new_sst_handle(b"a", Some(BytesRange::from_ref("c"..="d"))),
@@ -989,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_should_encode_decode_wal_object_store_uri() {
-        let mut manifest = Manifest::initial(CoreDbState::new());
+        let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.core.wal_object_store_uri = Some("s3://bucket/path".to_string());
 
         let codec = FlatBufferManifestCodec {};
@@ -1001,7 +1001,7 @@ mod tests {
 
     #[test]
     fn test_should_encode_decode_retention_min_seq() {
-        let mut manifest = Manifest::initial(CoreDbState::new());
+        let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.core.last_l0_seq = 11111;
         manifest.core.recent_snapshot_min_seq = 12345;
 
@@ -1012,7 +1012,7 @@ mod tests {
         assert_eq!(decoded.core.recent_snapshot_min_seq, 12345);
 
         // Test None case
-        let mut manifest_none = Manifest::initial(CoreDbState::new());
+        let mut manifest_none = Manifest::initial(ManifestCore::new());
         manifest_none.core.recent_snapshot_min_seq = 0;
 
         let bytes_none = codec.encode(&manifest_none);

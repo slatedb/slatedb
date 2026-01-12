@@ -85,17 +85,17 @@ impl StoredCompactions {
         self.inner.object()
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<Compactions>, SlateDBError> {
         Ok(self.inner.prepare_dirty()?)
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn refresh(&mut self) -> Result<&Compactions, SlateDBError> {
         Ok(self.inner.refresh().await?)
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn update(
         &mut self,
         dirty: DirtyObject<Compactions>,

@@ -16,8 +16,10 @@ use log::{debug, info};
 
 use crate::clock::SystemClock;
 use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
+use crate::compactor::CompactionsCore;
 use crate::compactor_state::{CompactionStatus, Compactions, CompactorState};
 use crate::config::{CheckpointOptions, CompactorOptions};
+use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
@@ -28,11 +30,36 @@ use crate::DbRand;
 ///
 /// This view intentionally avoids `DirtyObject` because reads should not create or mutate
 /// remote state (e.g., a missing `.compactions` file on a fresh DB).
-pub(crate) struct CompactorStateView {
+pub struct CompactorStateView {
     /// The latest compactions state if present. The u64 is the compactions file version.
     pub(crate) compactions: Option<(u64, Compactions)>,
     /// The latest manifest. The u64 is the manifest file version.
     pub(crate) manifest: (u64, Manifest),
+}
+
+impl CompactorStateView {
+    /// Returns a read-only view of the .compactions file if present.
+    pub fn compactions(&self) -> Option<&CompactionsCore> {
+        self.compactions.as_ref().map(|(_, c)| &c.core)
+    }
+
+    /// Returns a read-only view of the .manifest file.
+    pub fn manifest(&self) -> &ManifestCore {
+        &self.manifest.1.core
+    }
+}
+
+/// Converts a full [`CompactorState`] into a read-only view.
+impl From<&CompactorState> for CompactorStateView {
+    fn from(state: &CompactorState) -> Self {
+        CompactorStateView {
+            compactions: Some((
+                state.compactions().id().into(),
+                state.compactions().value.clone(),
+            )),
+            manifest: (state.manifest().id().into(), state.manifest().value.clone()),
+        }
+    }
 }
 
 /// Reader that enforces compactions-first ordering when fetching state.
@@ -294,10 +321,14 @@ mod tests {
     use crate::admin::AdminBuilder;
     use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
-    use crate::compactor_state::{Compaction, CompactionSpec};
-    use crate::db_state::CoreDbState;
+    use crate::compactor_state::{
+        Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
+    };
+    use crate::db_state::ManifestCore;
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::Manifest;
+    use crate::transactional_object::test_utils::new_dirty_object;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -321,7 +352,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -357,6 +388,46 @@ mod tests {
         assert!(matches!(compactions_result, Err(SlateDBError::Fenced)));
     }
 
+    #[test]
+    fn test_compactor_state_to_view() {
+        let mut manifest = Manifest::initial(ManifestCore::new());
+        manifest.compactor_epoch = 11;
+        manifest.core.l0_last_compacted = Some(Ulid::from_parts(5, 0));
+
+        let mut compactions = Compactions::new(manifest.compactor_epoch);
+        let compaction_id = Ulid::from_parts(10, 0);
+        let spec = CompactionSpec::new(vec![], 7);
+        let compaction =
+            Compaction::new(compaction_id, spec.clone()).with_status(CompactionStatus::Running);
+        compactions.insert(compaction);
+
+        let manifest_id = 3u64;
+        let compactions_id = 8u64;
+        let state = CompactorState::new(
+            new_dirty_object(manifest_id, manifest.clone()),
+            new_dirty_object(compactions_id, compactions.clone()),
+        );
+
+        let view = CompactorStateView::from(&state);
+
+        assert_eq!(view.manifest.0, manifest_id);
+        assert_eq!(view.manifest.1, manifest);
+
+        let (view_compactions_id, view_compactions) =
+            view.compactions.expect("missing compactions");
+        assert_eq!(view_compactions_id, compactions_id);
+        assert_eq!(
+            view_compactions.compactor_epoch,
+            compactions.compactor_epoch
+        );
+
+        let view_compaction = view_compactions
+            .get(&compaction_id)
+            .expect("missing compaction");
+        assert_eq!(view_compaction.status(), CompactionStatus::Running);
+        assert_eq!(view_compaction.spec(), &spec);
+    }
+
     #[tokio::test]
     async fn test_fence_syncs_compactor_epochs() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -372,7 +443,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -424,7 +495,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -506,7 +577,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -560,7 +631,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -616,7 +687,7 @@ mod tests {
 
         StoredManifest::create_new_db(
             manifest_store.clone(),
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await

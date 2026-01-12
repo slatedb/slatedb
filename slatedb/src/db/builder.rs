@@ -138,7 +138,7 @@ use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper};
-use crate::db_state::CoreDbState;
+use crate::db_state::ManifestCore;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GarbageCollector;
@@ -491,7 +491,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let stored_manifest = match latest_manifest {
             Some(manifest) => manifest,
             None => {
-                let state = CoreDbState::new_with_wal_object_store(wal_object_store_uri);
+                let state = ManifestCore::new_with_wal_object_store(wal_object_store_uri);
                 StoredManifest::create_new_db(manifest_store.clone(), state, system_clock.clone())
                     .await?
             }

@@ -14,6 +14,7 @@
 )]
 
 use ::slatedb::admin::{load_object_store_from_env, Admin};
+use ::slatedb::compactor::{CompactionRequest, CompactionSpec};
 use ::slatedb::config::{
     CheckpointOptions, CheckpointScope, DbReaderOptions, DurabilityLevel, FlushOptions, FlushType,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
@@ -40,6 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
+use ulid::Ulid;
 use uuid::Uuid;
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
@@ -186,6 +188,7 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySlateDBReader>()?;
     m.add_class::<PySlateDBSnapshot>()?;
     m.add_class::<PySlateDBTransaction>()?;
+    m.add_class::<PyCompactionRequest>()?;
     m.add_class::<PySlateDBAdmin>()?;
     m.add_class::<PyWriteBatch>()?;
     m.add_class::<PyDbIterator>()?;
@@ -2279,6 +2282,30 @@ impl PySlateDBReader {
     }
 }
 
+#[pyclass(name = "SlateDBCompactionRequest")]
+struct PyCompactionRequest {
+    inner: CompactionRequest,
+}
+
+#[pymethods]
+impl PyCompactionRequest {
+    #[staticmethod]
+    fn full() -> Self {
+        Self {
+            inner: CompactionRequest::Full,
+        }
+    }
+
+    #[staticmethod]
+    fn spec(spec_json: String) -> PyResult<Self> {
+        let spec: CompactionSpec = serde_json::from_str(&spec_json)
+            .map_err(|e| InvalidError::new_err(format!("invalid compaction spec JSON: {e}")))?;
+        Ok(Self {
+            inner: CompactionRequest::Spec(spec),
+        })
+    }
+}
+
 #[pyclass(name = "SlateDBAdmin")]
 struct PySlateDBAdmin {
     inner: Arc<Admin>,
@@ -2368,6 +2395,134 @@ impl PySlateDBAdmin {
             };
             admin
                 .list_manifests(range)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id = None))]
+    fn read_compactions(&self, id: Option<u64>) -> PyResult<Option<String>> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            admin
+                .read_compactions(id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id = None))]
+    fn read_compactions_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            admin
+                .read_compactions(id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (start = None, end = None))]
+    fn list_compactions(&self, start: Option<u64>, end: Option<u64>) -> PyResult<String> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            let range = match (start, end) {
+                (Some(s), Some(e)) => s..e,
+                (Some(s), None) => s..u64::MAX,
+                (None, Some(e)) => u64::MIN..e,
+                (None, None) => u64::MIN..u64::MAX,
+            };
+            admin
+                .list_compactions(range)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (start = None, end = None))]
+    fn list_compactions_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Option<u64>,
+        end: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            let range = match (start, end) {
+                (Some(s), Some(e)) => s..e,
+                (Some(s), None) => s..u64::MAX,
+                (None, Some(e)) => u64::MIN..e,
+                (None, None) => u64::MIN..u64::MAX,
+            };
+            admin
+                .list_compactions(range)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id, compactions_id = None))]
+    fn read_compaction(&self, id: String, compactions_id: Option<u64>) -> PyResult<Option<String>> {
+        let admin = self.inner.clone();
+        let compaction_id = Ulid::from_string(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid compaction ULID: {e}")))?;
+        let rt = get_runtime();
+        rt.block_on(async move {
+            admin
+                .read_compaction(compaction_id, compactions_id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id, compactions_id = None))]
+    fn read_compaction_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        compactions_id: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let compaction_id = Ulid::from_string(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid compaction ULID: {e}")))?;
+        future_into_py(py, async move {
+            admin
+                .read_compaction(compaction_id, compactions_id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (request))]
+    fn submit_compaction(&self, request: PyRef<PyCompactionRequest>) -> PyResult<String> {
+        let admin = self.inner.clone();
+        let request = request.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            admin
+                .submit_compaction(request)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (request))]
+    fn submit_compaction_async<'py>(
+        &self,
+        py: Python<'py>,
+        request: PyRef<'py, PyCompactionRequest>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let request = request.inner.clone();
+        future_into_py(py, async move {
+            admin
+                .submit_compaction(request)
                 .await
                 .map_err(|e| InvalidError::new_err(e.to_string()))
         })

@@ -28,6 +28,8 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 bytes = { workspace = true }
 log = { workspace = true }
 chrono = { workspace = true }
+serde_json = { workspace = true }
+ulid = { workspace = true }
 
 [lints]
 workspace = true
