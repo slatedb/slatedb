@@ -1069,7 +1069,6 @@ mod tests {
         );
     }
 
-
     #[tokio::test]
     async fn test_admin_fence_writers() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1149,5 +1148,5 @@ mod tests {
                 assert_eq!(row_entry_iter.next().unwrap(), entry)
             }
         }
-    } 
+    }
 }
