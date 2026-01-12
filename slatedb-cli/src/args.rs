@@ -138,7 +138,7 @@ pub(crate) enum CliCommands {
         /// The max size in bytes of the l0 ssts that will be generated from replaying the WALs of
         /// this checkpoint.
         #[arg(short, long)]
-        sst_size: usize,
+        sst_size: Option<usize>,
     },
 
     /// Runs a garbage collection for a specific resource type once

@@ -2310,24 +2310,26 @@ class SlateDBAdmin:
         """
         ...
 
-    def restore_checkpoint(self, id: str) -> None:
+    def restore_checkpoint(self, id: str, sst_size: int = 64 * 1024 * 1024) -> None:
         """
         Restore the database to a known checkpoint by id.
 
         Args:
             id: Checkpoint UUID string.
+            sst_size: Optional size setting for new SSTs in bytes. Defaults to 64 MB.
 
         Examples:
             >>> admin.restore_checkpoint("00000000-0000-0000-0000-000000000000")
         """
         ...
 
-    async def restore_checkpoint_async(self, id: str) -> None:
+    async def restore_checkpoint_async(self, id: str, sst_size: int = 64 * 1024 * 1024) -> None:
         """
         Async variant of ``restore_checkpoint``.
 
         Args:
             id: Checkpoint UUID string.
+            sst_size: Optional size setting for new SSTs in bytes. Defaults to 64 MB.
 
         Examples:
             >>> await admin.restore_checkpoint_async("00000000-0000-0000-0000-000000000000")

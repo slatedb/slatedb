@@ -58,7 +58,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         CliCommands::DeleteCheckpoint { id } => exec_delete_checkpoint(&admin, id).await?,
         CliCommands::ListCheckpoints { name } => exec_list_checkpoints(&admin, name).await?,
-        CliCommands::RestoreCheckpoint { id } => exec_restore_checkpoint(&admin, id, l0_sst_size).await?,
+        CliCommands::RestoreCheckpoint { id, sst_size } => {
+            exec_restore_checkpoint(&admin, id, sst_size).await?
+        }
         CliCommands::RunGarbageCollection { resource, min_age } => {
             exec_gc_once(&admin, resource, min_age).await?
         }
@@ -168,8 +170,12 @@ async fn exec_delete_checkpoint(admin: &Admin, id: Uuid) -> Result<(), Box<dyn E
     Ok(())
 }
 
-async fn exec_restore_checkpoint(admin: &Admin, id: Uuid, l0_sst_size) -> Result<(), Box<dyn Error>> {
-    println!("{:?}", admin.restore_checkpoint(id, l0_sst_size).await?);
+async fn exec_restore_checkpoint(
+    admin: &Admin,
+    id: Uuid,
+    sst_size: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    println!("{:?}", admin.restore_checkpoint(id, sst_size).await?);
     Ok(())
 }
 

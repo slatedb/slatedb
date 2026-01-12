@@ -383,7 +383,7 @@ impl Admin {
     /// Restores the checkpoint by duplicating the checkpointed manifest as the latest and replays
     /// the necessary WALs to new l0 ssts.
     ///
-    /// sst_size (bytes) defaults to 64Mb if None.
+    /// sst_size (bytes) defaults to 64MB if None.
     ///
     /// Prevents concurrent operations by:
     /// - Fencing writers through uploading a fencing WAL at the start of the operation

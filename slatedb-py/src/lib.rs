@@ -38,7 +38,6 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use std::backtrace::Backtrace;
 use std::sync::Arc;
 use std::time::Duration;
-use std::u64;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -2554,7 +2553,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (id))]
+    #[pyo3(signature = (id, sst_size = None))]
     fn restore_checkpoint(&self, id: String, sst_size: Option<usize>) -> PyResult<()> {
         let admin = self.inner.clone();
         let rt = get_runtime();
@@ -2568,7 +2567,7 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (id))]
+    #[pyo3(signature = (id, sst_size))]
     fn restore_checkpoint_async<'py>(
         &self,
         py: Python<'py>,
