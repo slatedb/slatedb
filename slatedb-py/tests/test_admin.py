@@ -145,7 +145,9 @@ def test_admin_compactions_read_list_submit(db_path, env_file):
     submitted = admin.submit_compaction(request)
     assert isinstance(submitted, str)
     submitted_payload = json.loads(submitted)
-    compaction_id = submitted_payload["id"]
+    assert isinstance(submitted_payload, list)
+    assert len(submitted_payload) == 1
+    compaction_id = submitted_payload[0]["id"]
 
     read_back = admin.read_compaction(compaction_id)
     assert read_back is not None
@@ -181,7 +183,9 @@ async def test_admin_compactions_read_list_submit_async(db_path, env_file):
     submitted = await admin.submit_compaction_async(request)
     assert isinstance(submitted, str)
     submitted_payload = json.loads(submitted)
-    compaction_id = submitted_payload["id"]
+    assert isinstance(submitted_payload, list)
+    assert len(submitted_payload) == 1
+    compaction_id = submitted_payload[0]["id"]
 
     read_back = await admin.read_compaction_async(compaction_id)
     assert read_back is not None

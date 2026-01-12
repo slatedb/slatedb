@@ -14,11 +14,14 @@
 )]
 
 use ::slatedb::admin::{load_object_store_from_env, Admin};
-use ::slatedb::compactor::{CompactionRequest, CompactionSpec, SourceId};
+use ::slatedb::compactor::{
+    CompactionRequest, CompactionSchedulerSupplier, CompactionSpec,
+    SizeTieredCompactionSchedulerSupplier,
+};
 use ::slatedb::config::{
-    CheckpointOptions, CheckpointScope, DbReaderOptions, DurabilityLevel, FlushOptions, FlushType,
-    GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
-    ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
+    CheckpointOptions, CheckpointScope, CompactorOptions, DbReaderOptions, DurabilityLevel,
+    FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::Db;
@@ -73,75 +76,36 @@ fn map_error(err: Error) -> PyErr {
     }
 }
 
-async fn compaction_spec_from_request(
+async fn submit_compactions_for_request(
     admin: &Admin,
+    scheduler: &str,
     request: CompactionRequest,
-) -> PyResult<CompactionSpec> {
-    match request {
-        CompactionRequest::Spec(spec) => Ok(spec),
-        CompactionRequest::Full => {
-            let manifest_json = admin
-                .read_manifest(None)
-                .await
-                .map_err(|e| InvalidError::new_err(e.to_string()))?
-                .ok_or_else(|| InvalidError::new_err("no manifest file found"))?;
-            compaction_spec_from_manifest_json(&manifest_json)
+) -> PyResult<Vec<::slatedb::compactor::Compaction>> {
+    let state = admin
+        .read_compactor_state_view()
+        .await
+        .map_err(|e| InvalidError::new_err(e.to_string()))?;
+    let supplier = match scheduler {
+        "size-tiered" => SizeTieredCompactionSchedulerSupplier::default(),
+        _ => {
+            return Err(InvalidError::new_err(format!(
+                "unsupported scheduler: {scheduler}"
+            )))
         }
+    };
+    let scheduler = supplier.compaction_scheduler(&CompactorOptions::default());
+    let specs = scheduler
+        .generate(&state, &request)
+        .map_err(|e| InvalidError::new_err(e.to_string()))?;
+    let mut compactions = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let compaction = admin
+            .submit_compaction(spec)
+            .await
+            .map_err(|e| InvalidError::new_err(e.to_string()))?;
+        compactions.push(compaction);
     }
-}
-
-fn compaction_spec_from_manifest_json(manifest_json: &str) -> PyResult<CompactionSpec> {
-    let value: serde_json::Value = serde_json::from_str(manifest_json)
-        .map_err(|e| InvalidError::new_err(format!("invalid manifest JSON: {e}")))?;
-    let manifest = value
-        .as_array()
-        .and_then(|items| items.get(1))
-        .ok_or_else(|| InvalidError::new_err("invalid manifest payload: expected [id, manifest]"))?;
-    let core = manifest
-        .get("core")
-        .ok_or_else(|| InvalidError::new_err("invalid manifest payload: missing core"))?;
-    let l0 = core
-        .get("l0")
-        .and_then(|entries| entries.as_array())
-        .ok_or_else(|| InvalidError::new_err("invalid manifest payload: missing l0"))?;
-    let mut sources = Vec::new();
-    for sst in l0 {
-        let compacted_id = sst
-            .get("id")
-            .and_then(|id| id.get("Compacted"))
-            .and_then(|id| id.as_str())
-            .ok_or_else(|| {
-                InvalidError::new_err("invalid manifest payload: expected compacted SST id")
-            })?;
-        let ulid = Ulid::from_string(compacted_id)
-            .map_err(|e| InvalidError::new_err(format!("invalid SST ULID: {e}")))?;
-        sources.push(SourceId::Sst(ulid));
-    }
-    let compacted = core
-        .get("compacted")
-        .and_then(|entries| entries.as_array())
-        .ok_or_else(|| InvalidError::new_err("invalid manifest payload: missing compacted"))?;
-    let mut destination: Option<u32> = None;
-    for run in compacted {
-        let id = run
-            .get("id")
-            .and_then(|id| id.as_u64())
-            .ok_or_else(|| {
-                InvalidError::new_err("invalid manifest payload: expected sorted run id")
-            })?;
-        let id = u32::try_from(id).map_err(|_| {
-            InvalidError::new_err("invalid manifest payload: sorted run id out of range")
-        })?;
-        destination = Some(destination.map_or(id, |current| current.min(id)));
-        sources.push(SourceId::SortedRun(id));
-    }
-    if sources.is_empty() {
-        return Err(InvalidError::new_err(
-            "full compaction request has no sources",
-        ));
-    }
-
-    Ok(CompactionSpec::new(sources, destination.unwrap_or(0)))
+    Ok(compactions)
 }
 
 async fn load_db_from_url(
@@ -2586,36 +2550,35 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (request))]
-    fn submit_compaction(&self, request: PyRef<PyCompactionRequest>) -> PyResult<String> {
+    #[pyo3(signature = (request, scheduler = None))]
+    fn submit_compaction(
+        &self,
+        request: PyRef<PyCompactionRequest>,
+        scheduler: Option<String>,
+    ) -> PyResult<String> {
         let admin = self.inner.clone();
         let request = request.inner.clone();
+        let scheduler = scheduler.unwrap_or_else(|| "size-tiered".to_string());
         let rt = get_runtime();
         rt.block_on(async move {
-            let compaction_spec = compaction_spec_from_request(&admin, request).await?;
-            let compaction = admin
-                .submit_compaction(compaction_spec)
-                .await
-                .map_err(|e| InvalidError::new_err(e.to_string()))?;
-            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
+            let compactions = submit_compactions_for_request(&admin, &scheduler, request).await?;
+            serde_json::to_string(&compactions).map_err(|e| InvalidError::new_err(e.to_string()))
         })
     }
 
-    #[pyo3(signature = (request))]
+    #[pyo3(signature = (request, scheduler = None))]
     fn submit_compaction_async<'py>(
         &self,
         py: Python<'py>,
         request: PyRef<'py, PyCompactionRequest>,
+        scheduler: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
         let request = request.inner.clone();
+        let scheduler = scheduler.unwrap_or_else(|| "size-tiered".to_string());
         future_into_py(py, async move {
-            let compaction_spec = compaction_spec_from_request(&admin, request).await?;
-            let compaction = admin
-                .submit_compaction(compaction_spec)
-                .await
-                .map_err(|e| InvalidError::new_err(e.to_string()))?;
-            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
+            let compactions = submit_compactions_for_request(&admin, &scheduler, request).await?;
+            serde_json::to_string(&compactions).map_err(|e| InvalidError::new_err(e.to_string()))
         })
     }
 

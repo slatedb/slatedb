@@ -176,6 +176,10 @@ pub(crate) enum CliCommands {
             .required(true)
     ))]
     SubmitCompaction {
+        /// Compaction scheduler name (only "size-tiered" is supported).
+        #[arg(long, default_value = "size-tiered")]
+        scheduler: String,
+
         /// Submit a full compaction request.
         #[arg(long, value_parser = parse_compaction_request)]
         request: CompactionRequest,

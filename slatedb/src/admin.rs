@@ -1,7 +1,8 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
-use crate::compactor::{Compaction, CompactionSpec, Compactor};
+use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
+use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::dispatcher::MessageHandlerExecutor;
@@ -148,6 +149,17 @@ impl Admin {
         };
 
         Ok(Some(compaction.clone()))
+    }
+
+    /// Read-only access to the current compactor state view.
+    pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, Box<dyn Error>> {
+        let manifest_store = Arc::new(ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        ));
+        let compactions_store = Arc::new(self.compactions_store());
+        let reader = CompactorStateReader::new(&manifest_store, &compactions_store);
+        Ok(reader.read_view().await?)
     }
 
     /// Submit a compaction request and return the submitted compaction.

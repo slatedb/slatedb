@@ -2,9 +2,11 @@ use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use chrono::{TimeZone, Utc};
 use object_store::path::Path;
 use slatedb::admin::{self, Admin, AdminBuilder};
-use slatedb::compactor::{CompactionRequest, CompactionSpec, SourceId};
+use slatedb::compactor::{
+    CompactionRequest, CompactionSchedulerSupplier, SizeTieredCompactionSchedulerSupplier,
+};
 use slatedb::config::{
-    CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
 use slatedb::seq_tracker::FindOption;
 use std::error::Error;
@@ -73,8 +75,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             compacted,
             compactions,
         } => schedule_gc(&admin, manifest, wal, compacted, compactions).await?,
-        CliCommands::SubmitCompaction { request } => {
-            exec_submit_compaction(&admin, request).await?
+        CliCommands::SubmitCompaction { scheduler, request } => {
+            exec_submit_compaction(&admin, scheduler, request).await?
         }
 
         CliCommands::SeqToTs { seq, round } => {
@@ -146,94 +148,28 @@ async fn exec_list_compactions(
 
 async fn exec_submit_compaction(
     admin: &Admin,
+    scheduler: String,
     request: CompactionRequest,
 ) -> Result<(), Box<dyn Error>> {
-    let compaction_spec = compaction_spec_from_request(admin, request).await?;
-    let compaction = admin.submit_compaction(compaction_spec).await?;
-    let compaction_json = serde_json::to_string(&compaction)?;
+    let state = admin.read_compactor_state_view().await?;
+    let supplier = match scheduler.as_str() {
+        "size-tiered" => SizeTieredCompactionSchedulerSupplier::default(),
+        _ => {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported scheduler: {scheduler}"),
+            )))
+        }
+    };
+    let scheduler = supplier.compaction_scheduler(&CompactorOptions::default());
+    let specs = scheduler.generate(&state, &request)?;
+    let mut compactions = Vec::with_capacity(specs.len());
+    for spec in specs {
+        compactions.push(admin.submit_compaction(spec).await?);
+    }
+    let compaction_json = serde_json::to_string(&compactions)?;
     println!("{}", compaction_json);
     Ok(())
-}
-
-async fn compaction_spec_from_request(
-    admin: &Admin,
-    request: CompactionRequest,
-) -> Result<CompactionSpec, Box<dyn Error>> {
-    match request {
-        CompactionRequest::Spec(spec) => Ok(spec),
-        CompactionRequest::Full => {
-            let manifest_json = admin
-                .read_manifest(None)
-                .await?
-                .ok_or_else(|| invalid_manifest_error("no manifest file found"))?;
-            compaction_spec_from_manifest_json(&manifest_json)
-        }
-    }
-}
-
-fn compaction_spec_from_manifest_json(
-    manifest_json: &str,
-) -> Result<CompactionSpec, Box<dyn Error>> {
-    let value: serde_json::Value =
-        serde_json::from_str(manifest_json).map_err(|e| {
-            invalid_manifest_error(format!("invalid manifest JSON: {e}"))
-        })?;
-    let manifest = value
-        .as_array()
-        .and_then(|items| items.get(1))
-        .ok_or_else(|| invalid_manifest_error("invalid manifest payload: expected [id, manifest]"))?;
-    let core = manifest
-        .get("core")
-        .ok_or_else(|| invalid_manifest_error("invalid manifest payload: missing core"))?;
-    let l0 = core
-        .get("l0")
-        .and_then(|entries| entries.as_array())
-        .ok_or_else(|| invalid_manifest_error("invalid manifest payload: missing l0"))?;
-    let mut sources = Vec::new();
-    for sst in l0 {
-        let compacted_id = sst
-            .get("id")
-            .and_then(|id| id.get("Compacted"))
-            .and_then(|id| id.as_str())
-            .ok_or_else(|| {
-                invalid_manifest_error("invalid manifest payload: expected compacted SST id")
-            })?;
-        let ulid = Ulid::from_string(compacted_id)
-            .map_err(|e| invalid_manifest_error(format!("invalid SST ULID: {e}")))?;
-        sources.push(SourceId::Sst(ulid));
-    }
-    let compacted = core
-        .get("compacted")
-        .and_then(|entries| entries.as_array())
-        .ok_or_else(|| invalid_manifest_error("invalid manifest payload: missing compacted"))?;
-    let mut destination: Option<u32> = None;
-    for run in compacted {
-        let id = run
-            .get("id")
-            .and_then(|id| id.as_u64())
-            .ok_or_else(|| {
-                invalid_manifest_error("invalid manifest payload: expected sorted run id")
-            })?;
-        let id = u32::try_from(id).map_err(|_| {
-            invalid_manifest_error("invalid manifest payload: sorted run id out of range")
-        })?;
-        destination = Some(destination.map_or(id, |current| current.min(id)));
-        sources.push(SourceId::SortedRun(id));
-    }
-    if sources.is_empty() {
-        return Err(invalid_manifest_error(
-            "full compaction request has no sources",
-        ));
-    }
-
-    Ok(CompactionSpec::new(sources, destination.unwrap_or(0)))
-}
-
-fn invalid_manifest_error(message: impl Into<String>) -> Box<dyn Error> {
-    Box::new(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        message.into(),
-    ))
 }
 
 async fn exec_read_compaction(

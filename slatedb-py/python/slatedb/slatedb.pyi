@@ -2268,19 +2268,24 @@ class SlateDBAdmin:
         """
         ...
 
-    def submit_compaction(self, request: SlateDBCompactionRequest) -> str:
+    def submit_compaction(
+        self, request: SlateDBCompactionRequest, scheduler: str = "size-tiered"
+    ) -> str:
         """
         Submit a compaction request and return the submitted compaction.
 
         Args:
             request: A :class:`SlateDBCompactionRequest` instance.
+            scheduler: Compaction scheduler name (only ``"size-tiered"`` is supported).
 
         Returns:
-            JSON string of the submitted compaction.
+            JSON string of the submitted compactions.
         """
         ...
 
-    async def submit_compaction_async(self, request: SlateDBCompactionRequest) -> str:
+    async def submit_compaction_async(
+        self, request: SlateDBCompactionRequest, scheduler: str = "size-tiered"
+    ) -> str:
         """
         Async variant of ``submit_compaction``.
         """
