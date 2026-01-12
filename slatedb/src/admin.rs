@@ -19,7 +19,6 @@ use crate::rand::DbRand;
 use crate::seq_tracker::FindOption;
 use crate::utils::{IdGenerator, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
 use object_store::path::Path;
