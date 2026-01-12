@@ -14,14 +14,11 @@
 )]
 
 use ::slatedb::admin::{load_object_store_from_env, Admin};
-use ::slatedb::compactor::{
-    CompactionRequest, CompactionSchedulerSupplier, CompactionSpec,
-    SizeTieredCompactionSchedulerSupplier,
-};
+use ::slatedb::compactor::{CompactionRequest, CompactionSpec, SourceId};
 use ::slatedb::config::{
-    CheckpointOptions, CheckpointScope, CompactorOptions, DbReaderOptions, DurabilityLevel,
-    FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-    MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
+    CheckpointOptions, CheckpointScope, DbReaderOptions, DurabilityLevel, FlushOptions, FlushType,
+    GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
+    ReadOptions, ScanOptions, Settings, Ttl, WriteOptions,
 };
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::Db;
@@ -74,38 +71,6 @@ fn map_error(err: Error) -> PyErr {
         ::slatedb::ErrorKind::Internal => InternalError::new_err(msg),
         _ => InternalError::new_err(msg),
     }
-}
-
-async fn submit_compactions_for_request(
-    admin: &Admin,
-    scheduler: &str,
-    request: CompactionRequest,
-) -> PyResult<Vec<::slatedb::compactor::Compaction>> {
-    let state = admin
-        .read_compactor_state_view()
-        .await
-        .map_err(|e| InvalidError::new_err(e.to_string()))?;
-    let supplier = match scheduler {
-        "size-tiered" => SizeTieredCompactionSchedulerSupplier::default(),
-        _ => {
-            return Err(InvalidError::new_err(format!(
-                "unsupported scheduler: {scheduler}"
-            )))
-        }
-    };
-    let scheduler = supplier.compaction_scheduler(&CompactorOptions::default());
-    let specs = scheduler
-        .generate(&state, &request)
-        .map_err(|e| InvalidError::new_err(e.to_string()))?;
-    let mut compactions = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let compaction = admin
-            .submit_compaction(spec)
-            .await
-            .map_err(|e| InvalidError::new_err(e.to_string()))?;
-        compactions.push(compaction);
-    }
-    Ok(compactions)
 }
 
 async fn load_db_from_url(
@@ -223,6 +188,7 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySlateDBReader>()?;
     m.add_class::<PySlateDBSnapshot>()?;
     m.add_class::<PySlateDBTransaction>()?;
+    m.add_class::<PyCompactionSpec>()?;
     m.add_class::<PyCompactionRequest>()?;
     m.add_class::<PySlateDBAdmin>()?;
     m.add_class::<PyWriteBatch>()?;
@@ -2318,8 +2284,77 @@ impl PySlateDBReader {
 }
 
 #[pyclass(name = "SlateDBCompactionRequest")]
+#[allow(dead_code)]
 struct PyCompactionRequest {
     inner: CompactionRequest,
+}
+
+#[derive(Debug)]
+enum CompactionSourceInput {
+    SortedRun(u32),
+    Sst(Ulid),
+}
+
+impl<'py> FromPyObject<'py> for CompactionSourceInput {
+    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
+        let dict = ob.downcast::<PyDict>().map_err(|_| {
+            InvalidError::new_err("compaction source must be a dict with a single key")
+        })?;
+        if dict.len() != 1 {
+            return Err(InvalidError::new_err(
+                "compaction source dict must have exactly one key",
+            ));
+        }
+        let mut iter = dict.iter();
+        let (key, value) = iter.next().ok_or_else(|| {
+            InvalidError::new_err("compaction source dict must have exactly one key")
+        })?;
+        let key: String = key
+            .extract()
+            .map_err(|_| InvalidError::new_err("compaction source key must be a string"))?;
+        match key.as_str() {
+            "SortedRun" => {
+                let id: u32 = value.extract().map_err(|_| {
+                    InvalidError::new_err("compaction source SortedRun value must be an int")
+                })?;
+                Ok(Self::SortedRun(id))
+            }
+            "Sst" => {
+                let ulid_str: String = value.extract().map_err(|_| {
+                    InvalidError::new_err("compaction source Sst value must be a ULID string")
+                })?;
+                let ulid = Ulid::from_string(&ulid_str)
+                    .map_err(|e| InvalidError::new_err(format!("invalid SST ULID: {e}")))?;
+                Ok(Self::Sst(ulid))
+            }
+            _ => Err(InvalidError::new_err(
+                "compaction source key must be 'SortedRun' or 'Sst'",
+            )),
+        }
+    }
+}
+
+#[pyclass(name = "CompactionSpec")]
+struct PyCompactionSpec {
+    inner: CompactionSpec,
+}
+
+#[pymethods]
+impl PyCompactionSpec {
+    #[new]
+    #[pyo3(signature = (sources, destination))]
+    fn new(sources: Vec<CompactionSourceInput>, destination: u32) -> Self {
+        let sources = sources
+            .into_iter()
+            .map(|source| match source {
+                CompactionSourceInput::SortedRun(id) => SourceId::SortedRun(id),
+                CompactionSourceInput::Sst(ulid) => SourceId::Sst(ulid),
+            })
+            .collect();
+        Self {
+            inner: CompactionSpec::new(sources, destination),
+        }
+    }
 }
 
 #[pymethods]
@@ -2332,12 +2367,10 @@ impl PyCompactionRequest {
     }
 
     #[staticmethod]
-    fn spec(spec_json: String) -> PyResult<Self> {
-        let spec: CompactionSpec = serde_json::from_str(&spec_json)
-            .map_err(|e| InvalidError::new_err(format!("invalid compaction spec JSON: {e}")))?;
-        Ok(Self {
-            inner: CompactionRequest::Spec(spec),
-        })
+    fn spec(spec: PyRef<'_, PyCompactionSpec>) -> Self {
+        Self {
+            inner: CompactionRequest::Spec(spec.inner.clone()),
+        }
     }
 }
 
@@ -2550,35 +2583,34 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (request, scheduler = None))]
-    fn submit_compaction(
-        &self,
-        request: PyRef<PyCompactionRequest>,
-        scheduler: Option<String>,
-    ) -> PyResult<String> {
+    #[pyo3(signature = (spec))]
+    fn submit_compaction(&self, spec: PyRef<'_, PyCompactionSpec>) -> PyResult<String> {
         let admin = self.inner.clone();
-        let request = request.inner.clone();
-        let scheduler = scheduler.unwrap_or_else(|| "size-tiered".to_string());
+        let spec = spec.inner.clone();
         let rt = get_runtime();
         rt.block_on(async move {
-            let compactions = submit_compactions_for_request(&admin, &scheduler, request).await?;
-            serde_json::to_string(&compactions).map_err(|e| InvalidError::new_err(e.to_string()))
+            let compaction = admin
+                .submit_compaction(spec)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
         })
     }
 
-    #[pyo3(signature = (request, scheduler = None))]
+    #[pyo3(signature = (spec))]
     fn submit_compaction_async<'py>(
         &self,
         py: Python<'py>,
-        request: PyRef<'py, PyCompactionRequest>,
-        scheduler: Option<String>,
+        spec: PyRef<'_, PyCompactionSpec>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
-        let request = request.inner.clone();
-        let scheduler = scheduler.unwrap_or_else(|| "size-tiered".to_string());
+        let spec = spec.inner.clone();
         future_into_py(py, async move {
-            let compactions = submit_compactions_for_request(&admin, &scheduler, request).await?;
-            serde_json::to_string(&compactions).map_err(|e| InvalidError::new_err(e.to_string()))
+            let compaction = admin
+                .submit_compaction(spec)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
         })
     }
 
