@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn test_supplier_overrides_scheduler_options() {
         // given:
-        let supplier = SizeTieredCompactionSchedulerSupplier::default();
+        let supplier = SizeTieredCompactionSchedulerSupplier;
         let scheduler_options = SizeTieredCompactionSchedulerOptions {
             min_compaction_sources: 2,
             max_compaction_sources: 2,

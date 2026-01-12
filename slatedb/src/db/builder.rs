@@ -575,7 +575,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
-                .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier::default()));
+                .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&compactor_options));
             let stats = Arc::new(CompactionStats::new(inner.stat_registry.clone()));
@@ -922,7 +922,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
         let scheduler_supplier = self
             .scheduler_supplier
-            .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier::default()));
+            .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
 
         Compactor::new(
             manifest_store,

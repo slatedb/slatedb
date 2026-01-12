@@ -153,7 +153,7 @@ async fn exec_submit_compaction(
 ) -> Result<(), Box<dyn Error>> {
     let state = admin.read_compactor_state_view().await?;
     let supplier = match scheduler.as_str() {
-        "size-tiered" => SizeTieredCompactionSchedulerSupplier::default(),
+        "size-tiered" => SizeTieredCompactionSchedulerSupplier,
         _ => {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
