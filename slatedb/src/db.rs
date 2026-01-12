@@ -5653,4 +5653,142 @@ mod tests {
 
         db.close().await.expect("failed to close DB");
     }
+
+    /// Tests that when reading from L0 with DurabilityLevel::Remote, we observe data at
+    /// an earlier durability watermark until the watermark is updated, at which point we
+    /// observe data at the new watermark.
+    ///
+    /// This test validates the fix in flush.rs that ensures the retention iterator
+    /// considers the durable watermark when flushing memtable to L0. Without this fix,
+    /// the L0 SST would only contain the latest value (seq2), and remote readers would
+    /// incorrectly fail to find the durable value (seq1).
+    ///
+    /// See: https://github.com/slatedb/slatedb/pull/1189#issuecomment-3736149180
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_return_durable_value_when_reading_from_l0_with_remote_durability() {
+        // Given: a DB with failpoint registry
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_durable_read_from_l0";
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None; // Disable auto-flush so we control when flush happens
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Write value1 without awaiting durable, then manually flush WAL only
+        db.put_with_options(
+            b"key",
+            b"value1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap(); // WAL flush makes seq1 durable
+
+        let seq_after_first_write = db.inner.oracle.last_remote_persisted_seq();
+
+        // Write value2 without awaiting durable - seq2 is in WAL buffer but not flushed
+        db.put_with_options(
+            b"key",
+            b"value2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Verify seq hasn't advanced yet (value2 not durable)
+        assert_eq!(
+            db.inner.oracle.last_remote_persisted_seq(),
+            seq_after_first_write,
+            "expected durable seq to not advance before WAL flush"
+        );
+
+        // Pause before updating durable seq after L0 flush
+        fail_parallel::cfg(fp_registry.clone(), "before-l0-durable-seq-update", "pause").unwrap();
+
+        // Trigger memtable flush to L0 in background (it will pause at failpoint)
+        let db_clone = db.clone();
+        let flush_handle = tokio::spawn(async move {
+            db_clone
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+        });
+
+        // Wait for L0 to appear in manifest (indicating flush has written SST)
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        wait_for_manifest_condition(
+            &mut stored_manifest,
+            |s| !s.l0.is_empty(),
+            Duration::from_secs(30),
+        )
+        .await;
+
+        // Verify durable seq hasn't advanced yet (we're paused at failpoint)
+        assert_eq!(
+            db.inner.oracle.last_remote_persisted_seq(),
+            seq_after_first_write,
+            "expected durable seq to not advance while paused at failpoint"
+        );
+
+        // When: Read with DurabilityLevel::Remote while paused at failpoint
+        let value = db
+            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Remote))
+            .await
+            .unwrap();
+
+        // Then: Should see value1 (the durable value at seq1), not value2 (seq2)
+        assert_eq!(
+            value,
+            Some(Bytes::from("value1")),
+            "expected to read durable value1 when durability filter is Remote"
+        );
+
+        // Also verify Memory durability sees the latest value
+        let value_memory = db
+            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Memory))
+            .await
+            .unwrap();
+        assert_eq!(
+            value_memory,
+            Some(Bytes::from("value2")),
+            "expected to read latest value2 when durability filter is Memory"
+        );
+
+        // Resume the failpoint
+        fail_parallel::cfg(fp_registry.clone(), "before-l0-durable-seq-update", "off").unwrap();
+        flush_handle.await.unwrap().unwrap();
+
+        // After durable seq advances, Remote read should now return value2
+        let value_after = db
+            .get_with_options(b"key", &ReadOptions::new().with_durability_filter(Remote))
+            .await
+            .unwrap();
+        assert_eq!(
+            value_after,
+            Some(Bytes::from("value2")),
+            "expected to read value2 after durable seq advances"
+        );
+
+        db.close().await.unwrap();
+    }
 }
