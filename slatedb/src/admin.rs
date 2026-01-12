@@ -476,7 +476,7 @@ impl Admin {
             .replay_wal_to_l0(
                 manifest_to_restore.core.replay_after_wal_id + 1
                     ..manifest_to_restore.core.next_wal_sst_id,
-                current_manifest.db_state(),
+                &manifest_to_restore.core,
                 wal_store.clone(),
                 sst_size,
             )
@@ -573,7 +573,7 @@ impl Admin {
     async fn replay_wal_to_l0(
         &self,
         wal_id_range: Range<u64>,
-        current_state: &ManifestCore,
+        core: &ManifestCore,
         table_store: Arc<TableStore>,
         l0_sst_size: Option<usize>,
     ) -> Result<VecDeque<SsTableHandle>, crate::Error> {
@@ -586,7 +586,7 @@ impl Admin {
         };
         let mut replay_iter = WalReplayIterator::range(
             wal_id_range,
-            current_state,
+            core,
             wal_replay_options,
             Arc::clone(&table_store),
         )
