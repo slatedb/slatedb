@@ -9,7 +9,7 @@ homepage.workspace = true
 
 [dependencies]
 chrono = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 [features]
 test-util = ["tokio/test-util"]
