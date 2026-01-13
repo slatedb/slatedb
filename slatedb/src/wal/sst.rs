@@ -188,7 +188,7 @@ impl EncodedSsTableBuilder<'_> {
             index: footer.index,
             filter: None,
             unconsumed_blocks: self.blocks,
-            footer: footer.data,
+            footer: footer.encoded_bytes,
         })
     }
 

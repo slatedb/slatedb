@@ -522,7 +522,7 @@ pub(crate) struct EncodedSsTableFooter {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
     pub(crate) filter: Option<Arc<BloomFilter>>,
-    pub(crate) data: Bytes,
+    pub(crate) encoded_bytes: Bytes,
 }
 
 /// Builder for encoding the SSTable footer (filter, index, info, and metadata).
@@ -625,7 +625,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             info,
             index,
             filter: maybe_filter,
-            data: Bytes::from(buf),
+            encoded_bytes: Bytes::from(buf),
         })
     }
 }
@@ -917,7 +917,7 @@ impl EncodedSsTableBuilder<'_> {
             index: footer.index,
             filter: footer.filter,
             unconsumed_blocks: self.blocks,
-            footer: footer.data,
+            footer: footer.encoded_bytes,
         })
     }
 
