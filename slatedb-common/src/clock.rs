@@ -1,7 +1,11 @@
-//! Utilities for system time shared across SlateDB.
+//! This module contains utility methods and structs for handling time.
 //!
-//! This module provides the `SystemClock` abstraction and implementations for
-//! production (`DefaultSystemClock`) and tests (`MockSystemClock`).
+//! The [SystemClock] struct is used to measure wall-clock time. We've chosen to
+//! implement our own [SystemClock] so we can mock it for testing purposes. Mocks
+//! are available when the `test-util` feature is enabled.
+//!
+//! [DefaultSystemClock] is provided as well. It implements a system clock that
+//! uses Tokio's clock to measure time duration.
 
 #![allow(clippy::disallowed_methods)]
 

@@ -9,15 +9,11 @@
 //!    writes in the database. This could represent a logical sequence number
 //!    (LSN) from a database, a Kafka offset, a `created_at` timestamp
 //!    associated with the write, and so on.
-//!
-//! We've chosen to implement our own [SystemClock] so we can mock it for testing
-//! purposes. Mocks are available when the `test-util` feature is enabled.
-//!
-//! [DefaultSystemClock] and [DefaultLogicalClock] are both provided as well.
-//! [DefaultSystemClock] implements a system clock that uses Tokio's clock to measure
-//! time duration. [DefaultLogicalClock] implements a logical clock that wraps
-//! the [DefaultSystemClock] and returns the number of milliseconds since the
-//! Unix epoch.
+//! 
+//! The [SystemClock] struct is provided in `slatedb-common`. The `slatedb` package
+//! builds on top of that and provides the [LogicalClock] abstraction.
+//! [DefaultLogicalClock] implements a logical clock that wraps the
+//! [DefaultSystemClock] and returns the number of milliseconds since the Unix epoch.
 
 #![allow(clippy::disallowed_methods)]
 
