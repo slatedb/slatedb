@@ -12,7 +12,7 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use parking_lot::RwLock;
-use slatedb::clock::SystemClock;
+use slatedb_common::clock::SystemClock;
 
 /// ObjectStore wrapper that overrides metadata times using a provided SystemClock.
 /// - Records timestamps for mutating operations (put, copy, rename, delete).
@@ -225,7 +225,7 @@ mod tests {
     use futures::TryStreamExt;
     use object_store::memory::InMemory;
     use object_store::PutPayload;
-    use slatedb::clock::MockSystemClock;
+    use slatedb_common::clock::MockSystemClock;
 
     fn p(s: &str) -> Path {
         Path::from(s)

@@ -25,7 +25,7 @@
 //! components to make this possible:
 //!
 //! - [SystemClock]: A mock system clock is provided by
-//!   [MockSystemClock](slatedb::clock::MockSystemClock).
+//!   [MockSystemClock](slatedb_common::clock::MockSystemClock).
 //! - [DstLogicalClock](slatedb_dst::DstLogicalClock): A default DST logical clock is provided
 //!   by [DefaultDstLogicalClock](slatedb_dst::DefaultDstLogicalClock).
 //! - [DbRand]: Can be made deterministic by providing a seed in [DbRand::new].
@@ -48,7 +48,7 @@
 //! # // RUSTDOCFLAGS="--cfg tokio_unstable"
 //! # #[cfg(tokio_unstable)] {
 //! # use slatedb::*;
-//! # use slatedb::clock::MockSystemClock;
+//! # use slatedb_common::clock::MockSystemClock;
 //! # use slatedb::object_store::memory::InMemory;
 //! # use slatedb_dst::*;
 //! # use slatedb_dst::utils::*;
@@ -93,7 +93,6 @@ use rand::seq::IteratorRandom;
 use rand::Rng;
 use rand::RngCore;
 use slatedb::clock::LogicalClock;
-use slatedb::clock::SystemClock;
 use slatedb::config::PutOptions;
 use slatedb::config::ReadOptions;
 use slatedb::config::ScanOptions;
@@ -103,6 +102,7 @@ use slatedb::Db;
 use slatedb::DbRand;
 use slatedb::Error;
 use slatedb::WriteBatch;
+use slatedb_common::clock::SystemClock;
 use std::future::Future;
 use std::ops::Bound;
 use std::ops::RangeBounds;

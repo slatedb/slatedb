@@ -6,12 +6,12 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::seq_tracker::SequenceTracker;
-use slatedb_txn_obj::transactional_object::DirtyObject;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;
 use serde::Serialize;
+use slatedb_txn_obj::transactional_object::DirtyObject;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -643,7 +643,6 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -651,6 +650,7 @@ mod tests {
     use bytes::Bytes;
     use proptest::collection::vec;
     use proptest::proptest;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;

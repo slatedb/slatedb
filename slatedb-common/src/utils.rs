@@ -32,6 +32,7 @@ pub async fn timeout<T, Err>(
 mod tests {
     use super::timeout;
     use crate::clock::MockSystemClock;
+    use crate::clock::SystemClock;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;

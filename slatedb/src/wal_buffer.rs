@@ -491,7 +491,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::{DefaultSystemClock, MonotonicClock};
+    use crate::clock::MonotonicClock;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::object_stores::ObjectStores;
     use crate::sst::SsTableFormat;
@@ -503,6 +503,7 @@ mod tests {
     use crate::utils::MonotonicSeq;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use slatedb_common::clock::DefaultSystemClock;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;

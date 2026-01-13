@@ -13,7 +13,6 @@
 //! referenced by in-flight operations.
 
 use crate::checkpoint::Checkpoint;
-use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
 use crate::config::GarbageCollectorOptions;
 pub use crate::db::builder::GarbageCollectorBuilder;
@@ -24,7 +23,6 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use slatedb_txn_obj::transactional_object::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -32,6 +30,10 @@ use compactions_gc::CompactionsGcTask;
 use futures::stream::BoxStream;
 use log::{debug, error, info};
 use manifest_gc::ManifestGcTask;
+use slatedb_common::clock::SystemClock;
+use slatedb_txn_obj::transactional_object::{
+    DirtyObject, SimpleTransactionalObject, TransactionalObject,
+};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -289,7 +291,6 @@ mod tests {
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
-    use crate::clock::DefaultSystemClock;
     use crate::compactions_store::StoredCompactions;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
@@ -298,6 +299,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
+    use slatedb_common::clock::DefaultSystemClock;
 
     use crate::utils::WatchableOnceCell;
     use crate::{

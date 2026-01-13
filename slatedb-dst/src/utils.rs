@@ -3,7 +3,6 @@
 use log::{error, info};
 use rand::Rng;
 use slatedb::clock::LogicalClock;
-use slatedb::clock::SystemClock;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
 use slatedb::config::GarbageCollectorDirectoryOptions;
@@ -16,6 +15,7 @@ use slatedb::DbBuilder;
 use slatedb::DbRand;
 use slatedb::Error;
 use slatedb::Settings;
+use slatedb_common::clock::SystemClock;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;

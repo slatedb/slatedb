@@ -43,8 +43,7 @@ use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
-use crate::clock::MonotonicClock;
-use crate::clock::{LogicalClock, SystemClock};
+use crate::clock::{LogicalClock, MonotonicClock};
 use crate::config::{
     FlushOptions, FlushType, MergeOptions, PreloadLevel, PutOptions, ReadOptions, ScanOptions,
     Settings, WriteOptions,
@@ -67,10 +66,11 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use slatedb_txn_obj::transactional_object::DirtyObject;
 use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use slatedb_common::clock::SystemClock;
+use slatedb_txn_obj::transactional_object::DirtyObject;
 
 pub use builder::DbBuilder;
 
@@ -1519,9 +1519,6 @@ mod tests {
     };
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
-    use crate::clock::DefaultSystemClock;
-    #[cfg(feature = "test-util")]
-    use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
@@ -1555,6 +1552,9 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use proptest::test_runner::{TestRng, TestRunner};
+    use slatedb_common::clock::DefaultSystemClock;
+    #[cfg(feature = "test-util")]
+    use slatedb_common::clock::MockSystemClock;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
     use std::sync::atomic::{AtomicBool, Ordering};

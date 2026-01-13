@@ -1,18 +1,18 @@
-use crate::clock::SystemClock;
 use crate::compactor_state::Compactions;
 use crate::error::SlateDBError;
 #[allow(dead_code)]
 use crate::error::SlateDBError::LatestTransactionalObjectVersionMissing;
 use crate::flatbuffer_types::FlatBufferCompactionsCodec;
+use chrono::Utc;
+use object_store::path::Path;
+use object_store::ObjectStore;
+use serde::Serialize;
+use slatedb_common::clock::SystemClock;
 use slatedb_txn_obj::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::transactional_object::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
     SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
 };
-use chrono::Utc;
-use object_store::path::Path;
-use object_store::ObjectStore;
-use serde::Serialize;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
@@ -278,7 +278,6 @@ impl CompactionsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::DefaultSystemClock;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::error;
     use crate::rand::DbRand;
@@ -286,6 +285,7 @@ mod tests {
     use crate::test_utils::FlakyObjectStore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use slatedb_common::clock::DefaultSystemClock;
     use std::time::Duration;
     use ulid::Ulid;
 

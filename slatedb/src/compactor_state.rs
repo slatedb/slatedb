@@ -675,7 +675,6 @@ mod tests {
 
     use super::*;
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactor_state::SourceId::Sst;
     use crate::config::Settings;
     use crate::db::Db;
@@ -687,6 +686,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use tokio::runtime::{Handle, Runtime};
 
     const PATH: &str = "/test/db";

@@ -118,9 +118,7 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::clock::DefaultLogicalClock;
-use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
-use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
@@ -155,6 +153,8 @@ use crate::sst::{BlockTransformer, SsTableFormat};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
+use slatedb_common::clock::DefaultSystemClock;
+use slatedb_common::clock::SystemClock;
 
 /// A builder for creating a new Db instance.
 ///

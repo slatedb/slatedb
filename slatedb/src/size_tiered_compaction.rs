@@ -424,7 +424,6 @@ mod tests {
 
     use crate::compactor::CompactionScheduler;
 
-    use crate::clock::DefaultSystemClock;
     use crate::compactor_state::{
         Compaction, CompactionSpec, Compactions, CompactorState, SourceId,
     };
@@ -432,9 +431,10 @@ mod tests {
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
-    use slatedb_txn_obj::transactional_object::DirtyObject;
     use crate::utils::IdGenerator;
     use crate::DbRand;
+    use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_txn_obj::transactional_object::DirtyObject;
     use std::sync::Arc;
 
     #[test]

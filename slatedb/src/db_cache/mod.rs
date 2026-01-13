@@ -19,12 +19,12 @@ use chrono::{DateTime, TimeDelta, Utc};
 use log::{debug, error, trace};
 use parking_lot::Mutex;
 
-use crate::clock::SystemClock;
 use crate::db_cache::stats::DbCacheStats;
 use crate::stats::StatRegistry;
 use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
 };
+use slatedb_common::clock::SystemClock;
 
 #[cfg(feature = "foyer")]
 pub mod foyer;
@@ -616,10 +616,10 @@ pub(crate) mod test_utils {
 mod tests {
 
     use crate::block::BlockBuilder;
-    use crate::clock::DefaultSystemClock;
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
     use crate::filter::BloomFilterBuilder;
+    use slatedb_common::clock::DefaultSystemClock;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
 

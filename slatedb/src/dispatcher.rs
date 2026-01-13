@@ -29,7 +29,7 @@
 //! ```ignore
 //! # use slatedb::dispatcher::{MessageHandlerExecutor, MessageHandler, MessageFactory};
 //! # use slatedb::error::SlateDBError;
-//! # use slatedb::clock::DefaultSystemClock;
+//! # use slatedb_common::clock::DefaultSystemClock;
 //! # use slatedb::utils::WatchableOnceCell;
 //! # use std::sync::Arc;
 //! # use std::time::Duration;
@@ -119,10 +119,10 @@ use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
 
 use crate::{
-    clock::{SystemClock, SystemClockTicker},
     error::SlateDBError,
     utils::{panic_string, split_join_result, split_unwind_result, WatchableOnceCell},
 };
+use slatedb_common::clock::{SystemClock, SystemClockTicker};
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
 pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
@@ -666,13 +666,13 @@ impl MessageHandlerExecutor {
 #[cfg(all(test, feature = "test-util"))]
 mod test {
     use super::{MessageDispatcher, MessageHandler};
-    use crate::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
     use crate::dispatcher::{MessageFactory, MessageHandlerExecutor};
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
     use futures::stream::BoxStream;
     use futures::StreamExt;
+    use slatedb_common::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;

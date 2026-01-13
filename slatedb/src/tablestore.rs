@@ -609,7 +609,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
-    use crate::clock::DefaultSystemClock;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::SplitCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
@@ -627,6 +626,7 @@ mod tests {
     use crate::{
         block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
     };
+    use slatedb_common::clock::DefaultSystemClock;
 
     const ROOT: &str = "/root";
 

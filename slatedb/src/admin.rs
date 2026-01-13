@@ -1,5 +1,4 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
-use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::{CompactionRequest, Compactor};
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
@@ -8,6 +7,7 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use slatedb_common::clock::SystemClock;
 
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};

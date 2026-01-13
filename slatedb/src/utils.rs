@@ -1,4 +1,4 @@
-use crate::clock::{MonotonicClock, SystemClock};
+use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
@@ -8,6 +8,7 @@ use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use log::error;
 use rand::{Rng, RngCore};
+use slatedb_common::clock::SystemClock;
 use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;

@@ -21,12 +21,9 @@
 
 #![allow(clippy::disallowed_methods)]
 
-#[cfg(feature = "test-util")]
-pub use slatedb_common::clock::MockSystemClock;
-pub use slatedb_common::clock::{DefaultSystemClock, SystemClock, SystemClockTicker};
-
 use crate::error::SlateDBError;
 use log::info;
+use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use std::{
     cmp,
     fmt::Debug,
