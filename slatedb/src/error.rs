@@ -10,7 +10,7 @@ use crate::error::SlateDBError::{
     LatestTransactionalObjectVersionMissing, TransactionalObjectVersionExists,
 };
 use crate::merge_operator::MergeOperatorError;
-use slatedb_txn_obj::transactional_object::TransactionalObjectError;
+use slatedb_txn_obj::TransactionalObjectError;
 
 #[non_exhaustive]
 #[derive(Clone, Debug, ThisError)]

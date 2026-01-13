@@ -9,7 +9,7 @@
 //!    writes in the database. This could represent a logical sequence number
 //!    (LSN) from a database, a Kafka offset, a `created_at` timestamp
 //!    associated with the write, and so on.
-//! 
+//!
 //! The [SystemClock] struct is provided in `slatedb-common`. The `slatedb` package
 //! builds on top of that and provides the [LogicalClock] abstraction.
 //! [DefaultLogicalClock] implements a logical clock that wraps the

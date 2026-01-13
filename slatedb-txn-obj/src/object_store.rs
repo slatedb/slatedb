@@ -1,5 +1,5 @@
-use crate::transactional_object::TransactionalObjectError::CallbackError;
-use crate::transactional_object::{
+use crate::TransactionalObjectError::CallbackError;
+use crate::{
     GenericObjectMetadata, MonotonicId, ObjectCodec, SequencedStorageProtocol,
     TransactionalObjectError, TransactionalStorageProtocol,
 };
@@ -173,8 +173,8 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
 
 #[cfg(test)]
 mod tests {
-    use crate::transactional_object::tests::{new_store, TestVal};
-    use crate::transactional_object::{
+    use crate::tests::{new_store, TestVal};
+    use crate::{
         MonotonicId, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
         TransactionalStorageProtocol,
     };

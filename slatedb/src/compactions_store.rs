@@ -8,8 +8,8 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
 use slatedb_common::clock::SystemClock;
-use slatedb_txn_obj::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
-use slatedb_txn_obj::transactional_object::{
+use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
+use slatedb_txn_obj::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
     SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
 };

@@ -11,7 +11,7 @@ use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;
 use serde::Serialize;
-use slatedb_txn_obj::transactional_object::DirtyObject;
+use slatedb_txn_obj::DirtyObject;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};

@@ -70,7 +70,7 @@ use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
-use slatedb_txn_obj::transactional_object::DirtyObject;
+use slatedb_txn_obj::DirtyObject;
 
 pub use builder::DbBuilder;
 

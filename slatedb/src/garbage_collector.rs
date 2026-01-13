@@ -31,9 +31,7 @@ use futures::stream::BoxStream;
 use log::{debug, error, info};
 use manifest_gc::ManifestGcTask;
 use slatedb_common::clock::SystemClock;
-use slatedb_txn_obj::transactional_object::{
-    DirtyObject, SimpleTransactionalObject, TransactionalObject,
-};
+use slatedb_txn_obj::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;

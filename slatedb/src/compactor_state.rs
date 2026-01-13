@@ -9,7 +9,7 @@ use ulid::Ulid;
 use crate::db_state::{ManifestCore, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
-use slatedb_txn_obj::transactional_object::DirtyObject;
+use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
 ///

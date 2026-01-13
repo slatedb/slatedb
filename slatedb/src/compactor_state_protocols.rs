@@ -331,7 +331,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use slatedb_txn_obj::transactional_object::DirtyObject;
+    use slatedb_txn_obj::DirtyObject;
     use std::sync::Arc;
     use ulid::Ulid;
 

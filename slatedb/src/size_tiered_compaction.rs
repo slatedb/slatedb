@@ -434,7 +434,7 @@ mod tests {
     use crate::utils::IdGenerator;
     use crate::DbRand;
     use slatedb_common::clock::DefaultSystemClock;
-    use slatedb_txn_obj::transactional_object::DirtyObject;
+    use slatedb_txn_obj::DirtyObject;
     use std::sync::Arc;
 
     #[test]
