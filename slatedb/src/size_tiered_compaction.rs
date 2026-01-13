@@ -432,7 +432,7 @@ mod tests {
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::seq_tracker::SequenceTracker;
     use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
-    use crate::transactional_object::DirtyObject;
+    use slatedb_txn_obj::transactional_object::DirtyObject;
     use crate::utils::IdGenerator;
     use crate::DbRand;
     use std::sync::Arc;

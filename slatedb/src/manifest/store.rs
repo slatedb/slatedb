@@ -9,8 +9,8 @@ use crate::error::SlateDBError::{
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::Manifest;
 use crate::rand::DbRand;
-use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
-use crate::transactional_object::{
+use slatedb_txn_obj::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
+use slatedb_txn_obj::transactional_object::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
     SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
 };
@@ -598,7 +598,7 @@ impl ManifestStore {
 pub(crate) mod test_utils {
     use crate::db_state::ManifestCore;
     use crate::manifest::Manifest;
-    use crate::transactional_object::DirtyObject;
+    use slatedb_txn_obj::transactional_object::DirtyObject;
 
     pub(crate) fn new_dirty_manifest() -> DirtyObject<Manifest> {
         DirtyObject::new(1u64.into(), Manifest::initial(ManifestCore::new()))
@@ -617,7 +617,7 @@ mod tests {
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
-    use crate::transactional_object::TransactionalObject;
+    use slatedb_txn_obj::transactional_object::TransactionalObject;
     use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;

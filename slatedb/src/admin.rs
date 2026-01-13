@@ -31,7 +31,7 @@ use ulid::Ulid;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
-use crate::transactional_object::TransactionalObject;
+use slatedb_txn_obj::transactional_object::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
 ///

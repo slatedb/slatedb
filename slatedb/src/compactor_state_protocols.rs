@@ -328,7 +328,7 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
-    use crate::transactional_object::DirtyObject;
+    use slatedb_txn_obj::transactional_object::DirtyObject;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;

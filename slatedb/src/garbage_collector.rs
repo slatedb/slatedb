@@ -24,7 +24,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::transactional_object::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
+use slatedb_txn_obj::transactional_object::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;

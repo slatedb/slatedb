@@ -6,7 +6,7 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::seq_tracker::SequenceTracker;
-use crate::transactional_object::DirtyObject;
+use slatedb_txn_obj::transactional_object::DirtyObject;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;

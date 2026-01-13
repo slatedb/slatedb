@@ -4,8 +4,8 @@ use crate::error::SlateDBError;
 #[allow(dead_code)]
 use crate::error::SlateDBError::LatestTransactionalObjectVersionMissing;
 use crate::flatbuffer_types::FlatBufferCompactionsCodec;
-use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
-use crate::transactional_object::{
+use slatedb_txn_obj::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
+use slatedb_txn_obj::transactional_object::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
     SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
 };

@@ -40,7 +40,7 @@ use crate::flatbuffer_types::root_generated::{
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::seq_tracker::SequenceTracker;
-use crate::transactional_object::ObjectCodec;
+use slatedb_txn_obj::transactional_object::ObjectCodec;
 use crate::utils::clamp_allocated_size_bytes;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
@@ -780,7 +780,7 @@ mod tests {
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
     };
     use crate::manifest::{ExternalDb, Manifest};
-    use crate::transactional_object::ObjectCodec;
+    use slatedb_txn_obj::transactional_object::ObjectCodec;
     use crate::{checkpoint, error::SlateDBError};
     use std::collections::VecDeque;
 

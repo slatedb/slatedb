@@ -67,7 +67,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::transactional_object::DirtyObject;
+use slatedb_txn_obj::transactional_object::DirtyObject;
 use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
