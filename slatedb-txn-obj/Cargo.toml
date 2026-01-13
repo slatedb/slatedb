@@ -1,0 +1,21 @@
+[package]
+name = "slatedb-txn-obj"
+description = "Transactional object primitives used by SlateDB."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+log = { workspace = true }
+object_store = { workspace = true }
+slatedb-common = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

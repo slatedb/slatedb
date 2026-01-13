@@ -328,7 +328,7 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
-    use crate::transactional_object::test_utils::new_dirty_object;
+    use crate::transactional_object::DirtyObject;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -404,8 +404,8 @@ mod tests {
         let manifest_id = 3u64;
         let compactions_id = 8u64;
         let state = CompactorState::new(
-            new_dirty_object(manifest_id, manifest.clone()),
-            new_dirty_object(compactions_id, compactions.clone()),
+            DirtyObject::new(manifest_id.into(), manifest.clone()),
+            DirtyObject::new(compactions_id.into(), compactions.clone()),
         );
 
         let view = CompactorStateView::from(&state);

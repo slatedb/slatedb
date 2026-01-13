@@ -424,7 +424,7 @@ impl CompactorState {
 
     /// Returns the current in-memory core DB state derived from the manifest.
     pub(crate) fn db_state(&self) -> &ManifestCore {
-        self.manifest.core()
+        &self.manifest.value.core
     }
 
     /// Returns the local dirty manifest that will be written back after compactions.
@@ -497,7 +497,7 @@ impl CompactorState {
         let my_db_state = self.db_state();
         let last_compacted_l0 = my_db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &remote_manifest.core().l0;
+        let writer_l0 = &remote_manifest.value.core.l0;
         for writer_l0_sst in writer_l0 {
             let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
@@ -682,7 +682,6 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::transactional_object::test_utils::new_dirty_object;
     use crate::utils::IdGenerator;
     use crate::DbRand;
     use object_store::memory::InMemory;
@@ -1150,7 +1149,7 @@ mod tests {
     // test helpers
 
     fn new_dirty_compactions(compactor_epoch: u64) -> DirtyObject<Compactions> {
-        new_dirty_object(1u64, Compactions::new(compactor_epoch))
+        DirtyObject::new(1u64.into(), Compactions::new(compactor_epoch))
     }
 
     fn compaction_with_status(id: Ulid, status: CompactionStatus) -> Compaction {

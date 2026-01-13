@@ -45,6 +45,8 @@ rand_xoshiro = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 siphasher = { workspace = true }
+slatedb-common = { workspace = true }
+slatedb-txn-obj = { workspace = true }
 snap = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
@@ -100,7 +102,7 @@ zstd = ["dep:zstd"]
 wal_disable = []
 moka = ["dep:moka"]
 foyer = ["dep:foyer", "dep:anyhow"]
-test-util = ["tokio/test-util"]
+test-util = ["tokio/test-util", "slatedb-common/test-util"]
 
 [lib]
 # Disable `libtest` harness because it fights with Criterion's `--output-format bencher`

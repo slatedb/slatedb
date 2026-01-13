@@ -25,12 +25,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-impl DirtyObject<Manifest> {
-    pub(crate) fn core(&self) -> &ManifestCore {
-        &self.value.core
-    }
-}
-
 pub(crate) struct FenceableManifest {
     clock: Arc<dyn SystemClock>,
     inner: FenceableTransactionalObject<Manifest>,
@@ -604,11 +598,10 @@ impl ManifestStore {
 pub(crate) mod test_utils {
     use crate::db_state::ManifestCore;
     use crate::manifest::Manifest;
-    use crate::transactional_object::test_utils::new_dirty_object;
     use crate::transactional_object::DirtyObject;
 
     pub(crate) fn new_dirty_manifest() -> DirtyObject<Manifest> {
-        new_dirty_object(1u64, Manifest::initial(ManifestCore::new()))
+        DirtyObject::new(1u64.into(), Manifest::initial(ManifestCore::new()))
     }
 }
 

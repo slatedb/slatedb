@@ -422,7 +422,8 @@ impl Admin {
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
                 let checkpoints: Vec<Checkpoint> = dirty
-                    .core()
+                    .value
+                    .core
                     .checkpoints
                     .iter()
                     .filter(|c| c.id != id)

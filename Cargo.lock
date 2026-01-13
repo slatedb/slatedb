@@ -3301,6 +3301,8 @@ dependencies = [
  "serde",
  "serde_json",
  "siphasher",
+ "slatedb-common",
+ "slatedb-txn-obj",
  "snap",
  "sysinfo",
  "tempfile",
@@ -3353,6 +3355,14 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "uuid",
+]
+
+[[package]]
+name = "slatedb-common"
+version = "0.10.0"
+dependencies = [
+ "chrono",
+ "tokio",
 ]
 
 [[package]]
@@ -3409,6 +3419,21 @@ dependencies = [
  "tokio",
  "ulid",
  "uuid",
+]
+
+[[package]]
+name = "slatedb-txn-obj"
+version = "0.10.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "log",
+ "object_store",
+ "slatedb-common",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

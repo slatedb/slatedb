@@ -244,6 +244,7 @@ impl From<TransactionalObjectError> for SlateDBError {
             TransactionalObjectError::InvalidObjectState => {
                 SlateDBError::InvalidTransactionalObjectState
             }
+            other => SlateDBError::TransactionalObjectError(Arc::new(other)),
         }
     }
 }

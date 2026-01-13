@@ -116,7 +116,7 @@ impl DbInner {
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
-        let last_l0_seq = manifest.core().last_l0_seq;
+        let last_l0_seq = manifest.value.core.last_l0_seq;
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
@@ -128,7 +128,7 @@ impl DbInner {
 
         let mono_clock = Arc::new(MonotonicClock::new(
             logical_clock,
-            manifest.core().last_l0_clock_tick,
+            manifest.value.core.last_l0_clock_tick,
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
@@ -468,10 +468,11 @@ impl DbInner {
         {
             Some(PreloadLevel::AllSst) => {
                 // Preload both L0 and compacted SSTs
-                let l0_count = current_state.manifest.core().l0.len();
+                let l0_count = current_state.manifest.value.core.l0.len();
                 let compacted_count: usize = current_state
                     .manifest
-                    .core()
+                    .value
+                    .core
                     .compacted
                     .iter()
                     .map(|level| level.ssts.len())
@@ -485,7 +486,8 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
-                        .core()
+                        .value
+                        .core
                         .l0
                         .iter()
                         .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
@@ -495,7 +497,8 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
-                        .core()
+                        .value
+                        .core
                         .compacted
                         .iter()
                         .flat_map(|level| &level.ssts)
@@ -515,7 +518,8 @@ impl DbInner {
                 // Preload only L0 SSTs
                 let l0_sst_paths: Vec<object_store::path::Path> = current_state
                     .manifest
-                    .core()
+                    .value
+                    .core
                     .l0
                     .iter()
                     .map(|sst_handle| path_resolver.table_path(&sst_handle.id))
@@ -1999,8 +2003,8 @@ mod tests {
         db.flush().await.unwrap();
 
         let state = db.inner.state.read().view();
-        assert_eq!(1, state.state.manifest.core().l0.len());
-        let sst = state.state.manifest.core().l0.front().unwrap();
+        assert_eq!(1, state.state.manifest.value.core.l0.len());
+        let sst = state.state.manifest.value.core.l0.front().unwrap();
         let index = db.inner.table_store.read_index(sst, true).await.unwrap();
         assert!(!index.borrow().block_meta().is_empty());
         assert_eq!(
@@ -3516,7 +3520,7 @@ mod tests {
 
         let manifest_state = {
             let guard = db.inner.state.read();
-            guard.state().manifest.core().clone()
+            guard.state().manifest.value.core.clone()
         };
         let last_l0_seq = manifest_state.last_l0_seq;
         assert!(

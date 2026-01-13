@@ -244,7 +244,8 @@ impl GarbageCollector {
         let utc_now: DateTime<Utc> = self.system_clock.now();
         let mut dirty = manifest.prepare_dirty()?;
         let retained_checkpoints: Vec<Checkpoint> = dirty
-            .core()
+            .value
+            .core
             .checkpoints
             .iter()
             .filter(|checkpoint| match checkpoint.expire_time {
@@ -254,7 +255,7 @@ impl GarbageCollector {
             .cloned()
             .collect();
 
-        let maybe_dirty = if dirty.core().checkpoints.len() != retained_checkpoints.len() {
+        let maybe_dirty = if dirty.value.core.checkpoints.len() != retained_checkpoints.len() {
             dirty.value.core.checkpoints = retained_checkpoints;
             Some(dirty)
         } else {
@@ -531,7 +532,8 @@ mod tests {
     ) -> Result<(), SlateDBError> {
         let mut dirty = stored_manifest.prepare_dirty()?;
         let updated_checkpoints = dirty
-            .core()
+            .value
+            .core
             .checkpoints
             .iter()
             .filter(|checkpoint| checkpoint.id != checkpoint_id)

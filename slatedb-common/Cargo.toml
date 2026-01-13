@@ -1,0 +1,18 @@
+[package]
+name = "slatedb-common"
+description = "Common utilities and types shared across SlateDB."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[features]
+test-util = ["tokio/test-util"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
