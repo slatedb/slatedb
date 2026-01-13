@@ -134,7 +134,7 @@ impl CompactorStateWriter {
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
-        let (manifest, compactions) = Self::fence(
+        let (manifest, mut compactions) = Self::fence(
             stored_manifest,
             compactions_store,
             system_clock.clone(),
@@ -152,6 +152,8 @@ impl CompactorStateWriter {
             }
         });
         dirty_compactions.value.retain_active_and_last_finished();
+        // Persist recovery state before any refresh() can overwrite it.
+        compactions.update(dirty_compactions.clone()).await?;
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
