@@ -396,13 +396,11 @@ impl SizeTieredCompactionScheduler {
 }
 
 #[derive(Default)]
-pub struct SizeTieredCompactionSchedulerSupplier {
-    options: SizeTieredCompactionSchedulerOptions,
-}
+pub struct SizeTieredCompactionSchedulerSupplier;
 
 impl SizeTieredCompactionSchedulerSupplier {
-    pub const fn new(options: SizeTieredCompactionSchedulerOptions) -> Self {
-        Self { options }
+    pub const fn new() -> Self {
+        Self
     }
 }
 
@@ -411,8 +409,10 @@ impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
         &self,
         compactor_options: &CompactorOptions,
     ) -> Box<dyn CompactionScheduler + Send + Sync> {
+        let scheduler_options =
+            SizeTieredCompactionSchedulerOptions::from(&compactor_options.scheduler_options);
         Box::new(SizeTieredCompactionScheduler::new(
-            self.options,
+            scheduler_options,
             compactor_options.max_concurrent_compactions,
         ))
     }
@@ -422,16 +422,19 @@ impl CompactionSchedulerSupplier for SizeTieredCompactionSchedulerSupplier {
 mod tests {
     use std::collections::VecDeque;
 
-    use crate::compactor::CompactionScheduler;
+    use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 
     use crate::clock::DefaultSystemClock;
     use crate::compactor_state::{
         Compaction, CompactionSpec, Compactions, CompactorState, SourceId,
     };
+    use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::seq_tracker::SequenceTracker;
-    use crate::size_tiered_compaction::SizeTieredCompactionScheduler;
+    use crate::size_tiered_compaction::{
+        SizeTieredCompactionScheduler, SizeTieredCompactionSchedulerSupplier,
+    };
     use crate::transactional_object::test_utils::new_dirty_object;
     use crate::utils::IdGenerator;
     use crate::DbRand;
@@ -457,6 +460,38 @@ mod tests {
             .collect();
         assert_eq!(request.sources(), &expected_sources);
         assert_eq!(request.destination(), 0);
+    }
+
+    #[test]
+    fn test_supplier_overrides_scheduler_options() {
+        // given:
+        let supplier = SizeTieredCompactionSchedulerSupplier;
+        let scheduler_options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 2,
+            ..Default::default()
+        }
+        .into();
+        let compactor_options = CompactorOptions {
+            scheduler_options,
+            ..CompactorOptions::default()
+        };
+        let scheduler = supplier.compaction_scheduler(&compactor_options);
+        let l0 = [create_sst(1), create_sst(1)];
+        let state =
+            &create_compactor_state(create_db_state(l0.iter().cloned().collect(), Vec::new()));
+
+        // when:
+        let requests: Vec<CompactionSpec> = scheduler.propose(&state.into());
+
+        // then:
+        assert_eq!(requests.len(), 1);
+        let request = requests.first().unwrap();
+        let expected_sources: Vec<SourceId> = l0
+            .iter()
+            .map(|h| SourceId::Sst(h.id.unwrap_compacted_id()))
+            .collect();
+        assert_eq!(request.sources(), &expected_sources);
     }
 
     #[test]

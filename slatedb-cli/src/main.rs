@@ -2,9 +2,11 @@ use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use chrono::{TimeZone, Utc};
 use object_store::path::Path;
 use slatedb::admin::{self, Admin, AdminBuilder};
-use slatedb::compactor::{CompactionRequest, CompactionSpec};
+use slatedb::compactor::{
+    CompactionRequest, CompactionSchedulerSupplier, SizeTieredCompactionSchedulerSupplier,
+};
 use slatedb::config::{
-    CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
 };
 use slatedb::seq_tracker::FindOption;
 use std::error::Error;
@@ -73,8 +75,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             compacted,
             compactions,
         } => schedule_gc(&admin, manifest, wal, compacted, compactions).await?,
-        CliCommands::SubmitCompaction { full, spec } => {
-            exec_submit_compaction(&admin, full, spec).await?
+        CliCommands::SubmitCompaction { scheduler, request } => {
+            exec_submit_compaction(&admin, scheduler, request).await?
         }
 
         CliCommands::SeqToTs { seq, round } => {
@@ -146,17 +148,26 @@ async fn exec_list_compactions(
 
 async fn exec_submit_compaction(
     admin: &Admin,
-    full: bool,
-    spec: Option<String>,
+    scheduler: String,
+    request: CompactionRequest,
 ) -> Result<(), Box<dyn Error>> {
-    let compaction_request = if full {
-        CompactionRequest::Full
-    } else {
-        let spec_json = spec.ok_or("missing --spec JSON")?;
-        let parsed_spec: CompactionSpec = serde_json::from_str(&spec_json)?;
-        CompactionRequest::Spec(parsed_spec)
+    let state = admin.read_compactor_state_view().await?;
+    let supplier = match scheduler.as_str() {
+        "size-tiered" => SizeTieredCompactionSchedulerSupplier,
+        _ => {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported scheduler: {scheduler}"),
+            )))
+        }
     };
-    let compaction_json = admin.submit_compaction(compaction_request).await?;
+    let scheduler = supplier.compaction_scheduler(&CompactorOptions::default());
+    let specs = scheduler.generate(&state, &request)?;
+    let mut compactions = Vec::with_capacity(specs.len());
+    for spec in specs {
+        compactions.push(admin.submit_compaction(spec).await?);
+    }
+    let compaction_json = serde_json::to_string(&compactions)?;
     println!("{}", compaction_json);
     Ok(())
 }
@@ -172,7 +183,8 @@ async fn exec_read_compaction(
             println!("no compaction found");
         }
         Some(compaction) => {
-            println!("{}", compaction);
+            let compaction_json = serde_json::to_string(&compaction)?;
+            println!("{}", compaction_json);
         }
     }
     Ok(())
