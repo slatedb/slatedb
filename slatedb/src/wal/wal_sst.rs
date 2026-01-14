@@ -622,6 +622,8 @@ mod tests {
     #[cfg(feature = "snappy")]
     #[tokio::test]
     async fn should_compress_blocks_with_snappy() {
+        use crate::sst::CHECKSUM_SIZE;
+
         // Given
         let mut builder =
             EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
@@ -644,6 +646,13 @@ mod tests {
             Some(CompressionCodec::Snappy)
         );
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
+        let compressed_with_checksum = &block.encoded_bytes;
+        let compressed =
+            &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
+        let decompressed = snap::raw::Decoder::new()
+            .decompress_vec(compressed)
+            .unwrap();
+        assert_eq!(decompressed, block.block.encode().as_ref());
         let mut iter = BlockIterator::new(block.block, Ascending);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100),
@@ -655,6 +664,8 @@ mod tests {
     #[cfg(feature = "lz4")]
     #[tokio::test]
     async fn should_compress_blocks_with_lz4() {
+        use crate::sst::CHECKSUM_SIZE;
+
         // Given
         let mut builder =
             EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
@@ -674,6 +685,11 @@ mod tests {
         // Then
         assert_eq!(encoded.info.compression_codec, Some(CompressionCodec::Lz4));
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
+        let compressed_with_checksum = &block.encoded_bytes;
+        let compressed =
+            &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
+        let decompressed = lz4_flex::block::decompress_size_prepended(compressed).unwrap();
+        assert_eq!(decompressed, block.block.encode().as_ref());
         let mut iter = BlockIterator::new(block.block, Ascending);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100),
@@ -685,6 +701,8 @@ mod tests {
     #[cfg(feature = "zstd")]
     #[tokio::test]
     async fn should_compress_blocks_with_zstd() {
+        use crate::sst::CHECKSUM_SIZE;
+
         // Given
         let mut builder =
             EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
@@ -704,6 +722,11 @@ mod tests {
         // Then
         assert_eq!(encoded.info.compression_codec, Some(CompressionCodec::Zstd));
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
+        let compressed_with_checksum = &block.encoded_bytes;
+        let compressed =
+            &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
+        let decompressed = zstd::stream::decode_all(compressed).unwrap();
+        assert_eq!(decompressed, block.block.encode().as_ref());
         let mut iter = BlockIterator::new(block.block, Ascending);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100),
@@ -715,6 +738,9 @@ mod tests {
     #[cfg(feature = "zlib")]
     #[tokio::test]
     async fn should_compress_blocks_with_zlib() {
+        use crate::sst::CHECKSUM_SIZE;
+        use std::io::Read;
+
         // Given
         let mut builder =
             EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
@@ -734,6 +760,13 @@ mod tests {
         // Then
         assert_eq!(encoded.info.compression_codec, Some(CompressionCodec::Zlib));
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
+        let compressed_with_checksum = &block.encoded_bytes;
+        let compressed =
+            &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
+        let mut decoder = flate2::read::ZlibDecoder::new(compressed);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, block.block.encode().as_ref());
         let mut iter = BlockIterator::new(block.block, Ascending);
         let expected = vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(100),
