@@ -6,13 +6,13 @@ use std::time::Duration;
 /// A timeout wrapper for futures that returns the provided error if the future
 /// does not complete within the specified duration.
 ///
-/// Arguments:
+/// # Arguments:
 /// - `clock`: The clock to use for the timeout.
 /// - `duration`: The duration to wait for the future to complete.
 /// - `error_fn`: Returns the error to use when the timeout expires.
 /// - `future`: The future to timeout
 ///
-/// Returns:
+/// # Returns:
 /// - `Ok(T)`: If the future completes within the specified duration.
 /// - `Err(Err)`: If the future does not complete within the specified duration.
 pub async fn timeout<T, Err>(

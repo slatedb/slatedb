@@ -1,3 +1,12 @@
+//! Common utilities shared across SlateDB crates.
+//!
+//! This crate contains utilities that are used by multiple SlateDB
+//! crates. It is intended to be a lightweight dependency that can be
+//! included in other crates without adding significant overhead.
+//!
+//! `slatedb-common` should not depend on any other SlateDB crates to avoid
+//! circular dependencies. It can depend on third-party crates as needed.
+
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
