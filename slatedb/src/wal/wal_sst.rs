@@ -21,7 +21,7 @@ use crate::types::RowEntry;
 /// - No bloom filter is created
 /// - The index tracks sequence number ranges per block instead of first keys
 #[allow(unused)]
-pub(crate) struct EncodedSsTableBuilder<'a> {
+pub(crate) struct EncodedWalSsTableBuilder<'a> {
     builder: BlockBuilder,
     index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
@@ -35,7 +35,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     first_seq: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
 }
 
-impl EncodedSsTableBuilder<'_> {
+impl EncodedWalSsTableBuilder<'_> {
     /// Create a builder based on target block size.
     #[allow(unused)]
     pub(crate) fn new(block_size: usize, sst_codec: Box<dyn SsTableInfoCodec>) -> Self {
@@ -218,7 +218,7 @@ mod tests {
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
 
-    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
+    fn next_block_to_iter(builder: &mut EncodedWalSsTableBuilder) -> BlockIterator<Block> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap().block;
@@ -228,7 +228,8 @@ mod tests {
     #[tokio::test]
     async fn should_make_blocks_available_and_report_size() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(32, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(32, Box::new(FlatBufferSsTableInfoCodec {}));
 
         // When
         let result1 = builder
@@ -279,7 +280,8 @@ mod tests {
     #[tokio::test]
     async fn should_build_without_bloom_filter() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         builder
             .add_value(b"key1", b"value1", 1, None, None)
             .await
@@ -300,7 +302,8 @@ mod tests {
     #[tokio::test]
     async fn should_store_entries_in_insertion_order() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(4096, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(4096, Box::new(FlatBufferSsTableInfoCodec {}));
         builder
             .add_value(b"zebra", b"val1", 5, Some(100), None)
             .await
@@ -332,7 +335,8 @@ mod tests {
     #[tokio::test]
     async fn should_handle_tombstones() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         let tombstone = RowEntry::new(
             Bytes::from_static(b"key1"),
             ValueDeletable::Tombstone,
@@ -362,7 +366,8 @@ mod tests {
     #[tokio::test]
     async fn should_handle_merge() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         let merge = RowEntry::new(
             Bytes::from_static(b"key1"),
             ValueDeletable::Merge(Bytes::from_static(b"merge_value")),
@@ -392,7 +397,8 @@ mod tests {
     #[tokio::test]
     async fn should_store_first_seq_in_index() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(32, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(32, Box::new(FlatBufferSsTableInfoCodec {}));
         builder
             .add_value(&[b'a'; 8], &[b'1'; 8], 10, None, None)
             .await
@@ -421,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn should_build_empty_sst_when_no_entries() {
         // Given
-        let builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let builder = EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         assert!(builder.is_drained());
 
         // When
@@ -436,7 +442,8 @@ mod tests {
     #[tokio::test]
     async fn should_handle_empty_value() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         builder
             .add_value(b"key1", b"", 1, Some(1), None)
             .await
@@ -462,7 +469,8 @@ mod tests {
     #[tokio::test]
     async fn should_handle_large_value() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(64, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(64, Box::new(FlatBufferSsTableInfoCodec {}));
         let large_value = vec![b'x'; 256];
         builder
             .add_value(b"key1", &large_value, 1, Some(1), None)
@@ -482,7 +490,8 @@ mod tests {
     #[tokio::test]
     async fn should_handle_single_entry_sst() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         builder
             .add_value(b"only_key", b"only_value", 42, Some(100), None)
             .await
@@ -507,7 +516,8 @@ mod tests {
     #[tokio::test]
     async fn should_handle_max_seq_number() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         builder
             .add_value(b"key1", b"value1", u64::MAX, Some(1), None)
             .await
@@ -528,7 +538,8 @@ mod tests {
     #[tokio::test]
     async fn should_handle_duplicate_keys_different_seqs() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         builder
             .add_value(b"key1", b"value1", 1, Some(1), None)
             .await
@@ -559,7 +570,8 @@ mod tests {
     #[tokio::test]
     async fn should_handle_entries_with_expire_ts() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         builder
             .add_value(b"key1", b"value1", 1, Some(100), Some(200))
             .await
@@ -587,7 +599,8 @@ mod tests {
     #[tokio::test]
     async fn should_verify_block_checksums() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}));
         builder
             .add_value(b"key1", b"value1", 1, None, None)
             .await
@@ -610,8 +623,9 @@ mod tests {
     #[tokio::test]
     async fn should_compress_blocks_with_snappy() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
-            .with_compression_codec(CompressionCodec::Snappy);
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
+                .with_compression_codec(CompressionCodec::Snappy);
         builder
             .add_value(b"key1", b"value1", 1, Some(100), None)
             .await
@@ -642,8 +656,9 @@ mod tests {
     #[tokio::test]
     async fn should_compress_blocks_with_lz4() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
-            .with_compression_codec(CompressionCodec::Lz4);
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
+                .with_compression_codec(CompressionCodec::Lz4);
         builder
             .add_value(b"key1", b"value1", 1, Some(100), None)
             .await
@@ -671,8 +686,9 @@ mod tests {
     #[tokio::test]
     async fn should_compress_blocks_with_zstd() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
-            .with_compression_codec(CompressionCodec::Zstd);
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
+                .with_compression_codec(CompressionCodec::Zstd);
         builder
             .add_value(b"key1", b"value1", 1, Some(100), None)
             .await
@@ -700,8 +716,9 @@ mod tests {
     #[tokio::test]
     async fn should_compress_blocks_with_zlib() {
         // Given
-        let mut builder = EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
-            .with_compression_codec(CompressionCodec::Zlib);
+        let mut builder =
+            EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
+                .with_compression_codec(CompressionCodec::Zlib);
         builder
             .add_value(b"key1", b"value1", 1, Some(100), None)
             .await
@@ -772,7 +789,7 @@ mod tests {
             // Given
             let transformer = MockBlockTransformer::new();
             let mut builder =
-                EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
+                EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
                     .with_block_transformer(Arc::clone(&transformer) as Arc<dyn BlockTransformer>);
             builder
                 .add_value(b"key1", b"value1", 1, Some(100), None)
@@ -791,7 +808,7 @@ mod tests {
             // Given - use small block size to force multiple blocks
             let transformer = MockBlockTransformer::new();
             let mut builder =
-                EncodedSsTableBuilder::new(32, Box::new(FlatBufferSsTableInfoCodec {}))
+                EncodedWalSsTableBuilder::new(32, Box::new(FlatBufferSsTableInfoCodec {}))
                     .with_block_transformer(Arc::clone(&transformer) as Arc<dyn BlockTransformer>);
             builder
                 .add_value(&[b'a'; 8], &[b'1'; 8], 1, Some(1), None)
@@ -821,7 +838,7 @@ mod tests {
             // Given
             let transformer = MockBlockTransformer::new();
             let mut builder =
-                EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
+                EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
                     .with_block_transformer(transformer as Arc<dyn BlockTransformer>);
             builder
                 .add_value(b"key1", b"value1", 1, Some(100), None)
@@ -851,7 +868,7 @@ mod tests {
             // Given
             let transformer = MockBlockTransformer::new();
             let mut builder =
-                EncodedSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
+                EncodedWalSsTableBuilder::new(1024, Box::new(FlatBufferSsTableInfoCodec {}))
                     .with_compression_codec(CompressionCodec::Lz4)
                     .with_block_transformer(Arc::clone(&transformer) as Arc<dyn BlockTransformer>);
             builder
