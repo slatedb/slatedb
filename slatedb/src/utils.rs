@@ -1,4 +1,4 @@
-use crate::clock::{MonotonicClock, SystemClock};
+use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
@@ -8,13 +8,13 @@ use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use log::error;
 use rand::{Rng, RngCore};
+use slatedb_common::clock::SystemClock;
 use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -293,31 +293,6 @@ impl<R: RngCore> IdGenerator for R {
             .expect("timestamp outside u64 range in gen_ulid");
         let random_bytes = self.random::<u128>();
         Ulid::from_parts(now, random_bytes)
-    }
-}
-
-/// A timeout wrapper for futures that returns a SlateDBError::Timeout if the future
-/// does not complete within the specified duration.
-///
-/// Arguments:
-/// - `clock`: The clock to use for the timeout.
-/// - `duration`: The duration to wait for the future to complete.
-/// - `operation`: The name of the operation that will time out, for logging purposes.
-/// - `future`: The future to timeout
-///
-/// Returns:
-/// - `Ok(T)`: If the future completes within the specified duration.
-/// - `Err(SlateDBError::Timeout)`: If the future does not complete within the specified duration.
-pub(crate) async fn timeout<T, Err>(
-    clock: Arc<dyn SystemClock>,
-    duration: Duration,
-    error_fn: impl FnOnce() -> Err,
-    future: impl Future<Output = Result<T, Err>> + Send,
-) -> Result<T, Err> {
-    tokio::select! {
-        biased;
-        res = future => res,
-        _ = clock.sleep(duration) => Err(error_fn())
     }
 }
 
@@ -917,94 +892,6 @@ mod tests {
         // a buffer of the minimal size, as Bytes doesn't expose the underlying buffer's
         // capacity. The best we can do is assert it allocated a new buffer.
         assert_ne!(clamped.as_ptr(), slice.as_ptr());
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "test-util")]
-    async fn test_timeout_completes_before_expiry() {
-        use crate::{clock::MockSystemClock, utils::timeout};
-
-        // Given: a mock clock and a future that completes quickly
-        let clock = Arc::new(MockSystemClock::new());
-
-        // When: we execute a future with a timeout
-        let completed_future = async { Ok::<_, SlateDBError>(42) };
-        let timeout_future = timeout(
-            clock,
-            Duration::from_millis(100),
-            || unreachable!(),
-            completed_future,
-        );
-
-        // Then: the future should complete successfully with the expected value
-        let result = timeout_future.await;
-        assert_eq!(result.unwrap(), 42);
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "test-util")]
-    async fn test_timeout_expires() {
-        use std::sync::atomic::AtomicBool;
-
-        use crate::clock::{MockSystemClock, SystemClock};
-        use crate::utils::timeout;
-
-        // Given: a mock clock and a future that will never complete
-        let clock = Arc::new(MockSystemClock::new());
-        let never_completes = std::future::pending::<Result<(), SlateDBError>>();
-        let timeout_duration = Duration::from_millis(100);
-
-        // When: we execute the future with a timeout and advance the clock past the timeout duration
-        let timeout_future = timeout(
-            clock.clone(),
-            timeout_duration,
-            || SlateDBError::TransactionalObjectTimeout {
-                timeout: timeout_duration,
-            },
-            never_completes,
-        );
-        let done = Arc::new(AtomicBool::new(false));
-        let this_done = done.clone();
-
-        tokio::spawn(async move {
-            while !this_done.load(SeqCst) {
-                clock.advance(Duration::from_millis(100)).await;
-                // Yield or else the scheduler keeps picking this loop, which
-                // the sleep task forever.
-                tokio::task::yield_now().await;
-            }
-        });
-
-        // Then: the future should complete with a timeout error
-        let result = timeout_future.await;
-        done.store(true, SeqCst);
-        assert!(matches!(
-            result,
-            Err(SlateDBError::TransactionalObjectTimeout { .. })
-        ));
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "test-util")]
-    async fn test_timeout_respects_biased_select() {
-        use crate::{clock::MockSystemClock, utils::timeout};
-
-        // Given: a mock clock and two futures that complete simultaneously
-        let clock = Arc::new(MockSystemClock::new());
-        let completes_immediately = async { Ok::<_, SlateDBError>(42) };
-
-        // When: we execute the future with a timeout and both are ready immediately
-        let timeout_future = timeout(
-            clock,
-            Duration::from_millis(100),
-            || unreachable!(),
-            completes_immediately,
-        );
-
-        // Then: because of the 'biased' select, the future should complete with the value
-        // rather than timing out, even though both are ready
-        let result = timeout_future.await;
-        assert_eq!(result.unwrap(), 42);
     }
 
     #[rstest]

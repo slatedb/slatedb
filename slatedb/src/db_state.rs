@@ -6,12 +6,12 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::seq_tracker::SequenceTracker;
-use crate::transactional_object::DirtyObject;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;
 use serde::Serialize;
+use slatedb_txn_obj::DirtyObject;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -353,7 +353,7 @@ pub(crate) struct COWDbState {
 
 impl COWDbState {
     pub(crate) fn core(&self) -> &ManifestCore {
-        self.manifest.core()
+        &self.manifest.value.core
     }
 }
 
@@ -586,18 +586,19 @@ impl<'a> StateModifier<'a> {
     pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
-        let l0_last_compacted = &remote_manifest.core().l0_last_compacted;
+        let l0_last_compacted = &remote_manifest.value.core.l0_last_compacted;
         let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
             self.state
                 .manifest
-                .core()
+                .value
+                .core
                 .l0
                 .iter()
                 .cloned()
                 .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
                 .collect()
         } else {
-            self.state.manifest.core().l0.iter().cloned().collect()
+            self.state.manifest.value.core.l0.iter().cloned().collect()
         };
 
         let my_db_state = self.state.core();
@@ -632,7 +633,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
         // statement -- probably some generic inference bug
         #[allow(clippy::needless_return)]
         return state.modify(|modifier| {
-            let next_wal_id = modifier.state.manifest.core().next_wal_sst_id;
+            let next_wal_id = modifier.state.manifest.value.core.next_wal_sst_id;
             modifier.state.manifest.value.core.next_wal_sst_id += 1;
             next_wal_id
         });
@@ -642,7 +643,6 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -650,6 +650,7 @@ mod tests {
     use bytes::Bytes;
     use proptest::collection::vec;
     use proptest::proptest;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;

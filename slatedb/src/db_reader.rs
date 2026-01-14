@@ -1,7 +1,5 @@
 use crate::bytes_range::BytesRange;
-use crate::clock::{
-    DefaultLogicalClock, DefaultSystemClock, LogicalClock, MonotonicClock, SystemClock,
-};
+use crate::clock::{DefaultLogicalClock, LogicalClock, MonotonicClock};
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
@@ -29,6 +27,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use std::collections::VecDeque;
 use std::ops::{RangeBounds, Sub};
 use std::sync::Arc;
@@ -919,7 +918,7 @@ impl DbRead for DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::{DefaultLogicalClock, DefaultSystemClock, LogicalClock, SystemClock};
+    use crate::clock::{DefaultLogicalClock, LogicalClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::ManifestCore;
@@ -939,6 +938,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use std::collections::BTreeMap;
     use std::ops::RangeFull;
     use std::sync::Arc;

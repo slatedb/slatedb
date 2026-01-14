@@ -65,7 +65,6 @@ use tokio::runtime::Handle;
 use tracing::instrument;
 use ulid::Ulid;
 
-use crate::clock::SystemClock;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
@@ -82,6 +81,7 @@ use crate::rand::DbRand;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator, WatchableOnceCell};
+use slatedb_common::clock::SystemClock;
 
 pub use crate::compactor_state::{
     Compaction, CompactionSpec, CompactionStatus, CompactionsCore, CompactorState, SourceId,
@@ -984,7 +984,6 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
     use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
@@ -1010,6 +1009,7 @@ mod tests {
     use crate::test_utils::{assert_iterator, TestClock};
     use crate::types::RowEntry;
     use bytes::Bytes;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
     const PATH: &str = "/test/db";
 

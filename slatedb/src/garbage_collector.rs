@@ -13,7 +13,6 @@
 //! referenced by in-flight operations.
 
 use crate::checkpoint::Checkpoint;
-use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
 use crate::config::GarbageCollectorOptions;
 pub use crate::db::builder::GarbageCollectorBuilder;
@@ -24,7 +23,6 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
-use crate::transactional_object::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -32,6 +30,8 @@ use compactions_gc::CompactionsGcTask;
 use futures::stream::BoxStream;
 use log::{debug, error, info};
 use manifest_gc::ManifestGcTask;
+use slatedb_common::clock::SystemClock;
+use slatedb_txn_obj::{DirtyObject, SimpleTransactionalObject, TransactionalObject};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -244,7 +244,8 @@ impl GarbageCollector {
         let utc_now: DateTime<Utc> = self.system_clock.now();
         let mut dirty = manifest.prepare_dirty()?;
         let retained_checkpoints: Vec<Checkpoint> = dirty
-            .core()
+            .value
+            .core
             .checkpoints
             .iter()
             .filter(|checkpoint| match checkpoint.expire_time {
@@ -254,7 +255,7 @@ impl GarbageCollector {
             .cloned()
             .collect();
 
-        let maybe_dirty = if dirty.core().checkpoints.len() != retained_checkpoints.len() {
+        let maybe_dirty = if dirty.value.core.checkpoints.len() != retained_checkpoints.len() {
             dirty.value.core.checkpoints = retained_checkpoints;
             Some(dirty)
         } else {
@@ -288,7 +289,6 @@ mod tests {
     use uuid::Uuid;
 
     use crate::checkpoint::Checkpoint;
-    use crate::clock::DefaultSystemClock;
     use crate::compactions_store::StoredCompactions;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::config::{GarbageCollectorDirectoryOptions, GarbageCollectorOptions};
@@ -297,6 +297,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::types::RowEntry;
+    use slatedb_common::clock::DefaultSystemClock;
 
     use crate::utils::WatchableOnceCell;
     use crate::{
@@ -531,7 +532,8 @@ mod tests {
     ) -> Result<(), SlateDBError> {
         let mut dirty = stored_manifest.prepare_dirty()?;
         let updated_checkpoints = dirty
-            .core()
+            .value
+            .core
             .checkpoints
             .iter()
             .filter(|checkpoint| checkpoint.id != checkpoint_id)

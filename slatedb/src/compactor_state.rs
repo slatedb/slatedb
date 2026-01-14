@@ -9,7 +9,7 @@ use ulid::Ulid;
 use crate::db_state::{ManifestCore, SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
-use crate::transactional_object::DirtyObject;
+use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
 ///
@@ -424,7 +424,7 @@ impl CompactorState {
 
     /// Returns the current in-memory core DB state derived from the manifest.
     pub(crate) fn db_state(&self) -> &ManifestCore {
-        self.manifest.core()
+        &self.manifest.value.core
     }
 
     /// Returns the local dirty manifest that will be written back after compactions.
@@ -497,7 +497,7 @@ impl CompactorState {
         let my_db_state = self.db_state();
         let last_compacted_l0 = my_db_state.l0_last_compacted;
         let mut merged_l0s = VecDeque::new();
-        let writer_l0 = &remote_manifest.core().l0;
+        let writer_l0 = &remote_manifest.value.core.l0;
         for writer_l0_sst in writer_l0 {
             let writer_l0_id = writer_l0_sst.id.unwrap_compacted_id();
             // todo: this is brittle. we are relying on the l0 list always being updated in
@@ -675,19 +675,19 @@ mod tests {
 
     use super::*;
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactor_state::SourceId::Sst;
     use crate::config::Settings;
     use crate::db::Db;
     use crate::db_state::SsTableId;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::transactional_object::test_utils::new_dirty_object;
     use crate::utils::IdGenerator;
     use crate::DbRand;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_txn_obj::test_utils::new_dirty_object;
     use tokio::runtime::{Handle, Runtime};
 
     const PATH: &str = "/test/db";

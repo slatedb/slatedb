@@ -43,8 +43,7 @@ use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
-use crate::clock::MonotonicClock;
-use crate::clock::{LogicalClock, SystemClock};
+use crate::clock::{LogicalClock, MonotonicClock};
 use crate::config::{
     FlushOptions, FlushType, MergeOptions, PreloadLevel, PutOptions, ReadOptions, ScanOptions,
     Settings, WriteOptions,
@@ -67,10 +66,11 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::transactional_object::DirtyObject;
 use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use slatedb_common::clock::SystemClock;
+use slatedb_txn_obj::DirtyObject;
 
 pub use builder::DbBuilder;
 
@@ -116,7 +116,7 @@ impl DbInner {
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
-        let last_l0_seq = manifest.core().last_l0_seq;
+        let last_l0_seq = manifest.value.core.last_l0_seq;
         let last_seq = MonotonicSeq::new(last_l0_seq);
         let last_committed_seq = MonotonicSeq::new(last_l0_seq);
         let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
@@ -128,7 +128,7 @@ impl DbInner {
 
         let mono_clock = Arc::new(MonotonicClock::new(
             logical_clock,
-            manifest.core().last_l0_clock_tick,
+            manifest.value.core.last_l0_clock_tick,
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
@@ -468,10 +468,11 @@ impl DbInner {
         {
             Some(PreloadLevel::AllSst) => {
                 // Preload both L0 and compacted SSTs
-                let l0_count = current_state.manifest.core().l0.len();
+                let l0_count = current_state.manifest.value.core.l0.len();
                 let compacted_count: usize = current_state
                     .manifest
-                    .core()
+                    .value
+                    .core
                     .compacted
                     .iter()
                     .map(|level| level.ssts.len())
@@ -485,7 +486,8 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
-                        .core()
+                        .value
+                        .core
                         .l0
                         .iter()
                         .map(|sst_handle| path_resolver.table_path(&sst_handle.id)),
@@ -495,7 +497,8 @@ impl DbInner {
                 all_sst_paths.extend(
                     current_state
                         .manifest
-                        .core()
+                        .value
+                        .core
                         .compacted
                         .iter()
                         .flat_map(|level| &level.ssts)
@@ -515,7 +518,8 @@ impl DbInner {
                 // Preload only L0 SSTs
                 let l0_sst_paths: Vec<object_store::path::Path> = current_state
                     .manifest
-                    .core()
+                    .value
+                    .core
                     .l0
                     .iter()
                     .map(|sst_handle| path_resolver.table_path(&sst_handle.id))
@@ -1515,9 +1519,6 @@ mod tests {
     };
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::cached_object_store_stats::CachedObjectStoreStats;
-    use crate::clock::DefaultSystemClock;
-    #[cfg(feature = "test-util")]
-    use crate::clock::MockSystemClock;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
@@ -1550,6 +1551,9 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
     use proptest::test_runner::{TestRng, TestRunner};
+    use slatedb_common::clock::DefaultSystemClock;
+    #[cfg(feature = "test-util")]
+    use slatedb_common::clock::MockSystemClock;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1998,8 +2002,8 @@ mod tests {
         db.flush().await.unwrap();
 
         let state = db.inner.state.read().view();
-        assert_eq!(1, state.state.manifest.core().l0.len());
-        let sst = state.state.manifest.core().l0.front().unwrap();
+        assert_eq!(1, state.state.manifest.value.core.l0.len());
+        let sst = state.state.manifest.value.core.l0.front().unwrap();
         let index = db.inner.table_store.read_index(sst, true).await.unwrap();
         assert!(!index.borrow().block_meta().is_empty());
         assert_eq!(
@@ -3512,7 +3516,7 @@ mod tests {
 
         let manifest_state = {
             let guard = db.inner.state.read();
-            guard.state().manifest.core().clone()
+            guard.state().manifest.value.core.clone()
         };
         let last_l0_seq = manifest_state.last_l0_seq;
         assert!(

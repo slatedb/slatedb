@@ -1,5 +1,4 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
-use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
 use crate::compactor_state_protocols::CompactorStateReader;
@@ -9,6 +8,7 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use slatedb_common::clock::SystemClock;
 
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
@@ -32,7 +32,7 @@ use ulid::Ulid;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
-use crate::transactional_object::TransactionalObject;
+use slatedb_txn_obj::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -436,7 +436,8 @@ impl Admin {
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
                 let checkpoints: Vec<Checkpoint> = dirty
-                    .core()
+                    .value
+                    .core
                     .checkpoints
                     .iter()
                     .filter(|c| c.id != id)

@@ -14,10 +14,10 @@
 use object_store::memory::InMemory;
 use rand::Rng;
 use rstest::rstest;
-use slatedb::clock::MockSystemClock;
-use slatedb::clock::SystemClock;
 use slatedb::DbRand;
 use slatedb::Error;
+use slatedb_common::clock::MockSystemClock;
+use slatedb_common::clock::SystemClock;
 use slatedb_dst::utils::{build_dst, build_runtime, run_simulation};
 use slatedb_dst::{DefaultDstLogicalClock, DstDuration, DstOptions};
 use std::rc::Rc;

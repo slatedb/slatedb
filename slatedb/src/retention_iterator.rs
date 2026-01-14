@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::clock::SystemClock;
 use crate::error::SlateDBError;
 use crate::iter::KeyValueIterator;
 use crate::seq_tracker::{FindOption, SequenceTracker};
 use crate::types::ValueDeletable::Tombstone;
 use crate::types::{RowEntry, ValueDeletable};
+use slatedb_common::clock::SystemClock;
 
 /// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
 ///
@@ -999,8 +999,8 @@ mod tests {
     #[test]
     #[cfg(feature = "test-util")]
     fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
-        use crate::clock::MockSystemClock;
         use crate::test_utils::TestIterator;
+        use slatedb_common::clock::MockSystemClock;
 
         // Test the apply_retention_filter function directly since TestIterator doesn't support create_ts
         let mut versions = std::collections::BTreeMap::new();
@@ -1091,9 +1091,9 @@ mod tests {
         #[case] clock_now: i64,
         #[case] timeout_ms: u64,
     ) {
-        use crate::clock::MockSystemClock;
         use crate::test_utils::TestIterator;
         use chrono::TimeZone;
+        use slatedb_common::clock::MockSystemClock;
 
         let mut sorted_points = tracker_points;
         sorted_points.sort_by_key(|(seq, _)| *seq);

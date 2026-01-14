@@ -216,8 +216,8 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
     use crate::config::CheckpointOptions;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
