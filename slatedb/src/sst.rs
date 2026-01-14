@@ -378,14 +378,19 @@ impl SsTableFormat {
     }
 
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
-        EncodedSsTableBuilder::new(
+        let mut builder = EncodedSsTableBuilder::new(
             self.block_size,
             self.min_filter_keys,
             self.sst_codec.clone(),
             self.filter_bits_per_key,
-            self.compression_codec,
-            self.block_transformer.clone(),
-        )
+        );
+        if let Some(codec) = self.compression_codec {
+            builder = builder.with_compression_codec(codec);
+        }
+        if let Some(ref transformer) = self.block_transformer {
+            builder = builder.with_block_transformer(transformer.clone());
+        }
+        builder
     }
 
     /// validate checksum and return the actual data bytes
@@ -484,18 +489,26 @@ pub(crate) struct EncodedSsTableBlockBuilder<'a> {
 }
 
 impl<'a> EncodedSsTableBlockBuilder<'a> {
-    pub(crate) fn new(
-        block_builder: BlockBuilder,
-        offset: u64,
-        compression_codec: Option<CompressionCodec>,
-        block_transformer: Option<&'a Arc<dyn BlockTransformer>>,
-    ) -> Self {
+    pub(crate) fn new(block_builder: BlockBuilder, offset: u64) -> Self {
         Self {
             block_builder,
             offset,
-            compression_codec,
-            block_transformer,
+            compression_codec: None,
+            block_transformer: None,
         }
+    }
+
+    pub(crate) fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
+        self.compression_codec = Some(codec);
+        self
+    }
+
+    pub(crate) fn with_block_transformer(
+        mut self,
+        transformer: &'a Arc<dyn BlockTransformer>,
+    ) -> Self {
+        self.block_transformer = Some(transformer);
+        self
     }
 
     pub(crate) async fn build(self) -> Result<EncodedSsTableBlock, SlateDBError> {
@@ -541,8 +554,6 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     pub(crate) fn new(
         blocks_len: u64,
         sst_first_key: Option<Bytes>,
-        compression_codec: Option<CompressionCodec>,
-        block_transformer: Option<&'a Arc<dyn BlockTransformer>>,
         sst_codec: &'a dyn SsTableInfoCodec,
         index_builder: flatbuffers::FlatBufferBuilder<'b, flatbuffers::DefaultAllocator>,
         block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
@@ -550,8 +561,8 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         Self {
             blocks_len,
             sst_first_key,
-            compression_codec,
-            block_transformer,
+            compression_codec: None,
+            block_transformer: None,
             sst_codec,
             index_builder,
             block_meta,
@@ -559,8 +570,21 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         }
     }
 
+    pub(crate) fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
+        self.compression_codec = Some(codec);
+        self
+    }
+
+    pub(crate) fn with_block_transformer(
+        mut self,
+        transformer: &'a Arc<dyn BlockTransformer>,
+    ) -> Self {
+        self.block_transformer = Some(transformer);
+        self
+    }
+
     /// Adds a bloom filter to the footer.
-    pub(crate) fn add_filter(mut self, filter: Arc<BloomFilter>, encoded_filter: Bytes) -> Self {
+    pub(crate) fn with_filter(mut self, filter: Arc<BloomFilter>, encoded_filter: Bytes) -> Self {
         self.filter = Some((filter, encoded_filter));
         self
     }
@@ -749,8 +773,6 @@ impl EncodedSsTableBuilder<'_> {
         min_filter_keys: u32,
         sst_codec: Box<dyn SsTableInfoCodec>,
         filter_bits_per_key: u32,
-        compression_codec: Option<CompressionCodec>,
-        block_transformer: Option<Arc<dyn BlockTransformer>>,
     ) -> Self {
         Self {
             current_len: 0,
@@ -766,9 +788,19 @@ impl EncodedSsTableBuilder<'_> {
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
             index_builder: flatbuffers::FlatBufferBuilder::new(),
             sst_codec,
-            compression_codec,
-            block_transformer,
+            compression_codec: None,
+            block_transformer: None,
         }
+    }
+
+    fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
+        self.compression_codec = Some(codec);
+        self
+    }
+
+    fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(transformer);
+        self
     }
 
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
@@ -833,14 +865,14 @@ impl EncodedSsTableBuilder<'_> {
 
         let new_builder = BlockBuilder::new(self.block_size);
         let builder = std::mem::replace(&mut self.builder, new_builder);
-        let block = EncodedSsTableBlockBuilder::new(
-            builder,
-            self.current_len,
-            self.compression_codec,
-            self.block_transformer.as_ref(),
-        )
-        .build()
-        .await?;
+        let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
+        if let Some(codec) = self.compression_codec {
+            block_builder = block_builder.with_compression_codec(codec);
+        }
+        if let Some(transformer) = self.block_transformer.as_ref() {
+            block_builder = block_builder.with_block_transformer(transformer);
+        }
+        let block = block_builder.build().await?;
         let block_meta = BlockMeta::create(
             &mut self.index_builder,
             &BlockMetaArgs {
@@ -896,18 +928,22 @@ impl EncodedSsTableBuilder<'_> {
         let mut footer_builder = EncodedSsTableFooterBuilder::new(
             self.current_len,
             self.sst_first_key,
-            self.compression_codec,
-            self.block_transformer.as_ref(),
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,
         );
+        if let Some(codec) = self.compression_codec {
+            footer_builder = footer_builder.with_compression_codec(codec);
+        }
+        if let Some(transformer) = self.block_transformer.as_ref() {
+            footer_builder = footer_builder.with_block_transformer(transformer);
+        }
 
         // Add filter if enough keys
         if self.num_keys >= self.min_filter_keys {
             let filter = Arc::new(self.filter_builder.build());
             let encoded_filter = filter.encode();
-            footer_builder = footer_builder.add_filter(filter, encoded_filter);
+            footer_builder = footer_builder.with_filter(filter, encoded_filter);
         }
 
         let footer = footer_builder.build().await?;
