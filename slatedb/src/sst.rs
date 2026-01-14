@@ -31,8 +31,7 @@
 //! - [`SsTableFormat`]: Configuration for SSTable format (block size, compression, etc.)
 //! - [`EncodedSsTableBuilder`]: Main builder for constructing SSTables from entries
 //! - [`EncodedSsTableBlockBuilder`]: Builder for encoding individual data blocks
-//! - [`EncodedSsTableFooterBuilder`]: Builder for the footer
-//!                                   (filter, index, metadata, metadata offset, version)
+//! - [`EncodedSsTableFooterBuilder`]: Builder for the footer (filter, index, metadata, metadata offset, version)
 //! - [`BlockTransformer`]: Trait for custom block transformations (e.g., encryption)
 //!
 //! # Compression
@@ -80,9 +79,9 @@ pub(crate) const SST_FORMAT_VERSION: u16 = 1;
 const NUM_FOOTER_BYTES: usize = 10;
 const NUM_FOOTER_BYTES_LONG: u64 = NUM_FOOTER_BYTES as u64;
 
-pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
-pub(crate) const SIZEOF_U32: usize = std::mem::size_of::<u32>();
-pub(crate) const SIZEOF_U64: usize = std::mem::size_of::<u64>();
+pub(crate) const SIZEOF_U16: usize = size_of::<u16>();
+pub(crate) const SIZEOF_U32: usize = size_of::<u32>();
+pub(crate) const SIZEOF_U64: usize = size_of::<u64>();
 pub(crate) const CHECKSUM_SIZE: usize = SIZEOF_U32;
 pub(crate) const OFFSET_SIZE: usize = SIZEOF_U16;
 pub(crate) const METADATA_OFFSET_SIZE: usize = SIZEOF_U64;
@@ -448,9 +447,8 @@ impl SsTableFormat {
 
     /// validate checksum and return the actual data bytes
     fn validate_checksum(&self, bytes: Bytes) -> Result<Bytes, SlateDBError> {
-        let checksum_sz = std::mem::size_of::<u32>();
-        let data_bytes = bytes.slice(..bytes.len() - checksum_sz);
-        let mut checksum_bytes = bytes.slice(bytes.len() - checksum_sz..);
+        let data_bytes = bytes.slice(..bytes.len() - CHECKSUM_SIZE);
+        let mut checksum_bytes = bytes.slice(bytes.len() - CHECKSUM_SIZE..);
         let checksum = crc32fast::hash(&data_bytes);
         let stored_checksum = checksum_bytes.get_u32();
         if checksum != stored_checksum {
@@ -794,7 +792,7 @@ async fn compress_and_transform(
         None => compressed,
     };
     let checksum = crc32fast::hash(&transformed);
-    let len = transformed.len() + std::mem::size_of::<u32>();
+    let len = transformed.len() + CHECKSUM_SIZE;
     buf.put(transformed);
     buf.put_u32(checksum);
     Ok(len)
