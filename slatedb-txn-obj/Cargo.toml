@@ -17,5 +17,8 @@ object_store = { workspace = true }
 slatedb-common = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+test-util = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

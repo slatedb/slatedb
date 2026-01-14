@@ -434,11 +434,10 @@ mod tests {
     use crate::size_tiered_compaction::{
         SizeTieredCompactionScheduler, SizeTieredCompactionSchedulerSupplier,
     };
-    use crate::transactional_object::test_utils::new_dirty_object;
     use crate::utils::IdGenerator;
     use crate::DbRand;
     use slatedb_common::clock::DefaultSystemClock;
-    use slatedb_txn_obj::DirtyObject;
+    use slatedb_txn_obj::test_utils::new_dirty_object;
     use std::sync::Arc;
 
     #[test]
@@ -888,8 +887,7 @@ mod tests {
     fn create_compactor_state(db_state: ManifestCore) -> CompactorState {
         let mut dirty = new_dirty_manifest();
         dirty.value.core = db_state;
-        let compactions =
-            DirtyObject::new(1u64.into(), Compactions::new(dirty.value.compactor_epoch));
+        let compactions = new_dirty_object(1u64, Compactions::new(dirty.value.compactor_epoch));
         CompactorState::new(dirty, compactions)
     }
 

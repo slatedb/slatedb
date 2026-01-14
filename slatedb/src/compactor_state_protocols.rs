@@ -333,7 +333,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use slatedb_txn_obj::DirtyObject;
+    use slatedb_txn_obj::test_utils::new_dirty_object;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -406,8 +406,8 @@ mod tests {
         let manifest_id = 3u64;
         let compactions_id = 8u64;
         let state = CompactorState::new(
-            DirtyObject::new(manifest_id.into(), manifest.clone()),
-            DirtyObject::new(compactions_id.into(), compactions.clone()),
+            new_dirty_object(manifest_id, manifest.clone()),
+            new_dirty_object(compactions_id, compactions.clone()),
         );
 
         let view = CompactorStateView::from(&state);

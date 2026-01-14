@@ -687,6 +687,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_txn_obj::test_utils::new_dirty_object;
     use tokio::runtime::{Handle, Runtime};
 
     const PATH: &str = "/test/db";
@@ -1149,7 +1150,7 @@ mod tests {
     // test helpers
 
     fn new_dirty_compactions(compactor_epoch: u64) -> DirtyObject<Compactions> {
-        DirtyObject::new(1u64.into(), Compactions::new(compactor_epoch))
+        new_dirty_object(1u64, Compactions::new(compactor_epoch))
     }
 
     fn compaction_with_status(id: Ulid, status: CompactionStatus) -> Compaction {

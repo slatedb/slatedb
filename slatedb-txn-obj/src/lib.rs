@@ -177,10 +177,6 @@ pub struct DirtyObject<T, Id: Copy = MonotonicId> {
 }
 
 impl<T, Id: Copy> DirtyObject<T, Id> {
-    pub fn new(id: Id, value: T) -> Self {
-        Self { id, value }
-    }
-
     #[allow(dead_code)]
     pub fn id(&self) -> Id {
         self.id
@@ -570,7 +566,7 @@ pub trait SequencedStorageProtocol<T>: TransactionalStorageProtocol<T, Monotonic
     async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
 }
 
-#[cfg(test)]
+#[cfg(feature = "test-util")]
 pub mod test_utils {
     use crate::DirtyObject;
 

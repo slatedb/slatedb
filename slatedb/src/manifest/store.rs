@@ -598,10 +598,11 @@ impl ManifestStore {
 pub(crate) mod test_utils {
     use crate::db_state::ManifestCore;
     use crate::manifest::Manifest;
+    use slatedb_txn_obj::test_utils::new_dirty_object;
     use slatedb_txn_obj::DirtyObject;
 
     pub(crate) fn new_dirty_manifest() -> DirtyObject<Manifest> {
-        DirtyObject::new(1u64.into(), Manifest::initial(ManifestCore::new()))
+        new_dirty_object(1u64, Manifest::initial(ManifestCore::new()))
     }
 }
 
