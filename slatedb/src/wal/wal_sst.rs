@@ -1,3 +1,52 @@
+//! WAL (Write-Ahead Log) SSTable encoding and building.
+//!
+//! This module provides a specialized SSTable builder for WAL entries. WAL SSTables
+//! differ from regular SSTables in several key ways optimized for write-ahead logging:
+//!
+//! # Differences from Regular SSTables
+//!
+//! | Feature | Regular SSTable | WAL SSTable |
+//! |---------|-----------------|-------------|
+//! | Bloom filter | Yes (optional) | No |
+//! | Index key | First key per block | First sequence number per block |
+//! | Key ordering | Sorted by key | Insertion order (by sequence) |
+//!
+//! # WAL SSTable Format
+//!
+//! ```text
+//! +------------------+
+//! |   Data Blocks    |  <- Entries in insertion order, optionally compressed
+//! +------------------+
+//! |   Index Block    |  <- Block metadata with sequence numbers
+//! +------------------+
+//! |   SST Info       |  <- Table metadata
+//! +------------------+
+//! |  Metadata offset |  <- Metadata offset (8 bytes)
+//! +------------------+
+//! |     Version      |  <- Format version (2 bytes)
+//! +------------------+
+//! ```
+//!
+//! # Key Components
+//!
+//! - [`EncodedWalSsTableBuilder`]: Builder for constructing WAL SSTables from entries
+//!
+//! The builder reuses shared components from the [`crate::sst`] module:
+//! - [`EncodedSsTableBlockBuilder`](crate::sst::EncodedSsTableBlockBuilder): For encoding data blocks
+//! - [`EncodedSsTableFooterBuilder`](crate::sst::EncodedSsTableFooterBuilder): For encoding the footer
+//!
+//! # Why No Bloom Filter?
+//!
+//! WAL SSTables are designed for sequential replay during recovery, not random
+//! key lookups. Since entries are read sequentially by sequence number, a bloom
+//! filter would provide no benefit.
+//!
+//! # Sequence Number Index
+//!
+//! Instead of indexing by first key (as in regular SSTables), the WAL SSTable
+//! index stores the first sequence number of each block. This enables efficient
+//! seeking to a specific point in the write-ahead log during recovery.
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -54,12 +103,15 @@ impl EncodedWalSsTableBuilder<'_> {
         }
     }
 
+
+    /// Sets the compression codec for compressing data blocks and index blocks
     #[allow(unused)]
     pub(crate) fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
         self.compression_codec = Some(codec);
         self
     }
 
+    /// Sets the block transformer for transforming data blocks and index blocks
     #[allow(unused)]
     pub(crate) fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);

@@ -29,9 +29,9 @@
 //! # Key Components
 //!
 //! - [`SsTableFormat`]: Configuration for SSTable format (block size, compression, etc.)
-//! - [`EncodedSsTableBuilder`]: Main builder for constructing SSTables from entries
-//! - [`EncodedSsTableBlockBuilder`]: Builder for encoding individual data blocks
-//! - [`EncodedSsTableFooterBuilder`]: Builder for the footer (filter, index, metadata, metadata offset, version)
+//! - [`EncodedSsTableBuilder`]: Main builder for constructing SSTables from entries. Internally uses:
+//!     - [`EncodedSsTableBlockBuilder`]: Builder for encoding individual data blocks
+//!     - [`EncodedSsTableFooterBuilder`]: Builder for the footer (filter, index, metadata, metadata offset, version)
 //! - [`BlockTransformer`]: Trait for custom block transformations (e.g., encryption)
 //!
 //! # Compression
@@ -519,9 +519,13 @@ impl SsTableInfo {
     }
 }
 
+/// Encoded SST data blocks
 pub(crate) struct EncodedSsTableBlock {
+    /// offset of the block within the SST
     pub(crate) offset: u64,
+    /// uncompressed and untransformed block
     pub(crate) block: Block,
+    /// compressed and transformed block
     pub(crate) encoded_bytes: Bytes,
 }
 
@@ -531,11 +535,15 @@ impl EncodedSsTableBlock {
     }
 }
 
-/// Builder for encoding a single SSTable block with compression and transformation.
+/// Builder for encoding a single SST block with compression and transformation.
 pub(crate) struct EncodedSsTableBlockBuilder<'a> {
+    /// builder for data blocks
     block_builder: BlockBuilder,
+    /// offset of the block within the SST
     offset: u64,
+    /// codec for compressing the data block
     compression_codec: Option<CompressionCodec>,
+    /// transformer for transforming the data block (e.g. encryption)
     block_transformer: Option<&'a Arc<dyn BlockTransformer>>,
 }
 
@@ -549,11 +557,13 @@ impl<'a> EncodedSsTableBlockBuilder<'a> {
         }
     }
 
+    /// Sets the compression codec for compressing the data block
     pub(crate) fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
         self.compression_codec = Some(codec);
         self
     }
 
+    /// Sets the block transformer for transforming the data block
     pub(crate) fn with_block_transformer(
         mut self,
         transformer: &'a Arc<dyn BlockTransformer>,
@@ -591,13 +601,21 @@ pub(crate) struct EncodedSsTableFooter {
 
 /// Builder for encoding the SSTable footer (filter, index, info, and metadata).
 pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
-    blocks_len: u64,
-    sst_first_key: Option<Bytes>,
+    /// size of all data blocks in the SST
+    blocks_size: u64,
+    /// first key in the SST
+    first_key: Option<Bytes>,
+    /// codec for compressing data blocks, index blocks, and filter blocks
     compression_codec: Option<CompressionCodec>,
+    /// transformer for transforming data blocks, index blocks, and filter blocks
     block_transformer: Option<&'a Arc<dyn BlockTransformer>>,
-    sst_codec: &'a dyn SsTableInfoCodec,
+    /// codec for the SST info
+    sst_info_codec: &'a dyn SsTableInfoCodec,
+    /// builder for the index block
     index_builder: flatbuffers::FlatBufferBuilder<'b, flatbuffers::DefaultAllocator>,
+    /// metadata block
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
+    /// filter block
     filter: Option<(Arc<BloomFilter>, Bytes)>,
 }
 
@@ -606,26 +624,28 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         blocks_len: u64,
         sst_first_key: Option<Bytes>,
         sst_codec: &'a dyn SsTableInfoCodec,
-        index_builder: flatbuffers::FlatBufferBuilder<'b, flatbuffers::DefaultAllocator>,
+        index_builder: flatbuffers::FlatBufferBuilder<'b, DefaultAllocator>,
         block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
     ) -> Self {
         Self {
-            blocks_len,
-            sst_first_key,
+            blocks_size: blocks_len,
+            first_key: sst_first_key,
             compression_codec: None,
             block_transformer: None,
-            sst_codec,
+            sst_info_codec: sst_codec,
             index_builder,
             block_meta,
             filter: None,
         }
     }
 
+    /// Sets an optional compression codec to the footer.
     pub(crate) fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
         self.compression_codec = Some(codec);
         self
     }
 
+    /// Sets an optional block transformer to the footer.
     pub(crate) fn with_block_transformer(
         mut self,
         transformer: &'a Arc<dyn BlockTransformer>,
@@ -645,7 +665,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         let mut buf = Vec::new();
 
         // Write filter block if present
-        let filter_offset = self.blocks_len + buf.len() as u64;
+        let filter_offset = self.blocks_size + buf.len() as u64;
         let (filter_len, maybe_filter) = match self.filter.take() {
             Some((filter, encoded_filter)) => {
                 let len = compress_and_transform(
@@ -660,7 +680,6 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             None => (0u64, None),
         };
 
-        // Build and write index block
         let vector = self.index_builder.create_vector(&self.block_meta);
         let index_wip = SsTableIndex::create(
             &mut self.index_builder,
@@ -671,7 +690,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         self.index_builder.finish(index_wip, None);
         let index_data = Bytes::from(self.index_builder.finished_data().to_vec());
         let index = SsTableIndexOwned::new(index_data.clone())?;
-        let index_offset = self.blocks_len + buf.len() as u64;
+        let index_offset = self.blocks_size + buf.len() as u64;
         let index_len = compress_and_transform(
             &mut buf,
             index_data,
@@ -680,19 +699,17 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         )
         .await? as u64;
 
-        // Create and encode SsTableInfo
-        let meta_offset = self.blocks_len + buf.len() as u64;
+        let meta_offset = self.blocks_size + buf.len() as u64;
         let info = SsTableInfo {
-            first_key: self.sst_first_key,
+            first_key: self.first_key,
             index_offset,
             index_len,
             filter_offset,
             filter_len,
             compression_codec: self.compression_codec,
         };
-        SsTableInfo::encode(&info, &mut buf, self.sst_codec);
+        SsTableInfo::encode(&info, &mut buf, self.sst_info_codec);
 
-        // Write metadata offset and version
         buf.put_u64(meta_offset);
         buf.put_u16(SST_FORMAT_VERSION);
 
@@ -734,6 +751,32 @@ impl EncodedSsTable {
     }
 }
 
+/// Compresses and transforms the data using the specified
+/// compression codec and the block transformer.
+async fn compress_and_transform(
+    buf: &mut Vec<u8>,
+    data: Bytes,
+    compression_codec: Option<CompressionCodec>,
+    block_transformer: Option<&Arc<dyn BlockTransformer>>,
+) -> Result<usize, SlateDBError> {
+    let compressed = match compression_codec {
+        None => data,
+        Some(c) => compress(data, c)?,
+    };
+    let transformed = match block_transformer {
+        Some(t) => t
+            .encode(compressed)
+            .await
+            .map_err(|_| SlateDBError::BlockTransformError)?,
+        None => compressed,
+    };
+    let checksum = crc32fast::hash(&transformed);
+    let len = transformed.len() + CHECKSUM_SIZE;
+    buf.put(transformed);
+    buf.put_u32(checksum);
+    Ok(len)
+}
+
 /// Compresses the data using the specified compression codec.
 pub(crate) fn compress(
     #[allow(unused_variables)] data: Bytes,
@@ -772,30 +815,6 @@ pub(crate) fn compress(
             Ok(Bytes::from(compressed))
         }
     }
-}
-
-async fn compress_and_transform(
-    buf: &mut Vec<u8>,
-    data: Bytes,
-    compression_codec: Option<CompressionCodec>,
-    block_transformer: Option<&Arc<dyn BlockTransformer>>,
-) -> Result<usize, SlateDBError> {
-    let compressed = match compression_codec {
-        None => data,
-        Some(c) => compress(data, c)?,
-    };
-    let transformed = match block_transformer {
-        Some(t) => t
-            .encode(compressed)
-            .await
-            .map_err(|_| SlateDBError::BlockTransformError)?,
-        None => compressed,
-    };
-    let checksum = crc32fast::hash(&transformed);
-    let len = transformed.len() + CHECKSUM_SIZE;
-    buf.put(transformed);
-    buf.put_u32(checksum);
-    Ok(len)
 }
 
 /// Builds an SSTable from key-value pairs.
@@ -844,11 +863,13 @@ impl EncodedSsTableBuilder<'_> {
         }
     }
 
+    /// Sets the compression codec for compressing the blocks
     fn with_compression_codec(mut self, codec: CompressionCodec) -> Self {
         self.compression_codec = Some(codec);
         self
     }
 
+    /// Sets the block transformer for transforming the blocks
     fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
         self
