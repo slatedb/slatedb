@@ -474,6 +474,15 @@ impl CompactorState {
 
         for compaction in remote_compactions.value.iter() {
             if let Entry::Vacant(v) = merged.entry(compaction.id()) {
+                // The compactor should control all compaction state transitions. If the
+                // compactor finds a new remote compaction (a compaction that the compactor
+                // didn't create), it must be in `Submitted` status (the beginning status).
+                assert_eq!(
+                    compaction.status(),
+                    CompactionStatus::Submitted,
+                    "found a new remote commpaction with non-Submitted status [compaction={:?}]",
+                    compaction
+                );
                 v.insert(compaction.clone());
             }
         }
@@ -785,15 +794,10 @@ mod tests {
         let mut state = CompactorState::new(manifest, local_compactions);
 
         let remote_submitted = Ulid::from_parts(3, 0);
-        let remote_finished = Ulid::from_parts(4, 0);
         let mut remote_compactions = new_dirty_compactions(compactor_epoch);
         remote_compactions.value.insert(compaction_with_status(
             remote_submitted,
             CompactionStatus::Submitted,
-        ));
-        remote_compactions.value.insert(compaction_with_status(
-            remote_finished,
-            CompactionStatus::Failed,
         ));
 
         state.merge_remote_compactions(remote_compactions);
@@ -804,18 +808,16 @@ mod tests {
             merged.get(&local_running).expect("not found").status(),
             CompactionStatus::Running
         );
+        assert!(merged.contains(&local_finished));
+        assert_eq!(
+            merged.get(&local_finished).expect("not found").status(),
+            CompactionStatus::Completed
+        );
         assert!(merged.contains(&remote_submitted));
         assert_eq!(
             merged.get(&remote_submitted).expect("not found").status(),
             CompactionStatus::Submitted
         );
-        assert!(merged.contains(&remote_finished));
-        assert_eq!(
-            merged.get(&remote_finished).expect("not found").status(),
-            CompactionStatus::Failed
-        );
-        // Expect this to be trimmed since remote_finished is finished and newer
-        assert!(!merged.contains(&local_finished));
     }
 
     #[test]
