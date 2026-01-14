@@ -1331,6 +1331,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use super::*;
@@ -1498,5 +1499,21 @@ object_store_cache_options:
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
+    }
+
+    #[test]
+    fn test_size_tiered_compaction_scheduler_options_roundtrip() {
+        let options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 3,
+            max_compaction_sources: 9,
+            include_size_threshold: 7.0,
+        };
+
+        let map: HashMap<String, String> = options.into();
+        let roundtripped = SizeTieredCompactionSchedulerOptions::from(map);
+
+        assert_eq!(roundtripped.min_compaction_sources, 3);
+        assert_eq!(roundtripped.max_compaction_sources, 9);
+        assert_eq!(roundtripped.include_size_threshold, 7.0);
     }
 }
