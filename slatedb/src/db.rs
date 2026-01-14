@@ -1522,7 +1522,7 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-        ObjectStoreCacheOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl,
+        ObjectStoreCacheOptions, Settings, Ttl,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_state::ManifestCore;
@@ -1535,7 +1535,6 @@ mod tests {
     use crate::rand::DbRand;
     #[cfg(feature = "test-util")]
     use crate::seq_tracker::FindOption;
-    use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
@@ -2897,9 +2896,6 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_batch_writes_consistency() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let compaction_scheduler = Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-            SizeTieredCompactionSchedulerOptions::default(),
-        ));
         let kv_store = Arc::new(
             Db::builder("/tmp/test_concurrent_kv_store", object_store)
                 .with_settings(test_db_options(
@@ -2912,9 +2908,9 @@ mod tests {
                         max_sst_size: 256,
                         max_concurrent_compactions: 1,
                         manifest_update_timeout: Duration::from_secs(300),
+                        ..Default::default()
                     }),
                 ))
-                .with_compaction_scheduler_supplier(compaction_scheduler)
                 .build()
                 .await
                 .unwrap(),
@@ -4607,6 +4603,7 @@ mod tests {
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
                 manifest_update_timeout: Duration::from_secs(300),
+                ..Default::default()
             }),
         ))
         .await;
@@ -4622,6 +4619,7 @@ mod tests {
                 manifest_update_timeout: Duration::from_secs(300),
                 max_sst_size: 256,
                 max_concurrent_compactions: 1,
+                ..Default::default()
             }),
         ))
         .await
