@@ -1,3 +1,56 @@
+//! SSTable (Sorted String Table) encoding and building.
+//!
+//! This module provides the core data structures and builders for creating and reading
+//! SSTables, the persistent on-disk format used by SlateDB for storing sorted key-value
+//! data.
+//!
+//! # SSTable Format
+//!
+//! An SSTable consists of the following components, written sequentially:
+//!
+//! ```text
+//! +------------------+
+//! |   Data Blocks    |  <- Key-value entries, optionally compressed
+//! +------------------+
+//! |   Filter Block   |  <- Bloom filter for efficient key lookups (optional)
+//! +------------------+
+//! |   Index Block    |  <- Block metadata (offsets, first keys)
+//! +------------------+
+//! |   SST Info       |  <- Table metadata (key range, compression, etc.)
+//! +------------------+
+//! |  Metadata offset |  <- Metadata offset (8 bytes)
+//! +------------------+
+//! |     Version      |  <- Format version (2 bytes)
+//! +------------------+
+//! ```
+//!
+//! Each block is followed by a CRC32 checksum for data integrity verification.
+//!
+//! # Key Components
+//!
+//! - [`SsTableFormat`]: Configuration for SSTable format (block size, compression, etc.)
+//! - [`EncodedSsTableBuilder`]: Main builder for constructing SSTables from entries
+//! - [`EncodedSsTableBlockBuilder`]: Builder for encoding individual data blocks
+//! - [`EncodedSsTableFooterBuilder`]: Builder for the footer
+//!                                   (filter, index, metadata, metadata offset, version)
+//! - [`BlockTransformer`]: Trait for custom block transformations (e.g., encryption)
+//!
+//! # Compression
+//!
+//! SSTables support optional compression via the [`CompressionCodec`] enum:
+//! - Snappy (feature: `snappy`)
+//! - LZ4 (feature: `lz4`)
+//! - Zstd (feature: `zstd`)
+//! - Zlib (feature: `zlib`)
+//!
+//! Compression is applied per-block before the checksum is computed.
+//!
+//! # Block Transformation
+//!
+//! The [`BlockTransformer`] trait allows custom transformations on block data,
+//! such as encryption. Transformations are applied after compression on write
+//! and before decompression on read.
+
 use std::collections::VecDeque;
 #[cfg(feature = "zlib")]
 use std::io::{Read, Write};
