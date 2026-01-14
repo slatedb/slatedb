@@ -763,13 +763,7 @@ async fn compress_and_transform(
         None => data,
         Some(c) => compress(data, c)?,
     };
-    let transformed = match block_transformer {
-        Some(t) => t
-            .encode(compressed)
-            .await
-            .map_err(|_| SlateDBError::BlockTransformError)?,
-        None => compressed,
-    };
+    let transformed = transform(compressed, block_transformer).await?;
     let checksum = crc32fast::hash(&transformed);
     let len = transformed.len() + CHECKSUM_SIZE;
     buf.put(transformed);
@@ -778,7 +772,7 @@ async fn compress_and_transform(
 }
 
 /// Compresses the data using the specified compression codec.
-pub(crate) fn compress(
+fn compress(
     #[allow(unused_variables)] data: Bytes,
     c: CompressionCodec,
 ) -> Result<Bytes, SlateDBError> {
@@ -815,6 +809,21 @@ pub(crate) fn compress(
             Ok(Bytes::from(compressed))
         }
     }
+}
+
+/// Transforms the data using the specified block transformer.
+async fn transform(
+    data: Bytes,
+    block_transformer: Option<&Arc<dyn BlockTransformer>>,
+) -> Result<Bytes, SlateDBError> {
+    let transformed = match block_transformer {
+        Some(t) => t
+            .encode(data)
+            .await
+            .map_err(|_| SlateDBError::BlockTransformError)?,
+        None => data,
+    };
+    Ok(transformed)
 }
 
 /// Builds an SSTable from key-value pairs.

@@ -9,7 +9,8 @@
 //! |---------|-----------------|-------------|
 //! | Bloom filter | Yes (optional) | No |
 //! | Index key | First key per block | First sequence number per block |
-//! | Key ordering | Sorted by key | Insertion order (by sequence) |
+//! | Key ordering | Sorted by key | Insertion order (by sequence number) |
+//! | First key field in SST info  | First key | First sequence number |
 //!
 //! # WAL SSTable Format
 //!
@@ -80,7 +81,7 @@ pub(crate) struct EncodedWalSsTableBuilder<'a> {
     sst_codec: Box<dyn SsTableInfoCodec>,
     compression_codec: Option<CompressionCodec>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
-    sst_first_key: Option<Bytes>,
+    sst_first_seq: Option<Bytes>,
     first_seq: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
 }
 
@@ -98,11 +99,10 @@ impl EncodedWalSsTableBuilder<'_> {
             sst_codec,
             compression_codec: None,
             block_transformer: None,
-            sst_first_key: None,
+            sst_first_seq: None,
             first_seq: None,
         }
     }
-
 
     /// Sets the compression codec for compressing data blocks and index blocks
     #[allow(unused)]
@@ -121,20 +121,19 @@ impl EncodedWalSsTableBuilder<'_> {
     /// Adds an entry to the WAL SSTable and returns the size of the block that was finished if any.
     #[allow(unused)]
     pub(crate) async fn add(&mut self, entry: RowEntry) -> Result<Option<usize>, SlateDBError> {
-        // Track first key for SST info
-        let is_sst_first_key = self.sst_first_key.is_none();
-        // ToDo(cadonna) Is this really needed for the WAL?
-        if is_sst_first_key {
-            self.sst_first_key = Some(entry.key.clone());
+        // Track first sequence number for SST info
+        let is_sst_first_seq = self.sst_first_seq.is_none();
+        if is_sst_first_seq {
+            self.sst_first_seq = Some(Bytes::copy_from_slice(&entry.seq.to_be_bytes()));
         }
-
-        let first_seq_bytes = entry.seq.to_be_bytes();
 
         let mut block_size = None;
         if !self.builder.would_fit(&entry) {
+            let first_seq_bytes = entry.seq.to_be_bytes();
             block_size = self.finish_block().await?;
             self.first_seq = Some(self.index_builder.create_vector(&first_seq_bytes));
-        } else if is_sst_first_key {
+        } else if is_sst_first_seq {
+            let first_seq_bytes = entry.seq.to_be_bytes();
             self.first_seq = Some(self.index_builder.create_vector(&first_seq_bytes));
         }
 
@@ -225,6 +224,7 @@ impl EncodedWalSsTableBuilder<'_> {
     ///
     /// Note: Unlike regular SSTs, WAL SSTs have no bloom filter.
     /// The index first_key field contains the min sequence number (as bytes) for each block.
+    /// SST info contains the first sequence number of the SST instead of the first key.
     #[allow(unused)]
     pub(crate) async fn build(mut self) -> Result<EncodedSsTable, SlateDBError> {
         self.finish_block().await?;
@@ -232,7 +232,7 @@ impl EncodedWalSsTableBuilder<'_> {
         // Build footer (includes index building, no filter for WAL SSTs)
         let mut footer_builder = EncodedSsTableFooterBuilder::new(
             self.current_len,
-            self.sst_first_key,
+            self.sst_first_seq,
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,
@@ -373,7 +373,10 @@ mod tests {
         let mut encoded = builder.build().await.unwrap();
 
         // Then
-        assert_eq!(encoded.info.first_key.as_ref().unwrap().as_ref(), b"zebra");
+        assert_eq!(
+            encoded.info.first_key.as_ref().unwrap().as_ref(),
+            5u64.to_be_bytes()
+        );
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
         let mut iter = BlockIterator::new(block.block, Ascending);
         let expected = vec![
@@ -555,7 +558,7 @@ mod tests {
         // Then
         assert_eq!(
             encoded.info.first_key.as_ref().unwrap().as_ref(),
-            b"only_key"
+            42u64.to_be_bytes()
         );
         assert_eq!(encoded.unconsumed_blocks.len(), 1);
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
