@@ -54,10 +54,10 @@ impl From<&CompactorState> for CompactorStateView {
     fn from(state: &CompactorState) -> Self {
         CompactorStateView {
             compactions: Some((
-                state.compactions().id().into(),
+                state.compactions().id.into(),
                 state.compactions().value.clone(),
             )),
-            manifest: (state.manifest().id().into(), state.manifest().value.clone()),
+            manifest: (state.manifest().id.into(), state.manifest().value.clone()),
         }
     }
 }

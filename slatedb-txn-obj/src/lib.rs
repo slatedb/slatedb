@@ -186,21 +186,10 @@ pub struct GenericObjectMetadata<Id: Copy = MonotonicId> {
 /// A local view of a transactional object, possibly with local mutations
 #[derive(Clone, Debug)]
 pub struct DirtyObject<T, Id: Copy = MonotonicId> {
-    /// This ID of the object from which this `DirtyObject` was created
-    id: Id,
+    /// The version ID that this dirty object is based on.
+    pub id: Id,
+    /// The value of the object, possibly with local mutations.
     pub value: T,
-}
-
-impl<T, Id: Copy> DirtyObject<T, Id> {
-    #[allow(dead_code)]
-    pub fn id(&self) -> Id {
-        self.id
-    }
-
-    #[allow(dead_code)]
-    pub fn into_value(self) -> T {
-        self.value
-    }
 }
 
 /// An in-memory datum that is backed by durable storage and can be
@@ -762,10 +751,10 @@ mod tests {
             epoch: 0,
             payload: 2,
         };
-        sr.ops.write(Some(dirty.id()), &dirty.value).await.unwrap();
+        sr.ops.write(Some(dirty.id), &dirty.value).await.unwrap();
         let err = sr
             .ops
-            .write(Some(dirty.id()), &dirty.value)
+            .write(Some(dirty.id), &dirty.value)
             .await
             .unwrap_err();
         assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
