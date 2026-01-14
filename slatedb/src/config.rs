@@ -168,6 +168,7 @@ use duration_str::{deserialize_duration, deserialize_option_duration};
 use figment::providers::{Env, Format, Json, Toml, Yaml};
 use figment::{Figment, Metadata, Provider};
 use serde::{Deserialize, Serialize, Serializer};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::{str::FromStr, time::Duration};
@@ -1088,6 +1089,47 @@ impl Default for SizeTieredCompactionSchedulerOptions {
     }
 }
 
+impl From<SizeTieredCompactionSchedulerOptions> for HashMap<String, String> {
+    fn from(options: SizeTieredCompactionSchedulerOptions) -> Self {
+        let mut map = HashMap::new();
+        map.insert(
+            "min_compaction_sources".to_string(),
+            options.min_compaction_sources.to_string(),
+        );
+        map.insert(
+            "max_compaction_sources".to_string(),
+            options.max_compaction_sources.to_string(),
+        );
+        map.insert(
+            "include_size_threshold".to_string(),
+            options.include_size_threshold.to_string(),
+        );
+        map
+    }
+}
+
+impl From<HashMap<String, String>> for SizeTieredCompactionSchedulerOptions {
+    fn from(mut map: HashMap<String, String>) -> Self {
+        let mut options = SizeTieredCompactionSchedulerOptions::default();
+        if let Some(value) = map.remove("min_compaction_sources") {
+            if let Ok(parsed) = value.parse() {
+                options.min_compaction_sources = parsed;
+            }
+        }
+        if let Some(value) = map.remove("max_compaction_sources") {
+            if let Ok(parsed) = value.parse() {
+                options.max_compaction_sources = parsed;
+            }
+        }
+        if let Some(value) = map.remove("include_size_threshold") {
+            if let Ok(parsed) = value.parse() {
+                options.include_size_threshold = parsed;
+            }
+        }
+        options
+    }
+}
+
 /// Garbage collector options.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GarbageCollectorOptions {
@@ -1410,5 +1452,30 @@ object_store_cache_options:
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
+    }
+
+    #[test]
+    fn test_size_tiered_compaction_scheduler_options_round_trip_hashmap() {
+        let options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 2,
+            max_compaction_sources: 9,
+            include_size_threshold: 1.75,
+        };
+
+        let map: HashMap<String, String> = options.into();
+        let round_trip = SizeTieredCompactionSchedulerOptions::from(map);
+
+        assert_eq!(
+            round_trip.min_compaction_sources, 2,
+            "min_compaction_sources should round-trip"
+        );
+        assert_eq!(
+            round_trip.max_compaction_sources, 9,
+            "max_compaction_sources should round-trip"
+        );
+        assert_eq!(
+            round_trip.include_size_threshold, 1.75,
+            "include_size_threshold should round-trip"
+        );
     }
 }
