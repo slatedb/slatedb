@@ -47,8 +47,9 @@ disallowed-methods = [
     # Safety checks to keep SlateDB safe for deterministic simulation testing (DST)
     { path = "rand::random", reason = "Use crate::rand::DbRand instead" },
     { path = "rand::thread_rng", reason = "Use crate::rand::DbRand instead" },
-    { path = "rand::prelude::random", reason = "Use crate::rand::DbRand instead" },
-    { path = "rand::prelude::thread_rng", reason = "Use crate::rand::DbRand instead" },
+    # prelude versions are allow-invalid since they may not be in scope
+    { path = "rand::prelude::random", reason = "Use crate::rand::DbRand instead", allow-invalid = true  },
+    { path = "rand::prelude::thread_rng", reason = "Use crate::rand::DbRand instead", allow-invalid = true  },
     { path = "std::time::SystemTime::now", reason = "Use slatedb_common::clock::SystemClock instead" },
     { path = "std::time::SystemTime::elapsed", reason = "Use slatedb_common::clock::SystemClock instead" },
     { path = "std::option::Option::unwrap", reason = "Use expect instead" },
