@@ -821,6 +821,25 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "found a new remote commpaction with non-Submitted status")]
+    fn test_merge_remote_compactions_panics_on_non_submitted_remote() {
+        let manifest = new_dirty_manifest();
+        let compactor_epoch = manifest.value.compactor_epoch;
+
+        let local_compactions = new_dirty_compactions(compactor_epoch);
+        let mut state = CompactorState::new(manifest, local_compactions);
+
+        let remote_running = Ulid::from_parts(3, 0);
+        let mut remote_compactions = new_dirty_compactions(compactor_epoch);
+        remote_compactions.value.insert(compaction_with_status(
+            remote_running,
+            CompactionStatus::Running,
+        ));
+
+        state.merge_remote_compactions(remote_compactions);
+    }
+
+    #[test]
     fn test_should_register_compaction() {
         // given:
         let rt = build_runtime();
