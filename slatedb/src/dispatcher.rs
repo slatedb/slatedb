@@ -782,17 +782,31 @@ mod test {
             .add_ticker(Duration::from_millis(5), 1)
             .add_clock_schedule(5); // Advance clock by 5ms after first message
         let cancellation_token = CancellationToken::new();
+        let fp = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-        );
+        )
+        .with_fp_registry(fp.clone());
+
+        // Pause the dispatcher run loop to prevent first ticker from firing immediately
+        fail_parallel::cfg(fp.clone(), "dispatcher-run-loop", "pause").unwrap();
+
+        // Start the dispatcher.
         let join = tokio::spawn(async move { dispatcher.run().await });
 
         // Send a message successfully, then trigger a tick before processing the next message
         tx.send(TestMessage::Channel(10)).unwrap();
+
+        // Enable run loop to process first message, then the tick
+        fail_parallel::cfg(fp.clone(), "dispatcher-run-loop", "off").unwrap();
+
+        // Wait for both to be processed
         wait_for_message_count(log.clone(), 2).await;
+
+        // Send another message successfully
         tx.send(TestMessage::Channel(20)).unwrap();
         wait_for_message_count(log.clone(), 3).await;
 
