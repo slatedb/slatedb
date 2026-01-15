@@ -178,7 +178,7 @@ impl EncodedWalSsTableBuilder<'_> {
         if let Some(codec) = self.compression_codec {
             block_builder = block_builder.with_compression_codec(codec);
         }
-        if let Some(transformer) = self.block_transformer.as_ref() {
+        if let Some(transformer) = self.block_transformer.clone() {
             block_builder = block_builder.with_block_transformer(transformer);
         }
         let block = block_builder.build().await?;
@@ -240,7 +240,7 @@ impl EncodedWalSsTableBuilder<'_> {
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
         }
-        if let Some(transformer) = self.block_transformer.as_ref() {
+        if let Some(transformer) = self.block_transformer.clone() {
             footer_builder = footer_builder.with_block_transformer(transformer);
         }
         let footer = footer_builder.build().await?;

@@ -536,7 +536,7 @@ impl EncodedSsTableBlock {
 }
 
 /// Builder for encoding a single SST block with compression and transformation.
-pub(crate) struct EncodedSsTableBlockBuilder<'a> {
+pub(crate) struct EncodedSsTableBlockBuilder {
     /// builder for data blocks
     block_builder: BlockBuilder,
     /// offset of the block within the SST
@@ -544,10 +544,10 @@ pub(crate) struct EncodedSsTableBlockBuilder<'a> {
     /// codec for compressing the data block
     compression_codec: Option<CompressionCodec>,
     /// transformer for transforming the data block (e.g. encryption)
-    block_transformer: Option<&'a Arc<dyn BlockTransformer>>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
-impl<'a> EncodedSsTableBlockBuilder<'a> {
+impl EncodedSsTableBlockBuilder {
     pub(crate) fn new(block_builder: BlockBuilder, offset: u64) -> Self {
         Self {
             block_builder,
@@ -564,10 +564,7 @@ impl<'a> EncodedSsTableBlockBuilder<'a> {
     }
 
     /// Sets the block transformer for transforming the data block
-    pub(crate) fn with_block_transformer(
-        mut self,
-        transformer: &'a Arc<dyn BlockTransformer>,
-    ) -> Self {
+    pub(crate) fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
         self
     }
@@ -580,7 +577,7 @@ impl<'a> EncodedSsTableBlockBuilder<'a> {
             &mut compressed_and_transformed_block,
             encoded_block,
             self.compression_codec,
-            self.block_transformer,
+            self.block_transformer.as_ref(),
         )
         .await?;
         Ok(EncodedSsTableBlock {
@@ -608,7 +605,7 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     /// codec for compressing data blocks, index blocks, and filter blocks
     compression_codec: Option<CompressionCodec>,
     /// transformer for transforming data blocks, index blocks, and filter blocks
-    block_transformer: Option<&'a Arc<dyn BlockTransformer>>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
     /// codec for the SST info
     sst_info_codec: &'a dyn SsTableInfoCodec,
     /// builder for the index block
@@ -646,10 +643,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     }
 
     /// Sets an optional block transformer to the footer.
-    pub(crate) fn with_block_transformer(
-        mut self,
-        transformer: &'a Arc<dyn BlockTransformer>,
-    ) -> Self {
+    pub(crate) fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
         self
     }
@@ -672,7 +666,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
                     &mut buf,
                     encoded_filter,
                     self.compression_codec,
-                    self.block_transformer,
+                    self.block_transformer.as_ref(),
                 )
                 .await?;
                 (len as u64, Some(filter))
@@ -695,7 +689,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             &mut buf,
             index_data,
             self.compression_codec,
-            self.block_transformer,
+            self.block_transformer.as_ref(),
         )
         .await? as u64;
 
@@ -950,7 +944,7 @@ impl EncodedSsTableBuilder<'_> {
         if let Some(codec) = self.compression_codec {
             block_builder = block_builder.with_compression_codec(codec);
         }
-        if let Some(transformer) = self.block_transformer.as_ref() {
+        if let Some(transformer) = self.block_transformer.clone() {
             block_builder = block_builder.with_block_transformer(transformer);
         }
         let block = block_builder.build().await?;
@@ -1016,7 +1010,7 @@ impl EncodedSsTableBuilder<'_> {
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
         }
-        if let Some(transformer) = self.block_transformer.as_ref() {
+        if let Some(transformer) = self.block_transformer.clone() {
             footer_builder = footer_builder.with_block_transformer(transformer);
         }
 
