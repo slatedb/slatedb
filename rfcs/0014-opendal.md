@@ -39,7 +39,7 @@ However, as development has progressed, we've encountered limitations with this 
 These wrapper implementations have several drawbacks:
 
 - Each feature requires implementing the full `ObjectStore` trait, leading to significant boilerplate code
-- We're duplicating efforts that are already solved problems in the broader ecosystem
+- We're duplicating efforts that are already solved problems in the broader ecosystem (.e.g [influxdb](https://github.com/influxdata/influxdb3_core/tree/main/object_store_mem_cache))
 - Maintaining and testing these wrappers adds ongoing engineering overhead
 - The composition of multiple wrapper layers can be error-prone and harder to reason about
 
