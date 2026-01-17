@@ -1766,7 +1766,17 @@ mod tests {
         let value = b"test_value";
 
         // insert at t=0
-        kv_store.put(key, value).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
         clock.set(99);
@@ -1815,7 +1825,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -1861,11 +1873,31 @@ mod tests {
         let value = b"test_value";
 
         // insert at t=0
-        kv_store.put(key, value).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
         clock.set(99);
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             Some(Bytes::from_static(value)),
@@ -1886,7 +1918,17 @@ mod tests {
         );
 
         // advance durable clock time to t=100 by flushing -- no longer returned
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             None,
@@ -2034,14 +2076,26 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> still returned
         clock.set(49);
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             Some(Bytes::from_static(value)),
@@ -2062,7 +2116,17 @@ mod tests {
         );
 
         // advance durable clock time to t=100 by flushing -- no longer returned
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             None,
@@ -2089,9 +2153,39 @@ mod tests {
             .unwrap();
 
         // insert keys at t=0
-        kv_store.put(b"key1", b"value1").await.unwrap();
-        kv_store.put(b"key2", b"value2").await.unwrap();
-        kv_store.put(b"key3", b"value3").await.unwrap();
+        kv_store
+            .put_with_options(
+                b"key1",
+                b"value1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key3",
+                b"value3",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
         clock.set(99);
@@ -2153,7 +2247,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -2164,7 +2260,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(75),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -2175,7 +2273,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(100),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -2253,13 +2353,53 @@ mod tests {
         let key_other = b"time_advancing_key";
 
         // insert keys at t=0
-        kv_store.put(b"key1", b"value1").await.unwrap();
-        kv_store.put(b"key2", b"value2").await.unwrap();
-        kv_store.put(b"key3", b"value3").await.unwrap();
+        kv_store
+            .put_with_options(
+                b"key1",
+                b"value1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key3",
+                b"value3",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
         clock.set(99);
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2291,7 +2431,17 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance durable clock time to t=100 by flushing -- no longer returned
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2330,7 +2480,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -2341,14 +2493,26 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(75),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> all still returned
         clock.set(49);
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2378,7 +2542,17 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance durable clock time to t=50 by flushing -- key1 expired
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2394,7 +2568,17 @@ mod tests {
 
         // advance durable clock time to t=75 by flushing -- both keys expired
         clock.set(75);
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -3910,9 +4094,36 @@ mod tests {
             .await
             .unwrap();
 
-        db.put(b"key1", b"val1").await.unwrap();
-        db.put(b"key2", b"val2").await.unwrap();
-        db.put(b"key3", b"val3").await.unwrap();
+        db.put_with_options(
+            b"key1",
+            b"val1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            b"key2",
+            b"val2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            b"key3",
+            b"val3",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
         db.flush().await.unwrap();
         db.close().await.unwrap();
 
@@ -4692,12 +4903,31 @@ mod tests {
         // When:
         // put with time = 10
         clock.set(10);
-        db.put(b"1", b"1").await.unwrap();
+        db.put_with_options(
+            b"1",
+            b"1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
 
         // Then:
         // put with time goes backwards, should fail
         clock.set(5);
-        match db.put(b"1", b"1").await {
+        match db
+            .put_with_options(
+                b"1",
+                b"1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+        {
             Ok(_) => panic!("expected an error on inserting backwards time"),
             Err(e) => assert_eq!(e.to_string(), "Invalid error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
@@ -4720,7 +4950,16 @@ mod tests {
         // When:
         // put with time = 10
         clock.set(10);
-        db.put(b"1", b"1").await.unwrap();
+        db.put_with_options(
+            b"1",
+            b"1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
         db.flush().await.unwrap();
 
         let db2 = Db::builder(path, object_store.clone())
@@ -4730,7 +4969,17 @@ mod tests {
             .await
             .unwrap();
         clock.set(5);
-        match db2.put(b"1", b"1").await {
+        match db2
+            .put_with_options(
+                b"1",
+                b"1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+        {
             Ok(_) => panic!("expected an error on inserting backwards time"),
             Err(e) => assert_eq!(e.to_string(), "Invalid error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
@@ -4791,15 +5040,30 @@ mod tests {
             .unwrap();
 
         clock.set(10);
-        db.put(&[b'a'; 4], &[b'j'; 8])
-            .await
-            .expect("write batch failed");
+        db.put_with_options(
+            &[b'a'; 4],
+            &[b'j'; 8],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("write batch failed");
         clock.set(11);
-        db.put(&[b'b'; 4], &[b'k'; 8])
-            .await
-            .expect("write batch failed");
+        db.put_with_options(
+            &[b'b'; 4],
+            &[b'k'; 8],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("write batch failed");
 
         // close the db to flush the manifest
+        db.flush().await.unwrap();
         db.close().await.unwrap();
 
         // check the last_l0_clock_tick persisted in the manifest, it should be
