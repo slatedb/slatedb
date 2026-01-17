@@ -27,7 +27,8 @@ provided by the bot. You will only need to do this once across all repos using o
 
 AI-generated (or largerly generated) pull requests are welcome, provided that you:
 
-- Generate the code changes with the latest OpenAI/Anthropic frontier model at maximum thinking. At the time of this writing, that is OpenAI Codex 5.2 (xhigh) or Claude Opus 4.5 (high with extended thinking and expanded `budget_tokens`).
+- Use the latest OpenAI/Anthropic frontier model at maximum thinking.
+- Write the pull request summary yourself (don't use AI for this).
 - Use the `claude` or `codex` CLI to generate the code.
 - Review the code change yourself before submitting the PR.
 - Run `/review` locally in the `codex` or `claude` CLI before submitting the PR.
