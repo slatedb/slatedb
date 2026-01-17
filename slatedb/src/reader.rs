@@ -397,16 +397,16 @@ mod tests {
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::types::{RowEntry, ValueDeletable};
     use rstest::rstest;
+    use slatedb_common::clock::{MockSystemClock, SystemClock};
 
     use crate::batch::WriteBatch;
-    use crate::clock::{LogicalClock, MonotonicClock};
+    use crate::clock::MonotonicClock;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
     use crate::sst::SsTableFormat;
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
-    use crate::test_utils::TestClock;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use std::collections::HashMap;
     use ulid::Ulid;
@@ -1268,18 +1268,19 @@ mod tests {
         #[case] test_case: LayerPriorityTestCase,
     ) -> Result<(), SlateDBError> {
         // Create test database state and populate it
+
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
         let stat_registry = StatRegistry::new();
         let db_stats = DbStats::new(&stat_registry);
-        let test_clock = Arc::new(TestClock::new());
+        let test_clock = Arc::new(MockSystemClock::new());
         // Set the clock to the test case's "now" value for TTL filtering
         if let Some(now) = test_case.now {
             test_clock.set(now);
         }
-        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn LogicalClock>, 0));
+        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
         let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));
@@ -1738,17 +1739,18 @@ mod tests {
         #[case] test_case: ScanTestCase,
     ) -> Result<(), SlateDBError> {
         // Create test database state and populate it
+
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
         let stat_registry = StatRegistry::new();
         let db_stats = DbStats::new(&stat_registry);
-        let test_clock = Arc::new(TestClock::new());
+        let test_clock = Arc::new(MockSystemClock::new());
         if let Some(now) = test_case.now {
             test_clock.set(now);
         }
-        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn LogicalClock>, 0));
+        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
 
         // Create Oracle with appropriate last_committed_seq
         let oracle = Arc::new(DbReaderOracle::new(crate::utils::MonotonicSeq::new(0)));

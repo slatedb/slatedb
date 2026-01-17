@@ -1,4 +1,3 @@
-use crate::clock::LogicalClock;
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
@@ -22,7 +21,7 @@ use std::fmt;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Once};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
@@ -124,29 +123,6 @@ impl KeyValueIterator for TestIterator {
             }
         }
         Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct TestClock {
-    pub(crate) ticker: AtomicI64,
-}
-
-impl TestClock {
-    pub(crate) fn new() -> TestClock {
-        TestClock {
-            ticker: AtomicI64::new(0),
-        }
-    }
-
-    pub(crate) fn set(&self, tick: i64) {
-        self.ticker.store(tick, Ordering::SeqCst);
-    }
-}
-
-impl LogicalClock for TestClock {
-    fn now(&self) -> i64 {
-        self.ticker.load(Ordering::SeqCst)
     }
 }
 

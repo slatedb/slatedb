@@ -617,10 +617,10 @@ pub(crate) fn format_bytes_si(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use slatedb_common::MockSystemClock;
 
     use crate::clock::MonotonicClock;
     use crate::error::SlateDBError;
-    use crate::test_utils::TestClock;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
         compute_max_parallel, format_bytes_si, panic_string, spawn_bg_task, BitReader, BitWriter,
@@ -630,7 +630,6 @@ mod tests {
     use parking_lot::Mutex;
     use std::any::Any;
     use std::collections::VecDeque;
-    use std::sync::atomic::Ordering::SeqCst;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -785,13 +784,13 @@ mod tests {
     #[tokio::test]
     async fn test_monotonicity_enforcement_on_mono_clock() {
         // Given:
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let mono_clock = MonotonicClock::new(clock.clone(), 0);
 
         // When:
-        clock.ticker.store(10, SeqCst);
+        clock.set(10);
         mono_clock.now().await.unwrap();
-        clock.ticker.store(5, SeqCst);
+        clock.set(5);
 
         // Then:
         if let Err(SlateDBError::InvalidClockTick {
@@ -809,11 +808,11 @@ mod tests {
     #[tokio::test]
     async fn test_monotonicity_enforcement_on_mono_clock_set_tick() {
         // Given:
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let mono_clock = MonotonicClock::new(clock.clone(), 0);
 
         // When:
-        clock.ticker.store(10, SeqCst);
+        clock.set(10);
         mono_clock.now().await.unwrap();
 
         // Then:
@@ -832,7 +831,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_await_valid_tick() {
         // the delegate clock is behind the mono clock by 100ms
-        let delegate_clock = Arc::new(TestClock::new());
+        let delegate_clock = Arc::new(MockSystemClock::new());
         let mono_clock = MonotonicClock::new(delegate_clock.clone(), 100);
 
         tokio::spawn({
@@ -840,7 +839,7 @@ mod tests {
             async move {
                 // wait for half the time it would wait for
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                delegate_clock.ticker.store(101, SeqCst);
+                delegate_clock.set(101);
             }
         });
 
@@ -854,7 +853,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_await_valid_tick_failure() {
         // the delegate clock is behind the mono clock by 100ms
-        let delegate_clock = Arc::new(TestClock::new());
+        let delegate_clock = Arc::new(MockSystemClock::new());
         let mono_clock = MonotonicClock::new(delegate_clock.clone(), 100);
 
         // wait for 10ms after the maximum time it should accept to wait

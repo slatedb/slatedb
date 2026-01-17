@@ -972,7 +972,6 @@ pub mod stats {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
-    use std::sync::atomic;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
@@ -981,6 +980,7 @@ mod tests {
     use object_store::ObjectStore;
     use parking_lot::Mutex;
     use rand::RngCore;
+    use slatedb_common::MockSystemClock;
     use ulid::Ulid;
 
     use super::*;
@@ -1006,7 +1006,7 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
-    use crate::test_utils::{assert_iterator, TestClock};
+    use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;
     use bytes::Bytes;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
@@ -1032,7 +1032,6 @@ mod tests {
     async fn test_compactor_compacts_l0() {
         // given:
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
         let scheduler_options = SizeTieredCompactionSchedulerOptions {
@@ -1049,7 +1048,6 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
             .build()
             .await
             .unwrap();
@@ -1105,7 +1103,7 @@ mod tests {
         use crate::test_utils::OnDemandCompactionSchedulerSupplier;
 
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
+        let system_clock = Arc::new(MockSystemClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| {
@@ -1122,7 +1120,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
+            .with_system_clock(system_clock)
             .with_compaction_scheduler_supplier(scheduler.clone())
             .build()
             .await
@@ -1203,7 +1201,7 @@ mod tests {
         use crate::test_utils::OnDemandCompactionSchedulerSupplier;
 
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
+        let system_clock = Arc::new(MockSystemClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| {
@@ -1220,7 +1218,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
+            .with_system_clock(system_clock)
             .with_compaction_scheduler_supplier(scheduler.clone())
             .build()
             .await
@@ -1303,7 +1301,6 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
@@ -1311,7 +1308,6 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1375,7 +1371,6 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| !state.manifest().l0.is_empty(),
         )));
@@ -1383,7 +1378,6 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1449,7 +1443,6 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
@@ -1457,7 +1450,6 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1517,7 +1509,6 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 3,
         )));
@@ -1525,7 +1516,6 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1591,7 +1581,7 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
-        let insert_clock = Arc::new(TestClock::new());
+        let insert_clock = Arc::new(MockSystemClock::new());
 
         let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
@@ -1603,7 +1593,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(insert_clock.clone())
+            .with_system_clock(insert_clock.clone())
             .with_compaction_scheduler_supplier(scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1613,7 +1603,7 @@ mod tests {
         let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // ticker time = 0, expire time = 10
-        insert_clock.ticker.store(0, atomic::Ordering::SeqCst);
+        insert_clock.set(0);
         db.merge_with_options(
             b"key1",
             &[b'a'; 32],
@@ -1628,7 +1618,7 @@ mod tests {
         .unwrap();
 
         // ticker time = 20, no expire time
-        insert_clock.ticker.store(20, atomic::Ordering::SeqCst);
+        insert_clock.set(20);
         db.merge_with_options(
             b"key1",
             &[b'b'; 32],
@@ -1673,7 +1663,6 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
@@ -1681,7 +1670,6 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1727,7 +1715,6 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
@@ -1735,7 +1722,6 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1831,7 +1817,7 @@ mod tests {
     async fn test_should_compact_expired_entries() {
         // given:
         let os = Arc::new(InMemory::new());
-        let insert_clock = Arc::new(TestClock::new());
+        let insert_clock = Arc::new(MockSystemClock::new());
 
         let scheduler_options = SizeTieredCompactionSchedulerOptions {
             min_compaction_sources: 2,
@@ -1848,7 +1834,7 @@ mod tests {
             .scheduler_options = scheduler_options;
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(insert_clock.clone())
+            .with_system_clock(insert_clock.clone())
             .build()
             .await
             .unwrap();
@@ -1858,7 +1844,7 @@ mod tests {
         let value = &[b'a'; 64];
 
         // ticker time = 0, expire time = 10
-        insert_clock.ticker.store(0, atomic::Ordering::SeqCst);
+        insert_clock.set(0);
         db.put_with_options(
             &[1; 16],
             value,
@@ -1871,7 +1857,7 @@ mod tests {
         .unwrap();
 
         // ticker time = 10, expire time = 60 (using default TTL)
-        insert_clock.ticker.store(10, atomic::Ordering::SeqCst);
+        insert_clock.set(10);
         db.put_with_options(
             &[2; 16],
             value,
@@ -1884,7 +1870,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // ticker time = 30, no expire time
-        insert_clock.ticker.store(30, atomic::Ordering::SeqCst);
+        insert_clock.set(30);
         db.put_with_options(
             &[3; 16],
             value,
@@ -1896,7 +1882,7 @@ mod tests {
 
         // this revives key 1
         // ticker time = 70, expire time 80
-        insert_clock.ticker.store(70, atomic::Ordering::SeqCst);
+        insert_clock.set(70);
         db.put_with_options(
             &[1; 16],
             value,
@@ -1909,6 +1895,9 @@ mod tests {
         .unwrap();
 
         db.flush().await.unwrap();
+
+        // advance time to 100ms to trigger compaction
+        insert_clock.set(150);
 
         // when:
         let db_state = await_compaction(&db).await;
@@ -3014,7 +3003,7 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
-        let logical_clock = Arc::new(TestClock::new());
+        let system_clock = Arc::new(MockSystemClock::new());
         let scheduler_options = SizeTieredCompactionSchedulerOptions {
             min_compaction_sources: 1,
             max_compaction_sources: 999,
@@ -3032,7 +3021,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_logical_clock(logical_clock)
+            .with_system_clock(system_clock)
             .with_sst_block_size(SstBlockSize::Other(128))
             .build()
             .await
