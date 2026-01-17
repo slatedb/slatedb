@@ -205,9 +205,9 @@ In the longer term, we hope the complexities around caching can be maintained wi
 
 We can consider to take the following 3-steps to migrate the `CachedObjectStore`:
 
-1. Still use the current implementation as the compatibility layer, and wrap the `ObjectStore` with OpenDAL's compatibility layer. This allows users to keep the caching behavior unchanged for systems which already had lots of cached objects whom do not hope to invalidate all of them in one shot.
-2. Implement a custom `CacheLayer` that preserves our chunked caching and eviction strategies. Or pick a community maintained cache layer like `opendal-foyer`.
-3. Push the customized or picked cache layer to OpenDAL upstream to make it a built-in feature, reducing the complexity of maintaining the cache layer in our repository.
+1. Continue using the current implementation as the compatibility layer, wrapping the `ObjectStore` with OpenDAL's compatibility layer. This allows users to maintain the existing caching behavior unchanged, which is important for systems that already have many cached objects and do not wish to invalidate them all at once.
+2. Work on porting the chunked cache implementation from SlateDB into OpenDAL's `FoyerLayer`.
+3. Adapt `FoyerLayer` to replace `CachedObjectStore` in SlateDB.
 
 <!-- TOC --><a name="migration-plan"></a>
 ## Migration Plan
