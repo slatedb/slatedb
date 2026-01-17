@@ -63,8 +63,8 @@ We hope to have a solution that reduces the complexity of maintaining our own wr
 The primary goals of migrating to OpenDAL are:
 
 1. **Reduce maintenance burden**: Eliminate the need to maintain custom wrapper layers (`CachedObjectStore`, `RetryingObjectStore`) by leveraging battle-tested ecosystem solutions
-2. **Improve extensibility**: Gain access to OpenDAL's rich layer ecosystem for future capabilities (observability, rate limiting, etc.) without additional development effort
-3. **Future-proof storage integration**: Benefit from OpenDAL's active development and broader backend support as SlateDB evolves
+2. **Improve extensibility**: Gain access to an extensible ecosystem that provides future capabilities (observability, rate limiting, etc.) out of the box, while making it easy to add custom extensions
+3. **More storage integrations**: Expand a diverse range of storage backends support as SlateDB evolves.
 
 <!-- TOC --><a name="constraints"></a>
 ### Constraints
@@ -75,6 +75,33 @@ Given that `object_store` is a core dependency deeply integrated throughout Slat
 2. **Performance parity**: I/O performance must not regress. Critical paths (read, write, list operations) should be benchmarked to ensure OpenDAL meets or exceeds current performance metrics.
 3. **Feature completeness**: All existing functionality (caching, retrying, error handling) must be preserved or improved during migration.
 4. **Validation before rollout**: A PoC must be implemented and validated against our test suite before committing to the full migration. The transition should be incremental and allow rollback if issues arise.
+
+### Features we want
+
+To ensure the **Feature completeness** constraint, OpenDAL must provide all of the following features as built-in capabilities, or make them trivial to implement on top of the library:
+
+- **On-disk caching with configurable policies**: Cache size limits, admission policies, and chunked caching for efficient partial reads.
+- **Flexible retry policies**: We need a flexible retry strategy that allows for different retry policies based on different scenarios and can perform different retry handling according to different object attributes.
+- **Standard environment variables**: Cloud vendors' object storage generally have some conventions for environment variables, such as `AWS_*`, `AZURE_*`, `GCP_*`, we should still support them after migration.
+- **Storing and retrieving attributes for local FS and in-memory storage**: In addition to storing data on disk, SlateDB requires storing metadata as object attributes. We must ensure that both local filesystem and in-memory storage backends support storing and retrieving this metadata.
+
+In addition to the required features mentioned above, it would also be beneficial to have built-in features that help optimize performance, such as:
+
+- **Request racing**: Potential optimization to mitigate tail latency
+- **Parallel scanning**: Ability to read a file in parallel with configurable concurrency and chunk sizes, which help improving read performance for large files.
+
+### OpenDAL Support Status
+
+The following table summarizes the current status of OpenDAL's support for the features we want at the time of writing:
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| On-disk caching | Partial | OpenDAL had check a basic implementation of [FoyerLayer](https://github.com/apache/opendal/pull/6366) but it needs further development to fully support chunk based caching scheme. |
+| Flexible retry policies | NeedToCustomize | OpenDAL has a built-in RetryLayer, but it lacks a custom retry policy that incorporates business logic. We need to customize the retry policy to handle specific error scenarios, such as retrying based on specific object attributes. |
+| Standard environment variables | Supported | OpenDAL respects standard environment variables for cloud providers (e.g., `AWS_*`, `AZURE_*`, `GCP_*`). |
+| Storing and Retrieving Metadata for FS/Mem | TBD | Need to investigate if OpenDAL provides this capability out of the box. |
+| Request racing | TBD | Need to investigate if OpenDAL provides this capability out of the box. |
+| Parallel scanning | Supported | Natively supported via `reader_with().concurrent().chunk()` API for parallel range reads, as described in this [doc](https://docs.rs/opendal/latest/opendal/struct.Reader.html#concurrent-read). |
 
 <!-- TOC --><a name="scope"></a>
 ## Scope
