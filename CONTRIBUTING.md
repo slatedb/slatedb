@@ -27,10 +27,10 @@ provided by the bot. You will only need to do this once across all repos using o
 
 AI-generated (or largerly generated) pull requests are welcome, provided that you:
 
-- Use the latest OpenAI/Anthropic frontier model at maximum thinking.
-- Write the pull request summary yourself (don't use AI for this).
-- Use the `claude` or `codex` CLI to generate the code.
+- Disclose that the pull request is largely AI generated.
+- Specify which tool and model you used.
+- Understand the changes in the PR.
+- Keep PR descriptions and review replies human.
 - Review the code change yourself before submitting the PR.
 - Run `/review` locally in the `codex` or `claude` CLI before submitting the PR.
 - Follow the guidelines in the PR template (the checkboxes at the bottom).
-- Note that the pull request is largely AI generated.
