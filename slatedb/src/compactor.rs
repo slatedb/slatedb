@@ -1068,7 +1068,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db).await;
+        let db_state = await_compaction(&db, None).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1133,7 +1133,7 @@ mod tests {
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
-        let db_state = await_compaction(&db).await.unwrap();
+        let db_state = await_compaction(&db, None).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
 
@@ -1235,7 +1235,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // Compact L0 to L1
-        let db_state = await_compaction(&db).await.unwrap();
+        let db_state = await_compaction(&db, None).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
 
@@ -1328,7 +1328,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db).await;
+        let db_state = await_compaction(&db, None).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1392,7 +1392,7 @@ mod tests {
         db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
         db.flush().await.unwrap();
 
-        let db_state = await_compaction(&db).await;
+        let db_state = await_compaction(&db, None).await;
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
 
@@ -1403,7 +1403,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when: compact L0 with the existing sorted run
-        let db_state = await_compaction(&db).await;
+        let db_state = await_compaction(&db, None).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1469,7 +1469,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db).await;
+        let db_state = await_compaction(&db, None).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1538,7 +1538,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db).await;
+        let db_state = await_compaction(&db, None).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1630,7 +1630,7 @@ mod tests {
         .await
         .unwrap();
 
-        let db_state = await_compaction(&db).await.unwrap();
+        let db_state = await_compaction(&db, None).await.unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.last_l0_clock_tick, 20);
 
@@ -1851,7 +1851,9 @@ mod tests {
             &PutOptions {
                 ttl: Ttl::ExpireAfter(10),
             },
-            &WriteOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
         )
         .await
         .unwrap();
@@ -1862,7 +1864,9 @@ mod tests {
             &[2; 16],
             value,
             &PutOptions { ttl: Ttl::Default },
-            &WriteOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
         )
         .await
         .unwrap();
@@ -1875,7 +1879,9 @@ mod tests {
             &[3; 16],
             value,
             &PutOptions { ttl: Ttl::NoExpiry },
-            &WriteOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
         )
         .await
         .unwrap();
@@ -1889,18 +1895,17 @@ mod tests {
             &PutOptions {
                 ttl: Ttl::ExpireAfter(80),
             },
-            &WriteOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
         )
         .await
         .unwrap();
 
         db.flush().await.unwrap();
 
-        // advance time to 100ms to trigger compaction
-        insert_clock.set(150);
-
         // when:
-        let db_state = await_compaction(&db).await;
+        let db_state = await_compaction(&db, Some(insert_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -3039,7 +3044,9 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        await_compaction(&db).await.expect("db was not compacted");
+        await_compaction(&db, None)
+            .await
+            .expect("db was not compacted");
 
         // then:
         let metrics = db.metrics();
@@ -3170,8 +3177,21 @@ mod tests {
 
     /// Waits until all writes have made their way to L1 or below. No data is allowed in
     /// in-memory WALs, in-memory memtables, or L0 SSTs on object storage.
-    async fn await_compaction(db: &Db) -> Option<ManifestCore> {
+    ///
+    /// If a clock is provided, it will be advanced the clock by 60 seconds on each iteration to
+    /// trigger time-based flushes and compactions.
+    async fn await_compaction(
+        db: &Db,
+        clock: Option<Arc<dyn SystemClock>>,
+    ) -> Option<ManifestCore> {
         run_for(Duration::from_secs(10), || async {
+            if clock.is_some() {
+                clock
+                    .as_ref()
+                    .unwrap()
+                    .advance(Duration::from_millis(60000))
+                    .await;
+            }
             let (empty_wal, empty_memtable, core_db_state) = {
                 let db_state = db.inner.state.read();
                 let cow_db_state = db_state.state();
