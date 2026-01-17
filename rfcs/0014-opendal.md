@@ -166,7 +166,7 @@ Migrating these four call sites to OpenDAL equivalents is straightforward, thoug
 The `ObjectStoreSequencedStorageProtocol` component (`transactional_object/object_store.rs`) has three direct call sites:
 
 1. `put_opts()` with `PutMode::Create` for writing new versioned manifests with CAS semantics
-2. `get()` for reading specific manifest versions
+2. `get()` for reading specific manifest versions and `.compactions` files.
 3. `list()` for listing manifest versions in a range
 
 This component provides the versioned storage protocol for `ManifestStore` and is particularly critical because it **uses `PutMode::Create` for optimistic concurrency control**. This create-if-not-exists semantics prevents concurrent manifest corruption, making it essential for fencing in distributed scenarios.
