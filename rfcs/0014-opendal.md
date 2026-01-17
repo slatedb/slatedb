@@ -71,7 +71,7 @@ The primary goals of migrating to OpenDAL are:
 
 Given that `object_store` is a core dependency deeply integrated throughout SlateDB, we must ensure:
 
-1. **No breaking changes**: The migration must be transparent to SlateDB users. Since we currently expose the `object_store::ObjectStore` trait as our public I/O API, we need to maintain API compatibility—either by keeping the same trait interface with a compatibility layer that preserves existing behavior.
+1. **No breaking changes**: The migration must be transparent to SlateDB users. Since we currently expose the `object_store::ObjectStore` trait as our public I/O API, we need to maintain API compatibility by still allowing the use of the `object_store::ObjectStore`, until users deem the interface no longer necessary.
 2. **Performance parity**: I/O performance must not regress. Critical paths (read, write, list operations) should be benchmarked to ensure OpenDAL meets or exceeds current performance metrics.
 3. **Feature completeness**: All existing functionality (caching, retrying, error handling) must be preserved or improved during migration.
 4. **Validation before rollout**: A PoC must be implemented and validated against our test suite before committing to the full migration. The transition should be incremental and allow rollback if issues arise.
