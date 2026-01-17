@@ -199,7 +199,7 @@ The `CachedObjectStore` (`cached_object_store/`) is the most complex extension o
 2. **Cache admission control**: An `AdmissionPicker` determines which objects should be cached based on access patterns, preventing cache pollution from one-time reads.
 3. **Pick-of-2 eviction strategy**: When cache size exceeds the limit, the evictor uses a pick-of-2 algorithm to approximate LRU—it randomly selects two cached files, compares their last access times, and evicts the older one. This requires a background task to periodically track the files list in the memory.
 
-At the time of writing, OpenDAL does not provide a built-in cache layer that matches our requirements. There was an issue that aims to add a cache layer for opendal in <https://github.com/apache/opendal/issues/5678>, however, this issue does not have much progress. There're still exists some community maintained cache layers, such as <https://github.com/r3v2d0g/opendal-foyer>.
+At the time of writing, OpenDAL provides a basic implementation of a cache layer via `FoyerLayer` (see PR [#6366](https://github.com/apache/opendal/pull/6366)), but it does not yet fully support the chunk-based caching scheme required by our `CachedObjectStore`. There's an ongoing effort to enhance `FoyerLayer` to support chunk-based caching (see PR [#6366](https://github.com/apache/opendal/issues/6372)).
 
 In the longer term, we hope the complexities around caching can be maintained with community force. Although the cache layer still haven't been built in from OpenDAL, we can push the force together to build it.
 
