@@ -991,7 +991,7 @@ mod tests {
     use crate::compactor_state::CompactionStatus;
     use crate::compactor_state::SourceId;
     use crate::config::{
-        PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
+        MergeOptions, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
@@ -1301,6 +1301,7 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
@@ -1308,6 +1309,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
+            .with_system_clock(system_clock.clone())
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1317,18 +1319,72 @@ mod tests {
         let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // write merge operations across multiple L0 SSTs
-        db.merge(b"key1", b"a").await.unwrap();
-        db.merge(b"key1", b"b").await.unwrap();
-        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'x'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
         db.flush().await.unwrap();
 
-        db.merge(b"key1", b"c").await.unwrap();
-        db.merge(b"key2", b"x").await.unwrap();
-        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.merge_with_options(
+            b"key1",
+            b"c",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            b"key2",
+            b"x",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'y'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, None).await;
+        let db_state = await_compaction(&db, Some(system_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1371,6 +1427,7 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| !state.manifest().l0.is_empty(),
         )));
@@ -1378,6 +1435,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
+            .with_system_clock(system_clock.clone())
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1387,23 +1445,80 @@ mod tests {
         let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // write initial merge operations and compact to L1
-        db.merge(b"key1", b"a").await.unwrap();
-        db.merge(b"key1", b"b").await.unwrap();
-        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'x'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding to exceed 256 bytes
         db.flush().await.unwrap();
 
-        let db_state = await_compaction(&db, None).await;
+        let db_state = await_compaction(&db, Some(system_clock.clone())).await;
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.compacted.len(), 1);
+        // Save current tick since we advanced it in `await_compaction`. We'll use it
+        // later to verify the create_ts of the merged and normal entries.
+        let expected_tick = system_clock.now().timestamp_millis();
 
         // write more merge operations to L0
-        db.merge(b"key1", b"c").await.unwrap();
-        db.merge(b"key1", b"d").await.unwrap();
-        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.merge_with_options(
+            b"key1",
+            b"c",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            b"key1",
+            b"d",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'y'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding to exceed 256 bytes
         db.flush().await.unwrap();
 
         // when: compact L0 with the existing sorted run
-        let db_state = await_compaction(&db, None).await;
+        let db_state = await_compaction(&db, Some(system_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1425,9 +1540,9 @@ mod tests {
         assert_iterator(
             &mut iter,
             vec![
-                RowEntry::new_merge(b"key1", b"abcd", 5).with_create_ts(0),
+                RowEntry::new_merge(b"key1", b"abcd", 5).with_create_ts(expected_tick),
                 RowEntry::new_value(&[b'x'; 16], &[b'p'; 128], 3).with_create_ts(0),
-                RowEntry::new_value(&[b'y'; 16], &[b'p'; 128], 6).with_create_ts(0),
+                RowEntry::new_value(&[b'y'; 16], &[b'p'; 128], 6).with_create_ts(expected_tick),
             ],
         )
         .await;
@@ -1443,6 +1558,7 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
@@ -1450,6 +1566,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
+            .with_system_clock(system_clock.clone())
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1459,17 +1576,62 @@ mod tests {
         let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // write only merge operations without any base value
-        db.merge(b"key1", b"x").await.unwrap();
-        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.merge_with_options(
+            b"key1",
+            b"x",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding to exceed 256 bytes
+        db.put_with_options(
+            &vec![b'x'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding to exceed 256 bytes
         db.flush().await.unwrap();
 
-        db.merge(b"key1", b"y").await.unwrap();
-        db.merge(b"key1", b"z").await.unwrap();
-        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.merge_with_options(
+            b"key1",
+            b"y",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            b"key1",
+            b"z",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'y'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding to exceed 256 bytes
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, None).await;
+        let db_state = await_compaction(&db, Some(system_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1509,6 +1671,7 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 3,
         )));
@@ -1516,6 +1679,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
+            .with_system_clock(system_clock.clone())
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1525,20 +1689,74 @@ mod tests {
         let (_manifest_store, _, table_store) = build_test_stores(os.clone());
 
         // write merge operations across three L0 SSTs in specific order
-        db.merge(b"key1", b"1").await.unwrap();
-        db.put(&vec![b'a'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.merge_with_options(
+            b"key1",
+            b"1",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'a'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding to exceed 256 bytes
         db.flush().await.unwrap();
 
-        db.merge(b"key1", b"2").await.unwrap();
-        db.put(&vec![b'b'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.merge_with_options(
+            b"key1",
+            b"2",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'b'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding to exceed 256 bytes
         db.flush().await.unwrap();
 
-        db.merge(b"key1", b"3").await.unwrap();
-        db.put(&vec![b'c'; 16], &vec![b'p'; 128]).await.unwrap(); // padding to exceed 256 bytes
+        db.merge_with_options(
+            b"key1",
+            b"3",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'c'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding to exceed 256 bytes
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, None).await;
+        let db_state = await_compaction(&db, Some(system_clock)).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
