@@ -1032,7 +1032,7 @@ mod tests {
     async fn test_compactor_compacts_l0() {
         // given:
         let os = Arc::new(InMemory::new());
-        let system_clock = Arc::new(DefaultSystemClock::new());
+        let system_clock = Arc::new(MockSystemClock::new());
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
         let scheduler_options = SizeTieredCompactionSchedulerOptions {
@@ -1995,7 +1995,7 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
-        let system_clock = Arc::new(DefaultSystemClock::new());
+        let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
