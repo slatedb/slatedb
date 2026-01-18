@@ -2,7 +2,6 @@
 
 use log::{error, info};
 use rand::Rng;
-use slatedb::clock::LogicalClock;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
 use slatedb::config::GarbageCollectorDirectoryOptions;
@@ -25,7 +24,6 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use crate::dst::DstDuration;
-use crate::dst::DstLogicalClock;
 use crate::object_store::ClockedObjectStore;
 use crate::DefaultDstDistribution;
 use crate::Dst;
@@ -50,24 +48,20 @@ const COMPRESSION_CODECS: [Option<&str>; 5] = [
 pub async fn build_dst(
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
-    logical_clock: Arc<dyn DstLogicalClock>,
     rand: Rc<DbRand>,
     dst_opts: DstOptions,
 ) -> Result<Dst, Error> {
-    let db = build_db(
-        object_store,
-        system_clock.clone(),
-        logical_clock.clone(),
-        &rand,
-    )
-    .await;
+    let db = build_db(object_store, system_clock.clone(), &rand).await;
 
     Dst::new(
         db,
-        system_clock,
-        logical_clock,
+        system_clock.clone(),
         rand.clone(),
-        Box::new(DefaultDstDistribution::new(rand, dst_opts.clone())),
+        Box::new(DefaultDstDistribution::new(
+            dst_opts.clone(),
+            system_clock,
+            rand,
+        )),
         dst_opts,
     )
 }
@@ -78,7 +72,6 @@ pub async fn build_dst(
 pub async fn build_db(
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
-    logical_clock: Arc<dyn LogicalClock>,
     rand: &DbRand,
 ) -> Db {
     let object_store = Arc::new(ClockedObjectStore::new(object_store, system_clock.clone()));
@@ -88,7 +81,6 @@ pub async fn build_db(
     builder = builder.with_settings(settings);
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
     builder = builder.with_system_clock(system_clock.clone());
-    builder = builder.with_logical_clock(logical_clock.clone());
     builder = builder.with_compaction_scheduler_supplier(compaction_scheduler_supplier);
     builder.build().await.unwrap()
 }
@@ -198,21 +190,13 @@ pub fn build_runtime(seed: u64) -> tokio::runtime::LocalRuntime {
 pub async fn run_simulation(
     object_store: Arc<dyn ObjectStore>,
     system_clock: Arc<dyn SystemClock>,
-    logical_clock: Arc<dyn DstLogicalClock>,
     rand: Rc<DbRand>,
     dst_duration: DstDuration,
     dst_opts: DstOptions,
 ) -> Result<(), Error> {
     let seed = rand.seed();
     info!("running simulation [seed={}]", seed);
-    let mut dst = build_dst(
-        object_store,
-        system_clock.clone(),
-        logical_clock.clone(),
-        rand.clone(),
-        dst_opts,
-    )
-    .await?;
+    let mut dst = build_dst(object_store, system_clock.clone(), rand.clone(), dst_opts).await?;
     match dst.run_simulation(dst_duration).await {
         Ok(_) => Ok(()),
         Err(e) => {
