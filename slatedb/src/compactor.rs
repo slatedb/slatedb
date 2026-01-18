@@ -3404,10 +3404,7 @@ mod tests {
     ) -> Option<ManifestCore> {
         run_for(Duration::from_secs(10), || async {
             if let Some(clock) = &clock {
-                clock
-                    .as_ref()
-                    .advance(Duration::from_millis(60000))
-                    .await;
+                clock.as_ref().advance(Duration::from_millis(60000)).await;
             }
             let (empty_wal, empty_memtable, core_db_state) = {
                 let db_state = db.inner.state.read();
