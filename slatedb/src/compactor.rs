@@ -3403,10 +3403,9 @@ mod tests {
         clock: Option<Arc<dyn SystemClock>>,
     ) -> Option<ManifestCore> {
         run_for(Duration::from_secs(10), || async {
-            if clock.is_some() {
+            if let Some(clock) = &clock {
                 clock
                     .as_ref()
-                    .unwrap()
                     .advance(Duration::from_millis(60000))
                     .await;
             }
