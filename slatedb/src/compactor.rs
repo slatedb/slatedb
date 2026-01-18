@@ -1120,7 +1120,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_system_clock(system_clock)
+            .with_system_clock(system_clock.clone())
             .with_compaction_scheduler_supplier(scheduler.clone())
             .build()
             .await
@@ -1133,7 +1133,9 @@ mod tests {
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
-        let db_state = await_compaction(&db, None).await.unwrap();
+        let db_state = await_compaction(&db, Some(system_clock.clone()))
+            .await
+            .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
 
@@ -1168,9 +1170,13 @@ mod tests {
         let tombstone = iter.next_entry().await.unwrap();
         assert!(tombstone.unwrap().value.is_tombstone());
 
-        let db_state = await_compacted_compaction(manifest_store.clone(), db_state.compacted)
-            .await
-            .unwrap();
+        let db_state = await_compacted_compaction(
+            manifest_store.clone(),
+            db_state.compacted,
+            Some(system_clock.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
 
         let compacted = &db_state.compacted.first().unwrap().ssts;
@@ -1218,7 +1224,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_system_clock(system_clock)
+            .with_system_clock(system_clock.clone())
             .with_compaction_scheduler_supplier(scheduler.clone())
             .build()
             .await
@@ -1235,7 +1241,9 @@ mod tests {
         db.flush().await.unwrap();
 
         // Compact L0 to L1
-        let db_state = await_compaction(&db, None).await.unwrap();
+        let db_state = await_compaction(&db, Some(system_clock.clone()))
+            .await
+            .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.l0.len(), 0, "{:?}", db_state.l0);
 
@@ -1256,9 +1264,13 @@ mod tests {
         assert_eq!(db_state.compacted.len(), 1);
 
         // Trigger compaction of L0 (tombstone) + L1 (values)
-        let db_state = await_compacted_compaction(manifest_store.clone(), db_state.compacted)
-            .await
-            .unwrap();
+        let db_state = await_compacted_compaction(
+            manifest_store.clone(),
+            db_state.compacted,
+            Some(system_clock.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
 
         let compacted = &db_state.compacted.first().unwrap().ssts;
@@ -1848,7 +1860,9 @@ mod tests {
         .await
         .unwrap();
 
-        let db_state = await_compaction(&db, None).await.unwrap();
+        let db_state = await_compaction(&db, Some(insert_clock.clone()))
+            .await
+            .unwrap();
         assert_eq!(db_state.compacted.len(), 1);
         assert_eq!(db_state.last_l0_clock_tick, 20);
 
@@ -3244,7 +3258,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
-            .with_system_clock(system_clock)
+            .with_system_clock(system_clock.clone())
             .with_sst_block_size(SstBlockSize::Other(128))
             .build()
             .await
@@ -3262,7 +3276,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        await_compaction(&db, None)
+        await_compaction(&db, Some(system_clock.clone()))
             .await
             .expect("db was not compacted");
 
@@ -3426,12 +3440,18 @@ mod tests {
         .await
     }
 
+    /// If a clock is provided, it will be advanced the clock by 60 seconds on each iteration to
+    /// trigger time-based flushes and compactions.
     #[allow(unused)] // only used with feature(wal_disable)
     async fn await_compacted_compaction(
         manifest_store: Arc<ManifestStore>,
         old_compacted: Vec<SortedRun>,
+        clock: Option<Arc<dyn SystemClock>>,
     ) -> Option<ManifestCore> {
         run_for(Duration::from_secs(10), || async {
+            if let Some(clock) = &clock {
+                clock.as_ref().advance(Duration::from_millis(60000)).await;
+            }
             let db_state = get_db_state(manifest_store.clone()).await;
             if !db_state.compacted.eq(&old_compacted) {
                 return Some(db_state);
