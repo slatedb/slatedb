@@ -3610,7 +3610,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(allfeature = "wal_disable")]
+    #[cfg(feature = "wal_disable")]
     async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_disabled() {
         test_sequence_tracker_persisted_across_flush_and_reload_impl(false).await;
     }
