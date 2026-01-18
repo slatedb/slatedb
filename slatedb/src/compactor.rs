@@ -1032,6 +1032,7 @@ mod tests {
     async fn test_compactor_compacts_l0() {
         // given:
         let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
         let scheduler_options = SizeTieredCompactionSchedulerOptions {
@@ -1048,6 +1049,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
+            .with_system_clock(system_clock.clone())
             .build()
             .await
             .unwrap();
@@ -1068,7 +1070,7 @@ mod tests {
         db.flush().await.unwrap();
 
         // when:
-        let db_state = await_compaction(&db, None).await;
+        let db_state = await_compaction(&db, Some(system_clock.clone())).await;
 
         // then:
         let db_state = db_state.expect("db was not compacted");
@@ -1895,6 +1897,7 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
@@ -1902,6 +1905,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
+            .with_system_clock(system_clock.clone())
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1911,19 +1915,63 @@ mod tests {
         let (manifest_store, _compactions_store, _table_store) = build_test_stores(os.clone());
 
         // write merge operations
-        db.merge(b"key1", b"a").await.unwrap();
-        db.merge(b"key1", b"b").await.unwrap();
-        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding
+        db.merge_with_options(
+            b"key1",
+            b"a",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.merge_with_options(
+            b"key1",
+            b"b",
+            &MergeOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'x'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding
         db.flush().await.unwrap();
 
         // then overwrite with a put
-        db.put(b"key1", b"new_value").await.unwrap();
-        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding
+        db.put_with_options(
+            b"key1",
+            b"new_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            &vec![b'y'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding
         db.flush().await.unwrap();
 
         // when:
-        // Wait a bit for compaction to occur
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ = await_compaction(&db, Some(system_clock)).await;
 
         // then: verify the put value overwrote the merge
         let result = db.get(b"key1").await.unwrap();
@@ -1947,6 +1995,7 @@ mod tests {
 
         // given:
         let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(DefaultSystemClock::new());
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
@@ -1954,6 +2003,7 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
+            .with_system_clock(system_clock.clone())
             .with_compaction_scheduler_supplier(compaction_scheduler)
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
@@ -1969,11 +2019,22 @@ mod tests {
             &crate::config::MergeOptions {
                 ttl: Ttl::ExpireAfter(100),
             },
-            &WriteOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
         )
         .await
         .unwrap();
-        db.put(&vec![b'x'; 16], &vec![b'p'; 128]).await.unwrap(); // padding
+        db.put_with_options(
+            &vec![b'x'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding
         db.flush().await.unwrap();
 
         db.merge_with_options(
@@ -1982,16 +2043,27 @@ mod tests {
             &crate::config::MergeOptions {
                 ttl: Ttl::ExpireAfter(200),
             },
-            &WriteOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
         )
         .await
         .unwrap();
-        db.put(&vec![b'y'; 16], &vec![b'p'; 128]).await.unwrap(); // padding
+        db.put_with_options(
+            &vec![b'y'; 16],
+            &vec![b'p'; 128],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap(); // padding
         db.flush().await.unwrap();
 
         // when:
         // Wait a bit for compaction to occur
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ = await_compaction(&db, Some(system_clock)).await;
 
         // then: verify that merges with different expire times are NOT merged together
         // Reading should get only the latest merge since they weren't combined
