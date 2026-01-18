@@ -66,8 +66,8 @@
 //!
 //! ```
 //! use slatedb::{Db, Error};
-//! use slatedb::clock::DefaultSystemClock;
 //! use slatedb::object_store::memory::InMemory;
+//! use slatedb_common::clock::DefaultSystemClock;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
