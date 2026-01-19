@@ -96,6 +96,9 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
                         <a href="https://merklemap.com/" target="_blank" rel="noopener noreferrer">
                             <img src="/img/logos/merklemap.svg" alt="MerkleMap" />
                         </a>
+                        <a href="https://s2.dev/" target="_blank" rel="noopener noreferrer">
+                            <img src="/img/logos/s2.svg" alt="S2" class="logo-tall" />
+                        </a>
                     </div>
                     <a href="https://github.com/slatedb/slatedb/issues/new?title=add%20%3Cmy%20company%3E%27s%20logo%20to%20used%20by&body=Please%20add%20%3Cmy%20company%3E%27s%20logo%20to%20the%20slatedb%20website.%0A%0A**Logo%20SVG%3A**%0A%0A**Company%20Link%3A**%0A%0A**How%20you%20use%20slatedb%3A**%0A" target="_blank" rel="noopener noreferrer" class="add-logo-link">+ add your logo</a>
                 </div>
@@ -408,9 +411,9 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
 
 	.logos-section {
 		display: grid;
-		grid-template-columns: repeat(4, 1fr);
+		grid-template-columns: repeat(5, 1fr);
 		align-items: center;
-		gap: 1rem;
+		gap: 0.5rem;
         padding-bottom: 0.5rem;
 		width: 100%;
 	}
@@ -431,7 +434,7 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
 	.logos-section img {
 		height: 2.5rem;
 		width: auto;
-		max-width: 120px;
+		max-width: 100px;
 		object-fit: contain;
 		opacity: 0.6;
 		transition: opacity 0.2s ease;
@@ -440,6 +443,10 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
 
 	.logos-section a:hover img {
 		opacity: 1;
+	}
+
+	.logos-section img.logo-tall {
+		height: 1.5rem;
 	}
 
 	.terminal {
