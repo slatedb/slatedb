@@ -18,7 +18,6 @@
 //! - [DstAction::Scan]
 //! - [DstAction::Flush]
 //! - [DstAction::AdvanceSystemClock]
-//! - [DstAction::AdvanceLogicalClock]
 //!
 //! [Dst] expects to be run with completely deterministic components for time, random
 //! numbers, and scheduling (the async runtime). SlateDB provides the following
@@ -26,8 +25,6 @@
 //!
 //! - [SystemClock]: A mock system clock is provided by
 //!   [MockSystemClock](slatedb_common::clock::MockSystemClock).
-//! - [DstLogicalClock](slatedb_dst::DstLogicalClock): A default DST logical clock is provided
-//!   by [DefaultDstLogicalClock](slatedb_dst::DefaultDstLogicalClock).
 //! - [DbRand]: Can be made deterministic by providing a seed in [DbRand::new].
 //! - [Runtime](tokio::runtime::Runtime): A single threaded Tokio runtime with a
 //!   rng_seed provided. This requires `RUSTFLAGS="--cfg tokio_unstable"` and Tokio's
@@ -55,7 +52,6 @@
 //! # use std::sync::Arc;
 //! # use std::rc::Rc;
 //! let system_clock = Arc::new(MockSystemClock::new());
-//! let logical_clock = Arc::new(DefaultDstLogicalClock::new());
 //! let rand = Rc::new(DbRand::new(12345));
 //! let dst_opts = DstOptions::default();
 //! let runtime = build_runtime(5678);
@@ -63,7 +59,6 @@
 //!     let db = DbBuilder::new("test_db", Arc::new(InMemory::new()))
 //!         .with_seed(1234)
 //!         .with_system_clock(system_clock.clone())
-//!         .with_logical_clock(logical_clock.clone())
 //!         .build()
 //!         .await
 //!         .unwrap();
@@ -71,7 +66,6 @@
 //!     let mut dst = Dst::new(
 //!         db,
 //!         system_clock,
-//!         logical_clock,
 //!         rand.clone(),
 //!         distr,
 //!         dst_opts,
@@ -92,7 +86,6 @@ use rand::distr::Uniform;
 use rand::seq::IteratorRandom;
 use rand::Rng;
 use rand::RngCore;
-use slatedb::clock::LogicalClock;
 use slatedb::config::PutOptions;
 use slatedb::config::ReadOptions;
 use slatedb::config::ScanOptions;
@@ -107,8 +100,6 @@ use std::future::Future;
 use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::rc::Rc;
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -173,8 +164,6 @@ pub enum DstAction {
     Flush,
     /// Advances the system clock by the given duration.
     AdvanceSystemClock(Duration),
-    /// Advances the logical clock by the given ticks.
-    AdvanceLogicalClock(i64),
 }
 
 impl std::fmt::Display for DstAction {
@@ -192,9 +181,6 @@ impl std::fmt::Display for DstAction {
             DstAction::Flush => write!(f, "Flush"),
             DstAction::AdvanceSystemClock(duration) => {
                 write!(f, "AdvanceSystemClock({:?})", duration)
-            }
-            DstAction::AdvanceLogicalClock(ticks) => {
-                write!(f, "AdvanceLogicalClock({})", ticks)
             }
         }
     }
@@ -240,9 +226,6 @@ impl std::fmt::Debug for DstAction {
             DstAction::AdvanceSystemClock(duration) => {
                 write!(f, "AdvanceSystemClock({:?})", duration)
             }
-            DstAction::AdvanceLogicalClock(ticks) => {
-                write!(f, "AdvanceLogicalClock({:?})", ticks)
-            }
         }
     }
 }
@@ -268,13 +251,18 @@ pub trait DstDistribution {
 ///   and to advance time between 1ms and 10 seconds.
 pub struct DefaultDstDistribution {
     options: DstOptions,
+    system_clock: Arc<dyn SystemClock>,
     rand: Rc<DbRand>,
 }
 
 /// Helper functions for generating DST actions.
 impl DefaultDstDistribution {
-    pub fn new(rand: Rc<DbRand>, options: DstOptions) -> Self {
-        Self { options, rand }
+    pub fn new(options: DstOptions, system_clock: Arc<dyn SystemClock>, rand: Rc<DbRand>) -> Self {
+        Self {
+            options,
+            system_clock,
+            rand,
+        }
     }
 
     /// Generate a write action with puts and deletes.
@@ -325,7 +313,14 @@ impl DefaultDstDistribution {
         } else if start_key == end_key {
             end_key.push(b'\0');
         }
-        DstAction::Scan(start_key.clone(), end_key.clone(), ScanOptions::default())
+        DstAction::Scan(
+            start_key.clone(),
+            end_key.clone(),
+            ScanOptions {
+                now: self.system_clock.now().timestamp_millis(),
+                ..Default::default()
+            },
+        )
     }
 
     fn sample_flush(&self) -> DstAction {
@@ -337,13 +332,6 @@ impl DefaultDstDistribution {
     fn sample_advance_system_time(&self) -> DstAction {
         let sleep_ms = self.sample_log10_uniform(1..300_000);
         DstAction::AdvanceSystemClock(Duration::from_millis(sleep_ms))
-    }
-
-    /// Generates an advance time action for the logical clock. The number of ticks is sampled
-    /// using a log-uniform distribution. The range is hard coded as 1..300_000 (1ms to 5 minutes).
-    fn sample_advance_logical_time(&self) -> DstAction {
-        let ticks = self.sample_log10_uniform(1..300_000);
-        DstAction::AdvanceLogicalClock(ticks as i64)
     }
 
     /// Samples a value from a log-uniform distribution. The log is a log10 (common log).
@@ -404,11 +392,12 @@ impl DefaultDstDistribution {
     /// improved in the future.
     #[inline]
     fn maybe_get_existing_key(&self, state: &SQLiteState) -> Option<Vec<u8>> {
+        let now = self.system_clock.now().timestamp_millis();
         let hit_probability = self.rand.rng().random_range(0.0..1.0);
-        let is_db_hit = !state.is_empty() && self.rand.rng().random_bool(hit_probability);
+        let is_db_hit = !state.is_empty(now) && self.rand.rng().random_bool(hit_probability);
 
         if is_db_hit {
-            let keys = state.keys().unwrap_or_default();
+            let keys = state.keys(now).unwrap_or_default();
             let existing_key = keys
                 .into_iter()
                 .choose(&mut self.rand.rng())
@@ -453,12 +442,17 @@ impl DefaultDstDistribution {
         let mut rng = self.rand.rng();
         WriteOptions {
             await_durable: rng.random_bool(0.5),
+            now: self.system_clock.now().timestamp_millis(),
+            ..Default::default()
         }
     }
 
     #[inline]
     fn gen_read_options(&self) -> ReadOptions {
-        ReadOptions::default()
+        ReadOptions {
+            now: self.system_clock.now().timestamp_millis(),
+            ..Default::default()
+        }
     }
 
     /// Returns true if the operation is a put, false if it is a delete.
@@ -475,7 +469,7 @@ impl DefaultDstDistribution {
 /// Samples an action from the distribution. Actions are sampled with equal probability.
 impl DstDistribution for DefaultDstDistribution {
     fn sample_action(&self, state: &SQLiteState) -> DstAction {
-        let weights = [1; 6]; // all actions have equal probability for now
+        let weights = [1; 5]; // all actions have equal probability for now
         let dist = WeightedIndex::new(weights).expect("non-empty weights and all ≥ 0");
         let action = dist.sample(&mut self.rand.rng());
         match action {
@@ -484,7 +478,6 @@ impl DstDistribution for DefaultDstDistribution {
             2 => self.sample_scan(state),
             3 => self.sample_flush(),
             4 => self.sample_advance_system_time(),
-            5 => self.sample_advance_logical_time(),
             _ => unreachable!(),
         }
     }
@@ -512,57 +505,12 @@ impl DstDuration {
     }
 }
 
-/// The DstLogicalClock trait extends the LogicalClock trait so that the DST simulation can call to
-/// advance the logical clock to test things like TTL.
-///
-/// Calling [`Self::now()`] must return the same value when called repeatedly until [`Self::advance()`] is
-/// complete.
-pub trait DstLogicalClock: LogicalClock {
-    // Advances the logical clock by the specified number of ticks.
-    fn advance(&self, ticks: i64);
-}
-
-/// [DefaultDstLogicalClock] uses an atomic i64 to track time.
-/// The clock always starts at i64::MIN.
-#[derive(Debug)]
-pub struct DefaultDstLogicalClock {
-    current_tick: AtomicI64,
-}
-
-impl DefaultDstLogicalClock {
-    pub fn new() -> Self {
-        Self {
-            current_tick: AtomicI64::new(i64::MIN),
-        }
-    }
-}
-
-impl Default for DefaultDstLogicalClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LogicalClock for DefaultDstLogicalClock {
-    fn now(&self) -> i64 {
-        self.current_tick.load(Ordering::Relaxed)
-    }
-}
-
-impl DstLogicalClock for DefaultDstLogicalClock {
-    fn advance(&self, ticks: i64) {
-        self.current_tick.fetch_add(ticks, Ordering::Relaxed);
-    }
-}
-
 /// The main struct that runs the simulation.
 pub struct Dst {
     /// The SlateDB instance to simulate on.
     db: Db,
     /// The system clock to use for the simulation.
     system_clock: Arc<dyn SystemClock>,
-    /// The logical clock to use for the simulation.
-    logical_clock: Arc<dyn DstLogicalClock>,
     /// The random number generator to use for the simulation.
     rand: Rc<DbRand>,
     /// The action sampler to use for the simulation.
@@ -575,16 +523,14 @@ impl Dst {
     pub fn new(
         db: Db,
         system_clock: Arc<dyn SystemClock>,
-        logical_clock: Arc<dyn DstLogicalClock>,
         rand: Rc<DbRand>,
         action_sampler: Box<dyn DstDistribution>,
         options: DstOptions,
     ) -> Result<Self, Error> {
-        let state = SQLiteState::new(options.state_path, logical_clock.clone())?;
+        let state = SQLiteState::new(options.state_path)?;
         Ok(Self {
             db,
             state,
-            logical_clock,
             rand,
             action_sampler,
             system_clock,
@@ -617,7 +563,6 @@ impl Dst {
                 }
                 DstAction::Flush => self.run_flush().await?,
                 DstAction::AdvanceSystemClock(duration) => self.advance_system_time(duration).await,
-                DstAction::AdvanceLogicalClock(ticks) => self.advance_logical_time(ticks),
             }
             step_count += 1;
         }
@@ -651,14 +596,14 @@ impl Dst {
             0f64
         };
         self.poll_await(future, flush_probability).await?;
-        self.state.write_batch(write_ops)?;
+        self.state.write_batch(write_ops, write_options.now)?;
         Ok(())
     }
 
     async fn run_get(&mut self, key: &Vec<u8>, read_options: &ReadOptions) -> Result<(), Error> {
         let future = self.db.get_with_options(key, read_options);
         let result = self.poll_await(future, 0f64).await?;
-        let expected_val = self.state.get(key)?;
+        let expected_val = self.state.get(key, read_options.now)?;
         let actual_val = result.map(|b| b.to_vec());
         assert_eq!(expected_val, actual_val);
         Ok(())
@@ -677,7 +622,7 @@ impl Dst {
         }
         let future = self.db.scan_with_options(start_key..end_key, scan_options);
         let mut actual_itr = self.poll_await(future, 0f64).await?;
-        let expected_itr = self.state.scan(start_key, end_key)?;
+        let expected_itr = self.state.scan(start_key, end_key, scan_options.now)?;
 
         for (expected_key, expected_val) in expected_itr {
             let actual_key_val = actual_itr
@@ -699,11 +644,6 @@ impl Dst {
     async fn advance_system_time(&self, duration: Duration) {
         debug!("advance_system_time [duration={:?}]", duration);
         self.system_clock.clone().advance(duration).await;
-    }
-
-    fn advance_logical_time(&self, ticks: i64) {
-        debug!("advance_logical_time [ticks={}]", ticks);
-        self.logical_clock.advance(ticks);
     }
 
     /// Polls a future until it is ready, advancing time if it is not ready.

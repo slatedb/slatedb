@@ -273,6 +273,9 @@ pub struct ReadOptions {
     pub dirty: bool,
     /// Whether or not fetched blocks should be cached
     pub cache_blocks: bool,
+    #[cfg(dst)]
+    /// Force the current timestamp for DST operations. See #719 for details.
+    pub now: i64,
 }
 
 impl Default for ReadOptions {
@@ -281,6 +284,8 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            #[cfg(dst)]
+            now: 0,
         }
     }
 }
@@ -326,6 +331,9 @@ pub struct ScanOptions {
     /// The maximum number of concurrent tasks for fetching blocks during scans.
     /// Higher values can improve throughput but use more resources. The default is 1.
     pub max_fetch_tasks: usize,
+    #[cfg(dst)]
+    /// Force the current timestamp for DST operations. See #719 for details.
+    pub now: i64,
 }
 
 impl Default for ScanOptions {
@@ -337,6 +345,8 @@ impl Default for ScanOptions {
             read_ahead_bytes: 1,
             cache_blocks: false,
             max_fetch_tasks: 1,
+            #[cfg(dst)]
+            now: 0,
         }
     }
 }
@@ -413,6 +423,9 @@ pub struct WriteOptions {
     /// Whether `put` calls should block until the write has been durably committed
     /// to the DB.
     pub await_durable: bool,
+    #[cfg(dst)]
+    /// Force the current timestamp for DST operations. See #719 for details.
+    pub now: i64,
 }
 
 impl Default for WriteOptions {
@@ -420,6 +433,8 @@ impl Default for WriteOptions {
     fn default() -> Self {
         Self {
             await_durable: true,
+            #[cfg(dst)]
+            now: 0,
         }
     }
 }
