@@ -477,12 +477,13 @@ impl CompactorState {
                 // The compactor should control all compaction state transitions. If the
                 // compactor finds a new remote compaction (a compaction that the compactor
                 // didn't create), it must be in `Submitted` status (the beginning status).
-                assert_eq!(
-                    compaction.status(),
-                    CompactionStatus::Submitted,
-                    "found a new remote commpaction with non-Submitted status [compaction={:?}]",
-                    compaction
-                );
+                if !matches!(compaction.status(), CompactionStatus::Submitted) {
+                    error!(
+                        "skipping remote commpaction with unexpected (non-Submitted) status [compaction={:?}]",
+                        compaction,
+                    );
+                    continue;
+                }
                 v.insert(compaction.clone());
             }
         }
@@ -821,12 +822,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "found a new remote commpaction with non-Submitted status")]
-    fn test_merge_remote_compactions_panics_on_non_submitted_remote() {
+    fn test_merge_remote_compactions_drops_non_submitted_remote() {
         let manifest = new_dirty_manifest();
         let compactor_epoch = manifest.value.compactor_epoch;
 
-        let local_compactions = new_dirty_compactions(compactor_epoch);
+        let local_running = Ulid::from_parts(1, 0);
+        let mut local_compactions = new_dirty_compactions(compactor_epoch);
+        local_compactions.value.insert(compaction_with_status(
+            local_running,
+            CompactionStatus::Running,
+        ));
         let mut state = CompactorState::new(manifest, local_compactions);
 
         let remote_running = Ulid::from_parts(3, 0);
@@ -837,6 +842,14 @@ mod tests {
         ));
 
         state.merge_remote_compactions(remote_compactions);
+
+        let merged = &state.compactions.value;
+        assert!(merged.contains(&local_running));
+        assert_eq!(
+            merged.get(&local_running).expect("not found").status(),
+            CompactionStatus::Running
+        );
+        assert!(!merged.contains(&remote_running));
     }
 
     #[test]
