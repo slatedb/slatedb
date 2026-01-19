@@ -3,7 +3,9 @@ use std::ops::{Bound, RangeBounds};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use chrono::{DateTime, Utc};
-use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, WIPOffset};
+use flatbuffers::{
+    FlatBufferBuilder, ForwardsUOffset, InvalidFlatbuffer, Vector, VerifierOptions, WIPOffset,
+};
 use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
@@ -13,13 +15,13 @@ use crate::compactor_state::{
     Compactions as CompactorCompactions, SourceId,
 };
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
-use crate::db_state::{CoreDbState, SsTableHandle};
+use crate::db_state::{ManifestCore, SsTableHandle};
 
 #[path = "./generated/root_generated.rs"]
-#[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods)]
+#[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods, unreachable_pub)]
 #[rustfmt::skip]
 mod root_generated;
-pub use root_generated::{
+pub(crate) use root_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
     SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
 };
@@ -31,18 +33,28 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
     CompactedSsTableArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
-    CompactionSpec as FbCompactionSpec, CompactionsV1, CompactionsV1Args, CompressionFormat,
-    SortedRun, SortedRunArgs, TieredCompactionSpec, TieredCompactionSpecArgs, Ulid as FbUlid,
-    UlidArgs as FbUlidArgs, Uuid, UuidArgs,
+    CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
+    CompactionsV1Args, CompressionFormat, SortedRun, SortedRunArgs, TieredCompactionSpec,
+    TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
 };
 use crate::manifest::{ExternalDb, Manifest};
 use crate::partitioned_keyspace::RangePartitionedKeySpace;
 use crate::seq_tracker::SequenceTracker;
-use crate::transactional_object::ObjectCodec;
 use crate::utils::clamp_allocated_size_bytes;
+use slatedb_txn_obj::ObjectCodec;
 
 pub(crate) const MANIFEST_FORMAT_VERSION: u16 = 1;
 pub(crate) const COMPACTIONS_FORMAT_VERSION: u16 = 1;
+
+/// FlatBuffer verifier options with increased table limit.
+/// The default limit is 1M tables, but with compression enabled, SST files
+/// can have many more blocks than the uncompressed file size would suggest.
+fn verifier_options() -> VerifierOptions {
+    VerifierOptions {
+        max_tables: 1_000_000_000,
+        ..Default::default()
+    }
+}
 
 /// A wrapper around a `Bytes` buffer containing a FlatBuffer-encoded `SsTableIndex`.
 #[derive(PartialEq, Eq, Clone)]
@@ -51,12 +63,12 @@ pub(crate) struct SsTableIndexOwned {
 }
 
 impl SsTableIndexOwned {
-    pub fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
-        flatbuffers::root::<SsTableIndex>(&data)?;
+    pub(crate) fn new(data: Bytes) -> Result<Self, InvalidFlatbuffer> {
+        flatbuffers::root_with_opts::<SsTableIndex>(&verifier_options(), &data)?;
         Ok(Self { data })
     }
 
-    pub fn borrow(&self) -> SsTableIndex<'_> {
+    pub(crate) fn borrow(&self) -> SsTableIndex<'_> {
         let raw = &self.data;
         unsafe { flatbuffers::root_unchecked::<SsTableIndex>(raw) }
     }
@@ -95,7 +107,7 @@ impl SsTableInfoCodec for FlatBufferSsTableInfoCodec {
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<SsTableInfo, SlateDBError> {
-        let info = flatbuffers::root::<FbSsTableInfo>(bytes)?;
+        let info = flatbuffers::root_with_opts::<FbSsTableInfo>(&verifier_options(), bytes)?;
         Ok(Self::sst_info(&info))
     }
 
@@ -105,7 +117,7 @@ impl SsTableInfoCodec for FlatBufferSsTableInfoCodec {
 }
 
 impl FlatBufferSsTableInfoCodec {
-    pub fn sst_info(info: &FbSsTableInfo) -> SsTableInfo {
+    pub(crate) fn sst_info(info: &FbSsTableInfo) -> SsTableInfo {
         let first_key: Option<Bytes> = info
             .first_key()
             .map(|key| Bytes::copy_from_slice(key.bytes()));
@@ -120,7 +132,7 @@ impl FlatBufferSsTableInfoCodec {
         }
     }
 
-    pub fn create_from_sst_info(info: &SsTableInfo) -> Bytes {
+    pub(crate) fn create_from_sst_info(info: &SsTableInfo) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_sst_info(info)
@@ -146,7 +158,10 @@ impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
             }));
         }
         let unversioned_bytes = bytes.slice(2..);
-        let manifest = flatbuffers::root::<ManifestV1>(unversioned_bytes.as_ref())?;
+        let manifest = flatbuffers::root_with_opts::<ManifestV1>(
+            &verifier_options(),
+            unversioned_bytes.as_ref(),
+        )?;
         Ok(Self::manifest(&manifest))
     }
 }
@@ -177,7 +192,7 @@ impl FlatBufferManifestCodec {
         }
     }
 
-    pub fn manifest(manifest: &ManifestV1) -> Manifest {
+    pub(crate) fn manifest(manifest: &ManifestV1) -> Manifest {
         let l0_last_compacted = manifest.l0_last_compacted().map(|id| id.ulid());
         let mut l0 = VecDeque::new();
 
@@ -235,7 +250,7 @@ impl FlatBufferManifestCodec {
                 .expect("Invalid encoding of sequence tracker in manifest."),
             None => SequenceTracker::new(),
         };
-        let core = CoreDbState {
+        let core = ManifestCore {
             initialized: manifest.initialized(),
             l0_last_compacted,
             l0,
@@ -269,7 +284,7 @@ impl FlatBufferManifestCodec {
         }
     }
 
-    pub fn create_from_manifest(manifest: &Manifest) -> Bytes {
+    pub(crate) fn create_from_manifest(manifest: &Manifest) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_manifest(manifest)
@@ -292,7 +307,7 @@ impl ObjectCodec<CompactorCompactions> for FlatBufferCompactionsCodec {
 }
 
 impl FlatBufferCompactionsCodec {
-    pub fn decode_compactions(bytes: &Bytes) -> Result<CompactorCompactions, SlateDBError> {
+    pub(crate) fn decode_compactions(bytes: &Bytes) -> Result<CompactorCompactions, SlateDBError> {
         if bytes.len() < 2 {
             return Err(SlateDBError::InvalidCompaction);
         }
@@ -304,11 +319,16 @@ impl FlatBufferCompactionsCodec {
             });
         }
         let unversioned_bytes = bytes.slice(2..);
-        let fb = flatbuffers::root::<CompactionsV1>(unversioned_bytes.as_ref())?;
+        let fb = flatbuffers::root_with_opts::<CompactionsV1>(
+            &verifier_options(),
+            unversioned_bytes.as_ref(),
+        )?;
         Self::compactions(&fb)
     }
 
-    pub fn compactions(compactions: &CompactionsV1) -> Result<CompactorCompactions, SlateDBError> {
+    pub(crate) fn compactions(
+        compactions: &CompactionsV1,
+    ) -> Result<CompactorCompactions, SlateDBError> {
         let recent_compactions = compactions
             .recent_compactions()
             .iter()
@@ -320,9 +340,8 @@ impl FlatBufferCompactionsCodec {
 
     fn compaction(compaction: &FbCompaction) -> Result<CompactorCompaction, SlateDBError> {
         let spec = Self::compaction_spec(compaction)?;
-        Ok(CompactorCompaction::new(compaction.id().ulid(), spec)
-            // TODO(criccomini): use actual status when we encode it in flatbuffer
-            .with_status(CompactionStatus::Submitted))
+        let status = CompactionStatus::from(compaction.status());
+        Ok(CompactorCompaction::new(compaction.id().ulid(), spec).with_status(status))
     }
 
     fn compaction_spec(compaction: &FbCompaction) -> Result<CompactorCompactionSpec, SlateDBError> {
@@ -348,7 +367,7 @@ impl FlatBufferCompactionsCodec {
         }
     }
 
-    pub fn create_from_compactions(compactions: &CompactorCompactions) -> Bytes {
+    pub(crate) fn create_from_compactions(compactions: &CompactorCompactions) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_compactions(compactions)
@@ -507,12 +526,14 @@ impl<'b> DbFlatBufferBuilder<'b> {
     fn add_compaction(&mut self, compaction: &CompactorCompaction) -> WIPOffset<FbCompaction<'b>> {
         let id = self.add_ulid(&compaction.id());
         let (spec_type, spec) = self.add_compaction_spec(compaction.spec());
+        let status = FbCompactionStatus::from(compaction.status());
         FbCompaction::create(
             &mut self.builder,
             &FbCompactionArgs {
                 id: Some(id),
                 spec_type,
                 spec: Some(spec),
+                status,
             },
         )
     }
@@ -715,6 +736,29 @@ impl From<CompressionFormat> for Option<CompressionCodec> {
     }
 }
 
+impl From<CompactionStatus> for FbCompactionStatus {
+    fn from(value: CompactionStatus) -> Self {
+        match value {
+            CompactionStatus::Submitted => FbCompactionStatus::Submitted,
+            CompactionStatus::Running => FbCompactionStatus::Running,
+            CompactionStatus::Completed => FbCompactionStatus::Completed,
+            CompactionStatus::Failed => FbCompactionStatus::Failed,
+        }
+    }
+}
+
+impl From<FbCompactionStatus> for CompactionStatus {
+    fn from(value: FbCompactionStatus) -> Self {
+        match value {
+            FbCompactionStatus::Submitted => CompactionStatus::Submitted,
+            FbCompactionStatus::Running => CompactionStatus::Running,
+            FbCompactionStatus::Completed => CompactionStatus::Completed,
+            FbCompactionStatus::Failed => CompactionStatus::Failed,
+            _ => CompactionStatus::Submitted,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_utils {
     use crate::flatbuffer_types::SsTableIndexOwned;
@@ -728,14 +772,16 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
-    use crate::compactor_state::{Compaction, CompactionSpec, Compactions, SourceId};
-    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::compactor_state::{
+        Compaction, CompactionSpec, CompactionStatus, Compactions, SourceId,
+    };
+    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::flatbuffer_types::{
         FlatBufferCompactionsCodec, FlatBufferManifestCodec, SsTableIndexOwned,
     };
     use crate::manifest::{ExternalDb, Manifest};
-    use crate::transactional_object::ObjectCodec;
     use crate::{checkpoint, error::SlateDBError};
+    use slatedb_txn_obj::ObjectCodec;
     use std::collections::VecDeque;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
@@ -749,7 +795,7 @@ mod tests {
     #[test]
     fn test_should_encode_decode_manifest_checkpoints() {
         // given:
-        let mut core = CoreDbState::new();
+        let mut core = ManifestCore::new();
         core.checkpoints = vec![
             checkpoint::Checkpoint {
                 id: uuid::Uuid::new_v4(),
@@ -782,7 +828,7 @@ mod tests {
     #[test]
     fn test_should_encode_decode_external_dbs() {
         // given:
-        let mut manifest = Manifest::initial(CoreDbState::new());
+        let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.external_dbs = vec![
             ExternalDb {
                 path: "/path/to/external/first".to_string(),
@@ -824,7 +870,7 @@ mod tests {
         }
 
         // given:
-        let mut manifest = Manifest::initial(CoreDbState::new());
+        let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.core.l0 = VecDeque::from(vec![
             new_sst_handle(b"a", None),
             new_sst_handle(b"a", Some(BytesRange::from_ref("c"..="d"))),
@@ -857,10 +903,10 @@ mod tests {
         assert_eq!(manifest, decoded);
     }
 
-    #[test]
-    fn test_should_clamp_index_alloc() {
+    #[tokio::test]
+    async fn test_should_clamp_index_alloc() {
         let format = SsTableFormat::default();
-        let sst = build_test_sst(&format, 3);
+        let sst = build_test_sst(&format, 3).await;
         let data = sst.remaining_as_bytes();
         let start_off = sst.info.index_offset as usize;
         let end_off = sst.info.index_offset as usize + sst.info.index_len as usize;
@@ -943,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_should_encode_decode_wal_object_store_uri() {
-        let mut manifest = Manifest::initial(CoreDbState::new());
+        let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.core.wal_object_store_uri = Some("s3://bucket/path".to_string());
 
         let codec = FlatBufferManifestCodec {};
@@ -955,7 +1001,7 @@ mod tests {
 
     #[test]
     fn test_should_encode_decode_retention_min_seq() {
-        let mut manifest = Manifest::initial(CoreDbState::new());
+        let mut manifest = Manifest::initial(ManifestCore::new());
         manifest.core.last_l0_seq = 11111;
         manifest.core.recent_snapshot_min_seq = 12345;
 
@@ -966,7 +1012,7 @@ mod tests {
         assert_eq!(decoded.core.recent_snapshot_min_seq, 12345);
 
         // Test None case
-        let mut manifest_none = Manifest::initial(CoreDbState::new());
+        let mut manifest_none = Manifest::initial(ManifestCore::new());
         manifest_none.core.recent_snapshot_min_seq = 0;
 
         let bytes_none = codec.encode(&manifest_none);
@@ -980,11 +1026,13 @@ mod tests {
         let compaction_l0 = Compaction::new(
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::Sst(ulid::Ulid::new())], 0),
-        );
+        )
+        .with_status(CompactionStatus::Running);
         let compaction_sr = Compaction::new(
             ulid::Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(5), SourceId::SortedRun(3)], 3),
-        );
+        )
+        .with_status(CompactionStatus::Failed);
         let mut compactions = Compactions::new(9);
         compactions.insert(compaction_l0.clone());
         compactions.insert(compaction_sr.clone());
@@ -1006,6 +1054,22 @@ mod tests {
                 .expect("missing sr compaction"),
             &compaction_sr
         );
+    }
+
+    #[test]
+    fn test_should_round_trip_compaction_statuses() {
+        let statuses = [
+            CompactionStatus::Submitted,
+            CompactionStatus::Running,
+            CompactionStatus::Completed,
+            CompactionStatus::Failed,
+        ];
+
+        for status in statuses {
+            let fb_status = super::FbCompactionStatus::from(status);
+            let round_trip = CompactionStatus::from(fb_status);
+            assert_eq!(round_trip, status);
+        }
     }
 
     #[test]

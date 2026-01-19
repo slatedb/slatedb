@@ -866,11 +866,23 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
-        builder.add_value(b"key4", b"value4", gen_attrs(4)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key3", b"value3", gen_attrs(3))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key4", b"value4", gen_attrs(4))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
@@ -1029,12 +1041,18 @@ mod tests {
             None,
         );
         let mut builder = writer.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
         let handle = writer
             .write_sst(
                 &SsTableId::Compacted(ulid::Ulid::new()),
-                builder.build().unwrap(),
+                builder.build().await.unwrap(),
                 false,
             )
             .await
@@ -1123,9 +1141,10 @@ mod tests {
             let value = format!("v_{}", String::from_utf8_lossy(key));
             builder
                 .add_value(key, value.as_bytes(), gen_attrs(0))
+                .await
                 .unwrap();
         }
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         table_store.write_sst(&id, encoded, false).await.unwrap()
     }
@@ -1153,10 +1172,11 @@ mod tests {
                     format!("value{}", i).as_bytes(),
                     gen_attrs(i),
                 )
+                .await
                 .unwrap();
         }
 
-        let encoded = builder.build().unwrap();
+        let encoded = builder.build().await.unwrap();
         table_store
             .write_sst(&SsTableId::Wal(0), encoded, false)
             .await
@@ -1438,11 +1458,23 @@ mod tests {
         ));
 
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
-        builder.add_value(b"key4", b"value4", gen_attrs(4)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key3", b"value3", gen_attrs(3))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key4", b"value4", gen_attrs(4))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         table_store.write_sst(&id, encoded, false).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();

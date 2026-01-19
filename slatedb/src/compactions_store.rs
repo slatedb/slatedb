@@ -1,18 +1,18 @@
-use crate::clock::SystemClock;
 use crate::compactor_state::Compactions;
 use crate::error::SlateDBError;
 #[allow(dead_code)]
 use crate::error::SlateDBError::LatestTransactionalObjectVersionMissing;
 use crate::flatbuffer_types::FlatBufferCompactionsCodec;
-use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
-use crate::transactional_object::{
-    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
-};
 use chrono::Utc;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
+use slatedb_common::clock::SystemClock;
+use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
+use slatedb_txn_obj::{
+    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
+    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
@@ -85,17 +85,17 @@ impl StoredCompactions {
         self.inner.object()
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn prepare_dirty(&self) -> Result<DirtyObject<Compactions>, SlateDBError> {
         Ok(self.inner.prepare_dirty()?)
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn refresh(&mut self) -> Result<&Compactions, SlateDBError> {
         Ok(self.inner.refresh().await?)
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn update(
         &mut self,
         dirty: DirtyObject<Compactions>,
@@ -278,13 +278,14 @@ impl CompactionsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::DefaultSystemClock;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::error;
+    use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use slatedb_common::clock::DefaultSystemClock;
     use std::time::Duration;
     use ulid::Ulid;
 
@@ -465,7 +466,11 @@ mod tests {
         // Given a flaky store that times out on the first write
         let base = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(base.clone(), 1));
-        let retrying = Arc::new(RetryingObjectStore::new(flaky.clone()));
+        let retrying = Arc::new(RetryingObjectStore::new(
+            flaky.clone(),
+            Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
+        ));
         let store = Arc::new(CompactionsStore::new(&Path::from(ROOT), retrying.clone()));
 
         // When creating new compactions (initial write under retry)

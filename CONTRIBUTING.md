@@ -23,13 +23,14 @@ When you submit a pull request, a CLA bot will automatically determine whether y
 a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
 provided by the bot. You will only need to do this once across all repos using our CLA.
 
-## Project Ideas
+## AI Generated Pull Requests
 
-Here are some fun projects that would be fun (and useful) to work on:
+AI-generated (or largerly generated) pull requests are welcome, provided that you:
 
-- Integrate SlateDB into [Kine](https://github.com/k3s-io/kine)
-- A Redis-compatible server on SlateDB.
-- A `pg_slatedb` PostgreSQL extension.
-- A [TiKV](https://github.com/tikv/tikv)-compatible [RawKV](https://tikv.org/docs/dev/develop/rawkv/introduction/) or TxnKV storage layer on SlateDB.
-- A multi-writer storage service on SlateDB using [Chitchat](https://github.com/quickwit-oss/chitchat).
-- SlateDB bindings in other languages.
+- Disclose that the pull request is largely AI generated.
+- Specify which tool and model you used.
+- Understand the changes in the PR.
+- Keep PR descriptions and review replies human.
+- Review the code change yourself before submitting the PR.
+- Run `/review` locally in the `codex` or `claude` CLI before submitting the PR.
+- Follow the guidelines in the PR template (the checkboxes at the bottom).

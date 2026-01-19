@@ -1,6 +1,7 @@
 use crate::clock::LogicalClock;
 use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
-use crate::compactor_state::{CompactionSpec, CompactorState, SourceId};
+use crate::compactor_state::{CompactionSpec, SourceId};
+use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
@@ -58,7 +59,7 @@ pub(crate) async fn assert_next_entry<T: KeyValueIterator>(
     assert_eq!(actual_entry, expected_entry.clone())
 }
 
-pub fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
+pub(crate) fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
     assert_eq!(kv.key, key);
     assert_eq!(kv.value, val);
 }
@@ -282,7 +283,7 @@ pub(crate) async fn seed_database(
     Ok(())
 }
 
-pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
+pub(crate) async fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> EncodedSsTable {
     let mut rng = rand::rng();
     let mut keygen = OrderedBytesGenerator::new_with_suffix(&[], &[0u8; 16]);
     let mut encoded_sst_builder = format.table_builder();
@@ -292,31 +293,31 @@ pub(crate) fn build_test_sst(format: &SsTableFormat, num_blocks: usize) -> Encod
         val.put_bytes(0u8, 32);
         rng.fill_bytes(&mut val);
         let row = RowEntry::new(k, ValueDeletable::Value(val.freeze()), 0u64, None, None);
-        encoded_sst_builder.add(row).unwrap();
+        encoded_sst_builder.add(row).await.unwrap();
     }
-    encoded_sst_builder.build().unwrap()
+    encoded_sst_builder.build().await.unwrap()
 }
 
 /// A compactor that compacts if there are L0s and `should_compact` returns true.
 /// All SSTs from L0 and all sorted runs are always compacted into sorted run 0.
 #[derive(Clone)]
 pub(crate) struct OnDemandCompactionScheduler {
-    pub(crate) should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>,
+    pub(crate) should_compact: Arc<dyn Fn(&CompactorStateView) -> bool + Send + Sync>,
 }
 
 impl OnDemandCompactionScheduler {
-    fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
+    fn new(should_compact: Arc<dyn Fn(&CompactorStateView) -> bool + Send + Sync>) -> Self {
         Self { should_compact }
     }
 }
 
 impl CompactionScheduler for OnDemandCompactionScheduler {
-    fn maybe_schedule_compaction(&self, state: &CompactorState) -> Vec<CompactionSpec> {
+    fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
         if !(self.should_compact)(state) {
             return vec![];
         }
 
-        let db_state = state.db_state();
+        let db_state = state.manifest();
 
         // always compact into sorted run 0
         let next_sr_id = 0;
@@ -342,7 +343,9 @@ pub(crate) struct OnDemandCompactionSchedulerSupplier {
 }
 
 impl OnDemandCompactionSchedulerSupplier {
-    pub(crate) fn new(should_compact: Arc<dyn Fn(&CompactorState) -> bool + Send + Sync>) -> Self {
+    pub(crate) fn new(
+        should_compact: Arc<dyn Fn(&CompactorStateView) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             scheduler: OnDemandCompactionScheduler::new(should_compact),
         }
@@ -385,6 +388,9 @@ pub(crate) struct FlakyObjectStore {
     put_opts_attempts: AtomicUsize,
     // Put options: if set, always return Precondition error (non-retryable)
     put_precondition_always: std::sync::atomic::AtomicBool,
+    // Put options: if set, write succeeds but returns AlreadyExists error
+    // This simulates a timeout that occurs after the write completes but before the response
+    put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool,
     // Head: transient failures on first N attempts
     fail_first_head: AtomicUsize,
     head_attempts: AtomicUsize,
@@ -409,6 +415,7 @@ impl FlakyObjectStore {
             fail_first_put_opts: AtomicUsize::new(fail_first_put_opts),
             put_opts_attempts: AtomicUsize::new(0),
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
+            put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
             head_attempts: AtomicUsize::new(0),
             fail_first_list: AtomicUsize::new(0),
@@ -422,6 +429,14 @@ impl FlakyObjectStore {
 
     pub(crate) fn with_put_precondition_always(self) -> Self {
         self.put_precondition_always.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// Configure the store to write data successfully but return an AlreadyExists error.
+    /// This simulates a timeout that occurs after the write completes but before the response.
+    pub(crate) fn with_put_succeeds_but_returns_already_exists(self) -> Self {
+        self.put_succeeds_but_returns_already_exists
+            .store(true, Ordering::SeqCst);
         self
     }
 
@@ -540,6 +555,21 @@ impl ObjectStore for FlakyObjectStore {
             return Err(object_store::Error::Precondition {
                 path: location.to_string(),
                 source: Box::new(std::io::Error::other("injected precondition")),
+            });
+        }
+        // Simulate: write succeeds but returns AlreadyExists error (timeout after write)
+        if self
+            .put_succeeds_but_returns_already_exists
+            .load(Ordering::SeqCst)
+        {
+            // Actually write the data
+            let _ = self.inner.put_opts(location, payload, opts).await?;
+            // But return an error as if we didn't get the response
+            return Err(object_store::Error::AlreadyExists {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::other(
+                    "injected already exists after successful write",
+                )),
             });
         }
         if self

@@ -14,6 +14,7 @@
 )]
 
 use ::slatedb::admin::{load_object_store_from_env, Admin};
+use ::slatedb::compactor::{CompactionRequest, CompactionSpec, SourceId};
 use ::slatedb::config::{
     CheckpointOptions, CheckpointScope, DbReaderOptions, DurabilityLevel, FlushOptions, FlushType,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, MergeOptions, PutOptions,
@@ -40,6 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
+use ulid::Ulid;
 use uuid::Uuid;
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
@@ -186,6 +188,8 @@ fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySlateDBReader>()?;
     m.add_class::<PySlateDBSnapshot>()?;
     m.add_class::<PySlateDBTransaction>()?;
+    m.add_class::<PyCompactionSpec>()?;
+    m.add_class::<PyCompactionRequest>()?;
     m.add_class::<PySlateDBAdmin>()?;
     m.add_class::<PyWriteBatch>()?;
     m.add_class::<PyDbIterator>()?;
@@ -2279,6 +2283,97 @@ impl PySlateDBReader {
     }
 }
 
+#[pyclass(name = "SlateDBCompactionRequest")]
+#[allow(dead_code)]
+struct PyCompactionRequest {
+    inner: CompactionRequest,
+}
+
+#[derive(Debug)]
+enum CompactionSourceInput {
+    SortedRun(u32),
+    Sst(Ulid),
+}
+
+impl<'py> FromPyObject<'py> for CompactionSourceInput {
+    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
+        let dict = ob.downcast::<PyDict>().map_err(|_| {
+            InvalidError::new_err("compaction source must be a dict with a single key")
+        })?;
+        if dict.len() != 1 {
+            return Err(InvalidError::new_err(
+                "compaction source dict must have exactly one key",
+            ));
+        }
+        let mut iter = dict.iter();
+        let (key, value) = iter.next().ok_or_else(|| {
+            InvalidError::new_err("compaction source dict must have exactly one key")
+        })?;
+        let key: String = key
+            .extract()
+            .map_err(|_| InvalidError::new_err("compaction source key must be a string"))?;
+        match key.as_str() {
+            "SortedRun" => {
+                let id: u32 = value.extract().map_err(|_| {
+                    InvalidError::new_err("compaction source SortedRun value must be an int")
+                })?;
+                Ok(Self::SortedRun(id))
+            }
+            "Sst" => {
+                let ulid_str: String = value.extract().map_err(|_| {
+                    InvalidError::new_err("compaction source Sst value must be a ULID string")
+                })?;
+                let ulid = Ulid::from_string(&ulid_str)
+                    .map_err(|e| InvalidError::new_err(format!("invalid SST ULID: {e}")))?;
+                Ok(Self::Sst(ulid))
+            }
+            _ => Err(InvalidError::new_err(
+                "compaction source key must be 'SortedRun' or 'Sst'",
+            )),
+        }
+    }
+}
+
+#[pyclass(name = "CompactionSpec")]
+struct PyCompactionSpec {
+    inner: CompactionSpec,
+}
+
+#[pymethods]
+impl PyCompactionSpec {
+    #[new]
+    #[pyo3(signature = (sources, destination))]
+    fn new(sources: Vec<CompactionSourceInput>, destination: u32) -> Self {
+        let sources = sources
+            .into_iter()
+            .map(|source| match source {
+                CompactionSourceInput::SortedRun(id) => SourceId::SortedRun(id),
+                CompactionSourceInput::Sst(ulid) => SourceId::Sst(ulid),
+            })
+            .collect();
+        Self {
+            inner: CompactionSpec::new(sources, destination),
+        }
+    }
+}
+
+#[pymethods]
+impl PyCompactionRequest {
+    #[staticmethod]
+    fn full() -> Self {
+        Self {
+            inner: CompactionRequest::Full,
+        }
+    }
+
+    #[staticmethod]
+    fn spec(spec: PyRef<'_, PyCompactionSpec>) -> Self {
+        Self {
+            inner: CompactionRequest::Spec(spec.inner.clone()),
+        }
+    }
+}
+
 #[pyclass(name = "SlateDBAdmin")]
 struct PySlateDBAdmin {
     inner: Arc<Admin>,
@@ -2370,6 +2465,152 @@ impl PySlateDBAdmin {
                 .list_manifests(range)
                 .await
                 .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id = None))]
+    fn read_compactions(&self, id: Option<u64>) -> PyResult<Option<String>> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            admin
+                .read_compactions(id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id = None))]
+    fn read_compactions_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            admin
+                .read_compactions(id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (start = None, end = None))]
+    fn list_compactions(&self, start: Option<u64>, end: Option<u64>) -> PyResult<String> {
+        let admin = self.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            let range = match (start, end) {
+                (Some(s), Some(e)) => s..e,
+                (Some(s), None) => s..u64::MAX,
+                (None, Some(e)) => u64::MIN..e,
+                (None, None) => u64::MIN..u64::MAX,
+            };
+            admin
+                .list_compactions(range)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (start = None, end = None))]
+    fn list_compactions_async<'py>(
+        &self,
+        py: Python<'py>,
+        start: Option<u64>,
+        end: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        future_into_py(py, async move {
+            let range = match (start, end) {
+                (Some(s), Some(e)) => s..e,
+                (Some(s), None) => s..u64::MAX,
+                (None, Some(e)) => u64::MIN..e,
+                (None, None) => u64::MIN..u64::MAX,
+            };
+            admin
+                .list_compactions(range)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (id, compactions_id = None))]
+    fn read_compaction(&self, id: String, compactions_id: Option<u64>) -> PyResult<Option<String>> {
+        let admin = self.inner.clone();
+        let compaction_id = Ulid::from_string(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid compaction ULID: {e}")))?;
+        let rt = get_runtime();
+        rt.block_on(async move {
+            let compaction = admin
+                .read_compaction(compaction_id, compactions_id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            let compaction_json = match compaction {
+                Some(compaction) => Some(
+                    serde_json::to_string(&compaction)
+                        .map_err(|e| InvalidError::new_err(e.to_string()))?,
+                ),
+                None => None,
+            };
+            Ok(compaction_json)
+        })
+    }
+
+    #[pyo3(signature = (id, compactions_id = None))]
+    fn read_compaction_async<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        compactions_id: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let compaction_id = Ulid::from_string(&id)
+            .map_err(|e| InvalidError::new_err(format!("invalid compaction ULID: {e}")))?;
+        future_into_py(py, async move {
+            let compaction = admin
+                .read_compaction(compaction_id, compactions_id)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            let compaction_json = match compaction {
+                Some(compaction) => Some(
+                    serde_json::to_string(&compaction)
+                        .map_err(|e| InvalidError::new_err(e.to_string()))?,
+                ),
+                None => None,
+            };
+            Ok(compaction_json)
+        })
+    }
+
+    #[pyo3(signature = (spec))]
+    fn submit_compaction(&self, spec: PyRef<'_, PyCompactionSpec>) -> PyResult<String> {
+        let admin = self.inner.clone();
+        let spec = spec.inner.clone();
+        let rt = get_runtime();
+        rt.block_on(async move {
+            let compaction = admin
+                .submit_compaction(spec)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
+        })
+    }
+
+    #[pyo3(signature = (spec))]
+    fn submit_compaction_async<'py>(
+        &self,
+        py: Python<'py>,
+        spec: PyRef<'_, PyCompactionSpec>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let admin = self.inner.clone();
+        let spec = spec.inner.clone();
+        future_into_py(py, async move {
+            let compaction = admin
+                .submit_compaction(spec)
+                .await
+                .map_err(|e| InvalidError::new_err(e.to_string()))?;
+            serde_json::to_string(&compaction).map_err(|e| InvalidError::new_err(e.to_string()))
         })
     }
 

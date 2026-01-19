@@ -5,7 +5,6 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::bytes_range::BytesRange;
-use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId};
 use crate::rand::DbRand;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
@@ -15,18 +14,21 @@ use uuid::Uuid;
 
 pub(crate) mod store;
 
+// TODO: should probably move these into manifest/mod.rs (this file)
+pub use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+
 #[derive(Clone, Serialize, PartialEq, Debug)]
 pub(crate) struct Manifest {
     // todo: try to make this writable only from module
     pub(crate) external_dbs: Vec<ExternalDb>,
-    pub(crate) core: CoreDbState,
+    pub(crate) core: ManifestCore,
     // todo: try to make this writable only from module
     pub(crate) writer_epoch: u64,
     pub(crate) compactor_epoch: u64,
 }
 
 impl Manifest {
-    pub(crate) fn initial(core: CoreDbState) -> Self {
+    pub(crate) fn initial(core: ManifestCore) -> Self {
         Self {
             external_dbs: vec![],
             core,
@@ -150,7 +152,7 @@ impl Manifest {
 
             // Now we can zip the manifests together
             let mut external_dbs = vec![];
-            let mut core = CoreDbState::new();
+            let mut core = ManifestCore::new();
 
             for (manifest, _) in ranges {
                 // First, we need to add all the external dbs
@@ -214,11 +216,11 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use crate::bytes_range::BytesRange;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::manifest::store::{ManifestStore, StoredManifest};
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
     use crate::config::CheckpointOptions;
-    use crate::db_state::{CoreDbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
+    use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::rand::DbRand;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -240,10 +242,13 @@ mod tests {
         let parent_path = Path::from("/tmp/test_parent");
         let parent_manifest_store =
             Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
-        let mut parent_manifest =
-            StoredManifest::create_new_db(parent_manifest_store, CoreDbState::new(), clock.clone())
-                .await
-                .unwrap();
+        let mut parent_manifest = StoredManifest::create_new_db(
+            parent_manifest_store,
+            ManifestCore::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
         let checkpoint = parent_manifest
             .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await
@@ -296,7 +301,7 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
         let mut manifest = StoredManifest::create_new_db(
             Arc::clone(&manifest_store),
-            CoreDbState::new(),
+            ManifestCore::new(),
             clock.clone(),
         )
         .await
@@ -532,7 +537,7 @@ mod tests {
     where
         F: FnMut(&str) -> SsTableId,
     {
-        let mut core = CoreDbState::new();
+        let mut core = ManifestCore::new();
         for entry in &manifest.l0 {
             core.l0.push_back(SsTableHandle::new_compacted(
                 sst_id_fn(entry.sst_alias),

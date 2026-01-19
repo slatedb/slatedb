@@ -51,6 +51,49 @@ class InternalError(Exception):
     """Raised for unexpected internal errors."""
 
 
+class CompactionSourceSortedRun(TypedDict):
+    SortedRun: int
+
+
+class CompactionSourceSst(TypedDict):
+    Sst: str
+
+
+CompactionSource = CompactionSourceSortedRun | CompactionSourceSst
+
+
+class CompactionSpec:
+    """Represents a compaction spec for admin submission."""
+
+    def __init__(self, sources: list[CompactionSource], destination: int) -> None:
+        """
+        Args:
+            sources: List of sources, each {"SortedRun": int} or {"Sst": "<ulid>"}.
+            destination: Sorted run id for the compaction output.
+        """
+        ...
+
+
+class SlateDBCompactionRequest:
+    """Represents a compaction request for admin submission."""
+
+    @staticmethod
+    def full() -> SlateDBCompactionRequest:
+        """Create a full compaction request."""
+        ...
+
+    @staticmethod
+    def spec(spec: CompactionSpec) -> SlateDBCompactionRequest:
+        """
+        Create a spec-based compaction request.
+
+        Example:
+            >>> spec = CompactionSpec([{"SortedRun": 3}], 3)
+            >>> req = SlateDBCompactionRequest.spec(spec)
+        """
+        ...
+
+
 class SlateDB:
     """
     Read/write interface to a SlateDB database.
@@ -2176,6 +2219,95 @@ class SlateDBAdmin:
         Examples:
             >>> await admin.list_manifests_async()
             '[{"id": 1, ...}, {"id": 2, ...}]'
+        """
+        ...
+
+    def read_compactions(self, id: int | None = None) -> str | None:
+        """
+        Read the latest or a specific compactions file as a JSON string.
+
+        Args:
+            id: Optional compactions file id to read. If ``None``, reads the latest.
+
+        Returns:
+            JSON string of the compactions file, or ``None`` if none exist.
+        """
+        ...
+
+    async def read_compactions_async(self, id: int | None = None) -> str | None:
+        """
+        Async variant of ``read_compactions``.
+
+        Args:
+            id: Optional compactions file id to read.
+
+        Returns:
+            JSON string of the compactions file, or ``None``.
+        """
+        ...
+
+    def list_compactions(self, start: int | None = None, end: int | None = None) -> str:
+        """
+        List compactions files within an optional [start, end) range as JSON.
+
+        Args:
+            start: Optional inclusive start id.
+            end: Optional exclusive end id.
+
+        Returns:
+            JSON string containing a list of compactions file metadata.
+        """
+        ...
+
+    async def list_compactions_async(self, start: int | None = None, end: int | None = None) -> str:
+        """
+        Async variant of ``list_compactions``.
+
+        Args:
+            start: Optional inclusive start id.
+            end: Optional exclusive end id.
+
+        Returns:
+            JSON string containing a list of compactions file metadata.
+        """
+        ...
+
+    def read_compaction(self, id: str, compactions_id: int | None = None) -> str | None:
+        """
+        Read a specific compaction by ULID from a compactions file.
+
+        Args:
+            id: ULID of the compaction to read.
+            compactions_id: Optional compactions file id to read from. If ``None``, reads latest.
+
+        Returns:
+            JSON string of the compaction, or ``None`` if not found.
+        """
+        ...
+
+    async def read_compaction_async(
+        self, id: str, compactions_id: int | None = None
+    ) -> str | None:
+        """
+        Async variant of ``read_compaction``.
+        """
+        ...
+
+    def submit_compaction(self, spec: CompactionSpec) -> str:
+        """
+        Submit a compaction request and return the submitted compaction.
+
+        Args:
+            spec: Compaction spec describing the sources and destination.
+
+        Returns:
+            JSON string of the submitted compaction.
+        """
+        ...
+
+    async def submit_compaction_async(self, spec: CompactionSpec) -> str:
+        """
+        Async variant of ``submit_compaction``.
         """
         ...
 

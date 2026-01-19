@@ -3,11 +3,13 @@ resolver = "2"
 members = [
     "examples",
     "slatedb",
+    "slatedb-common",
     "slatedb-bencher",
     "slatedb-cli",
     "slatedb-dst",
     "slatedb-go",
     "slatedb-py",
+    "slatedb-txn-obj",
 ]
 
 [workspace.package]
@@ -63,6 +65,8 @@ serde = "1.0"
 serde_json = "1.0.142"
 siphasher = "1"
 slatedb = { path = "slatedb", version = "0.10.0" }
+slatedb-common = { path = "slatedb-common", version = "0.10.0" }
+slatedb-txn-obj = { path = "slatedb-txn-obj", version = "0.10.0" }
 snap = "1.1.1"
 sysinfo = "0.35.2"
 thiserror = "1.0.63"
@@ -98,3 +102,4 @@ unexpected_cfgs = { level = "allow", check-cfg = [
     # (see slatedb-dst/src/utils.rs for details)
     'cfg(tokio_unstable)',
 ] }
+unreachable_pub = "warn"

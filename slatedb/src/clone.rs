@@ -1,7 +1,6 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::SystemClock;
 use crate::config::CheckpointOptions;
-use crate::db_state::{CoreDbState, SsTableId};
+use crate::db_state::{ManifestCore, SsTableId};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::CheckpointMissing;
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -11,6 +10,7 @@ use crate::utils::IdGenerator;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::ObjectStore;
+use slatedb_common::clock::SystemClock;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -284,7 +284,7 @@ async fn load_initialized_manifest(
 
 async fn copy_wal_ssts(
     object_store: Arc<dyn ObjectStore>,
-    parent_checkpoint_state: &CoreDbState,
+    parent_checkpoint_state: &ManifestCore,
     parent_path: &Path,
     clone_path: &Path,
     #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
@@ -312,11 +312,10 @@ async fn copy_wal_ssts(
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::DefaultSystemClock;
     use crate::clone::create_clone;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
-    use crate::db_state::CoreDbState;
+    use crate::db_state::ManifestCore;
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
@@ -327,6 +326,7 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use slatedb_common::clock::DefaultSystemClock;
     use std::ops::RangeFull;
     use std::sync::Arc;
 
@@ -454,7 +454,7 @@ mod tests {
         let non_existent_source_checkpoint_id = uuid::Uuid::new_v4();
         StoredManifest::create_uninitialized_clone(
             clone_manifest_store,
-            &Manifest::initial(CoreDbState::new()),
+            &Manifest::initial(ManifestCore::new()),
             parent_path.to_string(),
             non_existent_source_checkpoint_id,
             rand.clone(),
@@ -494,7 +494,7 @@ mod tests {
             Arc::new(ManifestStore::new(&parent_path, object_store.clone()));
         let mut parent_sm = StoredManifest::create_new_db(
             parent_manifest_store,
-            CoreDbState::new(),
+            ManifestCore::new(),
             system_clock.clone(),
         )
         .await
@@ -514,7 +514,7 @@ mod tests {
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         StoredManifest::create_uninitialized_clone(
             clone_manifest_store,
-            &Manifest::initial(CoreDbState::new()),
+            &Manifest::initial(ManifestCore::new()),
             parent_path.to_string(),
             checkpoint_1.id,
             rand.clone(),
@@ -552,7 +552,7 @@ mod tests {
         let system_clock = Arc::new(DefaultSystemClock::new());
 
         // Setup an uninitialized manifest pointing to a different parent
-        let parent_manifest = Manifest::initial(CoreDbState::new());
+        let parent_manifest = Manifest::initial(ManifestCore::new());
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
         StoredManifest::create_uninitialized_clone(
             Arc::clone(&clone_manifest_store),

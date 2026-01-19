@@ -10,7 +10,7 @@ use crate::error::SlateDBError::{
     LatestTransactionalObjectVersionMissing, TransactionalObjectVersionExists,
 };
 use crate::merge_operator::MergeOperatorError;
-use crate::transactional_object::TransactionalObjectError;
+use slatedb_txn_obj::TransactionalObjectError;
 
 #[non_exhaustive]
 #[derive(Clone, Debug, ThisError)]
@@ -98,6 +98,9 @@ pub(crate) enum SlateDBError {
     #[cfg(any(feature = "snappy", feature = "zlib", feature = "zstd"))]
     #[error("error compressing block")]
     BlockCompressionError,
+
+    #[error("error transforming block")]
+    BlockTransformError,
 
     #[error("Invalid RowFlags. #{message}. encoded_bits=`{encoded_bits:#b}`, known_bits=`{known_bits:#b}`")]
     InvalidRowFlags {
@@ -241,6 +244,7 @@ impl From<TransactionalObjectError> for SlateDBError {
             TransactionalObjectError::InvalidObjectState => {
                 SlateDBError::InvalidTransactionalObjectState
             }
+            other => SlateDBError::TransactionalObjectError(Arc::new(other)),
         }
     }
 }
@@ -495,6 +499,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::BlockDecompressionError => Error::data(msg),
             #[cfg(any(feature = "snappy", feature = "zlib", feature = "zstd"))]
             SlateDBError::BlockCompressionError => Error::data(msg),
+            SlateDBError::BlockTransformError => Error::data(msg),
             SlateDBError::InvalidRowFlags { .. } => Error::data(msg),
             SlateDBError::CheckpointMissing(_) => Error::data(msg),
             SlateDBError::InvalidVersion { .. } => Error::data(msg),

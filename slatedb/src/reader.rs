@@ -2,7 +2,7 @@ use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
-use crate::db_state::CoreDbState;
+use crate::db_state::ManifestCore;
 use crate::db_stats::DbStats;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::mem_table::{ImmutableMemtable, KVTable};
@@ -22,7 +22,7 @@ use std::sync::Arc;
 pub(crate) trait DbStateReader {
     fn memtable(&self) -> Arc<KVTable>;
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
-    fn core(&self) -> &CoreDbState;
+    fn core(&self) -> &ManifestCore;
 }
 
 struct IteratorSources {
@@ -436,7 +436,7 @@ mod tests {
     struct TestDbState {
         memtable: Arc<KVTable>,
         imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-        core: CoreDbState,
+        core: ManifestCore,
         table_store: Arc<TableStore>,
     }
 
@@ -453,7 +453,7 @@ mod tests {
             Self {
                 memtable: Arc::new(KVTable::new()),
                 imm_memtable: VecDeque::new(),
-                core: CoreDbState::new(),
+                core: ManifestCore::new(),
                 table_store,
             }
         }
@@ -520,10 +520,10 @@ mod tests {
             let mut builder = self.table_store.table_builder();
 
             for entry in entries {
-                builder.add(entry)?;
+                builder.add(entry).await?;
             }
 
-            let encoded = builder.build()?;
+            let encoded = builder.build().await?;
             let id = SsTableId::Compacted(Ulid::new());
             self.table_store.write_sst(&id, encoded, false).await
         }
@@ -538,7 +538,7 @@ mod tests {
             &self.imm_memtable
         }
 
-        fn core(&self) -> &CoreDbState {
+        fn core(&self) -> &ManifestCore {
             &self.core
         }
     }

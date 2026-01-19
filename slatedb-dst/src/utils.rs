@@ -3,7 +3,6 @@
 use log::{error, info};
 use rand::Rng;
 use slatedb::clock::LogicalClock;
-use slatedb::clock::SystemClock;
 use slatedb::config::CompactorOptions;
 use slatedb::config::CompressionCodec;
 use slatedb::config::GarbageCollectorDirectoryOptions;
@@ -16,6 +15,7 @@ use slatedb::DbBuilder;
 use slatedb::DbRand;
 use slatedb::Error;
 use slatedb::Settings;
+use slatedb_common::clock::SystemClock;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -83,7 +83,7 @@ pub async fn build_db(
 ) -> Db {
     let object_store = Arc::new(ClockedObjectStore::new(object_store, system_clock.clone()));
     let settings = build_settings(rand).await;
-    let compaction_scheduler_supplier = build_compaction_scheduler_supplier(rand, &settings).await;
+    let compaction_scheduler_supplier = Arc::new(SizeTieredCompactionSchedulerSupplier::new());
     let mut builder = DbBuilder::new("test_db", object_store);
     builder = builder.with_settings(settings);
     builder = builder.with_seed(rand.rng().random_range(0..u64::MAX));
@@ -113,6 +113,21 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         } else {
             None
         };
+    // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
+    // Otherwise, the compactor never runs and writers get blocked permanently.
+    let min_compaction_sources = rng.random_range(4..10).min(l0_max_ssts);
+    // Prevent scheduler from having a higher min compaction sources than max compaction sources.
+    let max_compaction_sources = 8.max(min_compaction_sources);
+    let scheduler_options = SizeTieredCompactionSchedulerOptions {
+        min_compaction_sources,
+        max_compaction_sources,
+        ..Default::default()
+    }
+    .into();
+    let compactor_options = CompactorOptions {
+        scheduler_options,
+        ..Default::default()
+    };
 
     Settings {
         flush_interval: Some(flush_interval),
@@ -126,46 +141,34 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
         compression_codec,
         garbage_collector_options: Some(GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
             compacted_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(900),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: Duration::from_secs(300),
-                ..Default::default()
+                interval: Some(
+                    rng.random_range(Duration::from_millis(1)..Duration::from_secs(600)),
+                ),
+                min_age: rng.random_range(Duration::from_millis(20)..Duration::from_secs(900)),
             }),
         }),
-        compactor_options: Some(CompactorOptions::default()),
+        compactor_options: Some(compactor_options),
         wal_enabled: rng.random_bool(0.5),
         ..Default::default()
     }
-}
-
-/// Builds a CompactorOptions instance with random values.
-///
-/// All arguments are expected to be deterministic.
-pub async fn build_compaction_scheduler_supplier(
-    rand: &DbRand,
-    settings: &Settings,
-) -> Arc<SizeTieredCompactionSchedulerSupplier> {
-    // Prevent scheduler from having a higher min compaction sources than L0 max SSTS.
-    // Otherwise, the compactor never runs and writers get blocked permanently.
-    let min_compaction_sources = rand.rng().random_range(4..10).min(settings.l0_max_ssts);
-    // Prevent scheduler from having a higher min compaction sources than max compaction sources.
-    let max_compaction_sources = 8.max(min_compaction_sources);
-    let options = SizeTieredCompactionSchedulerOptions {
-        min_compaction_sources,
-        max_compaction_sources,
-        ..Default::default()
-    };
-    Arc::new(SizeTieredCompactionSchedulerSupplier::new(options))
 }
 
 /// Tokio's default Runtime is non-deterministic even if a single thread is used.

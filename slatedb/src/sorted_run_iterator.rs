@@ -226,10 +226,19 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key3", b"value3", gen_attrs(3))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
         let sr = SortedRun {
@@ -274,14 +283,23 @@ mod tests {
             None,
         ));
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key1", b"value1", gen_attrs(1)).unwrap();
-        builder.add_value(b"key2", b"value2", gen_attrs(2)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         let id1 = SsTableId::Compacted(ulid::Ulid::new());
         let handle1 = table_store.write_sst(&id1, encoded, false).await.unwrap();
         let mut builder = table_store.table_builder();
-        builder.add_value(b"key3", b"value3", gen_attrs(3)).unwrap();
-        let encoded = builder.build().unwrap();
+        builder
+            .add_value(b"key3", b"value3", gen_attrs(3))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
         let id2 = SsTableId::Compacted(ulid::Ulid::new());
         let handle2 = table_store.write_sst(&id2, encoded, false).await.unwrap();
         let sr = SortedRun {
@@ -492,10 +510,10 @@ mod tests {
             }
 
             for (key, value) in sst_kvs {
-                builder.add_value(key, value, gen_attrs(0)).unwrap();
+                builder.add_value(key, value, gen_attrs(0)).await.unwrap();
             }
 
-            let encoded = builder.build().unwrap();
+            let encoded = builder.build().await.unwrap();
             let id = SsTableId::Compacted(ulid::Ulid::new());
             let handle = table_store.write_sst(&id, encoded, false).await.unwrap();
             ssts.push(handle);

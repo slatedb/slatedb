@@ -8,7 +8,6 @@ use futures::future::{join, join_all};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::clock::SystemClock;
 use crate::compactor::CompactorMessage;
 use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
@@ -25,6 +24,7 @@ use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
+use slatedb_common::clock::SystemClock;
 
 use crate::compactor::stats::CompactionStats;
 use crate::utils::{build_concurrent, compute_max_parallel, spawn_bg_task, IdGenerator};
@@ -386,7 +386,6 @@ impl TokioCompactionExecutorInner {
 mod tests {
     use super::*;
     use crate::bytes_range::BytesRange;
-    use crate::clock::DefaultSystemClock;
     use crate::sst_iter::SstView;
     use crate::stats::StatRegistry;
     use crate::test_utils::StringConcatMergeOperator;
@@ -395,6 +394,7 @@ mod tests {
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use slatedb_common::clock::DefaultSystemClock;
     use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -428,17 +428,21 @@ mod tests {
         let mut sst_builder = table_store.table_builder();
         sst_builder
             .add(RowEntry::new_merge(b"foo", b"3", 4))
+            .await
             .unwrap();
         sst_builder
             .add(RowEntry::new_merge(b"foo", b"2", 3))
+            .await
             .unwrap();
         sst_builder
             .add(RowEntry::new_merge(b"foo", b"1", 2))
+            .await
             .unwrap();
         sst_builder
             .add(RowEntry::new_merge(b"foo", b"0", 1))
+            .await
             .unwrap();
-        let encoded_sst = sst_builder.build().unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
         let l0 = table_store
             .write_sst(&id, encoded_sst, false)

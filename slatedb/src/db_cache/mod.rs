@@ -19,12 +19,12 @@ use chrono::{DateTime, TimeDelta, Utc};
 use log::{debug, error, trace};
 use parking_lot::Mutex;
 
-use crate::clock::SystemClock;
 use crate::db_cache::stats::DbCacheStats;
 use crate::stats::StatRegistry;
 use crate::{
     block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
 };
+use slatedb_common::clock::SystemClock;
 
 #[cfg(feature = "foyer")]
 pub mod foyer;
@@ -616,10 +616,10 @@ pub(crate) mod test_utils {
 mod tests {
 
     use crate::block::BlockBuilder;
-    use crate::clock::DefaultSystemClock;
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
     use crate::filter::BloomFilterBuilder;
+    use slatedb_common::clock::DefaultSystemClock;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
 
@@ -636,7 +636,10 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_should_count_filter_hits(cache: DbCacheWrapper, sst: EncodedSsTable) {
+    async fn test_should_count_filter_hits(
+        cache: DbCacheWrapper,
+        #[future(awt)] sst: EncodedSsTable,
+    ) {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
@@ -674,7 +677,10 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_should_count_index_hits(cache: DbCacheWrapper, sst: EncodedSsTable) {
+    async fn test_should_count_index_hits(
+        cache: DbCacheWrapper,
+        #[future(awt)] sst: EncodedSsTable,
+    ) {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
@@ -699,11 +705,11 @@ mod tests {
     async fn test_should_clamp_entries_to_cache(
         cache: DbCacheWrapper,
         sst_format: SsTableFormat,
-        sst: EncodedSsTable,
+        #[future(awt)] sst: EncodedSsTable,
     ) {
         // given:
         let bytes = sst.remaining_as_bytes();
-        let index = Arc::new(sst_format.read_index_raw(&sst.info, &bytes).unwrap());
+        let index = Arc::new(sst_format.read_index_raw(&sst.info, &bytes).await.unwrap());
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
             .insert(key.clone(), CachedEntry::with_sst_index(index.clone()))
@@ -737,12 +743,13 @@ mod tests {
     async fn test_should_count_data_block_hits(
         cache: DbCacheWrapper,
         sst_format: SsTableFormat,
-        sst: EncodedSsTable,
+        #[future(awt)] sst: EncodedSsTable,
     ) {
         // given:
         let data = sst.remaining_as_bytes();
         let block = sst_format
             .read_block_raw(&sst.info, &sst.index, 0, &data)
+            .await
             .unwrap();
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
@@ -813,7 +820,7 @@ mod tests {
         let cache_a = DbCacheWrapper::new(shared_cache.clone(), &registry_a, system_clock.clone());
         let cache_b = DbCacheWrapper::new(shared_cache.clone(), &registry_b, system_clock);
 
-        let sst = build_test_sst(&SsTableFormat::default(), 1);
+        let sst = build_test_sst(&SsTableFormat::default(), 1).await;
         let index = Arc::new(sst.index);
         let key = CachedKey::from((SST_ID, 2u64));
 
@@ -883,7 +890,7 @@ mod tests {
     }
 
     #[fixture]
-    fn sst(sst_format: SsTableFormat) -> EncodedSsTable {
-        build_test_sst(&sst_format, 1)
+    async fn sst(sst_format: SsTableFormat) -> EncodedSsTable {
+        build_test_sst(&sst_format, 1).await
     }
 }

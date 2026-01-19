@@ -6,12 +6,12 @@ use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use crate::seq_tracker::SequenceTracker;
-use crate::transactional_object::DirtyObject;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_id::WalIdStore;
 use bytes::Bytes;
 use log::debug;
 use serde::Serialize;
+use slatedb_txn_obj::DirtyObject;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -21,14 +21,18 @@ use ulid::Ulid;
 use uuid::Uuid;
 use SsTableId::{Compacted, Wal};
 
+/// A handle to an SSTable, including its ID, metadata, and visible key ranges.
 #[derive(Clone, PartialEq, Serialize)]
-pub(crate) struct SsTableHandle {
+pub struct SsTableHandle {
+    /// The unique identifier for this SSTable. The table can be either a WAL SST or a compacted SST.
     pub id: SsTableId,
+
+    /// Metadata information about this SSTable.
     pub info: SsTableInfo,
 
     /// The range of keys that are visible to the user. If non-empty, this handle represents a projection
     /// over the SST file.
-    pub visible_range: Option<BytesRange>,
+    pub(crate) visible_range: Option<BytesRange>,
 
     /// The effective range of keys that are visible to the user, which is the intersection of the
     /// physical range (first_key..unbounded) and any projection range. If a projection is specified,
@@ -92,6 +96,15 @@ impl SsTableHandle {
 
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
         Self::new_compacted(self.id, self.info.clone(), Some(visible_range))
+    }
+
+    /// The range of keys that are visible to the user.
+    ///
+    /// ## Returns
+    /// - `Some(BytesRange)` if there is a projection applied to this SST.
+    /// - `None` if the entire SST is visible.
+    pub fn visible_range(&self) -> Option<impl RangeBounds<Bytes>> {
+        self.visible_range.clone()
     }
 
     // Compacted (non-WAL) SSTs are never empty. They are created by compaction or
@@ -172,15 +185,19 @@ impl AsRef<SsTableHandle> for SsTableHandle {
     }
 }
 
+/// An identifier for an SSTable, which can be either a WAL SST or a compacted SST.
 #[derive(Clone, PartialEq, Hash, Eq, Copy, Serialize)]
-pub(crate) enum SsTableId {
+pub enum SsTableId {
+    /// A WAL SST identified by its unique WAL ID.
     Wal(u64),
+
+    /// A compacted SST identified by its ULID.
     Compacted(Ulid),
 }
 
 impl SsTableId {
     #[allow(clippy::panic)]
-    pub(crate) fn unwrap_wal_id(&self) -> u64 {
+    pub fn unwrap_wal_id(&self) -> u64 {
         match self {
             Wal(wal_id) => *wal_id,
             Compacted(_) => panic!("found compacted id when unwrapping WAL ID"),
@@ -188,7 +205,7 @@ impl SsTableId {
     }
 
     #[allow(clippy::panic)]
-    pub(crate) fn unwrap_compacted_id(&self) -> Ulid {
+    pub fn unwrap_compacted_id(&self) -> Ulid {
         match self {
             Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
             Compacted(ulid) => *ulid,
@@ -205,14 +222,22 @@ impl Debug for SsTableId {
     }
 }
 
+/// Metadata information about an SSTable. See [`crate::sst::EncodedSsTableBuilder`] for
+/// more information on the format of the SSTable and its metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
-pub(crate) struct SsTableInfo {
-    pub(crate) first_key: Option<Bytes>,
-    pub(crate) index_offset: u64,
-    pub(crate) index_len: u64,
-    pub(crate) filter_offset: u64,
-    pub(crate) filter_len: u64,
-    pub(crate) compression_codec: Option<CompressionCodec>,
+pub struct SsTableInfo {
+    /// The first key in the SSTable, if any.
+    pub first_key: Option<Bytes>,
+    /// The offset of the index block within the SSTable file.
+    pub index_offset: u64,
+    /// The length of the index block within the SSTable file.
+    pub index_len: u64,
+    /// The offset of the filter block within the SSTable file.
+    pub filter_offset: u64,
+    /// The length of the filter block within the SSTable file.
+    pub filter_len: u64,
+    /// The compression codec used for the SSTable, if any.
+    pub compression_codec: Option<CompressionCodec>,
 }
 
 pub(crate) trait SsTableInfoCodec: Send + Sync {
@@ -232,14 +257,18 @@ impl Clone for Box<dyn SsTableInfoCodec> {
     }
 }
 
+/// A sorted run consisting of multiple compacted SSTables.
 #[derive(Clone, PartialEq, Serialize, Debug)]
-pub(crate) struct SortedRun {
-    pub(crate) id: u32,
-    pub(crate) ssts: Vec<SsTableHandle>,
+pub struct SortedRun {
+    /// The unique identifier for this sorted run.
+    pub id: u32,
+    /// The list of SSTables in this sorted run.
+    pub ssts: Vec<SsTableHandle>,
 }
 
 impl SortedRun {
-    pub(crate) fn estimate_size(&self) -> u64 {
+    /// Estimate the total size of all SSTables in this sorted run.
+    pub fn estimate_size(&self) -> u64 {
         self.ssts.iter().map(|sst| sst.estimate_size()).sum()
     }
 
@@ -323,42 +352,67 @@ pub(crate) struct COWDbState {
 }
 
 impl COWDbState {
-    pub(crate) fn core(&self) -> &CoreDbState {
-        self.manifest.core()
+    pub(crate) fn core(&self) -> &ManifestCore {
+        &self.manifest.value.core
     }
 }
 
-/// represent the in-memory state of the manifest
+/// Represents an immutable in-memory view of .manifest file that is suitable
+/// to expose to end-users.
 #[derive(Clone, PartialEq, Serialize, Debug)]
-pub(crate) struct CoreDbState {
-    pub(crate) initialized: bool,
-    pub(crate) l0_last_compacted: Option<Ulid>,
-    pub(crate) l0: VecDeque<SsTableHandle>,
-    pub(crate) compacted: Vec<SortedRun>,
-    pub(crate) next_wal_sst_id: u64,
+pub struct ManifestCore {
+    /// Flag to indicate whether initialization has finished. When creating the initial manifest for
+    /// a root db (one that is not a clone), this flag will be set to true. When creating the initial
+    /// manifest for a clone db, this flag will be set to false and then updated to true once clone
+    /// initialization has completed.
+    pub initialized: bool,
+
+    /// The last compacted l0.
+    pub l0_last_compacted: Option<Ulid>,
+
+    /// A list of the L0 SSTs that are valid to read in the `compacted` folder.
+    pub l0: VecDeque<SsTableHandle>,
+
+    /// A list of the sorted runs that are valid to read in the `compacted` folder.
+    pub compacted: Vec<SortedRun>,
+
+    /// The next WAL SST ID to be assigned when creating a new WAL SST. The manifest FlatBuffer
+    /// contains `wal_id_last_seen`, which is always one less than this value.
+    pub next_wal_sst_id: u64,
+
     /// the WAL ID after which the WAL replay should start. Default to 0,
     /// which means all the WAL IDs should be greater than or equal to 1.
     /// When a new L0 is flushed, we update this field to the recent
     /// flushed WAL ID.
-    pub(crate) replay_after_wal_id: u64,
+    pub replay_after_wal_id: u64,
+
     /// the `last_l0_clock_tick` includes all data in L0 and below --
     /// WAL entries will have their latest ticks recovered on replay
-    /// into the in-memory state
-    pub(crate) last_l0_clock_tick: i64,
+    /// into the in-memory state.
+    pub last_l0_clock_tick: i64,
+
     /// it's persisted in the manifest, and only updated when a new L0
     /// SST is created in the manifest.
-    pub(crate) last_l0_seq: u64,
+    pub last_l0_seq: u64,
+
     /// Minimum sequence number across all recent in-memory snapshots. The compactor
     /// needs this to determine whether it's safe to drop duplicate key writes. If a
     /// recent snapshot still references an older version of a key, it should not be
     /// recycled. This field is updated when a new L0 is flushed.
-    pub(crate) recent_snapshot_min_seq: u64,
-    pub(crate) sequence_tracker: SequenceTracker,
-    pub(crate) checkpoints: Vec<Checkpoint>,
-    pub(crate) wal_object_store_uri: Option<String>,
+    pub recent_snapshot_min_seq: u64,
+
+    /// A sequence tracker that maps sequence numbers to timestamps as defined in
+    /// RFC-0012.
+    pub sequence_tracker: SequenceTracker,
+
+    /// A list of checkpoints that are currently open.
+    pub checkpoints: Vec<Checkpoint>,
+
+    /// The URI of the object store dedicated specifically for WAL, if any.
+    pub wal_object_store_uri: Option<String>,
 }
 
-impl CoreDbState {
+impl ManifestCore {
     pub(crate) fn new() -> Self {
         Self {
             initialized: true,
@@ -382,7 +436,7 @@ impl CoreDbState {
         this
     }
 
-    pub(crate) fn init_clone_db(&self) -> CoreDbState {
+    pub(crate) fn init_clone_db(&self) -> ManifestCore {
         let mut clone = self.clone();
         clone.initialized = false;
         clone.checkpoints.clear();
@@ -424,13 +478,13 @@ impl DbStateReader for DbStateView {
         &self.state.imm_memtable
     }
 
-    fn core(&self) -> &CoreDbState {
+    fn core(&self) -> &ManifestCore {
         self.state.core()
     }
 }
 
 impl DbState {
-    pub fn new(manifest: DirtyObject<Manifest>) -> Self {
+    pub(crate) fn new(manifest: DirtyObject<Manifest>) -> Self {
         Self {
             memtable: WritableKVTable::new(),
             state: Arc::new(COWDbState {
@@ -441,18 +495,18 @@ impl DbState {
         }
     }
 
-    pub fn state(&self) -> Arc<COWDbState> {
+    pub(crate) fn state(&self) -> Arc<COWDbState> {
         self.state.clone()
     }
 
-    pub fn view(&self) -> DbStateView {
+    pub(crate) fn view(&self) -> DbStateView {
         DbStateView {
             memtable: self.memtable.table().clone(),
             state: self.state.clone(),
         }
     }
 
-    pub fn closed_result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
+    pub(crate) fn closed_result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         self.closed_result.reader()
     }
 
@@ -460,11 +514,14 @@ impl DbState {
         self.closed_result.clone()
     }
 
-    pub fn memtable(&self) -> &WritableKVTable {
+    pub(crate) fn memtable(&self) -> &WritableKVTable {
         &self.memtable
     }
 
-    pub fn freeze_memtable(&mut self, recent_flushed_wal_id: u64) -> Result<(), SlateDBError> {
+    pub(crate) fn freeze_memtable(
+        &mut self,
+        recent_flushed_wal_id: u64,
+    ) -> Result<(), SlateDBError> {
         if let Some(result) = self.closed_result.reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
@@ -499,11 +556,11 @@ impl DbState {
         Ok(())
     }
 
-    pub fn merge_remote_manifest(&mut self, remote_manifest: DirtyObject<Manifest>) {
+    pub(crate) fn merge_remote_manifest(&mut self, remote_manifest: DirtyObject<Manifest>) {
         self.modify(|modifier| modifier.merge_remote_manifest(remote_manifest));
     }
 
-    pub fn modify<F, R>(&mut self, fun: F) -> R
+    pub(crate) fn modify<F, R>(&mut self, fun: F) -> R
     where
         F: FnOnce(&mut StateModifier<'_>) -> R,
     {
@@ -516,7 +573,7 @@ impl DbState {
 
 pub(crate) struct StateModifier<'a> {
     db_state: &'a mut DbState,
-    pub state: COWDbState,
+    pub(crate) state: COWDbState,
 }
 
 impl<'a> StateModifier<'a> {
@@ -526,25 +583,26 @@ impl<'a> StateModifier<'a> {
         Self { db_state, state }
     }
 
-    pub fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
+    pub(crate) fn merge_remote_manifest(&mut self, mut remote_manifest: DirtyObject<Manifest>) {
         // The compactor removes tables from l0_last_compacted, so we
         // only want to keep the tables up to there.
-        let l0_last_compacted = &remote_manifest.core().l0_last_compacted;
+        let l0_last_compacted = &remote_manifest.value.core.l0_last_compacted;
         let new_l0 = if let Some(l0_last_compacted) = l0_last_compacted {
             self.state
                 .manifest
-                .core()
+                .value
+                .core
                 .l0
                 .iter()
                 .cloned()
                 .take_while(|sst| sst.id.unwrap_compacted_id() != *l0_last_compacted)
                 .collect()
         } else {
-            self.state.manifest.core().l0.iter().cloned().collect()
+            self.state.manifest.value.core.l0.iter().cloned().collect()
         };
 
         let my_db_state = self.state.core();
-        remote_manifest.value.core = CoreDbState {
+        remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
             l0_last_compacted: remote_manifest.value.core.l0_last_compacted,
             l0: new_l0,
@@ -575,7 +633,7 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
         // statement -- probably some generic inference bug
         #[allow(clippy::needless_return)]
         return state.modify(|modifier| {
-            let next_wal_id = modifier.state.manifest.core().next_wal_sst_id;
+            let next_wal_id = modifier.state.manifest.value.core.next_wal_sst_id;
             modifier.state.manifest.value.core.next_wal_sst_id += 1;
             next_wal_id
         });
@@ -585,7 +643,6 @@ impl WalIdStore for parking_lot::RwLock<DbState> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
@@ -593,6 +650,7 @@ mod tests {
     use bytes::Bytes;
     use proptest::collection::vec;
     use proptest::proptest;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use std::collections::BTreeSet;
     use std::collections::Bound::Included;
     use std::ops::RangeBounds;

@@ -1,4 +1,4 @@
-use crate::clock::{MonotonicClock, SystemClock};
+use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
@@ -8,13 +8,13 @@ use bytes::{BufMut, Bytes};
 use futures::FutureExt;
 use log::error;
 use rand::{Rng, RngCore};
+use slatedb_common::clock::SystemClock;
 use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -207,31 +207,31 @@ pub(crate) struct MonotonicSeq {
 }
 
 impl MonotonicSeq {
-    pub fn new(initial_value: u64) -> Self {
+    pub(crate) fn new(initial_value: u64) -> Self {
         Self {
             val: AtomicU64::new(initial_value),
         }
     }
 
-    pub fn next(&self) -> u64 {
+    pub(crate) fn next(&self) -> u64 {
         self.val.fetch_add(1, SeqCst) + 1
     }
 
-    pub fn store(&self, value: u64) {
+    pub(crate) fn store(&self, value: u64) {
         self.val.store(value, SeqCst);
     }
 
-    pub fn load(&self) -> u64 {
+    pub(crate) fn load(&self) -> u64 {
         self.val.load(SeqCst)
     }
 
-    pub fn store_if_greater(&self, value: u64) {
+    pub(crate) fn store_if_greater(&self, value: u64) {
         self.val.fetch_max(value, SeqCst);
     }
 }
 
 /// An extension trait that adds a `.send_safely(...)` method to tokio's `UnboundedSender<T>`.
-pub trait SendSafely<T> {
+pub(crate) trait SendSafely<T> {
     /// Attempts to send a message to the channel, and if the channel is closed, returns the error
     /// in `error_reader` if it is set, otherwise panics.
     ///
@@ -269,7 +269,7 @@ impl<T> SendSafely<T> for UnboundedSender<T> {
 }
 
 /// Trait for generating UUIDs and ULIDs from a random number generator.
-pub trait IdGenerator {
+pub(crate) trait IdGenerator {
     fn gen_uuid(&mut self) -> Uuid;
     fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid;
 }
@@ -293,31 +293,6 @@ impl<R: RngCore> IdGenerator for R {
             .expect("timestamp outside u64 range in gen_ulid");
         let random_bytes = self.random::<u128>();
         Ulid::from_parts(now, random_bytes)
-    }
-}
-
-/// A timeout wrapper for futures that returns a SlateDBError::Timeout if the future
-/// does not complete within the specified duration.
-///
-/// Arguments:
-/// - `clock`: The clock to use for the timeout.
-/// - `duration`: The duration to wait for the future to complete.
-/// - `operation`: The name of the operation that will time out, for logging purposes.
-/// - `future`: The future to timeout
-///
-/// Returns:
-/// - `Ok(T)`: If the future completes within the specified duration.
-/// - `Err(SlateDBError::Timeout)`: If the future does not complete within the specified duration.
-pub async fn timeout<T, Err>(
-    clock: Arc<dyn SystemClock>,
-    duration: Duration,
-    error_fn: impl FnOnce() -> Err,
-    future: impl Future<Output = Result<T, Err>> + Send,
-) -> Result<T, Err> {
-    tokio::select! {
-        biased;
-        res = future => res,
-        _ = clock.sleep(duration) => Err(error_fn())
     }
 }
 
@@ -520,8 +495,7 @@ where
 /// - &'static str
 ///
 /// Other panic types are handled by printing a generic message with the type name.
-#[allow(dead_code)]
-pub fn panic_string(panic: &Box<dyn Any + Send>) -> String {
+pub(crate) fn panic_string(panic: &Box<dyn Any + Send>) -> String {
     if let Some(result) = panic.downcast_ref::<Result<(), SlateDBError>>() {
         match result {
             Ok(()) => "ok".to_string(),
@@ -621,7 +595,7 @@ pub(crate) fn split_join_result(
 /// assert_eq!(format_bytes_si(1500), "1.50 KB");
 /// assert_eq!(format_bytes_si(1_000_000), "1.00 MB");
 /// ```
-pub fn format_bytes_si(bytes: u64) -> String {
+pub(crate) fn format_bytes_si(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB"];
     const FACTOR: f64 = 1000.0;
 
@@ -918,94 +892,6 @@ mod tests {
         // a buffer of the minimal size, as Bytes doesn't expose the underlying buffer's
         // capacity. The best we can do is assert it allocated a new buffer.
         assert_ne!(clamped.as_ptr(), slice.as_ptr());
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "test-util")]
-    async fn test_timeout_completes_before_expiry() {
-        use crate::{clock::MockSystemClock, utils::timeout};
-
-        // Given: a mock clock and a future that completes quickly
-        let clock = Arc::new(MockSystemClock::new());
-
-        // When: we execute a future with a timeout
-        let completed_future = async { Ok::<_, SlateDBError>(42) };
-        let timeout_future = timeout(
-            clock,
-            Duration::from_millis(100),
-            || unreachable!(),
-            completed_future,
-        );
-
-        // Then: the future should complete successfully with the expected value
-        let result = timeout_future.await;
-        assert_eq!(result.unwrap(), 42);
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "test-util")]
-    async fn test_timeout_expires() {
-        use std::sync::atomic::AtomicBool;
-
-        use crate::clock::{MockSystemClock, SystemClock};
-        use crate::utils::timeout;
-
-        // Given: a mock clock and a future that will never complete
-        let clock = Arc::new(MockSystemClock::new());
-        let never_completes = std::future::pending::<Result<(), SlateDBError>>();
-        let timeout_duration = Duration::from_millis(100);
-
-        // When: we execute the future with a timeout and advance the clock past the timeout duration
-        let timeout_future = timeout(
-            clock.clone(),
-            timeout_duration,
-            || SlateDBError::TransactionalObjectTimeout {
-                timeout: timeout_duration,
-            },
-            never_completes,
-        );
-        let done = Arc::new(AtomicBool::new(false));
-        let this_done = done.clone();
-
-        tokio::spawn(async move {
-            while !this_done.load(SeqCst) {
-                clock.advance(Duration::from_millis(100)).await;
-                // Yield or else the scheduler keeps picking this loop, which
-                // the sleep task forever.
-                tokio::task::yield_now().await;
-            }
-        });
-
-        // Then: the future should complete with a timeout error
-        let result = timeout_future.await;
-        done.store(true, SeqCst);
-        assert!(matches!(
-            result,
-            Err(SlateDBError::TransactionalObjectTimeout { .. })
-        ));
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "test-util")]
-    async fn test_timeout_respects_biased_select() {
-        use crate::{clock::MockSystemClock, utils::timeout};
-
-        // Given: a mock clock and two futures that complete simultaneously
-        let clock = Arc::new(MockSystemClock::new());
-        let completes_immediately = async { Ok::<_, SlateDBError>(42) };
-
-        // When: we execute the future with a timeout and both are ready immediately
-        let timeout_future = timeout(
-            clock,
-            Duration::from_millis(100),
-            || unreachable!(),
-            completes_immediately,
-        );
-
-        // Then: because of the 'biased' select, the future should complete with the value
-        // rather than timing out, even though both are ready
-        let result = timeout_future.await;
-        assert_eq!(result.unwrap(), 42);
     }
 
     #[rstest]

@@ -2,16 +2,20 @@ use crate::args::{parse_args, CliArgs, CliCommands, GcResource, GcSchedule};
 use chrono::{TimeZone, Utc};
 use object_store::path::Path;
 use slatedb::admin::{self, Admin, AdminBuilder};
-use slatedb::config::{
-    CheckpointOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+use slatedb::compactor::{
+    CompactionRequest, CompactionSchedulerSupplier, SizeTieredCompactionSchedulerSupplier,
 };
-use slatedb::FindOption;
+use slatedb::config::{
+    CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+};
+use slatedb::seq_tracker::FindOption;
 use std::error::Error;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+use ulid::Ulid;
 use uuid::Uuid;
 
 mod args;
@@ -48,6 +52,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         CliCommands::ListCompactions { start, end } => {
             exec_list_compactions(&admin, start, end).await?
         }
+        CliCommands::ReadCompaction { id, compactions_id } => {
+            exec_read_compaction(&admin, id, compactions_id).await?
+        }
         CliCommands::CreateCheckpoint {
             lifetime,
             source,
@@ -68,6 +75,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             compacted,
             compactions,
         } => schedule_gc(&admin, manifest, wal, compacted, compactions).await?,
+        CliCommands::SubmitCompaction { scheduler, request } => {
+            exec_submit_compaction(&admin, scheduler, request).await?
+        }
 
         CliCommands::SeqToTs { seq, round } => {
             exec_seq_to_ts(&admin, seq, matches!(round, FindOption::RoundUp)).await?
@@ -133,6 +143,50 @@ async fn exec_list_compactions(
     };
 
     println!("{}", admin.list_compactions(range).await?);
+    Ok(())
+}
+
+async fn exec_submit_compaction(
+    admin: &Admin,
+    scheduler: String,
+    request: CompactionRequest,
+) -> Result<(), Box<dyn Error>> {
+    let state = admin.read_compactor_state_view().await?;
+    let supplier = match scheduler.as_str() {
+        "size-tiered" => SizeTieredCompactionSchedulerSupplier,
+        _ => {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported scheduler: {scheduler}"),
+            )))
+        }
+    };
+    let scheduler = supplier.compaction_scheduler(&CompactorOptions::default());
+    let specs = scheduler.generate(&state, &request)?;
+    let mut compactions = Vec::with_capacity(specs.len());
+    for spec in specs {
+        compactions.push(admin.submit_compaction(spec).await?);
+    }
+    let compaction_json = serde_json::to_string(&compactions)?;
+    println!("{}", compaction_json);
+    Ok(())
+}
+
+async fn exec_read_compaction(
+    admin: &Admin,
+    id: String,
+    compactions_id: Option<u64>,
+) -> Result<(), Box<dyn Error>> {
+    let compaction_id = Ulid::from_string(&id)?;
+    match admin.read_compaction(compaction_id, compactions_id).await? {
+        None => {
+            println!("no compaction found");
+        }
+        Some(compaction) => {
+            let compaction_json = serde_json::to_string(&compaction)?;
+            println!("{}", compaction_json);
+        }
+    }
     Ok(())
 }
 

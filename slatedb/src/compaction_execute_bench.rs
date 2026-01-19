@@ -15,7 +15,6 @@ use tokio::task::JoinHandle;
 use ulid::Ulid;
 
 use crate::bytes_generator::OrderedBytesGenerator;
-use crate::clock::{DefaultSystemClock, SystemClock};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{
@@ -34,6 +33,7 @@ use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
 use crate::utils::IdGenerator;
+use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
 pub struct CompactionExecuteBench {
     path: Path,

@@ -34,12 +34,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::instrument;
 
-use crate::clock::SystemClock;
 use crate::config::WriteOptions;
 use crate::dispatcher::MessageHandler;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::{batch::WriteBatch, db::DbInner, error::SlateDBError};
+use slatedb_common::clock::SystemClock;
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 

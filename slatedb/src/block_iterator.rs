@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::iter::IterationOrder;
@@ -5,10 +6,10 @@ use crate::iter::IterationOrder::Ascending;
 use crate::row_codec::SstRowCodecV0;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
 use async_trait::async_trait;
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use IterationOrder::Descending;
 
-pub trait BlockLike: Send + Sync {
+pub(crate) trait BlockLike: Send + Sync {
     fn data(&self) -> &Bytes;
     fn offsets(&self) -> &[u16];
 }
@@ -43,7 +44,7 @@ impl BlockLike for Arc<Block> {
     }
 }
 
-pub struct BlockIterator<B: BlockLike> {
+pub(crate) struct BlockIterator<B: BlockLike> {
     block: B,
     off_off: usize,
     // first key in the block, because slateDB does not support multi version of keys
@@ -71,25 +72,36 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        loop {
-            let result = self.load_at_current_off();
-            match result {
-                Ok(None) => return Ok(()),
-                Ok(Some(kv)) => {
-                    if kv.key < next_key {
-                        self.advance();
-                    } else {
-                        return Ok(());
-                    }
+        let num_entries = self.block.offsets().len();
+        if num_entries == 0 {
+            return Ok(());
+        }
+
+        // Binary search to find the first key >= next_key
+        let mut low = self.off_off;
+        let mut high = num_entries;
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let mid_key = self.decode_key_at_index(mid)?;
+
+            match mid_key.as_ref().cmp(next_key) {
+                Ordering::Less => {
+                    low = mid + 1;
                 }
-                Err(e) => return Err(e),
+                Ordering::Equal | Ordering::Greater => {
+                    high = mid;
+                }
             }
         }
+
+        self.off_off = low;
+        Ok(())
     }
 }
 
 impl<B: BlockLike> BlockIterator<B> {
-    pub fn new(block: B, ordering: IterationOrder) -> Self {
+    pub(crate) fn new(block: B, ordering: IterationOrder) -> Self {
         BlockIterator {
             first_key: BlockIterator::decode_first_key(&block),
             block,
@@ -98,7 +110,7 @@ impl<B: BlockLike> BlockIterator<B> {
         }
     }
 
-    pub fn new_ascending(block: B) -> Self {
+    pub(crate) fn new_ascending(block: B) -> Self {
         Self::new(block, Ascending)
     }
 
@@ -134,13 +146,30 @@ impl<B: BlockLike> BlockIterator<B> {
         )))
     }
 
-    pub fn decode_first_key(block: &B) -> Bytes {
+    fn decode_first_key(block: &B) -> Bytes {
         let mut buf = block.data().slice(..);
         let overlap_len = buf.get_u16() as usize;
         assert_eq!(overlap_len, 0, "first key overlap should be 0");
         let key_len = buf.get_u16() as usize;
         let first_key = &buf[..key_len];
         Bytes::copy_from_slice(first_key)
+    }
+
+    /// Decodes just the key at the given offset index without parsing the full row.
+    /// This is more efficient for binary search where we only need to compare keys.
+    fn decode_key_at_index(&self, index: usize) -> Result<Bytes, SlateDBError> {
+        let off = self.block.offsets()[index] as usize;
+        let mut cursor = self.block.data().slice(off..);
+
+        let key_prefix_len = cursor.get_u16() as usize;
+        let key_suffix_len = cursor.get_u16() as usize;
+        let key_suffix = &cursor[..key_suffix_len];
+
+        // Reconstruct the full key from first_key prefix + suffix
+        let mut full_key = BytesMut::with_capacity(key_prefix_len + key_suffix_len);
+        full_key.extend_from_slice(&self.first_key[..key_prefix_len]);
+        full_key.extend_from_slice(key_suffix);
+        Ok(full_key.freeze())
     }
 }
 
@@ -287,5 +316,220 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    // ----- Binary search tests -----
+
+    #[tokio::test]
+    async fn should_binary_search_in_large_block() {
+        // given: a block with many entries
+        let mut block_builder = BlockBuilder::new(16384);
+        for i in 0..100u32 {
+            let key = format!("key_{:05}", i);
+            let value = format!("value_{}", i);
+            assert!(block_builder.add_value(key.as_bytes(), value.as_bytes(), gen_empty_attrs()));
+        }
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to various keys
+        // then: the correct entries are returned
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"key_00050").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"key_00050", b"value_50");
+
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"key_00099").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"key_00099", b"value_99");
+
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"key_00000").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"key_00000", b"value_0");
+    }
+
+    #[tokio::test]
+    async fn should_seek_to_first_key_in_block() {
+        // given: a block with multiple entries
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to the first key
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"apple").await.unwrap();
+
+        // then: the first entry is returned
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"apple", b"1");
+    }
+
+    #[tokio::test]
+    async fn should_seek_to_last_key_in_block() {
+        // given: a block with multiple entries
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_value(b"apple", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to the last key
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"cherry").await.unwrap();
+
+        // then: the last entry is returned and iteration ends
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"cherry", b"3");
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_seek_to_key_before_first() {
+        // given: a block with entries
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_value(b"banana", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"cherry", b"3", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to a key before the first entry
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"apple").await.unwrap();
+
+        // then: the first entry is returned
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"banana", b"2");
+    }
+
+    #[tokio::test]
+    async fn should_seek_with_shared_prefix_keys() {
+        // given: a block with keys that share prefixes (tests prefix encoding interaction)
+        let mut block_builder = BlockBuilder::new(4096);
+        assert!(block_builder.add_value(b"user:1000", b"alice", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"user:1001", b"bob", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"user:1002", b"carol", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"user:1010", b"dave", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"user:1020", b"eve", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to various keys with shared prefixes
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"user:1001").await.unwrap();
+
+        // then: correct entry is found
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"user:1001", b"bob");
+
+        // when: seeking to a key between entries
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"user:1005").await.unwrap();
+
+        // then: the next entry is returned
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"user:1010", b"dave");
+    }
+
+    #[tokio::test]
+    async fn should_seek_multiple_times_sequentially() {
+        // given: a block with multiple entries
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_value(b"a", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"b", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"c", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"d", b"4", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"e", b"5", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::new_ascending(block);
+
+        // when/then: multiple sequential seeks work correctly
+        iter.seek(b"b").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"b", b"2");
+
+        iter.seek(b"d").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"d", b"4");
+
+        iter.seek(b"e").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"e", b"5");
+    }
+
+    #[tokio::test]
+    async fn should_seek_forward_only_from_current_position() {
+        // given: a block with entries and an iterator advanced past the first entry
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_value(b"a", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"b", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"c", b"3", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"d", b"4", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::new_ascending(block);
+
+        // advance past "a" and "b"
+        iter.next().await.unwrap();
+        iter.next().await.unwrap();
+
+        // when: seeking to a key before current position
+        iter.seek(b"a").await.unwrap();
+
+        // then: seek does not go backwards, returns current position ("c")
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"c", b"3");
+    }
+
+    #[tokio::test]
+    async fn should_seek_in_single_entry_block() {
+        // given: a block with only one entry
+        let mut block_builder = BlockBuilder::new(1024);
+        assert!(block_builder.add_value(b"only", b"one", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+
+        // when: seeking to the exact key
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"only").await.unwrap();
+
+        // then: the entry is returned
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"only", b"one");
+
+        // when: seeking to a key before it
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"aaa").await.unwrap();
+
+        // then: the entry is returned
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"only", b"one");
+
+        // when: seeking to a key after it
+        let mut iter = BlockIterator::new_ascending(&block);
+        iter.seek(b"zzz").await.unwrap();
+
+        // then: no entries remain
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_decode_key_at_index_correctly() {
+        // given: a block with entries that have shared prefixes
+        let mut block_builder = BlockBuilder::new(4096);
+        assert!(block_builder.add_value(b"prefix_aaa", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"prefix_bbb", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"prefix_ccc", b"3", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+        let iter = BlockIterator::new_ascending(&block);
+
+        // when: decoding keys at each index
+        // then: full keys are correctly reconstructed
+        let key0 = iter.decode_key_at_index(0).unwrap();
+        assert_eq!(key0.as_ref(), b"prefix_aaa");
+
+        let key1 = iter.decode_key_at_index(1).unwrap();
+        assert_eq!(key1.as_ref(), b"prefix_bbb");
+
+        let key2 = iter.decode_key_at_index(2).unwrap();
+        assert_eq!(key2.as_ref(), b"prefix_ccc");
     }
 }

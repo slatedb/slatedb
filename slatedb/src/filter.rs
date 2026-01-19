@@ -102,7 +102,7 @@ impl BloomFilter {
     }
 }
 
-pub fn filter_hash(key: &[u8]) -> u64 {
+pub(crate) fn filter_hash(key: &[u8]) -> u64 {
     // sip hash is the default rust hash function, however its only
     // accessible by creating DefaultHasher. Direct use of SipHasher13 in
     // std is deprecated. We don't want to use DefaultHasher because the

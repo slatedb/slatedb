@@ -28,10 +28,8 @@ use tracing_subscriber::EnvFilter;
 use transactions::TransactionBench;
 
 mod args;
-mod db;
-mod stats;
-mod system_monitor;
-mod transactions;
+pub mod db;
+pub mod system_monitor;
 
 const CLEANUP_NAME: &str = ".clean_benchmark_data";
 

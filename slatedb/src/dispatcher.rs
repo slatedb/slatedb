@@ -29,7 +29,7 @@
 //! ```ignore
 //! # use slatedb::dispatcher::{MessageHandlerExecutor, MessageHandler, MessageFactory};
 //! # use slatedb::error::SlateDBError;
-//! # use slatedb::clock::DefaultSystemClock;
+//! # use slatedb_common::clock::DefaultSystemClock;
 //! # use slatedb::utils::WatchableOnceCell;
 //! # use std::sync::Arc;
 //! # use std::time::Duration;
@@ -119,10 +119,10 @@ use tokio::{runtime::Handle, sync::mpsc, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::JoinMap};
 
 use crate::{
-    clock::{SystemClock, SystemClockTicker},
     error::SlateDBError,
     utils::{panic_string, split_join_result, split_unwind_result, WatchableOnceCell},
 };
+use slatedb_common::clock::{SystemClock, SystemClockTicker};
 
 /// A factory for creating messages when a [MessageDispatcherTicker] ticks.
 pub(crate) type MessageFactory<T> = dyn Fn() -> T + Send;
@@ -666,13 +666,13 @@ impl MessageHandlerExecutor {
 #[cfg(all(test, feature = "test-util"))]
 mod test {
     use super::{MessageDispatcher, MessageHandler};
-    use crate::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
     use crate::dispatcher::{MessageFactory, MessageHandlerExecutor};
     use crate::error::SlateDBError;
     use crate::utils::WatchableOnceCell;
     use fail_parallel::FailPointRegistry;
     use futures::stream::BoxStream;
     use futures::StreamExt;
+    use slatedb_common::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -782,17 +782,31 @@ mod test {
             .add_ticker(Duration::from_millis(5), 1)
             .add_clock_schedule(5); // Advance clock by 5ms after first message
         let cancellation_token = CancellationToken::new();
+        let fp = Arc::new(FailPointRegistry::default());
         let mut dispatcher = MessageDispatcher::new(
             Box::new(handler),
             rx,
             clock.clone(),
             cancellation_token.clone(),
-        );
+        )
+        .with_fp_registry(fp.clone());
+
+        // Pause the dispatcher run loop to prevent first ticker from firing immediately
+        fail_parallel::cfg(fp.clone(), "dispatcher-run-loop", "pause").unwrap();
+
+        // Start the dispatcher.
         let join = tokio::spawn(async move { dispatcher.run().await });
 
         // Send a message successfully, then trigger a tick before processing the next message
         tx.send(TestMessage::Channel(10)).unwrap();
+
+        // Enable run loop to process first message, then the tick
+        fail_parallel::cfg(fp.clone(), "dispatcher-run-loop", "off").unwrap();
+
+        // Wait for both to be processed
         wait_for_message_count(log.clone(), 2).await;
+
+        // Send another message successfully
         tx.send(TestMessage::Channel(20)).unwrap();
         wait_for_message_count(log.clone(), 3).await;
 
