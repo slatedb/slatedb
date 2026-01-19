@@ -1,8 +1,6 @@
-use std::{fmt, sync::Arc};
-
 use crate::{error::DstError, DstWriteOp};
 use rusqlite::{params, Connection, OptionalExtension};
-use slatedb::{clock::LogicalClock, config::Ttl, Error};
+use slatedb::{config::Ttl, Error};
 
 const CREATE_STATE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS dst_state (key BLOB PRIMARY KEY, val BLOB, expire_ts INTEGER)";
@@ -22,40 +20,30 @@ pub type StateKeyValue = (Vec<u8>, Vec<u8>);
 
 /// A trait for the DST state that can be used to store and retrieve data.
 pub trait State {
-    fn write_batch(&mut self, batch: &[DstWriteOp]) -> Result<(), Error>;
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
-    fn scan(&self, start_key: &[u8], end_key: &[u8]) -> Result<Vec<StateKeyValue>, Error>;
-    fn count(&self) -> Result<i64, Error>;
-    fn keys(&self) -> Result<Vec<Vec<u8>>, Error>;
-    fn is_empty(&self) -> bool;
+    fn write_batch(&mut self, batch: &[DstWriteOp], now: i64) -> Result<(), Error>;
+    fn get(&self, key: &[u8], now: i64) -> Result<Option<Vec<u8>>, Error>;
+    fn scan(&self, start_key: &[u8], end_key: &[u8], now: i64)
+        -> Result<Vec<StateKeyValue>, Error>;
+    fn count(&self, now: i64) -> Result<i64, Error>;
+    fn keys(&self, now: i64) -> Result<Vec<Vec<u8>>, Error>;
+    fn is_empty(&self, now: i64) -> bool;
 }
 
 /// A DST state that uses SQLite as the backend.
 pub struct SQLiteState {
     conn: Connection,
-    logical_clock: Arc<dyn LogicalClock>,
 }
 
 impl SQLiteState {
     /// Create a new SQLite state.
     ///
     /// If `path` is `None`, the state will be stored in memory.
-    pub fn new(
-        path: Option<&'static str>,
-        logical_clock: Arc<dyn LogicalClock>,
-    ) -> Result<Self, Error> {
+    pub fn new(path: Option<&'static str>) -> Result<Self, Error> {
         let path = path.unwrap_or(":memory:");
         let conn = Connection::open(path).map_err(DstError::SQLiteStateError)?;
         conn.execute(CREATE_STATE_SQL, ())
             .map_err(DstError::SQLiteStateError)?;
-        Ok(Self {
-            conn,
-            logical_clock,
-        })
-    }
-
-    fn now(&self) -> i64 {
-        self.logical_clock.now()
+        Ok(Self { conn })
     }
 }
 
@@ -67,8 +55,7 @@ impl State for SQLiteState {
     /// if the value is none.
     ///
     /// This function is transactional, applying all the write operations in the batch atomically.
-    fn write_batch(&mut self, batch: &[DstWriteOp]) -> Result<(), Error> {
-        let now = self.now();
+    fn write_batch(&mut self, batch: &[DstWriteOp], now: i64) -> Result<(), Error> {
         let tx = self
             .conn
             .transaction()
@@ -92,14 +79,14 @@ impl State for SQLiteState {
 
     /// Get a value from the state.
     /// It returns `None` if the key is not found.
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    fn get(&self, key: &[u8], now: i64) -> Result<Option<Vec<u8>>, Error> {
         let mut stmt = self
             .conn
             .prepare(SELECT_STATE_SQL)
             .map_err(DstError::SQLiteStateError)?;
 
         let value: Option<Vec<u8>> = stmt
-            .query_row((key, self.now()), |row| row.get(0))
+            .query_row((key, now), |row| row.get(0))
             .optional()
             .map_err(DstError::SQLiteStateError)?;
         Ok(value)
@@ -107,14 +94,19 @@ impl State for SQLiteState {
 
     /// Scan the state for key-value pairs in the range [start_key, end_key).
     /// It returns an empty vector if the range is empty.
-    fn scan(&self, start_key: &[u8], end_key: &[u8]) -> Result<Vec<StateKeyValue>, Error> {
+    fn scan(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        now: i64,
+    ) -> Result<Vec<StateKeyValue>, Error> {
         let mut stmt = self
             .conn
             .prepare(SCAN_STATE_SQL)
             .map_err(DstError::SQLiteStateError)?;
 
         let mut rows = stmt
-            .query((start_key, end_key, self.now()))
+            .query((start_key, end_key, now))
             .map_err(DstError::SQLiteStateError)?;
 
         let mut results = Vec::new();
@@ -128,28 +120,26 @@ impl State for SQLiteState {
 
     /// Count the number of key-value pairs in the state.
     /// It returns 0 if the state is empty.
-    fn count(&self) -> Result<i64, Error> {
+    fn count(&self, now: i64) -> Result<i64, Error> {
         let mut stmt = self
             .conn
             .prepare(COUNT_STATE_SQL)
             .map_err(DstError::SQLiteStateError)?;
 
         let count: i64 = stmt
-            .query_one((self.now(),), |row| row.get(0))
+            .query_one((now,), |row| row.get(0))
             .map_err(DstError::SQLiteStateError)?;
         Ok(count)
     }
 
     /// Get all the keys in the state.
     /// It returns an empty vector if the state is empty.
-    fn keys(&self) -> Result<Vec<Vec<u8>>, Error> {
+    fn keys(&self, now: i64) -> Result<Vec<Vec<u8>>, Error> {
         let mut stmt = self
             .conn
             .prepare(KEYS_STATE_SQL)
             .map_err(DstError::SQLiteStateError)?;
-        let mut rows = stmt
-            .query((self.now(),))
-            .map_err(DstError::SQLiteStateError)?;
+        let mut rows = stmt.query((now,)).map_err(DstError::SQLiteStateError)?;
 
         let mut keys = Vec::new();
         while let Some(row) = rows.next().map_err(DstError::SQLiteStateError)? {
@@ -161,16 +151,7 @@ impl State for SQLiteState {
 
     /// Check if the state is empty.
     /// It returns `true` if there are no key-value pairs in the state.
-    fn is_empty(&self) -> bool {
-        self.count().unwrap_or(0) == 0
-    }
-}
-
-impl fmt::Debug for SQLiteState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SQLiteState")
-            .field("connection", &self.conn)
-            .field("entries", &self.count().unwrap_or(0))
-            .finish()
+    fn is_empty(&self, now: i64) -> bool {
+        self.count(now).unwrap_or(0) == 0
     }
 }
