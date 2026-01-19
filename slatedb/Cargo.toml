@@ -79,6 +79,7 @@ filetime = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
+slatedb-common = { workspace = true, features = ["test-util"] }
 slatedb-txn-obj = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

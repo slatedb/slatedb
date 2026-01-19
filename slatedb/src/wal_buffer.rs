@@ -498,12 +498,12 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
-    use crate::test_utils::TestClock;
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::MonotonicSeq;
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path, ObjectStore};
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::MockSystemClock;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -518,7 +518,7 @@ mod tests {
         }
     }
 
-    async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<TestClock>) {
+    async fn setup_wal_buffer() -> (Arc<WalBufferManager>, Arc<TableStore>, Arc<MockSystemClock>) {
         let wal_id_store: Arc<dyn WalIdStore + Send + Sync> = Arc::new(MockWalIdStore {
             next_id: AtomicU64::new(1),
         });
@@ -529,7 +529,7 @@ mod tests {
             Path::from("/root"),
             None,
         ));
-        let test_clock = Arc::new(TestClock::new());
+        let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock.clone(), 0));
         let system_clock = Arc::new(DefaultSystemClock::new());
         let oracle = Arc::new(DbOracle::new(

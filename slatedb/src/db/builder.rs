@@ -66,16 +66,16 @@
 //!
 //! ```
 //! use slatedb::{Db, Error};
-//! use slatedb::clock::DefaultLogicalClock;
 //! use slatedb::object_store::memory::InMemory;
+//! use slatedb_common::clock::DefaultSystemClock;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
-//!     let clock = Arc::new(DefaultLogicalClock::new());
+//!     let clock = Arc::new(DefaultSystemClock::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_logical_clock(clock)
+//!         .with_system_clock(clock)
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -117,8 +117,6 @@ use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
-use crate::clock::DefaultLogicalClock;
-use crate::clock::LogicalClock;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
@@ -165,7 +163,6 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     memory_cache: Option<Arc<dyn DbCache>>,
-    logical_clock: Option<Arc<dyn LogicalClock>>,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
     compaction_runtime: Option<Handle>,
@@ -186,7 +183,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             settings: Settings::default(),
             wal_object_store: None,
             memory_cache: None,
-            logical_clock: None,
             system_clock: None,
             gc_runtime: None,
             compaction_runtime: None,
@@ -221,13 +217,6 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// [`slatedb::db_cache::SplitCache`] is used by default.
     pub fn with_memory_cache(mut self, memory_cache: Arc<dyn DbCache>) -> Self {
         self.memory_cache = Some(memory_cache);
-        self
-    }
-
-    /// Sets the logical clock to use for the database. Logical timestamps are used for
-    /// TTL expiration. If unset, SlateDB defaults to using system time.
-    pub fn with_logical_clock(mut self, clock: Arc<dyn LogicalClock>) -> Self {
-        self.logical_clock = Some(clock);
         self
     }
 
@@ -367,9 +356,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
         }
 
-        let logical_clock = self
-            .logical_clock
-            .unwrap_or_else(|| Arc::new(DefaultLogicalClock::new()));
         let memory_cache = self.memory_cache.or_else(|| {
             let block_cache = default_block_cache();
             let meta_cache = default_meta_cache();
@@ -512,7 +498,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         let inner = Arc::new(
             DbInner::new(
                 settings,
-                logical_clock,
                 system_clock.clone(),
                 rand.clone(),
                 table_store.clone(),

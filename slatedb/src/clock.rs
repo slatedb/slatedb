@@ -19,10 +19,9 @@
 
 use crate::error::SlateDBError;
 use log::info;
-use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+use slatedb_common::clock::SystemClock;
 use std::{
     cmp,
-    fmt::Debug,
     sync::{
         atomic::{AtomicI64, Ordering},
         Arc,
@@ -30,93 +29,16 @@ use std::{
     time::Duration,
 };
 
-/// Defines the logical clock that SlateDB will use to measure time for things
-/// like TTL expiration.
-pub trait LogicalClock: Debug + Send + Sync {
-    /// Returns a timestamp (typically measured in millis since the unix epoch).
-    /// Must return monotonically increasing numbers (this is enforced
-    /// at runtime and will panic if the invariant is broken).
-    ///
-    /// Note that this clock does not need to return a number that
-    /// represents a unix timestamp; the only requirement is that
-    /// it represents a sequence that can attribute a logical ordering
-    /// to actions on the database.
-    fn now(&self) -> i64;
-}
-
-/// A logical clock implementation that wraps the [DefaultSystemClock]
-/// and returns the number of milliseconds since the Unix epoch.
-#[derive(Debug)]
-pub struct DefaultLogicalClock {
-    last_ts: AtomicI64,
-    inner: Arc<dyn SystemClock>,
-}
-
-impl Default for DefaultLogicalClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DefaultLogicalClock {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(DefaultSystemClock::new()),
-            last_ts: AtomicI64::new(i64::MIN),
-        }
-    }
-}
-
-impl LogicalClock for DefaultLogicalClock {
-    fn now(&self) -> i64 {
-        let current_ts = self.inner.now().timestamp_millis();
-        self.last_ts.fetch_max(current_ts, Ordering::SeqCst);
-        self.last_ts.load(Ordering::SeqCst)
-    }
-}
-
-/// A mock logical clock implementation that uses an atomic i64 to track time.
-/// The clock always starts at i64::MIN and increments by 1 on each call to now().
-/// It is fully deterministic.
-#[cfg(feature = "test-util")]
-#[derive(Debug)]
-pub struct MockLogicalClock {
-    current_tick: AtomicI64,
-}
-
-#[cfg(feature = "test-util")]
-impl Default for MockLogicalClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(feature = "test-util")]
-impl MockLogicalClock {
-    pub fn new() -> Self {
-        Self {
-            current_tick: AtomicI64::new(i64::MIN),
-        }
-    }
-}
-
-#[cfg(feature = "test-util")]
-impl LogicalClock for MockLogicalClock {
-    fn now(&self) -> i64 {
-        self.current_tick.fetch_add(1, Ordering::SeqCst)
-    }
-}
-
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
 /// from the underlying implementation are monotonically increasing.
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
     pub(crate) last_durable_tick: AtomicI64,
-    delegate: Arc<dyn LogicalClock>,
+    delegate: Arc<dyn SystemClock>,
 }
 
 impl MonotonicClock {
-    pub(crate) fn new(delegate: Arc<dyn LogicalClock>, init_tick: i64) -> Self {
+    pub(crate) fn new(delegate: Arc<dyn SystemClock>, init_tick: i64) -> Self {
         Self {
             delegate,
             last_tick: AtomicI64::new(init_tick),
@@ -137,7 +59,7 @@ impl MonotonicClock {
     }
 
     pub(crate) async fn now(&self) -> Result<i64, SlateDBError> {
-        let tick = self.delegate.now();
+        let tick = self.delegate.now().timestamp_millis();
         match self.enforce_monotonic(tick) {
             Err(SlateDBError::InvalidClockTick {
                 last_tick,
@@ -150,7 +72,7 @@ impl MonotonicClock {
                     tick, last_tick, sync_millis
                 );
                 tokio::time::sleep(Duration::from_millis(sync_millis)).await;
-                self.enforce_monotonic(self.delegate.now())
+                self.enforce_monotonic(self.delegate.now().timestamp_millis())
             }
             result => result,
         }

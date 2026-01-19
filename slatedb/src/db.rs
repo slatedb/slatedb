@@ -43,7 +43,7 @@ use crate::batch::WriteBatch;
 use crate::batch_write::{WriteBatchMessage, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
-use crate::clock::{LogicalClock, MonotonicClock};
+use crate::clock::MonotonicClock;
 use crate::config::{
     FlushOptions, FlushType, MergeOptions, PreloadLevel, PutOptions, ReadOptions, ScanOptions,
     Settings, WriteOptions,
@@ -104,7 +104,6 @@ pub(crate) struct DbInner {
 impl DbInner {
     pub(crate) async fn new(
         settings: Settings,
-        logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         table_store: Arc<TableStore>,
@@ -127,7 +126,7 @@ impl DbInner {
         ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
-            logical_clock,
+            system_clock.clone(),
             manifest.value.core.last_l0_clock_tick,
         ));
 
@@ -1533,18 +1532,16 @@ mod tests {
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
-    #[cfg(feature = "test-util")]
     use crate::seq_tracker::FindOption;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
-        assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator, TestClock,
+        assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
     use crate::{proptest_util, test_utils, CloseReason, KeyValue};
     use async_trait::async_trait;
     use chrono::TimeDelta;
-    #[cfg(feature = "test-util")]
     use chrono::{TimeZone, Utc};
     use fail_parallel::FailPointRegistry;
     use futures::{future, future::join_all, StreamExt};
@@ -1552,7 +1549,6 @@ mod tests {
     use object_store::ObjectStore;
     use proptest::test_runner::{TestRng, TestRunner};
     use slatedb_common::clock::DefaultSystemClock;
-    #[cfg(feature = "test-util")]
     use slatedb_common::clock::MockSystemClock;
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
@@ -1755,13 +1751,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_default_ttl_and_read_uncommitted() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1770,10 +1766,20 @@ mod tests {
         let value = b"test_value";
 
         // insert at t=0
-        kv_store.put(key, value).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
-        clock.ticker.store(99, Ordering::SeqCst);
+        clock.set(99);
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1783,7 +1789,7 @@ mod tests {
         );
 
         // advance clock to t=100 --> no longer returned
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         assert_eq!(
             None,
             kv_store
@@ -1797,13 +1803,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_row_override_ttl_and_read_uncommitted() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let default_ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1819,13 +1825,15 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> still returned
-        clock.ticker.store(49, Ordering::SeqCst);
+        clock.set(49);
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1835,7 +1843,7 @@ mod tests {
         );
 
         // advance clock to t=50 --> no longer returned
-        clock.ticker.store(50, Ordering::SeqCst);
+        clock.set(50);
         assert_eq!(
             None,
             kv_store
@@ -1849,13 +1857,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_default_ttl_and_read_committed() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -1865,11 +1873,31 @@ mod tests {
         let value = b"test_value";
 
         // insert at t=0
-        kv_store.put(key, value).await.unwrap();
+        kv_store
+            .put_with_options(
+                key,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
-        clock.ticker.store(99, Ordering::SeqCst);
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        clock.set(99);
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             Some(Bytes::from_static(value)),
@@ -1880,7 +1908,7 @@ mod tests {
         );
 
         // advance clock to t=100 without flushing --> still returned
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -1890,7 +1918,17 @@ mod tests {
         );
 
         // advance durable clock time to t=100 by flushing -- no longer returned
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             None,
@@ -2015,13 +2053,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_row_override_ttl_and_read_committed() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -2038,14 +2076,26 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> still returned
-        clock.ticker.store(49, Ordering::SeqCst);
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        clock.set(49);
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             Some(Bytes::from_static(value)),
@@ -2056,7 +2106,7 @@ mod tests {
         );
 
         // advance clock to t=50 without flushing --> still returned
-        clock.ticker.store(50, Ordering::SeqCst);
+        clock.set(50);
         assert_eq!(
             Some(Bytes::from_static(value)),
             kv_store
@@ -2066,7 +2116,17 @@ mod tests {
         );
 
         // advance durable clock time to t=100 by flushing -- no longer returned
-        kv_store.put(key_other, value).await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
         assert_eq!(
             None,
@@ -2081,24 +2141,54 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_with_default_ttl_and_read_uncommitted() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
         // insert keys at t=0
-        kv_store.put(b"key1", b"value1").await.unwrap();
-        kv_store.put(b"key2", b"value2").await.unwrap();
-        kv_store.put(b"key3", b"value3").await.unwrap();
+        kv_store
+            .put_with_options(
+                b"key1",
+                b"value1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key3",
+                b"value3",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
-        clock.ticker.store(99, Ordering::SeqCst);
+        clock.set(99);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2122,7 +2212,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=100 --> no longer returned
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2138,13 +2228,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_with_row_override_ttl_and_read_uncommitted() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let default_ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -2157,7 +2247,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -2168,7 +2260,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(75),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -2179,13 +2273,15 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(100),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> all still returned
-        clock.ticker.store(49, Ordering::SeqCst);
+        clock.set(49);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2200,7 +2296,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=50 --> key1 expired, key2 and key3 still returned
-        clock.ticker.store(50, Ordering::SeqCst);
+        clock.set(50);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2214,7 +2310,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=75 --> key1 and key2 expired, only key3 returned
-        clock.ticker.store(75, Ordering::SeqCst);
+        clock.set(75);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2227,7 +2323,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=100 --> all expired
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2243,13 +2339,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_with_default_ttl_and_read_committed() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -2257,13 +2353,53 @@ mod tests {
         let key_other = b"time_advancing_key";
 
         // insert keys at t=0
-        kv_store.put(b"key1", b"value1").await.unwrap();
-        kv_store.put(b"key2", b"value2").await.unwrap();
-        kv_store.put(b"key3", b"value3").await.unwrap();
+        kv_store
+            .put_with_options(
+                b"key1",
+                b"value1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key2",
+                b"value2",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+        kv_store
+            .put_with_options(
+                b"key3",
+                b"value3",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
 
         // advance clock to t=99 --> still returned
-        clock.ticker.store(99, Ordering::SeqCst);
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        clock.set(99);
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2280,7 +2416,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=100 without flushing --> still returned
-        clock.ticker.store(100, Ordering::SeqCst);
+        clock.set(100);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key4"[..],
@@ -2295,7 +2431,17 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance durable clock time to t=100 by flushing -- no longer returned
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2313,13 +2459,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_with_row_override_ttl_and_read_committed() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let default_ttl = 100;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options_with_ttl(0, 1024, None, Some(default_ttl)))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -2334,7 +2480,9 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(50),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
@@ -2345,14 +2493,26 @@ mod tests {
                 &PutOptions {
                     ttl: Ttl::ExpireAfter(75),
                 },
-                &WriteOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
             )
             .await
             .unwrap();
 
         // advance clock to t=49 --> all still returned
-        clock.ticker.store(49, Ordering::SeqCst);
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        clock.set(49);
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2368,7 +2528,7 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance clock to t=50 without flushing --> still returned (durable clock hasn't advanced)
-        clock.ticker.store(50, Ordering::SeqCst);
+        clock.set(50);
         let mut iter = kv_store
             .scan_with_options(
                 &b"key1"[..]..&b"key3"[..],
@@ -2382,7 +2542,17 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance durable clock time to t=50 by flushing -- key1 expired
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -2397,8 +2567,18 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         // advance durable clock time to t=75 by flushing -- both keys expired
-        clock.ticker.store(75, Ordering::SeqCst);
-        kv_store.put(key_other, b"value").await.unwrap(); // fake data to advance clock
+        clock.set(75);
+        kv_store
+            .put_with_options(
+                key_other,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap(); // fake data to advance clock
         kv_store.flush().await.unwrap();
 
         let mut iter = kv_store
@@ -3025,7 +3205,7 @@ mod tests {
     async fn test_wal_disabled() {
         use crate::{test_utils::assert_iterator, types::RowEntry};
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let mut options = test_db_options(0, 256, None);
         options.wal_enabled = false;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -3039,7 +3219,7 @@ mod tests {
         ));
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(options)
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -3070,7 +3250,7 @@ mod tests {
         let write_options = WriteOptions {
             await_durable: true,
         };
-        clock.ticker.store(10, Ordering::SeqCst);
+        clock.set(10);
         db.put_with_options(
             &[b'c'; 32],
             &[b'l'; 32],
@@ -3319,7 +3499,6 @@ mod tests {
         assert!(found_keys.contains(key2.as_slice()));
     }
 
-    #[cfg(feature = "test-util")]
     async fn test_sequence_tracker_persisted_across_flush_and_reload_impl(wal_enabled: bool) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_sequence_tracker_flush";
@@ -3331,13 +3510,11 @@ mod tests {
         }
         #[cfg(not(feature = "wal_disable"))]
         let _ = wal_enabled;
-        let logical_clock = Arc::new(TestClock::new());
         let system_clock = Arc::new(MockSystemClock::new());
 
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(settings.clone())
             .with_system_clock(system_clock.clone())
-            .with_logical_clock(logical_clock.clone())
             .build()
             .await
             .unwrap();
@@ -3354,7 +3531,6 @@ mod tests {
 
         let timestamps_ms = [0_i64, 60_000, 120_000];
         for (idx, ts) in timestamps_ms.iter().enumerate() {
-            logical_clock.ticker.store(*ts, Ordering::SeqCst);
             system_clock.set(*ts);
             let key = format!("key-{idx}").into_bytes();
             let value = format!("value-{idx}").into_bytes();
@@ -3411,7 +3587,6 @@ mod tests {
         let reopened = Db::builder(path, object_store.clone())
             .with_settings(settings)
             .with_system_clock(system_clock.clone())
-            .with_logical_clock(logical_clock.clone())
             .build()
             .await
             .unwrap();
@@ -3430,18 +3605,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "test-util")]
     async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_enabled() {
         test_sequence_tracker_persisted_across_flush_and_reload_impl(true).await;
     }
 
     #[tokio::test]
-    #[cfg(all(feature = "test-util", feature = "wal_disable"))]
+    #[cfg(feature = "wal_disable")]
     async fn test_sequence_tracker_persisted_across_flush_and_reload_wal_disabled() {
         test_sequence_tracker_persisted_across_flush_and_reload_impl(false).await;
     }
 
-    #[cfg(feature = "test-util")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_sequence_tracker_not_ahead_of_last_l0_seq_when_flush_races_with_writes() {
         let fp_registry = Arc::new(FailPointRegistry::new());
@@ -3807,7 +3980,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_kv_store", object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
@@ -3843,7 +4016,7 @@ mod tests {
         let mut next_wal_id = 1;
         let kv_store = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
@@ -3880,7 +4053,7 @@ mod tests {
         // recover and validate that sst files are loaded on recovery.
         let kv_store_restored = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
@@ -3916,20 +4089,47 @@ mod tests {
         let path = "/tmp/test_kv_store";
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
 
-        db.put(b"key1", b"val1").await.unwrap();
-        db.put(b"key2", b"val2").await.unwrap();
-        db.put(b"key3", b"val3").await.unwrap();
+        db.put_with_options(
+            b"key1",
+            b"val1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            b"key2",
+            b"val2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            b"key3",
+            b"val3",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
         db.flush().await.unwrap();
         db.close().await.unwrap();
 
         let db_restored = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 256, None))
-            .with_logical_clock(Arc::new(TestClock::new()))
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
@@ -4692,23 +4892,42 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
         // When:
         // put with time = 10
-        clock.ticker.store(10, Ordering::SeqCst);
-        db.put(b"1", b"1").await.unwrap();
+        clock.set(10);
+        db.put_with_options(
+            b"1",
+            b"1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
 
         // Then:
         // put with time goes backwards, should fail
-        clock.ticker.store(5, Ordering::SeqCst);
-        match db.put(b"1", b"1").await {
+        clock.set(5);
+        match db
+            .put_with_options(
+                b"1",
+                b"1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+        {
             Ok(_) => panic!("expected an error on inserting backwards time"),
             Err(e) => assert_eq!(e.to_string(), "Invalid error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
@@ -4720,28 +4939,47 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
         // When:
         // put with time = 10
-        clock.ticker.store(10, Ordering::SeqCst);
-        db.put(b"1", b"1").await.unwrap();
+        clock.set(10);
+        db.put_with_options(
+            b"1",
+            b"1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
         db.flush().await.unwrap();
 
         let db2 = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 128, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
-        clock.ticker.store(5, Ordering::SeqCst);
-        match db2.put(b"1", b"1").await {
+        clock.set(5);
+        match db2
+            .put_with_options(
+                b"1",
+                b"1",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+        {
             Ok(_) => panic!("expected an error on inserting backwards time"),
             Err(e) => assert_eq!(e.to_string(), "Invalid error: invalid clock tick, must be monotonic. last_tick=`10`, next_tick=`5`"),
         }
@@ -4790,27 +5028,42 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover_clock_tick_from_wal() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
-        clock.ticker.store(10, Ordering::SeqCst);
-        db.put(&[b'a'; 4], &[b'j'; 8])
-            .await
-            .expect("write batch failed");
-        clock.ticker.store(11, Ordering::SeqCst);
-        db.put(&[b'b'; 4], &[b'k'; 8])
-            .await
-            .expect("write batch failed");
+        clock.set(10);
+        db.put_with_options(
+            &[b'a'; 4],
+            &[b'j'; 8],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("write batch failed");
+        clock.set(11);
+        db.put_with_options(
+            &[b'b'; 4],
+            &[b'k'; 8],
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .expect("write batch failed");
 
         // close the db to flush the manifest
+        db.flush().await.unwrap();
         db.close().await.unwrap();
 
         // check the last_l0_clock_tick persisted in the manifest, it should be
@@ -4824,10 +5077,10 @@ mod tests {
         let last_clock_tick = db_state.last_l0_clock_tick;
         assert_eq!(last_clock_tick, i64::MIN);
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
@@ -4837,24 +5090,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_update_manifest_clock_tick_on_l0_flush() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 32, None))
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
         // this will exceed the l0_sst_size_bytes, meaning a clean shutdown
         // will update the manifest
-        clock.ticker.store(10, Ordering::SeqCst);
+        clock.set(10);
         db.put(&[b'a'; 4], &[b'j'; 8])
             .await
             .expect("write batch failed");
-        clock.ticker.store(11, Ordering::SeqCst);
+        clock.set(11);
         db.put(&[b'b'; 4], &[b'k'; 8])
             .await
             .expect("write batch failed");
@@ -4878,7 +5131,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_recover_clock_tick_from_manifest() {
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let mut options = test_db_options(0, 32, None);
@@ -4886,16 +5139,16 @@ mod tests {
 
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
 
-        clock.ticker.store(10, Ordering::SeqCst);
+        clock.set(10);
         db.put(&[b'a'; 4], &[b'j'; 28])
             .await
             .expect("write batch failed");
-        clock.ticker.store(11, Ordering::SeqCst);
+        clock.set(11);
         db.put(&[b'b'; 4], &[b'k'; 28])
             .await
             .expect("write batch failed");
@@ -4904,12 +5157,12 @@ mod tests {
         db.flush().await.unwrap();
         db.close().await.unwrap();
 
-        let clock = Arc::new(TestClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let mut options = test_db_options(0, 32, None);
         options.wal_enabled = false;
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_logical_clock(clock.clone())
+            .with_system_clock(clock.clone())
             .build()
             .await
             .unwrap();
