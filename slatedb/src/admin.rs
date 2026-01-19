@@ -618,6 +618,15 @@ impl Admin {
         table_store: Arc<TableStore>,
         l0_sst_size: Option<usize>,
     ) -> Result<WalToL0Result, crate::Error> {
+        if wal_id_range.is_empty() {
+            return Ok(WalToL0Result {
+                sst_handles: VecDeque::new(),
+                last_tick: None,
+                last_seq: None,
+                sequence_tracker: SequenceTracker::new(),
+            });
+        }
+
         debug!("replaying wal_id_range {:?} to l0", &wal_id_range);
 
         let wal_replay_options = match l0_sst_size {
