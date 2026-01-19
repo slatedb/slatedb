@@ -54,22 +54,37 @@
 //! The goal is to keep this module fully generic and free of slatedb-specific logic; For example,
 //! manifest semantics live in `manifest/store.rs` and use these primitives by delegation.
 
-pub(crate) mod object_store;
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![warn(clippy::panic)]
+#![cfg_attr(test, allow(clippy::panic))]
+#![allow(clippy::result_large_err, clippy::too_many_arguments)]
+// Disallow non-approved non-deterministic types and functions in production code
+#![deny(clippy::disallowed_types, clippy::disallowed_methods)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        clippy::disallowed_types,
+        clippy::disallowed_methods
+    )
+)]
 
-use crate::clock::SystemClock;
-use crate::transactional_object::TransactionalObjectError::CallbackError;
-use crate::utils;
+pub mod object_store;
+
+use crate::TransactionalObjectError::CallbackError;
 use ::object_store::path::Path;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
+use slatedb_common::clock::SystemClock;
+use slatedb_common::utils;
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
 
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum TransactionalObjectError {
+pub enum TransactionalObjectError {
     #[error("io error")]
     IoError(#[from] Arc<std::io::Error>),
 
@@ -97,14 +112,14 @@ pub(crate) enum TransactionalObjectError {
 }
 
 // Generic codec to serialize/deserialize versioned records stored as files
-pub(crate) trait ObjectCodec<T>: Send + Sync {
+pub trait ObjectCodec<T>: Send + Sync {
     fn encode(&self, value: &T) -> Bytes;
     fn decode(&self, bytes: &Bytes) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// A monotonically increasing object version ID
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct MonotonicId {
+pub struct MonotonicId {
     id: u64,
 }
 
@@ -129,19 +144,19 @@ impl std::ops::Add<u64> for MonotonicId {
 }
 
 impl MonotonicId {
-    pub(crate) fn initial() -> Self {
+    pub fn initial() -> Self {
         Self { id: 1 }
     }
 
-    pub(crate) fn new(id: u64) -> Self {
+    pub fn new(id: u64) -> Self {
         Self { id }
     }
 
-    pub(crate) fn id(&self) -> u64 {
+    pub fn id(&self) -> u64 {
         self.id
     }
 
-    pub(crate) fn next(&self) -> Self {
+    pub fn next(&self) -> Self {
         Self { id: self.id + 1 }
     }
 }
@@ -160,38 +175,27 @@ impl From<MonotonicId> for u64 {
 
 /// Generic file metadata for versioned objects
 #[derive(Debug)]
-pub(crate) struct GenericObjectMetadata<Id: Copy = MonotonicId> {
-    pub(crate) id: Id,
-    pub(crate) location: Path,
-    pub(crate) last_modified: chrono::DateTime<Utc>,
+pub struct GenericObjectMetadata<Id: Copy = MonotonicId> {
+    pub id: Id,
+    pub location: Path,
+    pub last_modified: chrono::DateTime<Utc>,
     #[allow(dead_code)]
-    pub(crate) size: u32,
+    pub size: u32,
 }
 
 /// A local view of a transactional object, possibly with local mutations
 #[derive(Clone, Debug)]
-pub(crate) struct DirtyObject<T, Id: Copy = MonotonicId> {
-    /// This ID of the object from which this `DirtyObject` was created
-    id: Id,
-    pub(crate) value: T,
-}
-
-impl<T, Id: Copy> DirtyObject<T, Id> {
-    #[allow(dead_code)]
-    pub(crate) fn id(&self) -> Id {
-        self.id
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn into_value(self) -> T {
-        self.value
-    }
+pub struct DirtyObject<T, Id: Copy = MonotonicId> {
+    /// The version ID that this dirty object is based on.
+    pub id: Id,
+    /// The value of the object, possibly with local mutations.
+    pub value: T,
 }
 
 /// An in-memory datum that is backed by durable storage and can be
 /// transactionally updated.
 #[async_trait::async_trait]
-pub(crate) trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
+pub trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
     /// Returns the version ID of the in-memory view of the object
     fn id(&self) -> Id;
 
@@ -247,7 +251,7 @@ pub(crate) trait TransactionalObject<T: Clone, Id: Copy = MonotonicId> {
 /// it is never reset. Before any update, and after every refresh, this type checks whether the
 /// epoch stored in the object is higher than the epoch stored in `init`. If it is, then the
 /// corresponding `update` or `refresh` fails with`Fenced`.
-pub(crate) struct FenceableTransactionalObject<T: Clone, Id: Copy = MonotonicId> {
+pub struct FenceableTransactionalObject<T: Clone, Id: Copy = MonotonicId> {
     delegate: SimpleTransactionalObject<T, Id>,
     local_epoch: u64,
     get_epoch: fn(&T) -> u64,
@@ -275,7 +279,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
     ///   cannot complete within `object_update_timeout`.
     /// - Propagates any other [`TransactionalObjectError`] from refresh/update
     ///   operations.
-    pub(crate) async fn init(
+    pub async fn init(
         mut delegate: SimpleTransactionalObject<T, MonotonicId>,
         object_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
@@ -340,7 +344,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
     ///   `object_update_timeout`.
     /// - Propagates any other [`TransactionalObjectError`] from refresh/update
     ///   operations.
-    pub(crate) async fn init_with_epoch(
+    pub async fn init_with_epoch(
         mut delegate: SimpleTransactionalObject<T, MonotonicId>,
         object_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
@@ -383,7 +387,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn local_epoch(&self) -> u64 {
+    pub fn local_epoch(&self) -> u64 {
         self.local_epoch
     }
 
@@ -435,14 +439,14 @@ impl<T: Clone + Send + Sync> TransactionalObject<T>
 /// A basic transactional object that uses `TransactionalStorageProtocol` to provide transactional
 /// updates to an object.
 #[derive(Clone)]
-pub(crate) struct SimpleTransactionalObject<T, Id: Copy = MonotonicId> {
+pub struct SimpleTransactionalObject<T, Id: Copy = MonotonicId> {
     id: Id,
     object: T,
     ops: Arc<dyn TransactionalStorageProtocol<T, Id>>,
 }
 
 impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
-    pub(crate) async fn init(
+    pub async fn init(
         store: Arc<dyn TransactionalStorageProtocol<T, Id>>,
         value: T,
     ) -> Result<SimpleTransactionalObject<T, Id>, TransactionalObjectError> {
@@ -463,7 +467,7 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
     ///
     /// For a variant that treats a missing record as an error, use [`load`], which
     /// maps the absence of a record to `TransactionalObjectError::LatestRecordMissing`.
-    pub(crate) async fn try_load(
+    pub async fn try_load(
         store: Arc<dyn TransactionalStorageProtocol<T, Id>>,
     ) -> Result<Option<SimpleTransactionalObject<T, Id>>, TransactionalObjectError> {
         let Some((id, val)) = store.try_read_latest().await? else {
@@ -480,7 +484,7 @@ impl<T: Clone, Id: Copy> SimpleTransactionalObject<T, Id> {
     /// this method returns a [`Result`] with an instance of [`SimpleTransactionalObject`].
     /// If no objects could be found, the error [`LatestRecordMissing`] is returned.
     #[allow(dead_code)]
-    pub(crate) async fn load(
+    pub async fn load(
         store: Arc<dyn TransactionalStorageProtocol<T, Id>>,
     ) -> Result<SimpleTransactionalObject<T, Id>, TransactionalObjectError> {
         Self::try_load(store)
@@ -532,7 +536,7 @@ impl<T: Clone + Send + Sync, Id: Copy + PartialEq + Send + Sync> TransactionalOb
 /// the expected latest version ID and fail if the current version ID in durable storage does not
 /// match.
 #[async_trait]
-pub(crate) trait TransactionalStorageProtocol<T, Id: Copy>: Send + Sync {
+pub trait TransactionalStorageProtocol<T, Id: Copy>: Send + Sync {
     /// Write the object given the expected current version ID. If the version ID is None then
     /// `write` expects that no object currently exists in durable storage. If the version condition
     /// fails then this fn returns `ObjectVersionExists`
@@ -551,9 +555,7 @@ pub(crate) trait TransactionalStorageProtocol<T, Id: Copy>: Send + Sync {
 /// as a series of versions with monotonically increasing IDs. This is useful if it's important to
 /// observe earlier versions of the object.
 #[async_trait]
-pub(crate) trait SequencedStorageProtocol<T>:
-    TransactionalStorageProtocol<T, MonotonicId>
-{
+pub trait SequencedStorageProtocol<T>: TransactionalStorageProtocol<T, MonotonicId> {
     async fn try_read(&self, id: MonotonicId) -> Result<Option<T>, TransactionalObjectError>;
 
     async fn list(
@@ -568,11 +570,11 @@ pub(crate) trait SequencedStorageProtocol<T>:
     async fn delete(&self, id: MonotonicId) -> Result<(), TransactionalObjectError>;
 }
 
-#[cfg(test)]
-pub(crate) mod test_utils {
-    use crate::transactional_object::DirtyObject;
+#[cfg(feature = "test-util")]
+pub mod test_utils {
+    use crate::DirtyObject;
 
-    pub(crate) fn new_dirty_object<T>(id: u64, value: T) -> DirtyObject<T> {
+    pub fn new_dirty_object<T>(id: u64, value: T) -> DirtyObject<T> {
         DirtyObject {
             id: id.into(),
             value,
@@ -582,26 +584,26 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::DefaultSystemClock;
-    use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
-    use crate::transactional_object::TransactionalObjectError;
-    use crate::transactional_object::{
+    use crate::object_store::ObjectStoreSequencedStorageProtocol;
+    use crate::TransactionalObjectError;
+    use crate::{
         FenceableTransactionalObject, MonotonicId, ObjectCodec, SimpleTransactionalObject,
         TransactionalObject, TransactionalStorageProtocol,
     };
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use slatedb_common::clock::DefaultSystemClock;
     use std::sync::Arc;
     use tokio::time::Duration as TokioDuration;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(in crate::transactional_object) struct TestVal {
-        pub(in crate::transactional_object) epoch: u64,
-        pub(in crate::transactional_object) payload: u64,
+    pub(crate) struct TestVal {
+        pub(crate) epoch: u64,
+        pub(crate) payload: u64,
     }
 
-    pub(in crate::transactional_object) struct TestValCodec;
+    pub(crate) struct TestValCodec;
 
     impl ObjectCodec<TestVal> for TestValCodec {
         fn encode(&self, value: &TestVal) -> Bytes {
@@ -621,8 +623,7 @@ mod tests {
         }
     }
 
-    pub(in crate::transactional_object) fn new_store(
-    ) -> Arc<ObjectStoreSequencedStorageProtocol<TestVal>> {
+    pub(crate) fn new_store() -> Arc<ObjectStoreSequencedStorageProtocol<TestVal>> {
         let os = Arc::new(InMemory::new());
         Arc::new(ObjectStoreSequencedStorageProtocol::new(
             &Path::from("/root"),
@@ -750,10 +751,10 @@ mod tests {
             epoch: 0,
             payload: 2,
         };
-        sr.ops.write(Some(dirty.id()), &dirty.value).await.unwrap();
+        sr.ops.write(Some(dirty.id), &dirty.value).await.unwrap();
         let err = sr
             .ops
-            .write(Some(dirty.id()), &dirty.value)
+            .write(Some(dirty.id), &dirty.value)
             .await
             .unwrap_err();
         assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));

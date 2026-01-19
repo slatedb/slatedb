@@ -45,6 +45,8 @@ rand_xoshiro = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 siphasher = { workspace = true }
+slatedb-common = { workspace = true }
+slatedb-txn-obj = { workspace = true }
 snap = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
@@ -77,6 +79,7 @@ filetime = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
+slatedb-txn-obj = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-test = { workspace = true }
@@ -100,7 +103,7 @@ zstd = ["dep:zstd"]
 wal_disable = []
 moka = ["dep:moka"]
 foyer = ["dep:foyer", "dep:anyhow"]
-test-util = ["tokio/test-util"]
+test-util = ["tokio/test-util", "slatedb-common/test-util", "slatedb-txn-obj/test-util"]
 
 [lib]
 # Disable `libtest` harness because it fights with Criterion's `--output-format bencher`

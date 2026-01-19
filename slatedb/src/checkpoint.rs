@@ -61,8 +61,6 @@ mod tests {
     use crate::admin::AdminBuilder;
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
-    use crate::clock::DefaultSystemClock;
-    use crate::clock::SystemClock;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
@@ -80,6 +78,8 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::clock::SystemClock;
     use std::sync::Arc;
     use std::time::Duration;
 

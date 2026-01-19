@@ -10,7 +10,7 @@ use crate::error::SlateDBError::{
     LatestTransactionalObjectVersionMissing, TransactionalObjectVersionExists,
 };
 use crate::merge_operator::MergeOperatorError;
-use crate::transactional_object::TransactionalObjectError;
+use slatedb_txn_obj::TransactionalObjectError;
 
 #[non_exhaustive]
 #[derive(Clone, Debug, ThisError)]
@@ -244,6 +244,7 @@ impl From<TransactionalObjectError> for SlateDBError {
             TransactionalObjectError::InvalidObjectState => {
                 SlateDBError::InvalidTransactionalObjectState
             }
+            other => SlateDBError::TransactionalObjectError(Arc::new(other)),
         }
     }
 }

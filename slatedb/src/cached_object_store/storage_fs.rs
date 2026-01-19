@@ -6,7 +6,6 @@ use std::time::Duration;
 use std::{fmt::Display, io::SeekFrom};
 
 use crate::cached_object_store::stats::CachedObjectStoreStats;
-use crate::clock::SystemClock;
 use crate::rand::DbRand;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -14,6 +13,7 @@ use log::{debug, warn};
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
 use rand::{distr::Alphanumeric, Rng};
+use slatedb_common::clock::SystemClock;
 use tokio::fs::File;
 use tokio::{
     fs::{self, OpenOptions},
@@ -803,9 +803,10 @@ fn wrap_io_err(err: impl std::error::Error + Send + Sync + 'static) -> object_st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
-    use crate::{clock::DefaultSystemClock, stats::StatRegistry};
     use filetime::FileTime;
+    use slatedb_common::clock::DefaultSystemClock;
     use std::{io::Write, sync::atomic::Ordering, time::SystemTime};
 
     fn gen_rand_file(

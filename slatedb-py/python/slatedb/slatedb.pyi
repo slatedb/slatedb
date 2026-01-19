@@ -51,6 +51,29 @@ class InternalError(Exception):
     """Raised for unexpected internal errors."""
 
 
+class CompactionSourceSortedRun(TypedDict):
+    SortedRun: int
+
+
+class CompactionSourceSst(TypedDict):
+    Sst: str
+
+
+CompactionSource = CompactionSourceSortedRun | CompactionSourceSst
+
+
+class CompactionSpec:
+    """Represents a compaction spec for admin submission."""
+
+    def __init__(self, sources: list[CompactionSource], destination: int) -> None:
+        """
+        Args:
+            sources: List of sources, each {"SortedRun": int} or {"Sst": "<ulid>"}.
+            destination: Sorted run id for the compaction output.
+        """
+        ...
+
+
 class SlateDBCompactionRequest:
     """Represents a compaction request for admin submission."""
 
@@ -60,14 +83,16 @@ class SlateDBCompactionRequest:
         ...
 
     @staticmethod
-    def spec(spec_json: str) -> SlateDBCompactionRequest:
+    def spec(spec: CompactionSpec) -> SlateDBCompactionRequest:
         """
-        Create a spec-based compaction request from JSON-encoded CompactionSpec.
+        Create a spec-based compaction request.
 
         Example:
-            >>> req = SlateDBCompactionRequest.spec('{"sources":[{"SortedRun":3}],"destination":3}')
+            >>> spec = CompactionSpec([{"SortedRun": 3}], 3)
+            >>> req = SlateDBCompactionRequest.spec(spec)
         """
         ...
+
 
 class SlateDB:
     """
@@ -2268,19 +2293,19 @@ class SlateDBAdmin:
         """
         ...
 
-    def submit_compaction(self, request: SlateDBCompactionRequest) -> str:
+    def submit_compaction(self, spec: CompactionSpec) -> str:
         """
         Submit a compaction request and return the submitted compaction.
 
         Args:
-            request: A :class:`SlateDBCompactionRequest` instance.
+            spec: Compaction spec describing the sources and destination.
 
         Returns:
             JSON string of the submitted compaction.
         """
         ...
 
-    async def submit_compaction_async(self, request: SlateDBCompactionRequest) -> str:
+    async def submit_compaction_async(self, spec: CompactionSpec) -> str:
         """
         Async variant of ``submit_compaction``.
         """

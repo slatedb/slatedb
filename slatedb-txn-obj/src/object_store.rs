@@ -1,5 +1,5 @@
-use crate::transactional_object::TransactionalObjectError::CallbackError;
-use crate::transactional_object::{
+use crate::TransactionalObjectError::CallbackError;
+use crate::{
     GenericObjectMetadata, MonotonicId, ObjectCodec, SequencedStorageProtocol,
     TransactionalObjectError, TransactionalStorageProtocol,
 };
@@ -24,14 +24,14 @@ use std::sync::Arc;
 /// - New versions must use the next consecutive id (`current_id + 1`).
 /// - We rely on `put_if_not_exists` to enforce CAS at the storage layer. If a file with
 ///   the same id already exists, the write fails with `ObjectVersionExists`.
-pub(crate) struct ObjectStoreSequencedStorageProtocol<T> {
+pub struct ObjectStoreSequencedStorageProtocol<T> {
     object_store: Box<dyn ObjectStore>,
     codec: Box<dyn ObjectCodec<T>>,
     file_suffix: &'static str,
 }
 
 impl<T> ObjectStoreSequencedStorageProtocol<T> {
-    pub(crate) fn new(
+    pub fn new(
         root_path: &Path,
         object_store: Arc<dyn ObjectStore>,
         subdir: &str,
@@ -173,8 +173,8 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
 
 #[cfg(test)]
 mod tests {
-    use crate::transactional_object::tests::{new_store, TestVal};
-    use crate::transactional_object::{
+    use crate::tests::{new_store, TestVal};
+    use crate::{
         MonotonicId, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
         TransactionalStorageProtocol,
     };

@@ -118,9 +118,7 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::CachedObjectStore;
 use crate::cached_object_store::FsCacheStorage;
 use crate::clock::DefaultLogicalClock;
-use crate::clock::DefaultSystemClock;
 use crate::clock::LogicalClock;
-use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
@@ -132,7 +130,6 @@ use crate::config::default_block_cache;
 use crate::config::default_meta_cache;
 use crate::config::CompactorOptions;
 use crate::config::GarbageCollectorOptions;
-use crate::config::SizeTieredCompactionSchedulerOptions;
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
@@ -155,6 +152,8 @@ use crate::sst::{BlockTransformer, SsTableFormat};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
+use slatedb_common::clock::DefaultSystemClock;
+use slatedb_common::clock::SystemClock;
 
 /// A builder for creating a new Db instance.
 ///
@@ -576,7 +575,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .unwrap_or_else(|| tokio_handle.clone());
             let scheduler_supplier = self
                 .compaction_scheduler_supplier
-                .unwrap_or_else(default_compaction_scheduler_supplier);
+                .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&compactor_options));
             let stats = Arc::new(CompactionStats::new(inner.stat_registry.clone()));
@@ -923,7 +922,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
         let scheduler_supplier = self
             .scheduler_supplier
-            .unwrap_or_else(default_compaction_scheduler_supplier);
+            .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
 
         Compactor::new(
             manifest_store,
@@ -939,10 +938,4 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.merge_operator,
         )
     }
-}
-
-fn default_compaction_scheduler_supplier() -> Arc<dyn CompactionSchedulerSupplier> {
-    Arc::new(SizeTieredCompactionSchedulerSupplier::new(
-        SizeTieredCompactionSchedulerOptions::default(),
-    ))
 }

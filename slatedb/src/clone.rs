@@ -1,5 +1,4 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::SystemClock;
 use crate::config::CheckpointOptions;
 use crate::db_state::{ManifestCore, SsTableId};
 use crate::error::SlateDBError;
@@ -11,6 +10,7 @@ use crate::utils::IdGenerator;
 use fail_parallel::{fail_point, FailPointRegistry};
 use object_store::path::Path;
 use object_store::ObjectStore;
+use slatedb_common::clock::SystemClock;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -312,7 +312,6 @@ async fn copy_wal_ssts(
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::DefaultSystemClock;
     use crate::clone::create_clone;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
@@ -327,6 +326,7 @@ mod tests {
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use slatedb_common::clock::DefaultSystemClock;
     use std::ops::RangeFull;
     use std::sync::Arc;
 

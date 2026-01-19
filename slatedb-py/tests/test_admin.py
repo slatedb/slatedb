@@ -3,10 +3,10 @@ import json
 import pytest
 
 from slatedb import (
+    CompactionSpec,
     InvalidError,
     SlateDB,
     SlateDBAdmin,
-    SlateDBCompactionRequest,
     SlateDBReader,
 )
 
@@ -139,10 +139,8 @@ def test_admin_compactions_read_list_submit(db_path, env_file):
     db.close()
 
     admin = SlateDBAdmin(db_path, env_file=env_file)
-    request = SlateDBCompactionRequest.spec(
-        json.dumps({"sources": [{"SortedRun": 3}], "destination": 3})
-    )
-    submitted = admin.submit_compaction(request)
+    spec = CompactionSpec([{"SortedRun": 3}], 3)
+    submitted = admin.submit_compaction(spec)
     assert isinstance(submitted, str)
     submitted_payload = json.loads(submitted)
     compaction_id = submitted_payload["id"]
@@ -175,10 +173,8 @@ async def test_admin_compactions_read_list_submit_async(db_path, env_file):
     db.close()
 
     admin = SlateDBAdmin(db_path, env_file=env_file)
-    request = SlateDBCompactionRequest.spec(
-        json.dumps({"sources": [{"SortedRun": 3}], "destination": 3})
-    )
-    submitted = await admin.submit_compaction_async(request)
+    spec = CompactionSpec([{"SortedRun": 3}], 3)
+    submitted = await admin.submit_compaction_async(spec)
     assert isinstance(submitted, str)
     submitted_payload = json.loads(submitted)
     compaction_id = submitted_payload["id"]

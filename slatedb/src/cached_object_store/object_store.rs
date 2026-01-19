@@ -580,10 +580,10 @@ mod tests {
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
     use crate::cached_object_store::{storage::PartID, storage_fs::FsCacheEntry};
-    use crate::clock::DefaultSystemClock;
     use crate::rand::DbRand;
     use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
+    use slatedb_common::clock::DefaultSystemClock;
 
     fn new_test_cache_folder() -> std::path::PathBuf {
         let mut rng = rand::rng();

@@ -1,7 +1,7 @@
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
-use crate::clock::SystemClock;
 use crate::compactions_store::CompactionsStore;
-use crate::compactor::{CompactionRequest, Compactor};
+use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
+use crate::compactor_state_protocols::CompactorStateReader;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::db_state::{ManifestCore, SsTableHandle, SsTableId};
@@ -12,6 +12,7 @@ use crate::iter::KeyValueIterator;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::sst::SsTableFormat;
 use crate::tablestore::TableStore;
+use slatedb_common::clock::SystemClock;
 
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
@@ -38,7 +39,7 @@ use ulid::Ulid;
 use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
-use crate::transactional_object::TransactionalObject;
+use slatedb_txn_obj::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -129,13 +130,13 @@ impl Admin {
     /// - `maybe_id`: Optional ID of the compactions file to read from. If None, reads from the latest.
     ///
     /// ## Returns
-    /// - `Ok(Some(String))`: The compaction as a JSON string if found.
+    /// - `Ok(Some(Compaction))`: The compaction if found.
     /// - `Ok(None)`: If the compactions file or compaction ID does not exist.
     pub async fn read_compaction(
         &self,
         compaction_id: Ulid,
         maybe_id: Option<u64>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
+    ) -> Result<Option<Compaction>, Box<dyn Error>> {
         let compactions_store = self.compactions_store();
         let compactions = if let Some(compactions_id) = maybe_id {
             compactions_store
@@ -154,29 +155,42 @@ impl Admin {
             return Ok(None);
         };
 
-        Ok(Some(serde_json::to_string(compaction)?))
+        Ok(Some(compaction.clone()))
     }
 
-    /// Submit a compaction request and return the submitted compaction as JSON.
+    /// Returns a read-only view of the current compactor state.
+    pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, Box<dyn Error>> {
+        let manifest_store = Arc::new(ManifestStore::new(
+            &self.path,
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        ));
+        let compactions_store = Arc::new(self.compactions_store());
+        let reader = CompactorStateReader::new(&manifest_store, &compactions_store);
+        Ok(reader.read_view().await?)
+    }
+
+    /// Generate a compaction from a spec and submit it.
+    ///
+    /// ## Returns
+    /// - `Ok(Compaction)`: The submitted compaction.
+    /// - `Err`: If there was an error during submission or reading the submitted compaction.
     pub async fn submit_compaction(
         &self,
-        request: CompactionRequest,
-    ) -> Result<String, Box<dyn Error>> {
-        let manifest_store = Arc::new(self.manifest_store());
+        spec: CompactionSpec,
+    ) -> Result<Compaction, Box<dyn Error>> {
         let compactions_store = Arc::new(self.compactions_store());
         let compaction_id = Compactor::submit(
-            request,
-            manifest_store,
+            spec,
             compactions_store,
             Arc::new(DbRand::new(self.rand.seed())),
             self.system_clock.clone(),
         )
         .await?;
-        let Some(compaction_json) = self.read_compaction(compaction_id, None).await? else {
+        let Some(compaction) = self.read_compaction(compaction_id, None).await? else {
             return Err(Box::new(SlateDBError::InvalidDBState));
         };
 
-        Ok(compaction_json)
+        Ok(compaction)
     }
 
     /// List compactions files within a range
@@ -429,7 +443,8 @@ impl Admin {
             .maybe_apply_update(|stored_manifest| {
                 let mut dirty = stored_manifest.prepare_dirty()?;
                 let checkpoints: Vec<Checkpoint> = dirty
-                    .core()
+                    .value
+                    .core
                     .checkpoints
                     .iter()
                     .filter(|c| c.id != id)
@@ -853,8 +868,7 @@ mod tests {
     use crate::admin::Admin;
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
-    use crate::compactor::CompactionRequest;
-    use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
+    use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
     use crate::db_state::SsTableId;
     use crate::iter::KeyValueIterator;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -1006,17 +1020,12 @@ mod tests {
         stored.update(dirty).await.unwrap();
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
-        let compaction_json = admin
+        let compaction = admin
             .read_compaction(compaction_id, None)
             .await
             .unwrap()
             .expect("expected compaction");
-        let value: serde_json::Value = serde_json::from_str(&compaction_json).unwrap();
-
-        assert_eq!(
-            value.get("id").and_then(|v| v.as_str()).unwrap(),
-            compaction_id.to_string()
-        );
+        assert_eq!(compaction.id(), compaction_id);
     }
 
     #[tokio::test]
@@ -1030,30 +1039,11 @@ mod tests {
 
         let admin = AdminBuilder::new(path.clone(), object_store).build();
         let spec = CompactionSpec::new(vec![SourceId::SortedRun(3)], 3);
-        let compaction_json = admin
-            .submit_compaction(CompactionRequest::Spec(spec))
-            .await
-            .unwrap();
-        let value: serde_json::Value = serde_json::from_str(&compaction_json).unwrap();
-        let sources = value
-            .get("spec")
-            .and_then(|v| v.get("sources"))
-            .and_then(|v| v.as_array())
-            .unwrap();
+        let compaction = admin.submit_compaction(spec).await.unwrap();
 
-        assert_eq!(
-            value
-                .get("spec")
-                .and_then(|v| v.get("destination"))
-                .and_then(|v| v.as_u64())
-                .unwrap(),
-            3
-        );
-        assert_eq!(sources.len(), 1);
-        assert_eq!(
-            value.get("status").and_then(|v| v.as_str()).unwrap(),
-            "Submitted"
-        );
+        assert_eq!(compaction.spec().destination(), 3);
+        assert_eq!(compaction.spec().sources(), &vec![SourceId::SortedRun(3)]);
+        assert_eq!(compaction.status(), CompactionStatus::Submitted);
     }
 
     #[tokio::test]

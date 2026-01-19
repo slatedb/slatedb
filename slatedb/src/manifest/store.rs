@@ -1,5 +1,4 @@
 use crate::checkpoint::Checkpoint;
-use crate::clock::SystemClock;
 use crate::config::CheckpointOptions;
 use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
@@ -9,27 +8,22 @@ use crate::error::SlateDBError::{
 use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::manifest::Manifest;
 use crate::rand::DbRand;
-use crate::transactional_object::object_store::ObjectStoreSequencedStorageProtocol;
-use crate::transactional_object::{
-    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
-};
 use chrono::Utc;
 use log::debug;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
+use slatedb_common::clock::SystemClock;
+use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
+use slatedb_txn_obj::{
+    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
+    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+};
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
-
-impl DirtyObject<Manifest> {
-    pub(crate) fn core(&self) -> &ManifestCore {
-        &self.value.core
-    }
-}
 
 pub(crate) struct FenceableManifest {
     clock: Arc<dyn SystemClock>,
@@ -604,8 +598,8 @@ impl ManifestStore {
 pub(crate) mod test_utils {
     use crate::db_state::ManifestCore;
     use crate::manifest::Manifest;
-    use crate::transactional_object::test_utils::new_dirty_object;
-    use crate::transactional_object::DirtyObject;
+    use slatedb_txn_obj::test_utils::new_dirty_object;
+    use slatedb_txn_obj::DirtyObject;
 
     pub(crate) fn new_dirty_manifest() -> DirtyObject<Manifest> {
         new_dirty_object(1u64, Manifest::initial(ManifestCore::new()))
@@ -615,7 +609,6 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::config::CheckpointOptions;
     use crate::db_state::ManifestCore;
     use crate::error;
@@ -624,10 +617,11 @@ mod tests {
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
-    use crate::transactional_object::TransactionalObject;
     use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_txn_obj::TransactionalObject;
     use std::sync::Arc;
     use std::time::Duration;
 

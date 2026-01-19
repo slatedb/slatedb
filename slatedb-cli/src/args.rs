@@ -1,4 +1,5 @@
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
+use slatedb::compactor::CompactionRequest;
 use slatedb::seq_tracker::FindOption;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -188,13 +189,21 @@ pub(crate) enum CliCommands {
             .required(true)
     ))]
     SubmitCompaction {
-        /// Submit a full compaction request.
-        #[arg(long)]
-        full: bool,
+        /// Compaction scheduler name (only "size-tiered" is supported).
+        #[arg(long, default_value = "size-tiered")]
+        scheduler: String,
 
-        /// JSON-encoded compaction spec.
-        #[arg(long)]
-        spec: Option<String>,
+        /// Submit a full JSON-encoded compaction request.
+        ///
+        /// ## Examples
+        /// ```json
+        /// "Full"
+        /// ```
+        /// ```json
+        /// {"Spec":{"sources":[{"SortedRun":3},{"Sst":"01H8FQ5K6K7QK6EJ0E9HNF1J2B"}],"destination":7}}
+        /// ```
+        #[arg(long, value_parser = parse_compaction_request)]
+        request: CompactionRequest,
     },
 
     /// Schedules a period garbage collection job
@@ -285,6 +294,10 @@ pub(crate) struct GcSchedule {
 
 pub(crate) fn parse_args() -> CliArgs {
     CliArgs::parse()
+}
+
+fn parse_compaction_request(s: &str) -> Result<CompactionRequest, String> {
+    serde_json::from_str(s).map_err(|e| format!("Invalid compaction request JSON: {e}"))
 }
 
 fn parse_find_option(s: &str) -> Result<FindOption, String> {

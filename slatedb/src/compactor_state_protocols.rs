@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use log::{debug, info};
 
-use crate::clock::SystemClock;
 use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
 use crate::compactor::CompactionsCore;
 use crate::compactor_state::{CompactionStatus, Compactions, CompactorState};
@@ -25,6 +24,7 @@ use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::utils::IdGenerator;
 use crate::DbRand;
+use slatedb_common::clock::SystemClock;
 
 /// A read-only view of compactor state suitable for consumers like GC.
 ///
@@ -54,10 +54,10 @@ impl From<&CompactorState> for CompactorStateView {
     fn from(state: &CompactorState) -> Self {
         CompactorStateView {
             compactions: Some((
-                state.compactions().id().into(),
+                state.compactions().id.into(),
                 state.compactions().value.clone(),
             )),
-            manifest: (state.manifest().id().into(), state.manifest().value.clone()),
+            manifest: (state.manifest().id.into(), state.manifest().value.clone()),
         }
     }
 }
@@ -134,7 +134,7 @@ impl CompactorStateWriter {
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
-        let (manifest, compactions) = Self::fence(
+        let (manifest, mut compactions) = Self::fence(
             stored_manifest,
             compactions_store,
             system_clock.clone(),
@@ -152,6 +152,8 @@ impl CompactorStateWriter {
             }
         });
         dirty_compactions.value.retain_active_and_last_finished();
+        // Persist recovery state before any refresh() can overwrite it.
+        compactions.update(dirty_compactions.clone()).await?;
         let state = CompactorState::new(dirty_manifest, dirty_compactions);
         Ok(Self {
             state,
@@ -319,7 +321,6 @@ impl CompactorStateWriter {
 mod tests {
     use super::*;
     use crate::admin::AdminBuilder;
-    use crate::clock::{DefaultSystemClock, SystemClock};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
@@ -328,10 +329,11 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
-    use crate::transactional_object::test_utils::new_dirty_object;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_txn_obj::test_utils::new_dirty_object;
     use std::sync::Arc;
     use ulid::Ulid;
 

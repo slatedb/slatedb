@@ -231,7 +231,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::clock::DefaultSystemClock;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::db_state::{ManifestCore, SsTableId};
@@ -241,6 +240,7 @@ mod tests {
     use crate::stats::StatRegistry;
     use crate::test_utils::build_test_sst;
     use object_store::{memory::InMemory, path::Path};
+    use slatedb_common::clock::DefaultSystemClock;
 
     #[tokio::test]
     async fn test_compacted_gc_respects_min_age_cutoff() {

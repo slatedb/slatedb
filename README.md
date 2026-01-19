@@ -156,6 +156,7 @@ See who's using SlateDB.
 - [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
 - [Responsive](https://responsive.dev)
+- [s2-lite](https://github.com/s2-streamstore/s2)
 - [SQLync](https://sqlync.com)
 - [Tensorlake](https://www.tensorlake.ai)
 - [ZeroFS](https://zerofs.net)

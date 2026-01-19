@@ -236,6 +236,7 @@ mod tests {
             manifest_update_timeout: Duration::from_secs(300),
             compactor_options: Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
+                scheduler_options: Default::default(),
                 ..Default::default()
             }),
             max_unflushed_bytes: 16 * 1024,
@@ -673,6 +674,7 @@ mod tests {
             manifest_update_timeout: Duration::from_secs(300),
             compactor_options: Some(CompactorOptions {
                 poll_interval: Duration::from_millis(100),
+                scheduler_options: Default::default(),
                 ..Default::default()
             }),
             max_unflushed_bytes: 16 * 1024,
