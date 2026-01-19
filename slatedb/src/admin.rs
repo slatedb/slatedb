@@ -795,14 +795,10 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 /// <https://docs.rs/object_store/latest/object_store/aws/struct.AmazonS3Builder.html#method.with_config>
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
-    use object_store::aws::{S3ConditionalPut, S3CopyIfNotExists};
+    use object_store::aws::S3ConditionalPut;
 
     let builder = object_store::aws::AmazonS3Builder::from_env()
-        .with_conditional_put(S3ConditionalPut::ETagMatch)
-        .with_copy_if_not_exists(S3CopyIfNotExists::Header(
-            "If-None-Match".to_string(),
-            "*".to_string(),
-        ));
+        .with_conditional_put(S3ConditionalPut::ETagMatch);
 
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
 }
