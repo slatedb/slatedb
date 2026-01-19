@@ -78,6 +78,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use rstest::rstest;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
     use std::sync::Arc;
@@ -319,7 +320,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_restore_checkpoint() {
+    #[rstest]
+    #[case(CheckpointScope::All)]
+    #[case(CheckpointScope::Durable)]
+    async fn test_should_restore_checkpoint(#[case] checkpoint_scope: CheckpointScope) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
@@ -330,7 +334,7 @@ mod tests {
 
         db.put(b"key", b"old_val").await.unwrap();
         let checkpoint = db
-            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -345,7 +349,7 @@ mod tests {
             Some(Bytes::from_static(b"new_val")), // previous value should be overwritten
             db.get(b"key").await.unwrap(),
         );
-        db.create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+        db.create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
             .await
             .unwrap(); // to test that its not removed after travelling back in time
         let checkpoints = admin.list_checkpoints(None).await.unwrap();

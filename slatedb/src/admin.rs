@@ -17,11 +17,12 @@ use slatedb_common::clock::SystemClock;
 use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
-use crate::seq_tracker::FindOption;
+use crate::seq_tracker::{FindOption, SequenceTracker, TrackedSeq};
 use crate::utils::{IdGenerator, WatchableOnceCell};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
+use log::debug;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use std::collections::VecDeque;
@@ -40,6 +41,13 @@ use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
 use slatedb_txn_obj::TransactionalObject;
+
+pub struct WalToL0Result {
+    sst_handles: VecDeque<SsTableHandle>,
+    last_tick: Option<i64>,
+    last_seq: Option<u64>,
+    sequence_tracker: SequenceTracker,
+}
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -487,7 +495,12 @@ impl Admin {
 
         let manifest_to_restore = manifest_store.read_manifest(checkpoint.manifest_id).await?;
 
-        let l0_handles = self
+        let WalToL0Result {
+            sst_handles,
+            last_tick,
+            last_seq,
+            sequence_tracker,
+        } = self
             .replay_wal_to_l0(
                 manifest_to_restore.core.replay_after_wal_id + 1
                     ..manifest_to_restore.core.next_wal_sst_id,
@@ -507,7 +520,18 @@ impl Admin {
                 // valid.
                 dirty.value.core.checkpoints = stored_manifest.object().core.checkpoints.clone();
 
-                dirty.value.core.l0.extend(l0_handles.iter().cloned());
+                dirty.value.core.l0.extend(sst_handles.clone());
+                if let Some(last_tick) = last_tick {
+                    dirty.value.core.last_l0_clock_tick = last_tick;
+                }
+                if let Some(last_seq) = last_seq {
+                    dirty.value.core.last_l0_seq = last_seq;
+                }
+                dirty
+                    .value
+                    .core
+                    .sequence_tracker
+                    .extend_from(&sequence_tracker);
                 dirty.value.core.replay_after_wal_id = fencing_wal;
                 dirty.value.core.next_wal_sst_id = fencing_wal + 1;
 
@@ -584,14 +608,18 @@ impl Admin {
         }
     }
 
-    // Replays WALs in the id range into SSTs and flushes them to l0. Returns the handles of the newly generated and flushed SSTs.
+    // Replays WALs in the id range into SSTs and flushes them to l0.
+    // Returns the handles of the newly generated and flushed SSTs, a sequence_tracker tracking the
+    // sequence numbers inserted, and the latest sequence number and creation timestamp
     async fn replay_wal_to_l0(
         &self,
         wal_id_range: Range<u64>,
         core: &ManifestCore,
         table_store: Arc<TableStore>,
         l0_sst_size: Option<usize>,
-    ) -> Result<VecDeque<SsTableHandle>, crate::Error> {
+    ) -> Result<WalToL0Result, crate::Error> {
+        debug!("replaying wal_id_range {:?} to l0", &wal_id_range);
+
         let wal_replay_options = match l0_sst_size {
             Some(min_memtable_bytes) => WalReplayOptions {
                 min_memtable_bytes,
@@ -609,6 +637,9 @@ impl Admin {
 
         let mut sst_handles = VecDeque::new();
 
+        let mut sequence_tracker = SequenceTracker::new();
+        let mut last_seq = None;
+        let mut last_tick = None;
         while let Some(replayed_table) = replay_iter.next().await? {
             let id = SsTableId::Compacted(self.rand.rng().gen_ulid(self.system_clock.as_ref()));
             let mut sst_builder = table_store.table_builder();
@@ -623,9 +654,31 @@ impl Admin {
             // a compaction job (or return error).
             let handle = table_store.write_sst(&id, encoded_sst, false).await?;
             sst_handles.push_back(handle);
+
+            last_seq = Some(std::cmp::max(
+                last_seq.unwrap_or(replayed_table.last_seq),
+                replayed_table.last_seq,
+            ));
+            last_tick = Some(std::cmp::max(
+                last_tick.unwrap_or(replayed_table.last_tick),
+                replayed_table.last_tick,
+            ));
+            // Insert sequence numbers at table-level granularity instead of per-entry to reduce complexity
+            // and overhead. This is acceptable given SequenceTracker's approximate nature.
+            sequence_tracker.insert(TrackedSeq {
+                seq: replayed_table.last_seq,
+                ts: self.system_clock.now(),
+            });
         }
 
-        Ok(sst_handles)
+        debug!("Replayed WALs to new L0 SSTs: {:?}", sst_handles);
+
+        Ok(WalToL0Result {
+            sst_handles,
+            last_tick,
+            last_seq,
+            sequence_tracker,
+        })
     }
 
     fn manifest_store(&self) -> ManifestStore {
@@ -798,6 +851,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     use object_store::aws::S3ConditionalPut;
 
     let builder = object_store::aws::AmazonS3Builder::from_env()
+        .with_allow_http(true)
         .with_conditional_put(S3ConditionalPut::ETagMatch);
 
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
@@ -861,8 +915,8 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 mod tests {
     use std::sync::Arc;
 
-    use crate::admin::Admin;
     use crate::admin::{load_object_store_from_env, AdminBuilder};
+    use crate::admin::{Admin, WalToL0Result};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
     use crate::db_state::SsTableId;
@@ -1079,9 +1133,9 @@ mod tests {
         db.close().await.unwrap();
 
         let row_entries = vec![
-            RowEntry::new_value(b"key1", b"value1", 1),
-            RowEntry::new_value(b"key2", b"value2", 2),
-            RowEntry::new_value(b"key3", b"value3", 3),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(11),
+            RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(12), // last_seq
+            RowEntry::new_value(b"key3", b"value3", 3).with_create_ts(13),
         ];
 
         // setup wals
@@ -1093,13 +1147,19 @@ mod tests {
         writer.add(row_entries[2].clone()).await.unwrap();
         writer.close().await.unwrap();
 
-        // replay the wal entries to l0
+        // replay the wal entries to l0. Do not include the last WAL to test that it is left out of
+        // the replay results.
         let (_, manifest) = manifest_store
             .try_read_latest_manifest()
             .await
             .unwrap()
             .unwrap();
-        let sst_handles = admin
+        let WalToL0Result {
+            sst_handles,
+            last_seq,
+            last_tick,
+            sequence_tracker,
+        } = admin
             .replay_wal_to_l0(100..101, &manifest.core, table_store.clone(), None)
             .await
             .unwrap();
@@ -1121,5 +1181,11 @@ mod tests {
                 assert_eq!(row_entry_iter.next().unwrap(), entry)
             }
         }
+
+        assert_eq!(2, last_seq.unwrap());
+        assert_eq!(12, last_tick.unwrap());
+        assert!(sequence_tracker
+            .find_ts(1, crate::seq_tracker::FindOption::RoundUp)
+            .is_some(),);
     }
 }
