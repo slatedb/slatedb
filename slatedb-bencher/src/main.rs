@@ -29,7 +29,9 @@ use transactions::TransactionBench;
 
 mod args;
 pub mod db;
+pub mod stats;
 pub mod system_monitor;
+pub mod transactions;
 
 const CLEANUP_NAME: &str = ".clean_benchmark_data";
 
