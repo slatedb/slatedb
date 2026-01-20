@@ -236,7 +236,7 @@ mod tests {
     use crate::db_state::{ManifestCore, SsTableId};
     use crate::manifest::store::StoredManifest;
     use crate::object_stores::ObjectStores;
-    use crate::sst::SsTableFormat;
+    use crate::sst_format::SsTableFormat;
     use crate::stats::StatRegistry;
     use crate::test_utils::build_test_sst;
     use object_store::{memory::InMemory, path::Path};

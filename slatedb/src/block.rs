@@ -1,5 +1,6 @@
 use crate::error::SlateDBError;
 use crate::row_codec::{SstRowCodecV0, SstRowEntry};
+use crate::sst_format::{CHECKSUM_SIZE, OFFSET_SIZE};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -66,10 +67,8 @@ impl Block {
         number_of_blocks: usize,
     ) -> usize {
         let mut ans = entries_size_encoded;
-        let offset_len = std::mem::size_of::<u16>();
-        let checksum_len = std::mem::size_of::<u32>();
-        ans += offset_len * entry_num;
-        ans += checksum_len * number_of_blocks;
+        ans += OFFSET_SIZE * entry_num;
+        ans += CHECKSUM_SIZE * number_of_blocks;
         ans
     }
 }

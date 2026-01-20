@@ -927,7 +927,7 @@ mod tests {
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
-    use crate::sst::SsTableFormat;
+    use crate::sst_format::SsTableFormat;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::{error::SlateDBError, test_utils, Db};

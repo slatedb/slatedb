@@ -146,7 +146,7 @@ use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::sst::{BlockTransformer, SsTableFormat};
+use crate::sst_format::{BlockTransformer, SsTableFormat};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;

@@ -154,7 +154,7 @@ use crate::bytes_generator::OrderedBytesGenerator;
 use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
-use crate::sst::{EncodedSsTable, SsTableFormat};
+use crate::sst_format::{EncodedSsTable, SsTableFormat};
 use crate::{MergeOperator, MergeOperatorError};
 pub(crate) use assert_debug_snapshot;
 

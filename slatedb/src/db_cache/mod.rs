@@ -624,7 +624,7 @@ mod tests {
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
 
     use crate::db_cache::test_utils::TestCache;
-    use crate::sst::{EncodedSsTable, SsTableFormat};
+    use crate::sst_format::{EncodedSsTable, SsTableFormat};
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::build_test_sst;
     use crate::types::RowEntry;

@@ -20,7 +20,8 @@ use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
-use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
+use crate::sst::EncodedSsTableBuilder;
+use crate::sst_format::{EncodedSsTable, SsTableFormat};
 use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, block::Block};
 
@@ -510,9 +511,18 @@ impl TableStore {
         self.path_resolver.table_path(id)
     }
 
-    pub(crate) fn estimate_encoded_size(&self, entry_num: usize, entries_size: usize) -> usize {
+    pub(crate) fn estimate_encoded_size_compacted(
+        &self,
+        entry_num: usize,
+        entries_size: usize,
+    ) -> usize {
         self.sst_format
-            .estimate_encoded_size(entry_num, entries_size)
+            .estimate_encoded_size_compacted(entry_num, entries_size)
+    }
+
+    pub(crate) fn estimate_encoded_size_wal(&self, entry_num: usize, entries_size: usize) -> usize {
+        self.sst_format
+            .estimate_encoded_size_wal(entry_num, entries_size)
     }
 }
 
@@ -616,7 +626,7 @@ mod tests {
     use crate::object_stores::ObjectStores;
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
-    use crate::sst::SsTableFormat;
+    use crate::sst_format::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;

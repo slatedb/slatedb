@@ -194,7 +194,7 @@ use crate::error::SlateDBError;
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 use crate::merge_operator::MergeOperatorType;
-use crate::sst::BlockTransformer;
+use crate::sst_format::BlockTransformer;
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]

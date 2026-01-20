@@ -1042,7 +1042,7 @@ mod tests {
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
-    use crate::sst::SsTableFormat;
+    use crate::sst_format::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;

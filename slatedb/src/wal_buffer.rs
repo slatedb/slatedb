@@ -172,7 +172,7 @@ impl WalBufferManager {
     /// Returns the total size of all unflushed WALs in bytes.
     pub(crate) fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
         let inner = self.inner.read();
-        let current_wal_size = self.table_store.estimate_encoded_size(
+        let current_wal_size = self.table_store.estimate_encoded_size_wal(
             inner.current_wal.metadata().entry_num,
             inner.current_wal.metadata().entries_size_in_bytes,
         );
@@ -183,10 +183,9 @@ impl WalBufferManager {
             .map(|(_, wal)| {
                 let metadata = wal.metadata();
                 self.table_store
-                    .estimate_encoded_size(metadata.entry_num, metadata.entries_size_in_bytes)
+                    .estimate_encoded_size_wal(metadata.entry_num, metadata.entries_size_in_bytes)
             })
             .sum::<usize>();
-
         Ok(current_wal_size + imm_wal_size)
     }
 
@@ -210,7 +209,7 @@ impl WalBufferManager {
         // check the size of the current wal
         let (current_wal, need_flush, flush_tx) = {
             let inner = self.inner.read();
-            let current_wal_size = self.table_store.estimate_encoded_size(
+            let current_wal_size = self.table_store.estimate_encoded_size_wal(
                 inner.current_wal.metadata().entry_num,
                 inner.current_wal.metadata().entries_size_in_bytes,
             );
@@ -639,7 +638,7 @@ mod tests {
         }
 
         // Wait for background flush
-        assert_eq!(wal_buffer.recent_flushed_wal_id(), 10);
+        assert_eq!(wal_buffer.recent_flushed_wal_id(), 11);
     }
 
     #[tokio::test]

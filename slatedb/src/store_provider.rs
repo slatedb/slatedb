@@ -1,7 +1,7 @@
 use crate::db_cache::DbCache;
 use crate::manifest::store::ManifestStore;
 use crate::object_stores::ObjectStores;
-use crate::sst::{BlockTransformer, SsTableFormat};
+use crate::sst_format::{BlockTransformer, SsTableFormat};
 use crate::tablestore::TableStore;
 use object_store::path::Path;
 use object_store::ObjectStore;

@@ -843,7 +843,7 @@ mod tests {
     use crate::db_stats::DbStats;
     use crate::filter;
     use crate::object_stores::ObjectStores;
-    use crate::sst::SsTableFormat;
+    use crate::sst_format::SsTableFormat;
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::{assert_kv, gen_attrs};
     use crate::types::ValueDeletable;

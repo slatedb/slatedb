@@ -27,7 +27,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::object_stores::ObjectStores;
 use crate::rand::DbRand;
-use crate::sst::SsTableFormat;
+use crate::sst_format::SsTableFormat;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;

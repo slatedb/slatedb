@@ -49,7 +49,7 @@ pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
-pub use sst::BlockTransformer;
+pub use sst_format::BlockTransformer;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 
@@ -118,6 +118,7 @@ mod retrying_object_store;
 mod row_codec;
 mod sorted_run_iterator;
 mod sst;
+mod sst_format;
 mod sst_iter;
 mod store_provider;
 mod tablestore;
