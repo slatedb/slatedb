@@ -7,6 +7,7 @@ Table of Contents:
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
 - [Design](#design)
+- [Limitations](#limitations)
 - [Impact Analysis](#impact-analysis)
 - [Operations](#operations)
 - [Testing](#testing)
@@ -23,7 +24,9 @@ Authors:
 
 ## Summary
 
-This RFC introduces a public API for user-provided compaction filters in SlateDB. Users implement a `CompactionFilterFactory` that creates a `CompactionFilter` instance for each compaction job. Each filter can inspect entries and decide to keep, drop, or modify them. Filters execute on the compactor thread with async lifecycle hooks for setup and teardown.
+This RFC introduces a public API for user-provided compaction filters in SlateDB. Users implement a `CompactionFilterSupplier` that creates a `CompactionFilter` instance for each compaction job. Each filter can inspect entries and decide to keep, drop, convert to tombstone, or modify values. The design makes existing internal types (`RowEntry`, `ValueDeletable`) public and uses `CompactorStateView` to provide context to the filter.
+
+Compaction filters are gated behind the `compaction_filters` feature flag. Enabling this feature may affect snapshot consistency. See [Limitations](#limitations) for details.
 
 ## Motivation
 
@@ -37,21 +40,43 @@ This design could also unify internal TTL handling (`RetentionIterator`) with us
 
 ## Goals
 
-- Provide a user-friendly API following established SlateDB patterns (`MergeOperator`).
-- Zero overhead when no filter is configured - existing users are unaffected.
-- Async factory method for setup, async hook for teardown.
-- Access to essential compaction metadata.
-- Design that could potentially be used for internal TTL filtering.
+- Provide a user-friendly API following established SlateDB patterns (`CompactionSchedulerSupplier`).
+- Zero overhead when no filter is configured. Existing users are unaffected.
+- Design that can potentially be extended to enable internal TTL filtering
+refactoring.
 
 ## Non-Goals
 
 - Replacing the internal `RetentionIterator` immediately.
-- Modifying the key bytes of an entry (filters can only modify values).
-- Emitting new entries during compaction (filters can only keep, drop, or modify existing entries).
+- Modifying the key bytes of an entry key (filters can only modify values).
+- Emitting new entries during compaction (filters can only keep, drop, tombstone, or modify existing entries).
+- Guaranteeing snapshot consistency when compaction filters are enabled (see [Limitations](#limitations)).
 
 ## Design
 
-### Core Traits
+### Public Types
+
+The following existing internal types are made public to support compaction filters:
+
+```rust
+/// Entry in the LSM tree (made public).
+pub struct RowEntry {
+    pub key: Bytes,
+    pub value: ValueDeletable,
+    pub seq: u64,
+    pub create_ts: Option<i64>,
+    pub expire_ts: Option<i64>,
+}
+
+/// Value that can be a value, merge operand, or tombstone (made public).
+pub enum ValueDeletable {
+    Value(Bytes),
+    Merge(Bytes),
+    Tombstone,
+}
+```
+
+### CompactionFilterDecision
 
 ```rust
 /// Decision returned by a compaction filter for each entry.
@@ -66,97 +91,94 @@ pub enum CompactionFilterDecision {
     /// there are no older versions that could resurface, or when that behavior is
     /// acceptable for your use case.
     Drop,
+    /// Convert the entry to a tombstone.
+    ///
+    /// Use this instead of Drop when you need to shadow older versions of the same
+    /// key in lower levels. The tombstone will prevent "resurrection" of deleted data.
+    ///
+    /// Note: For merge operands, Tombstone behaves the same as Drop (the operand is
+    /// simply removed without creating a tombstone marker).
+    Tombstone,
     /// Modify the entry's value. Key and metadata remain unchanged.
+    ///
+    /// Note: If applied to a tombstone, the entry becomes a regular value with
+    /// the tombstone's sequence number, effectively resurrecting the key with a new value.
     Modify(Bytes),
 }
+```
 
-/// Metadata about the current compaction job.
-pub struct CompactionContext {
-    /// Destination sorted run ID.
-    pub destination: u32,
-    /// Logical clock tick for this compaction (used for TTL decisions).
-    pub compaction_ts: i64,
-    /// Whether this compaction is targeting the bottommost (oldest) sorted run.
-    /// When true, there are no older versions of keys below this.
-    pub is_bottommost: bool,
-}
+### CompactionFilter Trait
 
-/// Additional attributes of an entry being filtered.
-pub struct EntryAttributes {
-    /// The sequence number of this entry.
-    pub seq: u64,
-    /// The creation timestamp (if set).
-    pub create_ts: Option<i64>,
-    /// The expiration timestamp (if set).
-    pub expire_ts: Option<i64>,
-    /// Whether this entry is a merge operand (resolved without a base value).
-    pub is_merge: bool,
-}
-
+```rust
 /// Filter that processes entries during compaction.
 ///
 /// Each filter instance is created for a single compaction job and executes
-/// on the same thread as the compactor.
+/// single-threaded on the compactor thread. The filter must be `Send + Sync`
+/// to satisfy iterator trait requirements.
 #[async_trait]
 pub trait CompactionFilter: Send + Sync {
     /// Filter a single entry. Should be fast (synchronous, no I/O).
     ///
-    /// This method is called for every entry in the compaction. Keep it
-    /// efficient to avoid impacting compaction throughput.
-    ///
-    /// The method is infallible to force it to be as simple as possible.
-    fn filter(
-        &mut self,
-        key: &[u8],
-        value: Option<&[u8]>,
-        attrs: &EntryAttributes,
-    ) -> CompactionFilterDecision;
+    /// The method is infallible to keep it simple and fast.
+    fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision;
 
     /// Called after processing all entries.
     ///
     /// Use this hook to flush state, log statistics, or clean up resources.
     /// This method is infallible since compaction output has already been written.
-    async fn on_compaction_end(&mut self, context: &CompactionContext);
+    async fn on_compaction_end(&mut self, state: &CompactorStateView);
 }
+```
 
-/// Factory that creates a CompactionFilter instance per compaction job.
+### CompactionFilterSupplier Trait
+
+```rust
+/// Supplier that creates a CompactionFilter instance per compaction job.
 ///
-/// The factory is shared across all compactions and must be thread-safe (`Send + Sync`).
-/// It creates a new filter instance for each compaction job, providing
-/// isolated state per job. The async factory method allows for I/O during
-/// filter initialization (e.g., loading configuration, connecting to services).
+/// The supplier is shared across all compactions and must be thread-safe (`Send + Sync`).
+/// It creates a new filter instance for each compaction job, providing isolated state per job.
 #[async_trait]
-pub trait CompactionFilterFactory: Send + Sync {
+pub trait CompactionFilterSupplier: Send + Sync {
     /// Create a filter for a compaction job. Return Err to abort compaction.
     ///
-    /// This is the place to perform any async initialization (loading config,
+    /// This is async to allow I/O during initialization (loading config,
     /// connecting to external services, etc.) before the filter processes entries.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - Read-only view of the compactor state (manifest, compactions)
+    /// * `is_dest_last_run` - Whether the destination sorted run is the last (oldest) run.
+    ///   When true, tombstones can be safely dropped since there are no older versions below.
     async fn create_compaction_filter(
         &self,
-        context: &CompactionContext,
-    ) -> Result<Box<dyn CompactionFilter>, CompactionFilterInitError>;
+        state: &CompactorStateView,
+        is_dest_last_run: bool,
+    ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError>;
 }
-
 ```
 
 ### Error Type
 
 ```rust
-/// Error returned when filter initialization fails. This aborts the compaction.
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("compaction filter initialization failed: {0}")]
-pub struct CompactionFilterInitError(pub String);
+/// Errors that can occur during compaction filter operations.
+#[derive(Debug, Clone, Error)]
+#[non_exhaustive]
+pub enum CompactionFilterError {
+    /// Filter creation failed in `create_compaction_filter`. This aborts the compaction.
+    #[error("filter creation failed: {0}")]
+    CreationError(String),
+}
 ```
 
 ### Configuration
 
 ```rust
 // In DbBuilder (db/builder.rs)
-pub fn with_compaction_filter_factory(
+pub fn with_compaction_filter_supplier(
     mut self,
-    factory: Arc<dyn CompactionFilterFactory>,
+    supplier: Arc<dyn CompactionFilterSupplier>,
 ) -> Self {
-    self.compaction_filter_factory = Some(factory);
+    self.compaction_filter_supplier = Some(supplier);
     self
 }
 ```
@@ -232,7 +254,7 @@ operands into a single resolved value.
    - Cleans up tombstones at the bottommost level.
 
 4. **CompactionFilterIterator** (this RFC): Applies user-provided filters. This
-   is where your `CompactionFilter::filter()` method is called for each entry.
+   is where `CompactionFilter::filter()` method is called for each entry.
 
 This ordering ensures:
 
@@ -240,27 +262,44 @@ This ordering ensures:
 2. Expired entries and old versions are already removed.
 3. User filters only see "live" entries that would otherwise be written.
 
-### Entry Types and Filter Behavior
+### Limitations
 
-The filter behaves differently for different entry types:
+#### Feature Flag and Snapshot Consistency
 
-- **Values**: Filter is invoked. Normal key-value entries (`is_merge = false`).
-- **Merge operands**: Filter is invoked. Entries where merge operands were resolved
-  without a base value (`is_merge = true`).
-- **Tombstones**: Filter is **skipped**. Passed through unchanged.
+Compaction filters are gated behind the `compaction_filters` feature flag:
 
-**Why skip tombstones?** Tombstones are deletion markers that must be preserved to
-shadow older versions of the same key in lower levels. Allowing filters to modify
-or drop tombstones could cause deleted data to "resurrect."
+```toml
+[dependencies]
+slatedb = { version = "...", features = ["compaction_filters"] }
+```
+
+Enabling this feature may affect snapshot consistency.
+
+**Why?**
+
+Protecting snapshot data from arbitrary user filters adds significant complexity.
+Not all use cases require snapshot consistency guarantees, so we start simple with
+a feature flag to ensure users understand the trade-offs. This design can evolve
+if new use cases emerge that require snapshot protection.
+
+RocksDB faced the same challenge and [removed snapshot protection from compaction
+filters in v6.0](https://github.com/facebook/rocksdb/wiki/Compaction-Filter),
+noting "the feature has a bug which can't be easily fixed."
+
+When using compaction filters with snapshots, be aware that:
+- Filters may modify or drop entries that snapshots expect to see
+- Snapshot reads may return unexpected results if the filter altered the data
+- Users who need consistent snapshots should carefully consider their filter logic
 
 ### Potential for Internal TTL Unification
 
-Although user filters run after `RetentionIterator`, the `CompactionFilter`
-trait is designed to be general enough that internal TTL filtering could
-potentially be refactored to use the same abstraction.
-
-The current `RetentionIterator` handles concerns like (snapshot barriers, version retention)
-that would need to be handled in the filter.
+The `CompactionFilter` trait is designed to be general enough that internal TTL
+filtering could potentially be refactored to use the same abstraction. However,
+the current `RetentionIterator` buffers all versions of a key before applying
+retention policies (e.g., keeping boundary values for snapshot consistency).
+Unifying these would require either refactoring `RetentionIterator` to work
+entry-by-entry, or extending the filter API to receive all versions of a key
+at once.
 
 ### Error Handling
 
@@ -279,50 +318,88 @@ compactor, no synchronization needed.
 all entries in a compaction.
 4. **Simplified reasoning**: No concurrent access concerns within a filter.
 
+### Performance Considerations
+
+The `filter()` method is called for every entry during compaction, so it should
+be fast with minimal overhead possible.
+
+**For CPU-intensive filters:**
+
+If your filter requires expensive computation (e.g., complex parsing, or
+decoding), consider one of these approaches:
+
+1. **Use a dedicated compaction runtime**: Configure SlateDB to run compaction
+   on a separate async runtime using `DbBuilder::with_compaction_runtime()`.
+   This prevents filter work from blocking your application's main runtime.
+
+   ```rust
+   let compaction_runtime = tokio::runtime::Builder::new_multi_thread()
+       .worker_threads(2)
+       .thread_name("compaction")
+       .build()?;
+
+   let db = Db::builder("mydb", object_store)
+       .with_compaction_runtime(compaction_runtime.handle().clone())
+       .with_compaction_filter_supplier(Arc::new(MyExpensiveFilter))
+       .build()
+       .await?;
+   ```
+
+2. **Use `spawn_blocking` for heavy computation**: If only some entries require
+   expensive processing, you can offload that work to a blocking thread pool.
+   However, note that `filter()` is synchronous, so you'd need to restructure
+   your approach (e.g., batch processing in `on_compaction_end`).
+
 ### Usage Example
 
 ```rust
-use slatedb::{CompactionFilter, CompactionFilterFactory, CompactionContext,
-              CompactionFilterDecision, EntryAttributes, CompactionFilterInitError};
+use slatedb::{
+    CompactionFilter, CompactionFilterSupplier, CompactorStateView,
+    CompactionFilterDecision, CompactionFilterError, RowEntry,
+};
+use bytes::Bytes;
 use std::sync::Arc;
 use async_trait::async_trait;
 
-/// A filter that drops all keys with a specific prefix.
-struct PrefixDropFilter {
-    prefix: Vec<u8>,
-    dropped_count: u64,  // Can track state since we're single-threaded
+/// A filter that converts all entries with a specific key prefix to tombstones.
+struct PrefixDroppingFilter {
+    prefix: Bytes,
+    dropped_count: u64,
 }
 
 #[async_trait]
-impl CompactionFilter for PrefixDropFilter {
-    fn filter(&mut self, key: &[u8], _value: Option<&[u8]>, _attrs: &EntryAttributes)
-        -> CompactionFilterDecision {
-        if key.starts_with(&self.prefix) {
+impl CompactionFilter for PrefixDroppingFilter {
+    fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision {
+        if entry.key.starts_with(&self.prefix) {
             self.dropped_count += 1;
-            CompactionFilterDecision::Drop
-        } else {
-            CompactionFilterDecision::Keep
+            // Use Tombstone to shadow older versions in lower levels
+            return CompactionFilterDecision::Tombstone;
         }
+
+        CompactionFilterDecision::Keep
     }
 
-    async fn on_compaction_end(&mut self, ctx: &CompactionContext) {
+    async fn on_compaction_end(&mut self, _state: &CompactorStateView) {
         tracing::info!(
-            "Compaction {} dropped {} entries with prefix",
-            ctx.destination,
-            self.dropped_count
+            "Compaction dropped {} entries with prefix {:?}",
+            self.dropped_count,
+            self.prefix
         );
     }
 }
 
-struct PrefixDropFilterFactory {
-    prefix: Vec<u8>,
+struct PrefixDroppingFilterSupplier {
+    prefix: Bytes,
 }
 
 #[async_trait]
-impl CompactionFilterFactory for PrefixDropFilterFactory {
-    async fn create_compaction_filter(&self, _ctx: &CompactionContext)
-        -> Result<Box<dyn CompactionFilter>, CompactionFilterInitError> {
-        Ok(Box::new(PrefixDropFilter {
+impl CompactionFilterSupplier for PrefixDroppingFilterSupplier {
+    async fn create_compaction_filter(
+        &self,
+        _state: &CompactorStateView,
+        _is_dest_last_run: bool,
+    ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
+        Ok(Box::new(PrefixDroppingFilter {
             prefix: self.prefix.clone(),
             dropped_count: 0,
         }))
@@ -331,8 +408,8 @@ impl CompactionFilterFactory for PrefixDropFilterFactory {
 
 // Usage
 let db = Db::builder("mydb", object_store)
-    .with_compaction_filter_factory(Arc::new(PrefixDropFilterFactory {
-        prefix: b"test:".to_vec(),
+    .with_compaction_filter_supplier(Arc::new(PrefixDroppingFilterSupplier {
+        prefix: Bytes::from_static(b"temp:"),
     }))
     .build()
     .await?;
@@ -351,9 +428,9 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Consistency, Isolation, and Multi-Versioning
 
-- [ ] Transactions
-- [x] Snapshots - filters should be aware that dropped entries will impact snapshots.
-- [x] Sequence numbers - provided in EntryAttributes.
+- [x] Transactions - **consistency may be affected** when compaction filters are enabled (see [Limitations](#limitations)).
+- [x] Snapshots - **consistency may be affected** when compaction filters are enabled (see [Limitations](#limitations)).
+- [ ] Sequence numbers
 
 ### Time, Retention, and Derived State
 
@@ -368,7 +445,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 - [ ] Manifest format
 - [ ] Checkpoints
 - [ ] Clones
-- [x] Garbage collection - Drop decisions remove entries
+- [x] Garbage collection - Drop/Tombstone decisions remove entries
 - [ ] Database splitting and merging
 - [ ] Multi-writer
 
@@ -399,9 +476,9 @@ SlateDB features and components that this RFC interacts with. Check all that app
 ### Performance & Cost
 
 - **Latency**: `filter()` is synchronous in hot path - implementations must be fast
-- **Throughput**: Async lifecycle hooks allow I/O for setup/teardown without blocking compaction
+- **Throughput**: Async supplier allows I/O for setup/teardown without blocking compaction
 - **Object-store requests**: No impact; filters operate on in-memory data
-- **Space amplification**: `Drop` decisions reduce space; `Modify` may increase or decrease.
+- **Space amplification**: `Drop`/`Tombstone` decisions reduce space; `Modify` may increase or decrease.
 - **Zero overhead when disabled**: Users who do not configure a filter are not impacted.
 
 Well-implemented filters have minimal overhead on compaction throughput.
@@ -410,17 +487,17 @@ Well-implemented filters have minimal overhead on compaction throughput.
 
 - **Metrics**: No new counters.
 - **Logging**: Filter errors logged at WARN level.
-- **Configuration changes**: New `compaction_filter_factory` field in Settings.
+- **Configuration changes**: New `compaction_filter_supplier` field in Settings.
 
 ### Compatibility
 
 - **Existing data**: no change.
-- **Public APIs**: New optional configuration in `Settings` and `DbBuilder`.
+- **Public APIs**: New optional configuration in `Settings` and `DbBuilder`. `RowEntry` and `ValueDeletable` become public.
 - **Rolling upgrades**: not needed.
 
 ## Testing
 
-- **Unit tests**: Each decision type (Keep/Drop/Modify), error handling, lifecycle hooks.
+- **Unit tests**: Each decision type (Keep/Drop/Tombstone/Modify), error handling, lifecycle hooks.
 - **Integration tests**: End-to-end compaction with custom filters, verify data correctness.
 - **Fault-injection tests**: Filter errors, initialization failures.
 - **Deterministic simulation tests**: Include filter behavior in DST.
@@ -431,11 +508,13 @@ Well-implemented filters have minimal overhead on compaction throughput.
 ### Implementation
 
 - Core traits and iterator integration.
+- Make `RowEntry` and `ValueDeletable` public.
 - Basic tests and documentation.
 
 ### Feature Flags
 
-No feature flags needed. It's opt-in via configuration.
+The `compaction_filters` feature flag gates the `CompactionFilterSupplier` trait.
+See [Limitations](#limitations) for why this is behind a feature flag.
 
 ### Docs Updates
 
@@ -446,33 +525,38 @@ No feature flags needed. It's opt-in via configuration.
 
 ### 1. Async `filter()` method
 
-Adds per-entry overhead. Users needing I/O should batch in `on_compaction_start()`.
+Adds per-entry overhead. Users needing I/O should batch in `create_compaction_filter()`.
 
 ### 2. Replace RetentionIterator entirely
 
 **Deferred**: Built-in retention handles subtle edge cases (snapshot barriers, merge operand expiration). Could be unified in future.
 
-### 3. Single filter instance (no factory)
+### 3. Batched filter API (all versions of a key at once)
 
-Factory provides isolation between jobs and enables single-threaded execution without synchronization.
+Instead of `filter(entry) -> Decision`, provide `filter(Vec<RowEntry>) -> Vec<Decision>` where all versions of a key are passed together. This would:
+- Enable look-ahead logic (matching `RetentionIterator`'s current implementation)
+- Allow filters to make decisions based on the full version history
 
-### 5. Drop converts to tombstone
+**Deferred**: Adds API complexity and potential allocations. We're starting simple with entry-at-a-time filtering, which covers most use cases. The API can evolve if batched filtering becomes necessary.
 
-Having `Drop` convert to tombstone reduces the usefulness of the filter.
-Users who want tombstone behavior can call the delete API directly.
+### 4. Single filter instance (no factory/supplier)
 
-### 6. Built-in filter chaining
+Supplier provides isolation between jobs and enables single-threaded execution without synchronization.
+
+### 5. Define custom types instead of using RowEntry
+
+Using existing types (`RowEntry`, `CompactorStateView`) reduces API surface and avoids per-entry allocations for wrapper types.
+
+### 7. Built-in filter chaining
 
 Users who need multiple filters can implement a single `CompactionFilter` that internally chains multiple filters. This keeps SlateDB simpler while still enabling advanced use cases.
 
-## Open Questions
-
-1. Should internal TTL filtering be migrated to use this API?
 
 ## References
 
 - [GitHub Issue #225](https://github.com/slatedb/slatedb/issues/225) - Original feature request
 - [GitHub PR #224](https://github.com/slatedb/slatedb/pull/224) - Previous draft implementation (closed)
+- [Discord Discussion](https://discord.com/channels/1232385660460204122/1461435444934737940) - Design discussion thread
 - [RFC-0003: Timestamps and TTL](0003-timestamps-and-ttl.md) - Built-in TTL implementation
 - [RFC-0006: Merge Operator](0006-merge-operator.md) - Pattern for user-provided operators
 - [RocksDB Compaction Filter](https://github.com/facebook/rocksdb/wiki/Compaction-Filter) - Reference implementation
