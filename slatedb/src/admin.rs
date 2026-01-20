@@ -520,7 +520,11 @@ impl Admin {
                 // valid.
                 dirty.value.core.checkpoints = stored_manifest.object().core.checkpoints.clone();
 
-                dirty.value.core.l0.extend(sst_handles.clone());
+                dirty.value.core.l0.reserve(sst_handles.len());
+                for sst_handle in sst_handles.iter().rev() {
+                    dirty.value.core.l0.push_front(sst_handle.clone());
+                }
+
                 if let Some(last_tick) = last_tick {
                     dirty.value.core.last_l0_clock_tick = last_tick;
                 }
@@ -618,13 +622,15 @@ impl Admin {
         table_store: Arc<TableStore>,
         l0_sst_size: Option<usize>,
     ) -> Result<WalToL0Result, crate::Error> {
+        let mut result = WalToL0Result {
+            sst_handles: VecDeque::new(),
+            last_tick: None,
+            last_seq: None,
+            sequence_tracker: SequenceTracker::new(),
+        };
+
         if wal_id_range.is_empty() {
-            return Ok(WalToL0Result {
-                sst_handles: VecDeque::new(),
-                last_tick: None,
-                last_seq: None,
-                sequence_tracker: SequenceTracker::new(),
-            });
+            return Ok(result);
         }
 
         debug!("replaying wal_id_range {:?} to l0", &wal_id_range);
@@ -644,50 +650,44 @@ impl Admin {
         )
         .await?;
 
-        let mut sst_handles = VecDeque::new();
-
-        let mut sequence_tracker = SequenceTracker::new();
-        let mut last_seq = None;
-        let mut last_tick = None;
         while let Some(replayed_table) = replay_iter.next().await? {
+            if replayed_table.table.is_empty() {
+                continue;
+            }
+
             let id = SsTableId::Compacted(self.rand.rng().gen_ulid(self.system_clock.as_ref()));
             let mut sst_builder = table_store.table_builder();
             let mut iter = replayed_table.table.table().iter();
             while let Some(entry) = iter.next_entry().await? {
                 sst_builder.add(entry).await?;
             }
-
             let encoded_sst = sst_builder.build().await?;
 
-            // TODO: This might need a configurable l0_max_ssts check and maybe running
+            // TODO: This might need a configurable l0_max_ssts check, and if check fails, running
             // a compaction job (or return error).
             let handle = table_store.write_sst(&id, encoded_sst, false).await?;
-            sst_handles.push_back(handle);
+            result.sst_handles.push_front(handle);
 
-            last_seq = Some(std::cmp::max(
-                last_seq.unwrap_or(replayed_table.last_seq),
+            result.last_seq = Some(std::cmp::max(
+                result.last_seq.unwrap_or(replayed_table.last_seq),
                 replayed_table.last_seq,
             ));
-            last_tick = Some(std::cmp::max(
-                last_tick.unwrap_or(replayed_table.last_tick),
+            result.last_tick = Some(std::cmp::max(
+                result.last_tick.unwrap_or(replayed_table.last_tick),
                 replayed_table.last_tick,
             ));
+
             // Insert sequence numbers at table-level granularity instead of per-entry to reduce complexity
             // and overhead. This is acceptable given SequenceTracker's approximate nature.
-            sequence_tracker.insert(TrackedSeq {
+            result.sequence_tracker.insert(TrackedSeq {
                 seq: replayed_table.last_seq,
                 ts: self.system_clock.now(),
             });
         }
 
-        debug!("Replayed WALs to new L0 SSTs: {:?}", sst_handles);
+        debug!("Replayed WALs to new L0 SSTs: {:?}", result.sst_handles);
 
-        Ok(WalToL0Result {
-            sst_handles,
-            last_tick,
-            last_seq,
-            sequence_tracker,
-        })
+        Ok(result)
     }
 
     fn manifest_store(&self) -> ManifestStore {

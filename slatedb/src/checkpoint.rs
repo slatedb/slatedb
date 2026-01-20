@@ -327,49 +327,48 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
-        let db = Db::builder(path.clone(), object_store.clone())
-            .build()
-            .await
-            .unwrap();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
 
-        db.put(b"key", b"old_val").await.unwrap();
-        let checkpoint = db
+        db.put(b"key1", b"old_val").await.unwrap();
+        let checkpoint_old = db
             .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
             .await
             .unwrap();
 
-        db.put(b"key", b"new_val").await.unwrap();
+        db.put(b"key1", b"new_val").await.unwrap();
+        db.put(b"key2", b"new_key").await.unwrap();
+        let checkpoint_new = db
+            .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
+            .await
+            .unwrap();
         db.close().await.unwrap();
 
-        let db = Db::builder(path.clone(), object_store.clone())
-            .build()
+        admin
+            .restore_checkpoint(checkpoint_old.id, None)
             .await
             .unwrap();
-        assert_eq!(
-            Some(Bytes::from_static(b"new_val")), // previous value should be overwritten
-            db.get(b"key").await.unwrap(),
-        );
-        db.create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
-            .await
-            .unwrap(); // to test that its not removed after travelling back in time
-        let checkpoints = admin.list_checkpoints(None).await.unwrap();
-
-        admin.restore_checkpoint(checkpoint.id, None).await.unwrap();
-
-        let db = Db::builder(path.clone(), object_store.clone())
-            .build()
-            .await
-            .unwrap();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         assert_eq!(
             Some(Bytes::from_static(b"old_val")), // previous value should be restored
-            db.get(b"key").await.unwrap(),
+            db.get(b"key1").await.unwrap(),
         );
+        assert_eq!(None, db.get(b"key2").await.unwrap()); // key doesn't exist in this checkpoint
+        db.close().await.unwrap();
 
+        admin
+            .restore_checkpoint(checkpoint_new.id, None)
+            .await
+            .unwrap();
+        let db = Db::open(path, object_store).await.unwrap();
         assert_eq!(
-            checkpoints,
-            admin.list_checkpoints(None).await.unwrap(),
-            "current existing checkpoints should not be overwritten after restore"
+            Some(Bytes::from_static(b"new_val")), // future value should be restored
+            db.get(b"key1").await.unwrap(),
         );
+        assert_eq!(
+            Some(Bytes::from_static(b"new_key")),
+            db.get(b"key2").await.unwrap()
+        ); // new key should be restored
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
