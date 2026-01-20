@@ -1,5 +1,5 @@
 use crate::bytes_range::BytesRange;
-use crate::clock::{DefaultLogicalClock, LogicalClock, MonotonicClock};
+use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_read::DbRead;
 use crate::db_state::ManifestCore;
@@ -95,7 +95,6 @@ impl DbReaderInner {
         options: DbReaderOptions,
         checkpoint_id: Option<Uuid>,
         closed_result_watcher: WatchableOnceCell<Result<(), SlateDBError>>,
-        logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
@@ -122,7 +121,7 @@ impl DbReaderInner {
         );
 
         let mono_clock = Arc::new(MonotonicClock::new(
-            logical_clock.clone(),
+            system_clock.clone(),
             initial_state.core().last_l0_clock_tick,
         ));
 
@@ -562,7 +561,6 @@ impl DbReader {
             &store_provider,
             checkpoint_id,
             options,
-            Arc::new(DefaultLogicalClock::default()),
             clock,
             Arc::new(DbRand::default()),
         )
@@ -574,7 +572,6 @@ impl DbReader {
         store_provider: &dyn StoreProvider,
         checkpoint_id: Option<Uuid>,
         options: DbReaderOptions,
-        logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<Self, SlateDBError> {
@@ -592,7 +589,6 @@ impl DbReader {
                 options,
                 checkpoint_id,
                 closed_result_watcher,
-                logical_clock,
                 system_clock,
                 rand,
             )
@@ -918,7 +914,6 @@ impl DbRead for DbReader {
 
 #[cfg(test)]
 mod tests {
-    use crate::clock::{DefaultLogicalClock, LogicalClock};
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::ManifestCore;
@@ -996,7 +991,6 @@ mod tests {
             &test_provider,
             Some(checkpoint_result.id),
             DbReaderOptions::default(),
-            test_provider.logical_clock.clone(),
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
         )
@@ -1244,21 +1238,18 @@ mod tests {
         object_store: Arc<dyn ObjectStore>,
         path: Path,
         fp_registry: Arc<FailPointRegistry>,
-        logical_clock: Arc<dyn LogicalClock>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     }
 
     impl TestProvider {
         fn new(path: Path, object_store: Arc<dyn ObjectStore>) -> Self {
-            let logical_clock = Arc::new(DefaultLogicalClock::new());
             let system_clock = Arc::new(DefaultSystemClock::new());
             let rand = Arc::new(DbRand::default());
             TestProvider {
                 object_store,
                 path,
                 fp_registry: Arc::new(FailPointRegistry::new()),
-                logical_clock,
                 system_clock,
                 rand,
             }
@@ -1282,8 +1273,7 @@ mod tests {
                 self,
                 checkpoint,
                 options,
-                self.logical_clock.clone() as Arc<dyn LogicalClock>,
-                self.system_clock.clone() as Arc<dyn SystemClock>,
+                self.system_clock.clone(),
                 self.rand.clone(),
             )
             .await
