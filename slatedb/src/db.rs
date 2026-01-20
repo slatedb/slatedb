@@ -359,7 +359,8 @@ impl DbInner {
 
                 let await_flush_wal = async {
                     if let Some(oldest_unflushed_wal) = maybe_oldest_unflushed_wal {
-                        oldest_unflushed_wal.await_durable().await
+                        let mut reader = oldest_unflushed_wal.read().durable_watcher();
+                        reader.await_value().await
                     } else {
                         std::future::pending().await
                     }
