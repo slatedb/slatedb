@@ -68,6 +68,7 @@ use crate::types::RowEntry;
 /// Builds a WAL SSTable from entries.
 ///
 /// This builder differs from the regular EncodedSsTableBuilder in that:
+/// - It is assumed that the entries are added ordered by sequence number instead of key
 /// - No bloom filter is created
 /// - The index tracks sequence number ranges per block instead of first keys
 #[allow(unused)]
