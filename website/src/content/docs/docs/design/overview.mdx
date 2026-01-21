@@ -7,7 +7,7 @@ SlateDB is a log-structured merge-tree (LSM tree). We must first understand how 
 
 ## What is an LSM tree?
 
-LSM trees are an in-memory and on-disk data structure used to store key-value (KV) data. KV storage engines such as [RocksDB](https://github.com/facebook/rocksdb) or [LevelDB](https://github.com/google/leveldb), are based on LSM trees. They are a type of key-value (KV) storage engine. Databases such as ClickHouse use LSM-tree-like data structures as well. LSMs provide operations common to most KV storage engines:
+LSM trees are an in-memory and on-disk data structure used to store key-value (KV) data. KV storage engines such as [RocksDB](https://github.com/facebook/rocksdb) and [LevelDB](https://github.com/google/leveldb) are based on LSM trees. They are a type of key-value (KV) storage engine. LSMs provide operations common to most KV storage engines:
 
 - `put(key, value)`: Insert a key-value pair.
 - `get(key)`: Retrieve a key-value pair.
