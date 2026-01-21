@@ -33,6 +33,9 @@ table Compaction {
 
     // Current lifecycle status for this compaction
     status: CompactionStatus;
+
+    // Output SSTs already produced by this compaction.
+    output_ssts: [CompactedSsTable];
 }
 
 table CompactionsV1 {
