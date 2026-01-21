@@ -244,12 +244,11 @@ impl TokioCompactionExecutorInner {
                 if entry.key.as_ref() != last_key.as_ref() {
                     break;
                 }
-                let entry_seq = entry.seq;
-                peeking_iter.next_entry().await?;
                 // break on lower seq (because entries are sorted descending by seq for the same key)
-                if entry_seq < last_seq {
+                if entry.seq < last_seq {
                     break;
                 }
+                peeking_iter.next_entry().await?;
             }
         }
         Ok(peeking_iter)
@@ -464,6 +463,9 @@ impl TokioCompactionExecutorInner {
 mod tests {
     use super::*;
     use crate::bytes_range::BytesRange;
+    use crate::db_state::ManifestCore;
+    use crate::object_stores::ObjectStores;
+    use crate::sst::SsTableFormat;
     use crate::sst_iter::SstView;
     use crate::stats::StatRegistry;
     use crate::test_utils::StringConcatMergeOperator;
@@ -472,8 +474,510 @@ mod tests {
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use object_store::ObjectStore;
+    use rstest::rstest;
     use slatedb_common::clock::DefaultSystemClock;
+    use std::cmp::Ordering;
     use std::time::Duration;
+
+    async fn write_sst(
+        table_store: &Arc<TableStore>,
+        entries: &[RowEntry],
+        max_sst_size: usize,
+    ) -> Vec<SsTableHandle> {
+        if entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Write entries into one or more SSTs, splitting on the same block-size
+        // accounting used by the compactor's output writer.
+        let mut output_ssts = Vec::new();
+        let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+        let mut bytes_written = 0usize;
+
+        for (index, entry) in entries.iter().cloned().enumerate() {
+            if let Some(block_size) = writer.add(entry).await.unwrap() {
+                bytes_written += block_size;
+            }
+
+            if bytes_written > max_sst_size {
+                output_ssts.push(writer.close().await.unwrap());
+                bytes_written = 0;
+
+                if index + 1 < entries.len() {
+                    writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+                } else {
+                    return output_ssts;
+                }
+            }
+        }
+
+        output_ssts.push(writer.close().await.unwrap());
+        output_ssts
+    }
+
+    #[rstest]
+    #[case::l0_only(
+        vec![
+            vec![ // l0(0)
+                RowEntry::new_value(b"k00", b"k00-100", 100),
+                RowEntry::new_value(b"k01", b"k01-101", 101),
+                RowEntry::new_value(b"k02", b"k02-102", 102),
+                RowEntry::new_value(b"k03", b"k03-30", 30),
+                RowEntry::new_value(b"k03", b"k03-20", 20),
+                RowEntry::new_value(b"k04", b"k04-104", 104),
+            ],
+            vec![ // l0(1)
+                RowEntry::new_value(b"k05", b"k05-105", 105),
+                RowEntry::new_value(b"k06", b"k06-106", 106),
+                RowEntry::new_value(b"k07", b"k07-107", 107),
+                RowEntry::new_value(b"k08", b"k08-108", 108),
+                RowEntry::new_value(b"k09", b"k09-109", 109),
+                RowEntry::new_value(b"k10", b"k10-110", 110),
+            ],
+        ],
+        Vec::new(),
+        4096,
+        67_108_864,
+        Some(3),
+        None,
+        vec![
+            RowEntry::new_value(b"k03", b"k03-20", 20),
+            RowEntry::new_value(b"k04", b"k04-104", 104),
+            RowEntry::new_value(b"k05", b"k05-105", 105),
+            RowEntry::new_value(b"k06", b"k06-106", 106),
+            RowEntry::new_value(b"k07", b"k07-107", 107),
+            RowEntry::new_value(b"k08", b"k08-108", 108),
+            RowEntry::new_value(b"k09", b"k09-109", 109),
+            RowEntry::new_value(b"k10", b"k10-110", 110),
+        ]
+    )]
+    #[case::l0_only_multi_block(
+        vec![
+            vec![ // l0(0)
+                RowEntry::new_value(b"k00", b"k00-100", 100),
+                RowEntry::new_value(b"k01", b"k01-101", 101),
+                RowEntry::new_value(b"k02", b"k02-102", 102),
+                RowEntry::new_value(b"k03", b"k03-103", 103),
+                RowEntry::new_value(b"k04", b"k04-104", 104),
+                RowEntry::new_value(b"k05", b"k05-105", 105),
+                RowEntry::new_value(b"k06", b"k06-106", 106),
+                RowEntry::new_value(b"k07", b"k07-107", 107),
+                RowEntry::new_value(b"k08", b"k08-80", 80),
+                RowEntry::new_value(b"k08", b"k08-70", 70),
+                RowEntry::new_value(b"k09", b"k09-109", 109),
+                RowEntry::new_value(b"k10", b"k10-110", 110),
+                RowEntry::new_value(b"k11", b"k11-111", 111),
+                RowEntry::new_value(b"k12", b"k12-112", 112),
+            ],
+        ],
+        Vec::new(),
+        128,
+        1,
+        Some(9),
+        None,
+        vec![
+            RowEntry::new_value(b"k09", b"k09-109", 109),
+            RowEntry::new_value(b"k10", b"k10-110", 110),
+            RowEntry::new_value(b"k11", b"k11-111", 111),
+            RowEntry::new_value(b"k12", b"k12-112", 112),
+        ]
+    )]
+    #[case::sr_only(
+        Vec::new(),
+        vec![
+            vec![ // sr(0)
+                vec![ // sr(0) sst(0)
+                    RowEntry::new_value(b"k00", b"k00-300", 300),
+                    RowEntry::new_value(b"k01", b"k01-301", 301),
+                    RowEntry::new_value(b"k02", b"k02-302", 302),
+                    RowEntry::new_value(b"k03", b"k03-303", 303),
+                    RowEntry::new_value(b"k03", b"k03-33", 33),
+                    RowEntry::new_value(b"k04", b"k04-304", 304),
+                    RowEntry::new_value(b"k05", b"k05-305", 305),
+                ],
+            ],
+            vec![ // sr(1)
+                vec![  // sr(1) sst(0)
+                    RowEntry::new_value(b"k06", b"k06-406", 406),
+                    RowEntry::new_value(b"k07", b"k07-407", 407),
+                    RowEntry::new_value(b"k08", b"k08-408", 408),
+                    RowEntry::new_value(b"k09", b"k09-409", 409),
+                    RowEntry::new_value(b"k10", b"k10-410", 410),
+                    RowEntry::new_value(b"k11", b"k11-411", 411),
+                ],
+            ],
+        ],
+        4096,
+        67_108_864,
+        Some(4),
+        None,
+        vec![
+            RowEntry::new_value(b"k04", b"k04-304", 304),
+            RowEntry::new_value(b"k05", b"k05-305", 305),
+            RowEntry::new_value(b"k06", b"k06-406", 406),
+            RowEntry::new_value(b"k07", b"k07-407", 407),
+            RowEntry::new_value(b"k08", b"k08-408", 408),
+            RowEntry::new_value(b"k09", b"k09-409", 409),
+            RowEntry::new_value(b"k10", b"k10-410", 410),
+            RowEntry::new_value(b"k11", b"k11-411", 411),
+        ]
+    )]
+    #[case::l0_and_sr(
+        vec![
+            vec![ // l0(0)
+                RowEntry::new_value(b"k00", b"k00-500", 500),
+                RowEntry::new_value(b"k01", b"k01-501", 501),
+                RowEntry::new_value(b"k02", b"k02-502", 502),
+                RowEntry::new_value(b"k03", b"k03-503", 503),
+                RowEntry::new_value(b"k04", b"k04-504", 504),
+                RowEntry::new_value(b"k05", b"k05-90", 90),
+                RowEntry::new_value(b"k05", b"k05-80", 80),
+            ],
+            vec![ // l0(1)
+                RowEntry::new_value(b"k06", b"k06-606", 606),
+                RowEntry::new_value(b"k07", b"k07-607", 607),
+                RowEntry::new_value(b"k08", b"k08-608", 608),
+                RowEntry::new_value(b"k09", b"k09-609", 609),
+                RowEntry::new_value(b"k10", b"k10-610", 610),
+                RowEntry::new_value(b"k11", b"k11-611", 611),
+            ],
+        ],
+        vec![
+            vec![ // sr(0)
+                vec![ // sr(0) sst(0)
+                    RowEntry::new_value(b"k12", b"k12-720", 720),
+                    RowEntry::new_value(b"k13", b"k13-721", 721),
+                    RowEntry::new_value(b"k14", b"k14-722", 722),
+                    RowEntry::new_value(b"k15", b"k15-120", 120),
+                    RowEntry::new_value(b"k15", b"k15-110", 110),
+                    RowEntry::new_value(b"k16", b"k16-726", 726),
+                    RowEntry::new_value(b"k17", b"k17-727", 727),
+                ],
+            ],
+            vec![ // sr(1)
+                vec![ // sr(1) sst(0)
+                    RowEntry::new_value(b"k18", b"k18-830", 830),
+                    RowEntry::new_value(b"k19", b"k19-831", 831),
+                    RowEntry::new_value(b"k20", b"k20-832", 832),
+                    RowEntry::new_value(b"k21", b"k21-833", 833),
+                    RowEntry::new_value(b"k22", b"k22-834", 834),
+                    RowEntry::new_value(b"k23", b"k23-835", 835),
+                ],
+            ],
+        ],
+        4096,
+        67_108_864,
+        Some(5),
+        None,
+        vec![
+            RowEntry::new_value(b"k05", b"k05-80", 80),
+            RowEntry::new_value(b"k06", b"k06-606", 606),
+            RowEntry::new_value(b"k07", b"k07-607", 607),
+            RowEntry::new_value(b"k08", b"k08-608", 608),
+            RowEntry::new_value(b"k09", b"k09-609", 609),
+            RowEntry::new_value(b"k10", b"k10-610", 610),
+            RowEntry::new_value(b"k11", b"k11-611", 611),
+            RowEntry::new_value(b"k12", b"k12-720", 720),
+            RowEntry::new_value(b"k13", b"k13-721", 721),
+            RowEntry::new_value(b"k14", b"k14-722", 722),
+            RowEntry::new_value(b"k15", b"k15-120", 120),
+            RowEntry::new_value(b"k15", b"k15-110", 110),
+            RowEntry::new_value(b"k16", b"k16-726", 726),
+            RowEntry::new_value(b"k17", b"k17-727", 727),
+            RowEntry::new_value(b"k18", b"k18-830", 830),
+            RowEntry::new_value(b"k19", b"k19-831", 831),
+            RowEntry::new_value(b"k20", b"k20-832", 832),
+            RowEntry::new_value(b"k21", b"k21-833", 833),
+            RowEntry::new_value(b"k22", b"k22-834", 834),
+            RowEntry::new_value(b"k23", b"k23-835", 835),
+        ]
+    )]
+    #[case::l0_and_sr_overlap(
+        vec![
+            vec![ // l0(0)
+                RowEntry::new_value(b"k00", b"k00-900", 900),
+                RowEntry::new_value(b"k01", b"k01-901", 901),
+                RowEntry::new_value(b"k02", b"k02-902", 902),
+                RowEntry::new_value(b"k03", b"k03-903", 903),
+                RowEntry::new_value(b"k04", b"k04-904", 904),
+                RowEntry::new_value(b"k05", b"k05-905", 905),
+            ],
+            vec![ // l0(1)
+                RowEntry::new_value(b"k02", b"k02-920", 920),
+                RowEntry::new_value(b"k03", b"k03-921", 921),
+                RowEntry::new_value(b"k04", b"k04-922", 922),
+                RowEntry::new_value(b"k06", b"k06-923", 923),
+                RowEntry::new_value(b"k07", b"k07-924", 924),
+            ],
+        ],
+        vec![
+            vec![ // sr(0)
+                vec![ // sr(0) sst(0)
+                    RowEntry::new_value(b"k01", b"k01-800", 800),
+                    RowEntry::new_value(b"k03", b"k03-801", 801),
+                    RowEntry::new_value(b"k05", b"k05-802", 802),
+                    RowEntry::new_value(b"k08", b"k08-803", 803),
+                    RowEntry::new_value(b"k09", b"k09-804", 804),
+                ],
+            ],
+            vec![ // sr(1)
+                vec![ // sr(1) sst(0)
+                    RowEntry::new_value(b"k02", b"k02-850", 850),
+                    RowEntry::new_value(b"k04", b"k04-851", 851),
+                    RowEntry::new_value(b"k05", b"k05-852", 852),
+                    RowEntry::new_value(b"k07", b"k07-853", 853),
+                    RowEntry::new_value(b"k10", b"k10-854", 854),
+                ],
+            ],
+        ],
+        4096,
+        67_108_864,
+        Some(7),
+        None,
+        vec![
+            RowEntry::new_value(b"k03", b"k03-801", 801),
+            RowEntry::new_value(b"k04", b"k04-922", 922),
+            RowEntry::new_value(b"k04", b"k04-904", 904),
+            RowEntry::new_value(b"k04", b"k04-851", 851),
+            RowEntry::new_value(b"k05", b"k05-905", 905),
+            RowEntry::new_value(b"k05", b"k05-852", 852),
+            RowEntry::new_value(b"k05", b"k05-802", 802),
+            RowEntry::new_value(b"k06", b"k06-923", 923),
+            RowEntry::new_value(b"k07", b"k07-924", 924),
+            RowEntry::new_value(b"k07", b"k07-853", 853),
+            RowEntry::new_value(b"k08", b"k08-803", 803),
+            RowEntry::new_value(b"k09", b"k09-804", 804),
+            RowEntry::new_value(b"k10", b"k10-854", 854),
+        ]
+    )]
+    #[case::tombstones_resume(
+        vec![
+            vec![ // l0(0)
+                RowEntry::new_value(b"k00", b"k00-100", 100),
+                RowEntry::new_value(b"k01", b"k01-101", 101),
+                RowEntry::new_tombstone(b"k02", 105),
+                RowEntry::new_value(b"k02", b"k02-103", 103),
+                RowEntry::new_value(b"k03", b"k03-106", 106),
+            ],
+        ],
+        vec![
+            vec![ // sr(0)
+                vec![ // sr(0) sst(0)
+                    RowEntry::new_value(b"k01", b"k01-90", 90),
+                    RowEntry::new_value(b"k02", b"k02-95", 95),
+                    RowEntry::new_value(b"k04", b"k04-107", 107),
+                ],
+            ],
+        ],
+        4096,
+        67_108_864,
+        Some(3),
+        None,
+        vec![
+            RowEntry::new_value(b"k02", b"k02-103", 103),
+            RowEntry::new_value(b"k02", b"k02-95", 95),
+            RowEntry::new_value(b"k03", b"k03-106", 106),
+            RowEntry::new_value(b"k04", b"k04-107", 107),
+        ]
+    )]
+    #[case::no_output_ssts(
+        vec![
+            vec![ // l0(0)
+                RowEntry::new_value(b"k00", b"k00-10", 10),
+                RowEntry::new_value(b"k02", b"k02-25", 25),
+                RowEntry::new_value(b"k02", b"k02-20", 20),
+            ],
+            vec![ // l0(1)
+                RowEntry::new_value(b"k01", b"k01-30", 30),
+                RowEntry::new_value(b"k03", b"k03-40", 40),
+            ],
+        ],
+        vec![
+            vec![ // sr(0)
+                vec![ // sr(0) sst(0)
+                    RowEntry::new_value(b"k01", b"k01-15", 15),
+                    RowEntry::new_value(b"k02", b"k02-22", 22),
+                    RowEntry::new_value(b"k04", b"k04-50", 50),
+                ],
+            ],
+        ],
+        4096,
+        67_108_864,
+        None,
+        None,
+        vec![
+            RowEntry::new_value(b"k00", b"k00-10", 10),
+            RowEntry::new_value(b"k01", b"k01-30", 30),
+            RowEntry::new_value(b"k01", b"k01-15", 15),
+            RowEntry::new_value(b"k02", b"k02-25", 25),
+            RowEntry::new_value(b"k02", b"k02-22", 22),
+            RowEntry::new_value(b"k02", b"k02-20", 20),
+            RowEntry::new_value(b"k03", b"k03-40", 40),
+            RowEntry::new_value(b"k04", b"k04-50", 50),
+        ]
+    )]
+    #[case::resume_at_end(
+        vec![
+            vec![ // l0(0)
+                RowEntry::new_value(b"k00", b"k00-10", 10),
+                RowEntry::new_value(b"k01", b"k01-11", 11),
+            ],
+        ],
+        Vec::new(),
+        4096,
+        67_108_864,
+        Some(1),
+        None,
+        vec![]
+    )]
+    #[case::merge_operator_resume(
+        vec![
+            vec![ // l0(0)
+                RowEntry::new_value(b"k00", b"k00-100", 100),
+                RowEntry::new_merge(b"k01", b"b", 5),
+                RowEntry::new_merge(b"k02", b"y", 6),
+                RowEntry::new_value(b"k03", b"k03-103", 103),
+            ],
+        ],
+        vec![
+            vec![ // sr(0)
+                vec![ // sr(0) sst(0)
+                    RowEntry::new_merge(b"k01", b"a", 4),
+                    RowEntry::new_value(b"k01", b"base", 3),
+                    RowEntry::new_merge(b"k02", b"x", 4),
+                    RowEntry::new_value(b"k02", b"base2", 2),
+                ],
+            ],
+        ],
+        4096,
+        67_108_864,
+        Some(0),
+        Some(Arc::new(StringConcatMergeOperator {}) as MergeOperatorType),
+        vec![
+            RowEntry::new_value(b"k01", b"baseab", 5),
+            RowEntry::new_value(b"k02", b"base2xy", 6),
+            RowEntry::new_value(b"k03", b"k03-103", 103),
+        ]
+    )]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_load_iterators_resume(
+        #[case] l0_entry_sets: Vec<Vec<RowEntry>>,
+        #[case] sr_entry_sets: Vec<Vec<Vec<RowEntry>>>,
+        #[case] block_size: usize,
+        #[case] output_max_sst_size: usize,
+        #[case] resume_index: Option<usize>,
+        #[case] merge_operator: Option<MergeOperatorType>,
+        #[case] expected_rows: Vec<RowEntry>,
+    ) {
+        let handle = tokio::runtime::Handle::current();
+        let options = Arc::new(CompactorOptions::default());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let root_path = Path::from("testdb-load-iterators");
+        let clock = Arc::new(DefaultSystemClock::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store.clone(), None),
+            SsTableFormat {
+                block_size,
+                ..SsTableFormat::default()
+            },
+            root_path.clone(),
+            None,
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
+        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
+            .await
+            .unwrap();
+        let retention_min_seq = if merge_operator.is_some() {
+            None
+        } else {
+            Some(0)
+        };
+        let executor = TokioCompactionExecutor::new(
+            handle,
+            options,
+            tx,
+            table_store.clone(),
+            Arc::new(DbRand::new(100u64)),
+            Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+            clock,
+            manifest_store,
+            merge_operator,
+        );
+
+        // Materialize L0 SSTs from the provided entry sets. Use a huge max size so
+        // each entry set stays in a single SST, keeping the inputs predictable.
+        let mut l0_ssts = Vec::new();
+        let mut sorted_runs = Vec::new();
+        let mut all_entries = Vec::new();
+
+        for entries in &l0_entry_sets {
+            let ssts = write_sst(&table_store, entries, usize::MAX).await;
+            l0_ssts.extend(ssts);
+            all_entries.extend(entries.iter().cloned());
+        }
+
+        // Materialize sorted-run SSTs and group them into multiple SortedRun inputs,
+        // again keeping each entry set as a single SST by using a huge max size.
+        if !sr_entry_sets.is_empty() {
+            for (sr_id, sr_sst_sets) in sr_entry_sets.iter().enumerate() {
+                let mut sr_ssts = Vec::new();
+                for entries in sr_sst_sets {
+                    let ssts = write_sst(&table_store, entries, usize::MAX).await;
+                    sr_ssts.extend(ssts);
+                    all_entries.extend(entries.iter().cloned());
+                }
+                sorted_runs.push(SortedRun {
+                    id: sr_id as u32,
+                    ssts: sr_ssts,
+                });
+            }
+        }
+
+        // Sort the merged inputs to match the iterator order (key asc, seq desc).
+        let mut sorted_entries = all_entries.clone();
+        sorted_entries.sort_by(|left, right| match left.key.cmp(&right.key) {
+            Ordering::Equal => right.seq.cmp(&left.seq),
+            other => other,
+        });
+        // Persist the "already-written" output SSTs when resuming from a prefix.
+        let output_ssts = if let Some(resume_index) = resume_index {
+            assert!(resume_index < sorted_entries.len());
+            write_sst(
+                &table_store,
+                &sorted_entries[..=resume_index],
+                output_max_sst_size,
+            )
+            .await
+        } else {
+            Vec::new()
+        };
+
+        // Build compaction args that resume from the output SST starting point and expect
+        // the iterator to continue at the correct next row.
+        let job_args = StartCompactionJobArgs {
+            id: Ulid::new(),
+            compaction_id: Ulid::new(),
+            destination: 0,
+            ssts: l0_ssts,
+            sorted_runs,
+            output_ssts,
+            compaction_logical_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq,
+            estimated_source_bytes: 0,
+        };
+
+        // Verify the resumed iterator yields all remaining rows, starting immediately
+        // after the persisted prefix and continuing in sorted order.
+        let mut iter = executor.inner.load_iterators(&job_args).await.unwrap();
+        let mut resumed_entries = Vec::new();
+        while let Some(entry) = iter.next_entry().await.unwrap() {
+            resumed_entries.push(entry);
+        }
+        assert_eq!(resumed_entries, expected_rows);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compaction_job_should_retain_merges_newer_than_retention_min_seq_num() {
