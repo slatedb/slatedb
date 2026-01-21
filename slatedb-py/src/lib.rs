@@ -1954,7 +1954,7 @@ struct PySlateDBReader {
 #[pymethods]
 impl PySlateDBReader {
     #[classmethod]
-    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
+    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, object_store = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
     fn open_async<'py>(
         _cls: &'py Bound<'py, PyType>,
         py: Python<'py>,
@@ -1962,12 +1962,18 @@ impl PySlateDBReader {
         url: Option<String>,
         env_file: Option<String>,
         checkpoint_id: Option<String>,
+        object_store: Option<PyObjectStore>,
         merge_operator: Option<&'py Bound<'py, PyAny>>,
         manifest_poll_interval: Option<u64>,
         checkpoint_lifetime: Option<u64>,
         max_memtable_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let object_store = resolve_object_store_py(url.as_deref(), env_file.clone())?;
+        // Use provided object_store if available, otherwise resolve from url/env_file
+        let resolved_object_store = if let Some(os) = object_store {
+            os.inner
+        } else {
+            resolve_object_store_py(url.as_deref(), env_file.clone())?
+        };
         let merge_operator = parse_merge_operator(merge_operator)?;
         future_into_py(py, async move {
             let mut options = DbReaderOptions {
@@ -1989,7 +1995,7 @@ impl PySlateDBReader {
                         .map_err(|e| InvalidError::new_err(format!("invalid checkpoint_id: {e}")))
                 })
                 .transpose()?;
-            let db_reader = DbReader::open(path, object_store, checkpoint, options)
+            let db_reader = DbReader::open(path, resolved_object_store, checkpoint, options)
                 .await
                 .map_err(map_error)?;
             Ok(PySlateDBReader {
@@ -1998,19 +2004,25 @@ impl PySlateDBReader {
         })
     }
     #[new]
-    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
+    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, object_store = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
     fn new(
         path: String,
         url: Option<String>,
         env_file: Option<String>,
         checkpoint_id: Option<String>,
+        object_store: Option<PyObjectStore>,
         merge_operator: Option<&Bound<PyAny>>,
         manifest_poll_interval: Option<u64>,
         checkpoint_lifetime: Option<u64>,
         max_memtable_bytes: Option<u64>,
     ) -> PyResult<Self> {
         let rt = get_runtime();
-        let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
+        // Use provided object_store if available, otherwise resolve from url/env_file
+        let resolved_object_store = if let Some(os) = object_store {
+            os.inner
+        } else {
+            resolve_object_store_py(url.as_deref(), env_file)?
+        };
         let db_reader = rt.block_on(async {
             let mut options = DbReaderOptions {
                 merge_operator: parse_merge_operator(merge_operator)?,
@@ -2027,7 +2039,7 @@ impl PySlateDBReader {
             }
             DbReader::open(
                 path,
-                object_store,
+                resolved_object_store,
                 checkpoint_id
                     .map(|id| {
                         Uuid::parse_str(&id).map_err(|e| {
