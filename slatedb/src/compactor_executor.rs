@@ -53,6 +53,8 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) ssts: Vec<SsTableHandle>,
     /// Input existing sorted runs for this job.
     pub(crate) sorted_runs: Vec<SortedRun>,
+    /// Output SSTs already written for this compaction when resuming.
+    pub(crate) output_ssts: Vec<SsTableHandle>,
     /// The logical clock tick representing the logical time the compaction occurs. This is used
     /// to make decisions about retention of expiring records.
     pub(crate) compaction_logical_clock_tick: i64,
@@ -72,6 +74,7 @@ impl std::fmt::Debug for StartCompactionJobArgs {
             .field("destination", &self.destination)
             .field("ssts", &self.ssts)
             .field("sorted_runs", &self.sorted_runs)
+            .field("output_ssts", &self.output_ssts)
             .field(
                 "compaction_logical_clock_tick",
                 &self.compaction_logical_clock_tick,
@@ -457,6 +460,7 @@ mod tests {
             destination: 0,
             ssts: vec![l0],
             sorted_runs: vec![],
+            output_ssts: vec![],
             compaction_logical_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(retention_min_seq_num),
