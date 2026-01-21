@@ -21,6 +21,7 @@ use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
 };
+use crate::peeking_iterator::PeekingIterator;
 use crate::rand::DbRand;
 use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -172,7 +173,9 @@ impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         job_args: &'a StartCompactionJobArgs,
-    ) -> Result<RetentionIterator<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+    ) -> Result<PeekingIterator<RetentionIterator<Box<dyn KeyValueIterator + 'a>>>, SlateDBError>
+    {
+        let resume_cursor = self.last_written_key_and_seq(&job_args.output_ssts).await?;
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,
@@ -227,7 +230,29 @@ impl TokioCompactionExecutorInner {
         )
         .await?;
         retention_iter.init().await?;
-        Ok(retention_iter)
+        // When resuming, seek to the last written key and then drain entries for that key until
+        // we reach the last written seq.
+        let mut peeking_iter = PeekingIterator::new(retention_iter);
+        if let Some((last_key, last_seq)) = resume_cursor {
+            peeking_iter.seek(last_key.as_ref()).await?;
+            loop {
+                // break on empty
+                let Some(entry) = peeking_iter.peek().await? else {
+                    break;
+                };
+                // break on new key
+                if entry.key.as_ref() != last_key.as_ref() {
+                    break;
+                }
+                let entry_seq = entry.seq;
+                peeking_iter.next_entry().await?;
+                // break on lower seq (because entries are sorted descending by seq for the same key)
+                if entry_seq < last_seq {
+                    break;
+                }
+            }
+        }
+        Ok(peeking_iter)
     }
 
     /// Determines the last key and sequence number written by previously emitted output SSTs.
@@ -268,7 +293,8 @@ impl TokioCompactionExecutorInner {
             return Ok(None);
         };
 
-        // Sort descending so we get the last key and the highest sequence number for that key.
+        // Sort descending so we get the last row from the last block, which
+        // should be the last written key/seq.
         let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
         block_iter.init().await?;
         Ok(block_iter
@@ -312,7 +338,7 @@ impl TokioCompactionExecutorInner {
                     .worker_tx
                     .send(CompactorMessage::CompactionJobProgress {
                         id: args.id,
-                        bytes_processed: all_iter.total_bytes_processed(),
+                        bytes_processed: all_iter.inner().total_bytes_processed(),
                     })
                 {
                     debug!(
