@@ -83,6 +83,96 @@ impl std::fmt::Debug for StartCompactionJobArgs {
     }
 }
 
+/// Iterator adapter that can resume after a persisted compaction output SST.
+///
+/// This wrapper uses a [`PeekingIterator`] to seek to a key and drain entries for
+/// that key until it reaches the last written sequence.
+///
+/// ## Notes
+/// - Assumes entries for the same key are ordered by descending sequence.
+/// - Call `resume` after the iterator has been initialized.
+struct ResumingIterator<T: KeyValueIterator> {
+    iterator: PeekingIterator<T>,
+}
+
+impl<T: KeyValueIterator> ResumingIterator<T> {
+    /// Create a new resuming iterator that wraps the provided iterator.
+    ///
+    /// ## Arguments
+    /// - `iterator`: the iterator to wrap.
+    ///
+    /// ## Returns
+    /// - `ResumingIterator<T>`: the wrapper around `iterator`.
+    fn new(iterator: T) -> Self {
+        Self {
+            iterator: PeekingIterator::new(iterator),
+        }
+    }
+
+    /// Returns a reference to the wrapped iterator.
+    ///
+    /// ## Returns
+    /// - `&T`: the wrapped iterator.
+    fn inner(&self) -> &T {
+        self.iterator.inner()
+    }
+
+    /// Seeks to the key and then advances to the first entry after the sequence for that
+    /// key. This allows resuming after the last written entry.
+    ///
+    /// # Description
+    ///
+    /// This method first seeks to the specified `key` using the underlying iterator's
+    /// `seek` method. It then enters a loop where it peeks at the next entry without
+    /// advancing the iterator. If the peeked entry's key does not match the specified
+    /// `key`, the loop breaks, as we have moved past the desired key. If the keys match,
+    /// it checks the sequence number of the entry. Since entries for the same key are
+    /// sorted in descending order by sequence, if the entry's sequence is less than the
+    /// specified `seq`, the loop breaks, indicating we have found the position to resume.
+    ///
+    /// ## Arguments
+    /// - `key`: the last written key.
+    /// - `seq`: the last written sequence number.
+    ///
+    /// ## Returns
+    /// - `Ok(())` when the iterator is positioned after the last written entry.
+    ///
+    /// ## Errors
+    /// - `SlateDBError::IteratorNotInitialized` if the iterator has not been initialized.
+    /// - `SlateDBError`: any error returned by the underlying iterator.
+    async fn resume(&mut self, key: &[u8], seq: u64) -> Result<(), SlateDBError> {
+        self.iterator.seek(key).await?;
+        loop {
+            let Some(entry) = self.iterator.peek().await? else {
+                break;
+            };
+            if entry.key.as_ref() != key {
+                break;
+            }
+            if entry.seq < seq {
+                break;
+            }
+            self.iterator.next_entry().await?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: KeyValueIterator> KeyValueIterator for ResumingIterator<T> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
+        self.iterator.init().await
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<crate::types::RowEntry>, SlateDBError> {
+        self.iterator.next_entry().await
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        self.iterator.seek(next_key).await
+    }
+}
+
 /// Executes compaction jobs produced by the compactor.
 pub(crate) trait CompactionExecutor {
     /// Starts executing a compaction job asynchronously.
@@ -167,7 +257,7 @@ impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         job_args: &'a StartCompactionJobArgs,
-    ) -> Result<PeekingIterator<RetentionIterator<Box<dyn KeyValueIterator + 'a>>>, SlateDBError>
+    ) -> Result<ResumingIterator<RetentionIterator<Box<dyn KeyValueIterator + 'a>>>, SlateDBError>
     {
         let resume_cursor = match job_args.output_ssts.last() {
             Some(output_sst) => {
@@ -229,28 +319,13 @@ impl TokioCompactionExecutorInner {
         )
         .await?;
         retention_iter.init().await?;
-        // When resuming, seek to the last written key and then drain entries for that key until
-        // we reach the last written seq.
-        let mut peeking_iter = PeekingIterator::new(retention_iter);
+        let mut resuming_iter = ResumingIterator::new(retention_iter);
         if let Some((last_key, last_seq)) = resume_cursor {
-            peeking_iter.seek(last_key.as_ref()).await?;
-            loop {
-                // break on empty
-                let Some(entry) = peeking_iter.peek().await? else {
-                    break;
-                };
-                // break on new key
-                if entry.key.as_ref() != last_key.as_ref() {
-                    break;
-                }
-                // break on lower seq (because entries are sorted descending by seq for the same key)
-                if entry.seq < last_seq {
-                    break;
-                }
-                peeking_iter.next_entry().await?;
-            }
+            // When resuming, seek to the last written key and then drain entries for that key
+            // until we reach the last written seq.
+            resuming_iter.resume(last_key.as_ref(), last_seq).await?;
         }
-        Ok(peeking_iter)
+        Ok(resuming_iter)
     }
 
     /// Executes a single compaction job and returns the resulting [`SortedRun`].
