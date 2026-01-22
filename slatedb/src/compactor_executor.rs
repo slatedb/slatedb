@@ -58,9 +58,9 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) sorted_runs: Vec<SortedRun>,
     /// Output SSTs already written for this compaction when resuming.
     pub(crate) output_ssts: Vec<SsTableHandle>,
-    /// The logical clock tick representing the logical time the compaction occurs. This is used
+    /// The clock tick representing the time the compaction occurs. This is used
     /// to make decisions about retention of expiring records.
-    pub(crate) compaction_logical_clock_tick: i64,
+    pub(crate) compaction_clock_tick: i64,
     /// Whether the destination sorted run is the last (newest) run after compaction.
     pub(crate) is_dest_last_run: bool,
     /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
@@ -76,10 +76,7 @@ impl std::fmt::Debug for StartCompactionJobArgs {
             .field("ssts", &self.ssts)
             .field("sorted_runs", &self.sorted_runs)
             .field("output_ssts", &self.output_ssts)
-            .field(
-                "compaction_logical_clock_tick",
-                &self.compaction_logical_clock_tick,
-            )
+            .field("compaction_clock_tick", &self.compaction_clock_tick)
             .field("is_dest_last_run", &self.is_dest_last_run)
             .field("retention_min_seq", &self.retention_min_seq)
             .finish()
@@ -212,7 +209,7 @@ impl TokioCompactionExecutorInner {
                 merge_operator,
                 merge_iter,
                 false,
-                job_args.compaction_logical_clock_tick,
+                job_args.compaction_clock_tick,
                 job_args.retention_min_seq,
             ))
         } else {
@@ -226,7 +223,7 @@ impl TokioCompactionExecutorInner {
             None,
             job_args.retention_min_seq,
             job_args.is_dest_last_run,
-            job_args.compaction_logical_clock_tick,
+            job_args.compaction_clock_tick,
             self.clock.clone(),
             Arc::new(stored_manifest.db_state().sequence_tracker.clone()),
         )
@@ -918,7 +915,7 @@ mod tests {
             ssts: l0_ssts,
             sorted_runs,
             output_ssts,
-            compaction_logical_clock_tick: 0,
+            compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq,
         };
@@ -994,7 +991,7 @@ mod tests {
             ssts: vec![l0],
             sorted_runs: vec![],
             output_ssts: vec![],
-            compaction_logical_clock_tick: 0,
+            compaction_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(retention_min_seq_num),
         };
