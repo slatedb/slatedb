@@ -906,6 +906,24 @@ mod tests {
             RowEntry::new_value(b"k03", b"k03-103", 103),
         ]
     )]
+    #[case::merge_operator_resume_skip_merged_operands(
+        vec![
+            vec![ // l0(0)
+                RowEntry::new_merge(b"k00", b"10", 10),
+                RowEntry::new_merge(b"k00", b"4", 4),
+                RowEntry::new_merge(b"k00", b"1", 1),
+                RowEntry::new_value(b"k01", b"k01-5", 5),
+            ],
+        ],
+        Vec::new(),
+        4096,
+        67_108_864,
+        Some(0),
+        Some(Arc::new(StringConcatMergeOperator {}) as MergeOperatorType),
+        vec![
+            RowEntry::new_value(b"k01", b"k01-5", 5),
+        ]
+    )]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_load_iterators_resume(
         #[case] l0_entry_sets: Vec<Vec<RowEntry>>,
