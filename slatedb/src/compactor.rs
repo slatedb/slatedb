@@ -2897,6 +2897,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_progress_persists_output_ssts() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+        let spec = fixture.build_l0_compaction().await;
+        let compaction_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        fixture.handler.maybe_start_compactions().await.unwrap();
+
+        let sst_info = SsTableInfo {
+            first_key: Some(Bytes::from_static(b"a")),
+            ..SsTableInfo::default()
+        };
+        let output_sst = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), sst_info);
+        let output_ssts = vec![output_sst.clone()];
+
+        fixture
+            .handler
+            .handle(CompactorMessage::CompactionJobProgress {
+                id: compaction_id,
+                bytes_processed: 123,
+                output_ssts: output_ssts.clone(),
+            })
+            .await
+            .expect("fatal error handling progress message");
+
+        let (_, stored_compactions) = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap();
+        let stored = stored_compactions
+            .get(&compaction_id)
+            .expect("missing stored compaction");
+        assert_eq!(stored.output_ssts(), &output_ssts);
+
+        let state_compaction = fixture
+            .handler
+            .state()
+            .active_compactions()
+            .find(|c| c.id() == compaction_id)
+            .expect("missing compaction in state");
+        assert_eq!(state_compaction.output_ssts(), &output_ssts);
+    }
+
+    #[tokio::test]
     async fn test_maybe_schedule_compactions_only_submits() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         fixture.write_l0().await;
