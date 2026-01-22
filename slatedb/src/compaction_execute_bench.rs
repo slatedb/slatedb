@@ -248,7 +248,6 @@ impl CompactionExecuteBench {
             .into_iter()
             .map(|id| ssts_by_id.get(&id).expect("expected sst").clone())
             .collect();
-        let estimated_source_bytes = ssts.iter().map(|sst| sst.estimate_size()).sum::<u64>();
         Ok(StartCompactionJobArgs {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: rand.rng().gen_ulid(system_clock.as_ref()),
@@ -259,7 +258,6 @@ impl CompactionExecuteBench {
             compaction_logical_clock_tick: manifest.db_state().last_l0_clock_tick,
             retention_min_seq: Some(manifest.db_state().recent_snapshot_min_seq),
             is_dest_last_run,
-            estimated_source_bytes,
         })
     }
 
@@ -289,9 +287,6 @@ impl CompactionExecuteBench {
             .collect();
         info!("loaded compaction job");
 
-        // Calculate estimated source bytes from the sorted runs
-        let estimated_source_bytes: u64 = srs.iter().map(|sr| sr.estimate_size()).sum();
-
         StartCompactionJobArgs {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: job.id(),
@@ -302,7 +297,6 @@ impl CompactionExecuteBench {
             compaction_logical_clock_tick: state.last_l0_clock_tick,
             retention_min_seq: Some(state.recent_snapshot_min_seq),
             is_dest_last_run,
-            estimated_source_bytes,
         }
     }
 

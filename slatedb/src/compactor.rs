@@ -847,7 +847,6 @@ impl CompactorEventHandler {
             compaction_logical_clock_tick: db_state.last_l0_clock_tick,
             retention_min_seq: Some(db_state.recent_snapshot_min_seq),
             is_dest_last_run,
-            estimated_source_bytes: Self::calculate_estimated_source_bytes(&compaction, db_state),
         };
 
         // TODO(sujeetsawala): Add job attempt to compaction

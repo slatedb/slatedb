@@ -65,8 +65,6 @@ pub(crate) struct StartCompactionJobArgs {
     pub(crate) is_dest_last_run: bool,
     /// Optional minimum sequence to retain; lower sequences may be dropped by retention.
     pub(crate) retention_min_seq: Option<u64>,
-    /// Estimated total source bytes for this compaction.
-    pub(crate) estimated_source_bytes: u64,
 }
 
 impl std::fmt::Debug for StartCompactionJobArgs {
@@ -83,7 +81,6 @@ impl std::fmt::Debug for StartCompactionJobArgs {
                 &self.compaction_logical_clock_tick,
             )
             .field("is_dest_last_run", &self.is_dest_last_run)
-            .field("estimated_source_bytes", &self.estimated_source_bytes)
             .field("retention_min_seq", &self.retention_min_seq)
             .finish()
     }
@@ -924,7 +921,6 @@ mod tests {
             compaction_logical_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq,
-            estimated_source_bytes: 0,
         };
 
         // Verify the resumed iterator yields all remaining rows, starting immediately
@@ -1001,7 +997,6 @@ mod tests {
             compaction_logical_clock_tick: 0,
             is_dest_last_run: false,
             retention_min_seq: Some(retention_min_seq_num),
-            estimated_source_bytes: 0,
         };
         executor.start_compaction_job(compaction);
 
