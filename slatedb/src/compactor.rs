@@ -443,7 +443,7 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
             } => {
                 let compaction = self.state().compactions().value.get(&id);
                 let update_output_ssts =
-                    compaction.map_or(false, |c| c.output_ssts().len() != output_ssts.len());
+                    compaction.is_some_and(|c| c.output_ssts().len() != output_ssts.len());
                 self.state_mut().update_compaction(&id, |c| {
                     c.set_bytes_processed(bytes_processed);
                     if update_output_ssts {
