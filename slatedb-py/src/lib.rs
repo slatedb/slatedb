@@ -73,6 +73,35 @@ fn map_error(err: Error) -> PyErr {
     }
 }
 
+/// A shareable object store that can be reused across multiple SlateDB instances.
+/// This avoids the overhead of creating new S3 clients for each database.
+#[pyclass(name = "ObjectStore")]
+#[derive(Clone)]
+struct PyObjectStore {
+    inner: Arc<dyn ObjectStore>,
+}
+
+#[pymethods]
+impl PyObjectStore {
+    /// Create an ObjectStore from environment variables.
+    /// This is the same as what SlateDB.open_async() does internally,
+    /// but allows you to reuse the same object store across multiple DBs.
+    #[staticmethod]
+    #[pyo3(signature = (env_file = None))]
+    fn from_env(env_file: Option<String>) -> PyResult<Self> {
+        let object_store = load_object_store_from_env(env_file)
+            .map_err(|e| InvalidError::new_err(e.to_string()))?;
+        Ok(Self { inner: object_store })
+    }
+
+    /// Create an ObjectStore from a URL (e.g., "s3://bucket-name").
+    #[staticmethod]
+    fn from_url(url: &str) -> PyResult<Self> {
+        let object_store = Db::resolve_object_store(url).map_err(map_error)?;
+        Ok(Self { inner: object_store })
+    }
+}
+
 async fn load_db_from_url(
     path: &str,
     url: &str,
@@ -181,9 +210,25 @@ async fn load_db_from_env(
     builder.build().await.map_err(map_error)
 }
 
+async fn load_db_from_object_store(
+    path: &str,
+    object_store: Arc<dyn ObjectStore>,
+    settings: Settings,
+    merge_operator: Option<MergeOperatorType>,
+) -> PyResult<Db> {
+    let builder = Db::builder(path, object_store).with_settings(settings);
+    let builder = if let Some(op) = merge_operator {
+        builder.with_merge_operator(op)
+    } else {
+        builder
+    };
+    builder.build().await.map_err(map_error)
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn slatedb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyObjectStore>()?;
     m.add_class::<PySlateDB>()?;
     m.add_class::<PySlateDBReader>()?;
     m.add_class::<PySlateDBSnapshot>()?;
@@ -380,13 +425,14 @@ impl PySlateDB {
 #[pymethods]
 impl PySlateDB {
     #[classmethod]
-    #[pyo3(signature = (path, url = None, env_file = None, *, merge_operator = None, **kwargs))]
+    #[pyo3(signature = (path, url = None, env_file = None, object_store = None, *, merge_operator = None, **kwargs))]
     fn open_async<'py>(
         _cls: &'py Bound<'py, PyType>,
         py: Python<'py>,
         path: String,
         url: Option<String>,
         env_file: Option<String>,
+        object_store: Option<PyObjectStore>,
         merge_operator: Option<&'py Bound<'py, PyAny>>,
         kwargs: Option<&'py Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -401,7 +447,10 @@ impl PySlateDB {
         };
         let merge_operator = parse_merge_operator(merge_operator)?;
         future_into_py(py, async move {
-            let db = if let Some(url) = url {
+            let db = if let Some(os) = object_store {
+                // Use the provided shared object store (fast path - reuses S3 client)
+                load_db_from_object_store(&path, os.inner, settings, merge_operator).await?
+            } else if let Some(url) = url {
                 load_db_from_url(&path, &url, settings, merge_operator).await?
             } else {
                 load_db_from_env(&path, env_file, settings, merge_operator).await?
@@ -413,11 +462,12 @@ impl PySlateDB {
     }
 
     #[new]
-    #[pyo3(signature = (path, url = None, env_file = None, *, merge_operator = None, **kwargs))]
+    #[pyo3(signature = (path, url = None, env_file = None, object_store = None, *, merge_operator = None, **kwargs))]
     fn new(
         path: String,
         url: Option<String>,
         env_file: Option<String>,
+        object_store: Option<PyObjectStore>,
         merge_operator: Option<&Bound<PyAny>>,
         kwargs: Option<&Bound<PyDict>>,
     ) -> PyResult<Self> {
@@ -436,7 +486,10 @@ impl PySlateDB {
         let merge_operator = parse_merge_operator(merge_operator)?;
 
         let db = rt.block_on(async move {
-            if let Some(url) = url {
+            if let Some(os) = object_store {
+                // Use the provided shared object store (fast path - reuses S3 client)
+                load_db_from_object_store(&path, os.inner, settings, merge_operator).await
+            } else if let Some(url) = url {
                 load_db_from_url(&path, &url, settings, merge_operator).await
             } else {
                 load_db_from_env(&path, env_file, settings, merge_operator).await
@@ -1902,7 +1955,7 @@ struct PySlateDBReader {
 #[pymethods]
 impl PySlateDBReader {
     #[classmethod]
-    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
+    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, object_store = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
     fn open_async<'py>(
         _cls: &'py Bound<'py, PyType>,
         py: Python<'py>,
@@ -1910,12 +1963,18 @@ impl PySlateDBReader {
         url: Option<String>,
         env_file: Option<String>,
         checkpoint_id: Option<String>,
+        object_store: Option<PyObjectStore>,
         merge_operator: Option<&'py Bound<'py, PyAny>>,
         manifest_poll_interval: Option<u64>,
         checkpoint_lifetime: Option<u64>,
         max_memtable_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let object_store = resolve_object_store_py(url.as_deref(), env_file.clone())?;
+        // Use provided object_store if available, otherwise resolve from url/env_file
+        let resolved_object_store = if let Some(os) = object_store {
+            os.inner
+        } else {
+            resolve_object_store_py(url.as_deref(), env_file.clone())?
+        };
         let merge_operator = parse_merge_operator(merge_operator)?;
         future_into_py(py, async move {
             let mut options = DbReaderOptions {
@@ -1937,7 +1996,7 @@ impl PySlateDBReader {
                         .map_err(|e| InvalidError::new_err(format!("invalid checkpoint_id: {e}")))
                 })
                 .transpose()?;
-            let db_reader = DbReader::open(path, object_store, checkpoint, options)
+            let db_reader = DbReader::open(path, resolved_object_store, checkpoint, options)
                 .await
                 .map_err(map_error)?;
             Ok(PySlateDBReader {
@@ -1946,19 +2005,25 @@ impl PySlateDBReader {
         })
     }
     #[new]
-    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
+    #[pyo3(signature = (path, url = None, env_file = None, checkpoint_id = None, object_store = None, *, merge_operator = None, manifest_poll_interval = None, checkpoint_lifetime = None, max_memtable_bytes = None))]
     fn new(
         path: String,
         url: Option<String>,
         env_file: Option<String>,
         checkpoint_id: Option<String>,
+        object_store: Option<PyObjectStore>,
         merge_operator: Option<&Bound<PyAny>>,
         manifest_poll_interval: Option<u64>,
         checkpoint_lifetime: Option<u64>,
         max_memtable_bytes: Option<u64>,
     ) -> PyResult<Self> {
         let rt = get_runtime();
-        let object_store = resolve_object_store_py(url.as_deref(), env_file)?;
+        // Use provided object_store if available, otherwise resolve from url/env_file
+        let resolved_object_store = if let Some(os) = object_store {
+            os.inner
+        } else {
+            resolve_object_store_py(url.as_deref(), env_file)?
+        };
         let db_reader = rt.block_on(async {
             let mut options = DbReaderOptions {
                 merge_operator: parse_merge_operator(merge_operator)?,
@@ -1975,7 +2040,7 @@ impl PySlateDBReader {
             }
             DbReader::open(
                 path,
-                object_store,
+                resolved_object_store,
                 checkpoint_id
                     .map(|id| {
                         Uuid::parse_str(&id).map_err(|e| {

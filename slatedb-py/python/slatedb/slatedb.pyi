@@ -1576,6 +1576,7 @@ class SlateDBReader:
         url: str | None = None,
         env_file: str | None = None,
         checkpoint_id: str | None = None,
+        object_store: ObjectStore | None = None,
         *,
         merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
         manifest_poll_interval: int | None = None,
@@ -1590,6 +1591,8 @@ class SlateDBReader:
             url: Optional object store URL.
             env_file: Optional env file for object store config.
             checkpoint_id: Optional checkpoint UUID string to read at.
+            object_store: Optional shared ObjectStore instance. When provided,
+                reuses the S3 client for faster opens. Takes precedence over url/env_file.
             merge_operator: Optional merge operator for reads.
             manifest_poll_interval: Optional poll interval in milliseconds to refresh manifests and replay new WALs when no explicit checkpoint is supplied. Must be <= checkpoint_lifetime/2.
             checkpoint_lifetime: Optional checkpoint lifetime in milliseconds for implicit reader checkpoints. Must be >= 1000 and > 2x manifest_poll_interval.
@@ -1597,6 +1600,9 @@ class SlateDBReader:
 
         Examples:
             >>> reader = SlateDBReader("/tmp/mydb", env_file=".env")
+            >>> # Or with shared ObjectStore:
+            >>> store = ObjectStore.from_env(".env")
+            >>> reader = SlateDBReader("/tmp/mydb", object_store=store)
         """
         ...
 
@@ -1607,6 +1613,7 @@ class SlateDBReader:
         url: str | None = None,
         env_file: str | None = None,
         checkpoint_id: str | None = None,
+        object_store: ObjectStore | None = None,
         *,
         merge_operator: Callable[[bytes, bytes | None, bytes], bytes] | None = None,
         manifest_poll_interval: int | None = None,
@@ -1621,6 +1628,8 @@ class SlateDBReader:
             url: Optional object store URL.
             env_file: Optional env file for object store config.
             checkpoint_id: Optional checkpoint UUID to read at.
+            object_store: Optional shared ObjectStore instance. When provided,
+                reuses the S3 client for faster opens. Takes precedence over url/env_file.
             merge_operator: Optional merge operator for reads.
             manifest_poll_interval: Optional manifest poll interval (ms).
             checkpoint_lifetime: Optional checkpoint lifetime (ms).
@@ -1631,6 +1640,9 @@ class SlateDBReader:
 
         Examples:
             >>> reader = await SlateDBReader.open_async("/tmp/mydb", env_file=".env")
+            >>> # Or with shared ObjectStore:
+            >>> store = ObjectStore.from_env(".env")
+            >>> reader = await SlateDBReader.open_async("/tmp/mydb", object_store=store)
             >>> await reader.get_async(b"missing")
             None
         """
