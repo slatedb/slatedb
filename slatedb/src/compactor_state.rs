@@ -246,6 +246,11 @@ impl Compaction {
         self.status
     }
 
+    /// Sets the output SSTs produced by this compaction.
+    pub(crate) fn set_output_ssts(&mut self, output_ssts: Vec<SsTableHandle>) {
+        self.output_ssts = output_ssts;
+    }
+
     /// Returns the output SSTs produced by this compaction.
     pub fn output_ssts(&self) -> &Vec<SsTableHandle> {
         &self.output_ssts

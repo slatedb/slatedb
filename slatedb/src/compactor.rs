@@ -76,6 +76,7 @@ use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageFactory, MessageHandler, MessageHandlerExecutor};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
+use crate::manifest::SsTableHandle;
 use crate::merge_operator::MergeOperatorType;
 use crate::rand::DbRand;
 use crate::stats::StatRegistry;
@@ -213,6 +214,8 @@ pub(crate) enum CompactorMessage {
         id: Ulid,
         /// The total number of bytes processed so far (estimate).
         bytes_processed: u64,
+        /// The output SSTs produced so far (including previous runs).
+        output_ssts: Vec<SsTableHandle>,
     },
     /// Ticker-triggered message to log DB runs and in-flight job state.
     LogStats,
@@ -436,10 +439,21 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
             CompactorMessage::CompactionJobProgress {
                 id,
                 bytes_processed,
+                output_ssts,
             } => {
+                let compaction = self.state().compactions().value.get(&id);
+                let update_output_ssts =
+                    compaction.map_or(false, |c| c.output_ssts().len() != output_ssts.len());
                 self.state_mut().update_compaction(&id, |c| {
                     c.set_bytes_processed(bytes_processed);
+                    if update_output_ssts {
+                        c.set_output_ssts(output_ssts);
+                    }
                 });
+                // To prevent excessive writes, only persist if output SSTs changed.
+                if update_output_ssts {
+                    self.state_writer.write_compactions_safely().await?;
+                }
             }
         }
         Ok(())

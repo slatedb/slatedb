@@ -275,7 +275,7 @@ impl TokioCompactionExecutorInner {
     ) -> Result<SortedRun, SlateDBError> {
         debug!("executing compaction [job_args={:?}]", args);
         let mut all_iter = self.load_iterators(&args).await?;
-        let mut output_ssts = Vec::new();
+        let mut output_ssts = args.output_ssts.clone();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
         ));
@@ -295,6 +295,7 @@ impl TokioCompactionExecutorInner {
                     .send(CompactorMessage::CompactionJobProgress {
                         id: args.id,
                         bytes_processed: all_iter.inner().total_bytes_processed(),
+                        output_ssts: output_ssts.clone(),
                     })
                 {
                     debug!(
