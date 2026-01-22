@@ -375,7 +375,7 @@ mod tests {
 
         // Then
         assert_eq!(
-            encoded.info.first_key.as_ref().unwrap().as_ref(),
+            encoded.info.first_entry.as_ref().unwrap().as_ref(),
             5u64.to_be_bytes()
         );
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
@@ -491,7 +491,7 @@ mod tests {
 
         // Then
         assert!(encoded.unconsumed_blocks.is_empty());
-        assert!(encoded.info.first_key.is_none());
+        assert!(encoded.info.first_entry.is_none());
         assert!(encoded.filter.is_none());
     }
 
@@ -558,7 +558,7 @@ mod tests {
 
         // Then
         assert_eq!(
-            encoded.info.first_key.as_ref().unwrap().as_ref(),
+            encoded.info.first_entry.as_ref().unwrap().as_ref(),
             42u64.to_be_bytes()
         );
         assert_eq!(encoded.unconsumed_blocks.len(), 1);

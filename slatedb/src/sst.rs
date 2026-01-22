@@ -600,8 +600,8 @@ pub(crate) struct EncodedSsTableFooter {
 pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     /// size of all data blocks in the SST
     blocks_size: u64,
-    /// first key in the SST
-    first_key: Option<Bytes>,
+    /// first entry in the SST, key for compacted data, sequence number for WAL
+    first_entry: Option<Bytes>,
     /// codec for compressing data blocks, index blocks, and filter blocks
     compression_codec: Option<CompressionCodec>,
     /// transformer for transforming data blocks, index blocks, and filter blocks
@@ -619,14 +619,14 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
 impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     pub(crate) fn new(
         blocks_len: u64,
-        sst_first_key: Option<Bytes>,
+        sst_first_entry: Option<Bytes>,
         sst_codec: &'a dyn SsTableInfoCodec,
         index_builder: flatbuffers::FlatBufferBuilder<'b, DefaultAllocator>,
         block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
     ) -> Self {
         Self {
             blocks_size: blocks_len,
-            first_key: sst_first_key,
+            first_entry: sst_first_entry,
             compression_codec: None,
             block_transformer: None,
             sst_info_codec: sst_codec,
@@ -695,7 +695,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
 
         let meta_offset = self.blocks_size + buf.len() as u64;
         let info = SsTableInfo {
-            first_key: self.first_key,
+            first_entry: self.first_entry,
             index_offset,
             index_len,
             filter_offset,
@@ -825,7 +825,7 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     builder: BlockBuilder,
     index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
-    sst_first_key: Option<Bytes>,
+    sst_first_entry: Option<Bytes>,
     current_block_max_key: Option<Bytes>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'a>>>,
     current_len: u64,
@@ -852,7 +852,7 @@ impl EncodedSsTableBuilder<'_> {
             blocks: VecDeque::new(),
             block_meta: Vec::new(),
             first_key: None,
-            sst_first_key: None,
+            sst_first_entry: None,
             current_block_max_key: None,
             block_size,
             builder: BlockBuilder::new(block_size),
@@ -885,19 +885,19 @@ impl EncodedSsTableBuilder<'_> {
         self.num_keys += 1;
 
         let index_key = compute_index_key(self.current_block_max_key.take(), &entry.key);
-        let is_sst_first_key = self.sst_first_key.is_none();
+        let is_sst_first_entry = self.sst_first_entry.is_none();
 
         let mut block_size = None;
         if !self.builder.would_fit(&entry) {
             block_size = self.finish_block().await?;
             self.first_key = Some(self.index_builder.create_vector(&index_key));
-        } else if is_sst_first_key {
+        } else if is_sst_first_entry {
             self.first_key = Some(self.index_builder.create_vector(&index_key));
         }
 
         self.filter_builder.add_key(&entry.key);
-        if is_sst_first_key {
-            self.sst_first_key = Some(entry.key.clone());
+        if is_sst_first_entry {
+            self.sst_first_entry = Some(entry.key.clone());
         }
         self.current_block_max_key = Some(entry.key.clone());
 
@@ -1002,7 +1002,7 @@ impl EncodedSsTableBuilder<'_> {
         // Build footer (includes index building)
         let mut footer_builder = EncodedSsTableFooterBuilder::new(
             self.current_len,
-            self.sst_first_key,
+            self.sst_first_entry,
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,
@@ -1292,8 +1292,8 @@ mod tests {
         let sst_info = sst_handle.info;
         assert_eq!(
             b"key1",
-            sst_info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
 
         // construct sst info from the raw bytes and validate that it matches the original info.
@@ -1307,8 +1307,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_info_from_store.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct after reading from store"
+            sst_info_from_store.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct after reading from store"
         );
         assert_eq!(
             b"",
@@ -1374,8 +1374,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_handle.info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_handle.info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
     }
 
@@ -1455,8 +1455,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_handle.info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_handle.info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
     }
 
@@ -1574,8 +1574,8 @@ mod tests {
         let sst_info = sst_handle.info;
         assert_eq!(
             b"key1",
-            sst_info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
 
         // construct sst info from the raw bytes and validate that it matches the original info.
@@ -1829,8 +1829,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_handle.info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct"
+            sst_handle.info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct"
         );
     }
 
@@ -1877,8 +1877,8 @@ mod tests {
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
             b"key1",
-            sst_handle.info.first_key.unwrap().as_ref(),
-            "first key in sst info should be correct with compression + transformer"
+            sst_handle.info.first_entry.unwrap().as_ref(),
+            "first entry in sst info should be correct with compression + transformer"
         );
     }
 }

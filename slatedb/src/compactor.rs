@@ -2418,11 +2418,11 @@ mod tests {
         let l0_oldest = Ulid::new();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
         let l0_info = SsTableInfo {
-            first_key: Some(Bytes::from_static(b"a")),
+            first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
         let sr_info = SsTableInfo {
-            first_key: Some(Bytes::from_static(b"m")),
+            first_entry: Some(Bytes::from_static(b"m")),
             ..SsTableInfo::default()
         };
         dirty.value.core.l0 = VecDeque::from(vec![
@@ -2513,11 +2513,11 @@ mod tests {
         let l0_second = Ulid::from_parts(2, 0);
         let mut core = ManifestCore::new();
         let l0_info = SsTableInfo {
-            first_key: Some(Bytes::from_static(b"a")),
+            first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
         let sr_info = SsTableInfo {
-            first_key: Some(Bytes::from_static(b"m")),
+            first_entry: Some(Bytes::from_static(b"m")),
             ..SsTableInfo::default()
         };
         core.l0 = VecDeque::from(vec![
