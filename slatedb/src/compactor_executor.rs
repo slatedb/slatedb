@@ -3,19 +3,17 @@ use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 
-use bytes::Bytes;
 use chrono::TimeDelta;
 use futures::future::{join, join_all};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::block_iterator::BlockIterator;
 use crate::compactor::CompactorMessage;
 use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::iter::KeyValueIterator;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
@@ -30,7 +28,9 @@ use crate::tablestore::TableStore;
 use slatedb_common::clock::SystemClock;
 
 use crate::compactor::stats::CompactionStats;
-use crate::utils::{build_concurrent, compute_max_parallel, spawn_bg_task, IdGenerator};
+use crate::utils::{
+    build_concurrent, compute_max_parallel, last_written_key_and_seq, spawn_bg_task, IdGenerator,
+};
 use log::{debug, error};
 use tracing::instrument;
 use ulid::Ulid;
@@ -175,7 +175,12 @@ impl TokioCompactionExecutorInner {
         job_args: &'a StartCompactionJobArgs,
     ) -> Result<PeekingIterator<RetentionIterator<Box<dyn KeyValueIterator + 'a>>>, SlateDBError>
     {
-        let resume_cursor = self.last_written_key_and_seq(&job_args.output_ssts).await?;
+        let resume_cursor = match job_args.output_ssts.last() {
+            Some(output_sst) => {
+                last_written_key_and_seq(self.table_store.clone(), output_sst).await?
+            }
+            None => None,
+        };
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 4,
             blocks_to_fetch: 256,
@@ -252,54 +257,6 @@ impl TokioCompactionExecutorInner {
             }
         }
         Ok(peeking_iter)
-    }
-
-    /// Determines the last key and sequence number written by previously emitted output SSTs.
-    ///
-    /// ## Arguments
-    /// - `output_ssts`: Output SSTs already written for a compaction being resumed.
-    ///
-    /// ## Returns
-    /// - `Ok(Some((Bytes, u64)))`: last key and sequence number from the final output SST.
-    /// - `Ok(None)`: when `output_ssts` is empty or contains no data blocks.
-    ///
-    /// ## Errors
-    /// - `SlateDBError`: if reading the index or blocks fails.
-    async fn last_written_key_and_seq(
-        &self,
-        output_ssts: &[SsTableHandle],
-    ) -> Result<Option<(Bytes, u64)>, SlateDBError> {
-        let Some(last_output_sst) = output_ssts.last() else {
-            return Ok(None);
-        };
-
-        let index = self.table_store.read_index(last_output_sst, false).await?;
-        let num_blocks = index.borrow().block_meta().len();
-        if num_blocks == 0 {
-            return Ok(None);
-        }
-        let last_block_idx = num_blocks - 1;
-        let mut blocks = self
-            .table_store
-            .read_blocks_using_index(
-                last_output_sst,
-                index,
-                last_block_idx..last_block_idx + 1,
-                false,
-            )
-            .await?;
-        let Some(block) = blocks.pop_front() else {
-            return Ok(None);
-        };
-
-        // Sort descending so we get the last row from the last block, which
-        // should be the last written key/seq.
-        let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
-        block_iter.init().await?;
-        Ok(block_iter
-            .next_entry()
-            .await?
-            .map(|entry| (entry.key, entry.seq)))
     }
 
     /// Executes a single compaction job and returns the resulting [`SortedRun`].
@@ -1091,85 +1048,5 @@ mod tests {
         );
         assert_eq!(next.seq, retention_min_seq_num);
         assert!(iter.next_entry().await.unwrap().is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_last_written_key_and_seq_from_output_ssts() {
-        let handle = tokio::runtime::Handle::current();
-        let options = Arc::new(CompactorOptions::default());
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let os = Arc::new(InMemory::new());
-        let path = "testdb-last-written".to_string();
-        let clock = Arc::new(DefaultSystemClock::new());
-        let db = Db::builder(path.clone(), os.clone())
-            .with_system_clock(clock.clone())
-            .build()
-            .await
-            .unwrap();
-        let table_store = db.inner.table_store.clone();
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path.as_str()), os.clone()));
-        let executor = TokioCompactionExecutor::new(
-            handle,
-            options,
-            tx,
-            table_store.clone(),
-            Arc::new(DbRand::new(100u64)),
-            Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
-            clock,
-            manifest_store,
-            None,
-        );
-
-        let mut sst_builder = table_store.table_builder();
-        sst_builder
-            .add(RowEntry::new_value(b"a", b"1", 1))
-            .await
-            .unwrap();
-        sst_builder
-            .add(RowEntry::new_value(b"b", b"2", 2))
-            .await
-            .unwrap();
-        let encoded_sst = sst_builder.build().await.unwrap();
-        let sst1 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
-            .await
-            .unwrap();
-
-        let mut sst_builder = table_store.table_builder();
-        sst_builder
-            .add(RowEntry::new_value(b"m", b"3", 3))
-            .await
-            .unwrap();
-        sst_builder
-            .add(RowEntry::new_value(b"z", b"4", 4))
-            .await
-            .unwrap();
-        let encoded_sst = sst_builder.build().await.unwrap();
-        let sst2 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
-            .await
-            .unwrap();
-
-        let job_args = StartCompactionJobArgs {
-            id: Ulid::new(),
-            compaction_id: Ulid::new(),
-            destination: 0,
-            ssts: vec![],
-            sorted_runs: vec![],
-            output_ssts: vec![sst1, sst2],
-            compaction_logical_clock_tick: 0,
-            is_dest_last_run: false,
-            retention_min_seq: None,
-            estimated_source_bytes: 0,
-        };
-
-        let (last_key, last_seq) = executor
-            .inner
-            .last_written_key_and_seq(&job_args.output_ssts)
-            .await
-            .unwrap()
-            .expect("missing last entry");
-        assert_eq!(last_key, Bytes::from(b"z".as_slice()));
-        assert_eq!(last_seq, 4);
     }
 }
