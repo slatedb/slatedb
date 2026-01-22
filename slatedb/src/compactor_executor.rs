@@ -328,6 +328,31 @@ impl TokioCompactionExecutorInner {
         Ok(resuming_iter)
     }
 
+    fn send_compaction_progress(
+        &self,
+        id: Ulid,
+        bytes_processed: u64,
+        output_ssts: &[SsTableHandle],
+    ) {
+        // Allow send() because we are treating the executor like an external
+        // component. They can do what they want. If the send fails (e.g., during
+        // DB shutdown), we log it and continue with the compaction work.
+        #[allow(clippy::disallowed_methods)]
+        if let Err(e) = self
+            .worker_tx
+            .send(CompactorMessage::CompactionJobProgress {
+                id,
+                bytes_processed,
+                output_ssts: output_ssts.to_vec(),
+            })
+        {
+            debug!(
+                "failed to send compaction progress (likely DB shutdown) [error={:?}]",
+                e
+            );
+        }
+    }
+
     /// Executes a single compaction job and returns the resulting [`SortedRun`].
     ///
     /// ## Steps
@@ -355,23 +380,11 @@ impl TokioCompactionExecutorInner {
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
-                // Allow send() because we are treating the executor like an external
-                // component. They can do what they want. If the send fails (e.g., during
-                // DB shutdown), we log it and continue with the compaction work.
-                #[allow(clippy::disallowed_methods)]
-                if let Err(e) = self
-                    .worker_tx
-                    .send(CompactorMessage::CompactionJobProgress {
-                        id: args.id,
-                        bytes_processed: all_iter.inner().total_bytes_processed(),
-                        output_ssts: output_ssts.clone(),
-                    })
-                {
-                    debug!(
-                        "failed to send compaction progress (likely DB shutdown) [error={:?}]",
-                        e
-                    );
-                }
+                self.send_compaction_progress(
+                    args.id,
+                    all_iter.inner().total_bytes_processed(),
+                    &output_ssts,
+                );
                 last_progress_report = self.clock.now();
             }
 
@@ -391,6 +404,12 @@ impl TokioCompactionExecutorInner {
                 self.stats.bytes_compacted.add(sst.info.filter_offset);
                 output_ssts.push(sst);
                 bytes_written = 0;
+                self.send_compaction_progress(
+                    args.id,
+                    all_iter.inner().total_bytes_processed(),
+                    &output_ssts,
+                );
+                last_progress_report = self.clock.now();
             }
         }
 
