@@ -24,7 +24,7 @@ Authors:
 
 ## Summary
 
-This RFC introduces a public API for user-provided compaction filters in SlateDB. Users implement a `CompactionFilterSupplier` that creates a `CompactionFilter` instance for each compaction job. Each filter can inspect entries and decide to keep, drop, convert to tombstone, or modify values. The design makes existing internal types (`RowEntry`, `ValueDeletable`) public and uses `CompactorStateView` to provide context to the filter.
+This RFC introduces a public API for user-provided compaction filters in SlateDB. Users implement a `CompactionFilterSupplier` that creates a `CompactionFilter` instance for each compaction job. Each filter can inspect entries and decide to keep, drop, convert to tombstone, or modify values. The design makes existing internal types (`RowEntry`, `ValueDeletable`) public and uses `CompactionJobContext` to provide context to the filter.
 
 Compaction filters are gated behind the `compaction_filters` feature flag. Enabling this feature may affect snapshot consistency. See [Limitations](#limitations) for details.
 
@@ -73,6 +73,31 @@ pub enum ValueDeletable {
     Value(Bytes),
     Merge(Bytes),
     Tombstone,
+}
+```
+
+### CompactionJobContext
+
+```rust
+/// Context information about a compaction job.
+///
+/// This struct provides read-only information about the current compaction job
+/// to help filters make informed decisions.
+pub struct CompactionJobContext {
+    /// The destination sorted run ID for this compaction.
+    pub destination: u32,
+    /// Whether the destination sorted run is the last (oldest) run after compaction.
+    /// When true, tombstones can be safely dropped since there are no older versions below.
+    pub is_dest_last_run: bool,
+    /// The logical clock tick representing the logical time the compaction occurs.
+    /// This is used to make decisions about retention of expiring records.
+    pub compaction_logical_clock_tick: i64,
+    /// Optional minimum sequence number to retain.
+    ///
+    /// Entries with sequence numbers at or above this threshold are protected by
+    /// active snapshots. Dropping or modifying such entries may cause snapshot
+    /// reads to return inconsistent results.
+    pub retention_min_seq: Option<u64>,
 }
 ```
 
@@ -126,7 +151,7 @@ pub trait CompactionFilter: Send + Sync {
     ///
     /// Use this hook to flush state, log statistics, or clean up resources.
     /// This method is infallible since compaction output has already been written.
-    async fn on_compaction_end(&mut self, state: &CompactorStateView);
+    async fn on_compaction_end(&mut self);
 }
 ```
 
@@ -146,13 +171,10 @@ pub trait CompactionFilterSupplier: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `state` - Read-only view of the compactor state (manifest, compactions)
-    /// * `is_dest_last_run` - Whether the destination sorted run is the last (oldest) run.
-    ///   When true, tombstones can be safely dropped since there are no older versions below.
+    /// * `context` - Context about the compaction job (destination, clock tick, etc.)
     async fn create_compaction_filter(
         &self,
-        state: &CompactorStateView,
-        is_dest_last_run: bool,
+        context: &CompactionJobContext,
     ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError>;
 }
 ```
@@ -162,7 +184,6 @@ pub trait CompactionFilterSupplier: Send + Sync {
 ```rust
 /// Errors that can occur during compaction filter operations.
 #[derive(Debug, Clone, Error)]
-#[non_exhaustive]
 pub enum CompactionFilterError {
     /// Filter creation failed in `create_compaction_filter`. This aborts the compaction.
     #[error("filter creation failed: {0}")]
@@ -354,7 +375,7 @@ decoding), consider one of these approaches:
 
 ```rust
 use slatedb::{
-    CompactionFilter, CompactionFilterSupplier, CompactorStateView,
+    CompactionFilter, CompactionFilterSupplier, CompactionJobContext,
     CompactionFilterDecision, CompactionFilterError, RowEntry,
 };
 use bytes::Bytes;
@@ -379,7 +400,7 @@ impl CompactionFilter for PrefixDroppingFilter {
         CompactionFilterDecision::Keep
     }
 
-    async fn on_compaction_end(&mut self, _state: &CompactorStateView) {
+    async fn on_compaction_end(&mut self) {
         tracing::info!(
             "Compaction dropped {} entries with prefix {:?}",
             self.dropped_count,
@@ -396,8 +417,7 @@ struct PrefixDroppingFilterSupplier {
 impl CompactionFilterSupplier for PrefixDroppingFilterSupplier {
     async fn create_compaction_filter(
         &self,
-        _state: &CompactorStateView,
-        _is_dest_last_run: bool,
+        _context: &CompactionJobContext,
     ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
         Ok(Box::new(PrefixDroppingFilter {
             prefix: self.prefix.clone(),
@@ -545,7 +565,7 @@ Supplier provides isolation between jobs and enables single-threaded execution w
 
 ### 5. Define custom types instead of using RowEntry
 
-Using existing types (`RowEntry`, `CompactorStateView`) reduces API surface and avoids per-entry allocations for wrapper types.
+Using existing types (`RowEntry`, `CompactionJobContext`) reduces API surface and avoids per-entry allocations for wrapper types.
 
 ### 7. Built-in filter chaining
 
