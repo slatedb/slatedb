@@ -751,6 +751,8 @@ mod tests {
                 r.unwrap_err().to_string(),
                 "invalid environment variable CLOUD_PROVIDER value `invalid`"
             );
+            // unset since the environment variable loaded in from invalid.env
+            // takes precedence over the memory.env file.
             std::env::remove_var("CLOUD_PROVIDER");
 
             jail.create_file("memory.env", "CLOUD_PROVIDER=memory")
