@@ -751,6 +751,7 @@ mod tests {
                 r.unwrap_err().to_string(),
                 "invalid environment variable CLOUD_PROVIDER value `invalid`"
             );
+            std::env::remove_var("CLOUD_PROVIDER");
 
             jail.create_file("memory.env", "CLOUD_PROVIDER=memory")
                 .expect("failed to create temp env file");
