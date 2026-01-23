@@ -3,6 +3,7 @@ use std::mem;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use chrono::TimeDelta;
 use futures::future::{join, join_all};
 use parking_lot::Mutex;
@@ -84,43 +85,13 @@ impl std::fmt::Debug for StartCompactionJobArgs {
 }
 
 /// Iterator adapter that can resume after a persisted compaction output SST.
-///
-/// This wrapper uses a [`PeekingIterator`] to seek to a key and drain entries for
-/// that key until it reaches the last written sequence.
-///
-/// ## Notes
-/// - Assumes entries for the same key are ordered by descending sequence.
-/// - Call `resume` after the iterator has been initialized.
 struct ResumingIterator<T: KeyValueIterator> {
     iterator: PeekingIterator<T>,
 }
 
 impl<T: KeyValueIterator> ResumingIterator<T> {
-    /// Create a new resuming iterator that wraps the provided iterator.
-    ///
-    /// ## Arguments
-    /// - `iterator`: the iterator to wrap.
-    ///
-    /// ## Returns
-    /// - `ResumingIterator<T>`: the wrapper around `iterator`.
-    fn new(iterator: T) -> Self {
-        Self {
-            iterator: PeekingIterator::new(iterator),
-        }
-    }
-
-    /// Returns a reference to the wrapped iterator.
-    ///
-    /// ## Returns
-    /// - `&T`: the wrapped iterator.
-    fn inner(&self) -> &T {
-        self.iterator.inner()
-    }
-
-    /// Seeks to the key and then advances to the first entry after the sequence for that
-    /// key. This allows resuming after the last written entry.
-    ///
-    /// # Description
+    /// Create a new resuming iterator that wraps the provided iterator. The iterator
+    /// must be initialized prior to calling this method.
     ///
     /// This method first seeks to the specified `key` using the underlying iterator's
     /// `seek` method. It then enters a loop where it peeks at the next entry without
@@ -131,30 +102,42 @@ impl<T: KeyValueIterator> ResumingIterator<T> {
     /// specified `seq`, the loop breaks, indicating we have found the position to resume.
     ///
     /// ## Arguments
-    /// - `key`: the last written key.
-    /// - `seq`: the last written sequence number.
+    /// - `iterator`: the iterator to wrap.
+    /// - `resume_cursor`: a (key, seq) tuple. when present, seeks to the key and drains
+    ///   entries for that key until the iterator is positioned after the last written sequence.
     ///
     /// ## Returns
-    /// - `Ok(())` when the iterator is positioned after the last written entry.
-    ///
-    /// ## Errors
+    /// - `ResumingIterator<T>`: the wrapper around `iterator`.
     /// - `SlateDBError::IteratorNotInitialized` if the iterator has not been initialized.
     /// - `SlateDBError`: any error returned by the underlying iterator.
-    async fn resume(&mut self, key: &[u8], seq: u64) -> Result<(), SlateDBError> {
-        self.iterator.seek(key).await?;
-        loop {
-            let Some(entry) = self.iterator.peek().await? else {
-                break;
-            };
-            if entry.key.as_ref() != key {
-                break;
+    async fn new(iterator: T, resume_cursor: Option<(Bytes, u64)>) -> Result<Self, SlateDBError> {
+        let mut resuming_iter = Self {
+            iterator: PeekingIterator::new(iterator),
+        };
+        if let Some((key, seq)) = resume_cursor {
+            resuming_iter.iterator.seek(key.as_ref()).await?;
+            loop {
+                let Some(entry) = resuming_iter.iterator.peek().await? else {
+                    break;
+                };
+                if entry.key.as_ref() != key.as_ref() {
+                    break;
+                }
+                if entry.seq < seq {
+                    break;
+                }
+                resuming_iter.iterator.next_entry().await?;
             }
-            if entry.seq < seq {
-                break;
-            }
-            self.iterator.next_entry().await?;
         }
-        Ok(())
+        Ok(resuming_iter)
+    }
+
+    /// Returns a reference to the wrapped iterator.
+    ///
+    /// ## Returns
+    /// - `&T`: the wrapped iterator.
+    fn inner(&self) -> &T {
+        self.iterator.inner()
     }
 }
 
@@ -319,12 +302,7 @@ impl TokioCompactionExecutorInner {
         )
         .await?;
         retention_iter.init().await?;
-        let mut resuming_iter = ResumingIterator::new(retention_iter);
-        if let Some((last_key, last_seq)) = resume_cursor {
-            // When resuming, seek to the last written key and then drain entries for that key
-            // until we reach the last written seq.
-            resuming_iter.resume(last_key.as_ref(), last_seq).await?;
-        }
+        let resuming_iter = ResumingIterator::new(retention_iter, resume_cursor).await?;
         Ok(resuming_iter)
     }
 
