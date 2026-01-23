@@ -55,7 +55,7 @@ insertion/modification time of rows. The most common usages of timestamps are:
 
 ## Goals
 
-- Define the API for specifying timestamps via user defined clocks
+- Define the API for specifying TTL on writes
 - Define the changes to the on-disk format of stored rows
 - Outline mechanism to support Time-To-Live (TTL) via Compaction Filters
 
@@ -83,70 +83,58 @@ not preclude:
 
 We will make the following changes to `DbOptions`:
 
-- introduce a configuration for a custom clock, and will default to using the system clock
 - introduce a configuration for a default TTL, which defaults to `None`
 
-Note that the clock is expected to return monotonically increasing (greater than or equal to
-previous) values. This will be enforced by wrapping the supplied `Clock` implementation that
-tracks the previous values returned.
+SlateDB uses the system clock internally for TTL expiration. The clock returns the system time
+in milliseconds since the Unix epoch, and SlateDB enforces monotonicity by tracking the last
+tick and sleeping briefly if clock skew is detected.
 
 ```rust
-/// defines the clock that SlateDB will use during this session
-pub trait Clock {
-    /// Returns a timestamp in milliseconds since the unix epoch,
-    /// must return monotonically increasing numbers (this is enforced
-    /// at runtime and will panic if the invariant is broken)
-    ///
-    /// Note that this clock does not need to return a number that
-    /// represents the unix timestamp; the only requirement is that
-    /// it represents a sequence that can attribute a logical ordering
-    /// to actions on the database
-    fn now(&self) -> i64;
-}
-
-/// contains the default implementation of the Clock, and will return the system time
-pub struct SystemClock;
-
-// ...
-
 pub struct DbOptions {
     // ...
-
-    /// The Clock to use for insertion timestamps
-    ///
-    /// Default: the default clock uses the local system time on the machine
-    clock: Option<Arc<dyn Clock>>,
 
     /// The default time-to-live (TTL) for insertions (note that re-inserting a key
     /// with any value will update the TTL to use the default_ttl)
     ///
     /// Default: no TTL (insertions will remain until deleted)
-    default_ttl: Option<Duration>
+    default_ttl: Option<u64>
 }
 ```
 
-To enforce that the clock remains monotonically increasing across instantiations of the
-database, we will add the maximum timestamp written in both the manifest and each SST (
-see the change to `SsTableInfo` below). When seeding the database minimum timestamp, SlateDB
-will use the maximum value seen in all persisted WAL SSTs and the latest manifest.
-
-```fbs
-table ManifestV1 {
-    // ...
-    timestamp: long;
-}
-```
-
-`Db#put_put_with_options` can optionally specify a row-level TTL at insertion time
-by leveraging newly added field in `WriteOptions`:
+A custom `SystemClock` implementation can be provided via the `Db::builder` API using
+`with_system_clock()`. This is primarily useful for testing or for environments with
+non-standard time sources:
 
 ```rust
-pub struct WriteOptions {
+use slatedb::Db;
+use slatedb_common::clock::DefaultSystemClock;
+use std::sync::Arc;
+
+let db = Db::builder("my_db", object_store)
+    .with_system_clock(Arc::new(DefaultSystemClock::new()))
+    .build()
+    .await?;
+```
+
+`Db#put_with_options` can optionally specify a row-level TTL at insertion time
+by leveraging the `PutOptions` struct:
+
+```rust
+pub enum Ttl {
+    /// Use the default TTL configured in DbOptions
+    Default,
+    /// No expiration for this entry
+    NoExpiry,
+    /// Expire after the specified duration (in milliseconds)
+    ExpireAfter(u64),
+}
+
+pub struct PutOptions {
     /// The time-to-live (ttl) for this insertion. If this insert overwrites an existing
     /// database entry, the TTL for the most recent entry will be canonical.
     ///
     /// Default: the TTL configured in DbOptions when opening a SlateDB session
-    pub ttl: Option<Duration>,
+    pub ttl: Ttl,
 }
 ```
 
@@ -192,16 +180,13 @@ table SsTableInfo {
     // in order that they are declared in the RowAttributes enum
     row_features: [RowFeature];
     
-    // The time at which this SST was created, based on the configured Clock in
-    // DbOptions
+    // The time at which this SST was created (milliseconds since Unix epoch)
     creation_timestamp: long;
-   
-    // The minimum timestamp of any row in the SST, based on the configured Clock in
-    // DbOptions
+
+    // The minimum timestamp of any row in the SST (milliseconds since Unix epoch)
     min_ts: long;
-    
-    // The maximum timestamp of any row in the SST, based on the configured Clock in
-    // DbOptions
+
+    // The maximum timestamp of any row in the SST (milliseconds since Unix epoch)
     max_ts: long;
 }
 ```
@@ -281,10 +266,10 @@ key during the compaction process and optionally remove or modify the value. Thi
 of the periodic compaction interval specified in the following section.
 
 For the scope of this RFC, we will be introducing a builtin TS/TTL compaction filter. This filter
-will add a tombstone to any value where `db.clock.now() > kv.attributes.expire_ts`. Note that
-tombstones will still contain a timestamp see [out of order insertions](#insertion-timestamps). If
-a tombstone is added, the TTL (`expire_ts`) for the row will be cleared, indicating that a future
-run of this filter should not remove the tombstone.
+will add a tombstone to any value where `now > kv.attributes.expire_ts` (where `now` is the current
+system time in milliseconds). Note that tombstones will still contain a timestamp (see
+[insertion timestamps](#insertion-timestamps)). If a tombstone is added, the TTL (`expire_ts`) for
+the row will be cleared, indicating that a future run of this filter should not remove the tombstone.
 
 Since this RFC does not cover the public API for compaction filters, this filter will simply run
 on any SST that specifies `row_features: [Timestamp && TimeToLive]`.
@@ -320,9 +305,8 @@ for the lower levels of the LSM tree.
 ### Insertion Timestamps
 
 A previous version of this proposal introduced the concept of row level timestamps -- the ability
-to set a timestamp at each insertion instead of only specifying a custom clock. This introduced
-the ability to have out-of-order insertions, which in turn caused significant downstream
-complications.
+to set a timestamp at each insertion. This introduced the ability to have out-of-order insertions,
+which in turn caused significant downstream complications.
 
 In order to leave the door open for timestamps on insertion, we encode the clock time with each
 row in the SST as opposed to only maintaining the time that it should expire. This comes at the
@@ -369,3 +353,18 @@ the original `seq0` insert as it logically happened "after" `seq1`.
 ### October 6, 2024
 
 - Minor changes and feedback. Most notable is renaming "meta features" to "row attributes"
+
+### January 20, 2026
+
+- **Removed the `LogicalClock` trait and user-defined clock configuration.** The original design
+  allowed users to supply a custom clock implementation for TTL timestamps. This was removed because:
+  1. The custom clock functionality added complexity that introduced bugs
+  2. With the introduction of transactions (see RFC 0011), sequence numbers can solve many of the
+     same use cases that user-defined clocks were intended to address (e.g., ordering operations)
+- SlateDB now uses the system clock directly for TTL expiration timestamps. The `SystemClock` trait
+  (from `slatedb-common`) returns `DateTime<Utc>`, and SlateDB extracts milliseconds since epoch
+  internally. A custom `SystemClock` can still be provided via `Db::builder().with_system_clock()`
+  for testing or non-standard time sources.
+- Updated `DbOptions` to remove the `clock` configuration option
+- Updated `WriteOptions` to `PutOptions` with a `Ttl` enum that supports `Default`, `NoExpiry`,
+  and `ExpireAfter(u64)` variants
