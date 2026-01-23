@@ -1,3 +1,6 @@
+// println! is required in build scripts for cargo directives
+#![allow(clippy::disallowed_macros)]
+
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
@@ -56,11 +59,12 @@ fn get_or_download_flatc(flatc_dir: &Path) -> PathBuf {
     fs::create_dir_all(flatc_dir).expect("Failed to create flatc directory");
 
     let (url, binary_name) = get_download_url();
-    println!("cargo:warning=Downloading flatc {} from {}", FLATC_VERSION, url);
+    println!(
+        "cargo:warning=Downloading flatc {} from {}",
+        FLATC_VERSION, url
+    );
 
-    let response = ureq::get(&url)
-        .call()
-        .expect("Failed to download flatc");
+    let response = ureq::get(&url).call().expect("Failed to download flatc");
 
     let mut bytes = Vec::new();
     response
@@ -119,7 +123,10 @@ fn get_download_url() -> (String, String) {
         panic!("Unsupported operating system");
     };
 
-    (format!("{}/{}", base_url, archive_name), binary_name.to_string())
+    (
+        format!("{}/{}", base_url, archive_name),
+        binary_name.to_string(),
+    )
 }
 
 fn extract_archive(bytes: &[u8], binary_name: &str, flatc_binary: &Path) {
@@ -166,7 +173,10 @@ fn generate_flatbuffers(flatc_path: &Path, schemas_dir: &Path, out_dir: &Path) {
         panic!("Schema file not found: {:?}", root_schema);
     }
 
-    println!("cargo:warning=Generating flatbuffers from {:?}", root_schema);
+    println!(
+        "cargo:warning=Generating flatbuffers from {:?}",
+        root_schema
+    );
 
     let output = Command::new(flatc_path)
         .arg("-o")
