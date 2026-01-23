@@ -248,6 +248,10 @@ impl Compaction {
 
     /// Sets the output SSTs produced by this compaction.
     pub(crate) fn set_output_ssts(&mut self, output_ssts: Vec<SsTableHandle>) {
+        assert!(
+            output_ssts.starts_with(self.output_ssts.as_slice()),
+            "new output SSTs must always extend previous output SSTs"
+        );
         self.output_ssts = output_ssts;
     }
 
