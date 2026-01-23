@@ -2,9 +2,11 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::row_codec::SstRowCodecV0;
+use crate::tablestore::TableStore;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -16,6 +18,7 @@ use object_store::{
     PutPayload, PutResult,
 };
 use rand::{Rng, RngCore};
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -25,6 +28,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Once};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+use ulid::Ulid;
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: KeyValueIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -272,6 +276,77 @@ pub(crate) async fn build_test_sst(format: &SsTableFormat, num_blocks: usize) ->
         encoded_sst_builder.add(row).await.unwrap();
     }
     encoded_sst_builder.build().await.unwrap()
+}
+
+/// Builds RowEntry values from (key, seq, value) tuples and sorts by key asc/seq desc.
+pub(crate) fn build_row_entries(specs: Vec<(Bytes, u64, ValueDeletable)>) -> Vec<RowEntry> {
+    let mut entries = specs
+        .into_iter()
+        .map(|(key, seq, value)| RowEntry::new(key, value, seq, None, None))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| match left.key.cmp(&right.key) {
+        CmpOrdering::Equal => right.seq.cmp(&left.seq),
+        other => other,
+    });
+    entries
+}
+
+/// Writes entries into SSTs, splitting when the accumulated block size exceeds `max_sst_size`.
+pub(crate) async fn write_ssts(
+    table_store: &Arc<TableStore>,
+    entries: &[RowEntry],
+    max_sst_size: usize,
+) -> Vec<SsTableHandle> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let mut output_ssts = Vec::new();
+    let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+    let mut bytes_written = 0usize;
+
+    for (index, entry) in entries.iter().cloned().enumerate() {
+        if let Some(block_size) = writer.add(entry).await.unwrap() {
+            bytes_written += block_size;
+        }
+
+        if bytes_written > max_sst_size {
+            output_ssts.push(writer.close().await.unwrap());
+            bytes_written = 0;
+
+            if index + 1 < entries.len() {
+                writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+            } else {
+                return output_ssts;
+            }
+        }
+    }
+
+    output_ssts.push(writer.close().await.unwrap());
+    output_ssts
+}
+
+/// Builds SortedRun inputs from nested entry sets, writing each set as one or more SSTs.
+pub(crate) async fn build_sorted_runs(
+    table_store: &Arc<TableStore>,
+    sr_entry_sets: &[Vec<Vec<RowEntry>>],
+    max_sst_size: usize,
+) -> Vec<SortedRun> {
+    let mut sorted_runs = Vec::new();
+
+    for (sr_id, sr_sst_sets) in sr_entry_sets.iter().enumerate() {
+        let mut sr_ssts = Vec::new();
+        for entries in sr_sst_sets {
+            let ssts = write_ssts(table_store, entries, max_sst_size).await;
+            sr_ssts.extend(ssts);
+        }
+        sorted_runs.push(SortedRun {
+            id: sr_id as u32,
+            ssts: sr_ssts,
+        });
+    }
+
+    sorted_runs
 }
 
 /// A compactor that compacts if there are L0s and `should_compact` returns true.

@@ -511,16 +511,22 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::ManifestCore;
     use crate::object_stores::ObjectStores;
+    use crate::proptest_util::arbitrary;
     use crate::sst::SsTableFormat;
     use crate::sst_iter::SstView;
     use crate::stats::StatRegistry;
     use crate::test_utils::StringConcatMergeOperator;
+    use crate::test_utils::{build_row_entries, build_sorted_runs, write_ssts};
     use crate::types::{RowEntry, ValueDeletable};
     use crate::Db;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use proptest::prelude::Just;
+    use proptest::strategy::Strategy;
+    use proptest::test_runner::Config;
+    use proptest::{prop_oneof, proptest};
     use rstest::rstest;
     use slatedb_common::clock::DefaultSystemClock;
     use std::cmp::Ordering;
@@ -1040,6 +1046,226 @@ mod tests {
             resumed_entries.push(entry);
         }
         assert_eq!(resumed_entries, expected_rows);
+    }
+
+    // Property-based test to verify that executing a compaction job
+    // with resume points produces the same final output as executing
+    // the full compaction job in one go.
+    //
+    // The test generates random L0 and sorted-run entry sets,
+    // writes them to SSTs, and runs the compaction job twice:
+    //
+    // 1. Full compaction job without resuming.
+    // 2. Compaction job with resume points inserted at various
+    //    positions in the output.
+    //
+    // The outputs of both runs are compared to ensure they match.
+    #[test]
+    fn test_execute_compaction_job_resume_matches_full() {
+        const PROPTEST_CASES: u32 = 256;
+        const KEY_SIZE: usize = 4;
+        const VALUE_SIZE: usize = 6;
+        const MAX_SEQ: u64 = 2000;
+        const MAX_ENTRY_SET_LEN: usize = 64;
+        const MAX_L0_SETS: usize = 3;
+        const MAX_SR_SETS: usize = 3;
+        const RESUME_RANGE_MAX: usize = 16;
+        const RESUME_POINTS_MIN: usize = 1;
+        const RESUME_POINTS_MAX: usize = 3;
+        const MAX_SST_SIZE: usize = 128;
+        const BLOCK_SIZE: usize = 64;
+
+        proptest!(Config::with_cases(PROPTEST_CASES), |(
+            l0_specs in proptest::collection::vec(
+                proptest::collection::vec(
+                    (
+                        arbitrary::nonempty_bytes(KEY_SIZE),
+                        0u64..MAX_SEQ,
+                        prop_oneof![
+                            arbitrary::nonempty_bytes(VALUE_SIZE).prop_map(ValueDeletable::Value),
+                            arbitrary::nonempty_bytes(VALUE_SIZE).prop_map(ValueDeletable::Merge),
+                            Just(ValueDeletable::Tombstone),
+                        ],
+                    ),
+                    1..=MAX_ENTRY_SET_LEN,
+                ),
+                1..=MAX_L0_SETS,
+            ),
+            sr_specs in proptest::collection::vec(
+                proptest::collection::vec(
+                    (
+                        arbitrary::nonempty_bytes(KEY_SIZE),
+                        0u64..MAX_SEQ,
+                        prop_oneof![
+                            arbitrary::nonempty_bytes(VALUE_SIZE).prop_map(ValueDeletable::Value),
+                            arbitrary::nonempty_bytes(VALUE_SIZE).prop_map(ValueDeletable::Merge),
+                            Just(ValueDeletable::Tombstone),
+                        ],
+                    ),
+                    1..=MAX_ENTRY_SET_LEN,
+                ),
+                0..=MAX_SR_SETS,
+            ),
+            resume_points in proptest::collection::vec(
+                0usize..RESUME_RANGE_MAX,
+                RESUME_POINTS_MIN..=RESUME_POINTS_MAX,
+            ),
+        )| {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let l0_entry_sets = l0_specs
+                    .into_iter()
+                    .map(build_row_entries)
+                    .collect::<Vec<_>>();
+                let sr_entry_sets = sr_specs
+                    .into_iter()
+                    .map(|entries| vec![build_row_entries(entries)])
+                    .collect::<Vec<_>>();
+
+                let has_merge = l0_entry_sets
+                    .iter()
+                    .flatten()
+                    .chain(sr_entry_sets.iter().flatten().flatten())
+                    .any(|entry| matches!(entry.value, ValueDeletable::Merge(_)));
+                let merge_operator = if has_merge {
+                    Some(Arc::new(StringConcatMergeOperator {}) as MergeOperatorType)
+                } else {
+                    None
+                };
+                let retention_min_seq = if merge_operator.is_some() {
+                    None
+                } else {
+                    Some(0)
+                };
+
+                let handle = tokio::runtime::Handle::current();
+                let options = CompactorOptions {
+                    max_sst_size: MAX_SST_SIZE,
+                    ..Default::default()
+                };
+                let options = Arc::new(options);
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+                let root_path = Path::from("testdb-exec-resume");
+                let clock = Arc::new(DefaultSystemClock::new());
+                let table_store = Arc::new(TableStore::new(
+                    ObjectStores::new(object_store.clone(), None),
+                    SsTableFormat {
+                        block_size: BLOCK_SIZE,
+                        ..SsTableFormat::default()
+                    },
+                    root_path.clone(),
+                    None,
+                ));
+                let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
+                StoredManifest::create_new_db(
+                    manifest_store.clone(),
+                    ManifestCore::new(),
+                    clock.clone(),
+                )
+                .await
+                .unwrap();
+
+                let executor = TokioCompactionExecutor::new(
+                    handle,
+                    options,
+                    tx,
+                    table_store.clone(),
+                    Arc::new(DbRand::new(100u64)),
+                    Arc::new(CompactionStats::new(Arc::new(StatRegistry::new()))),
+                    clock,
+                    manifest_store,
+                    merge_operator,
+                );
+
+                let mut l0_ssts = Vec::new();
+                for entries in &l0_entry_sets {
+                    let ssts = write_ssts(&table_store, entries, usize::MAX).await;
+                    l0_ssts.extend(ssts);
+                }
+
+                let sorted_runs = build_sorted_runs(&table_store, &sr_entry_sets, usize::MAX).await;
+
+                let full_run = executor
+                    .inner
+                    .execute_compaction_job(StartCompactionJobArgs {
+                        id: Ulid::new(),
+                        compaction_id: Ulid::new(),
+                        destination: 0,
+                        ssts: l0_ssts.clone(),
+                        sorted_runs: sorted_runs.clone(),
+                        output_ssts: Vec::new(),
+                        compaction_clock_tick: 0,
+                        is_dest_last_run: false,
+                        retention_min_seq,
+                    })
+                    .await
+                    .unwrap();
+
+                let mut expected_entries = Vec::new();
+                for sst in &full_run.ssts {
+                    let mut iter = SstIterator::new(
+                        SstView::Borrowed(sst, BytesRange::from(..)),
+                        table_store.clone(),
+                        SstIteratorOptions::default(),
+                    )
+                    .unwrap();
+                    iter.init().await.unwrap();
+                    while let Some(entry) = iter.next_entry().await.unwrap() {
+                        expected_entries.push(entry);
+                    }
+                }
+
+                assert!(!expected_entries.is_empty());
+                let mut resume_indices = resume_points
+                    .into_iter()
+                    .map(|index| index % expected_entries.len())
+                    .collect::<Vec<_>>();
+                resume_indices.sort_unstable();
+                resume_indices.dedup();
+
+                for resume_index in resume_indices {
+                    let output_ssts = write_ssts(
+                        &table_store,
+                        &expected_entries[..=resume_index],
+                        MAX_SST_SIZE,
+                    )
+                    .await;
+                    let resumed_run = executor
+                        .inner
+                        .execute_compaction_job(StartCompactionJobArgs {
+                            id: Ulid::new(),
+                            compaction_id: Ulid::new(),
+                            destination: 0,
+                            ssts: l0_ssts.clone(),
+                            sorted_runs: sorted_runs.clone(),
+                            output_ssts,
+                            compaction_clock_tick: 0,
+                            is_dest_last_run: false,
+                            retention_min_seq,
+                        })
+                        .await
+                        .unwrap();
+
+                    let mut resumed_entries = Vec::new();
+                    for sst in &resumed_run.ssts {
+                        let mut iter = SstIterator::new(
+                            SstView::Borrowed(sst, BytesRange::from(..)),
+                            table_store.clone(),
+                            SstIteratorOptions::default(),
+                        )
+                        .unwrap();
+                        iter.init().await.unwrap();
+                        while let Some(entry) = iter.next_entry().await.unwrap() {
+                            resumed_entries.push(entry);
+                        }
+                    }
+
+                    assert_eq!(resumed_entries, expected_entries);
+                }
+
+            });
+        });
     }
 
     #[tokio::test(flavor = "multi_thread")]
