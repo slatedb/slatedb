@@ -611,6 +611,7 @@ fn get_env_variable(name: &str) -> Result<String, SlateDBError> {
 /// | Provider | Value | Documentation |
 /// |----------|-------|---------------|
 /// | Local | `local` | [load_local] |
+/// | Memory | `memory` | [load_memory] |
 /// | AWS | `aws` | [load_aws] |
 /// | Azure | `azure` | [load_azure] |
 /// | OpenDAL | `opendal` | [load_opendal] |
@@ -621,6 +622,7 @@ pub fn load_object_store_from_env(
     let cloud_provider = get_env_variable("CLOUD_PROVIDER")?;
     match cloud_provider.to_lowercase().as_str() {
         "local" => load_local(),
+        "memory" => load_memory(),
         #[cfg(feature = "aws")]
         "aws" => load_aws(),
         #[cfg(feature = "azure")]
@@ -644,6 +646,11 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     let local_path = get_env_variable("LOCAL_PATH")?;
     let lfs = object_store::local::LocalFileSystem::new_with_prefix(local_path)?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
+}
+
+/// Loads an in-memory object store instance.
+pub fn load_memory() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
+    Ok(Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an AWS S3 Object store instance. The environment variables consumed are
@@ -744,6 +751,12 @@ mod tests {
                 r.unwrap_err().to_string(),
                 "invalid environment variable CLOUD_PROVIDER value `invalid`"
             );
+
+            jail.create_file("memory.env", "CLOUD_PROVIDER=memory")
+                .expect("failed to create temp env file");
+            let r = load_object_store_from_env(Some("memory.env".to_string()));
+            let store = r.expect("expected memory object store");
+            assert_eq!(store.to_string(), "InMemory");
 
             Ok(())
         });
