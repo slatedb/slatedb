@@ -9,3 +9,4 @@ tmp
 *.pyc
 *.so
 slatedb-py/dist
+slatedb/src/generated/root_generated.rs
