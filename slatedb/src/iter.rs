@@ -7,7 +7,6 @@ use crate::types::{KeyValue, ValueDeletable};
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum IterationOrder {
     Ascending,
-    #[allow(dead_code)]
     Descending,
 }
 

@@ -1705,6 +1705,7 @@ impl<'a> Compaction<'a> {
   pub const VT_SPEC_TYPE: flatbuffers::VOffsetT = 6;
   pub const VT_SPEC: flatbuffers::VOffsetT = 8;
   pub const VT_STATUS: flatbuffers::VOffsetT = 10;
+  pub const VT_OUTPUT_SSTS: flatbuffers::VOffsetT = 12;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -1716,6 +1717,7 @@ impl<'a> Compaction<'a> {
     args: &'args CompactionArgs<'args>
   ) -> flatbuffers::WIPOffset<Compaction<'bldr>> {
     let mut builder = CompactionBuilder::new(_fbb);
+    if let Some(x) = args.output_ssts { builder.add_output_ssts(x); }
     if let Some(x) = args.spec { builder.add_spec(x); }
     if let Some(x) = args.id { builder.add_id(x); }
     builder.add_status(args.status);
@@ -1753,6 +1755,13 @@ impl<'a> Compaction<'a> {
     unsafe { self._tab.get::<CompactionStatus>(Compaction::VT_STATUS, Some(CompactionStatus::Submitted)).unwrap()}
   }
   #[inline]
+  pub fn output_ssts(&self) -> Option<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>(Compaction::VT_OUTPUT_SSTS, None)}
+  }
+  #[inline]
   #[allow(non_snake_case)]
   pub fn spec_as_tiered_compaction_spec(&self) -> Option<TieredCompactionSpec<'a>> {
     if self.spec_type() == CompactionSpec::TieredCompactionSpec {
@@ -1783,6 +1792,7 @@ impl flatbuffers::Verifiable for Compaction<'_> {
         }
      })?
      .visit_field::<CompactionStatus>("status", Self::VT_STATUS, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("output_ssts", Self::VT_OUTPUT_SSTS, false)?
      .finish();
     Ok(())
   }
@@ -1792,6 +1802,7 @@ pub struct CompactionArgs<'a> {
     pub spec_type: CompactionSpec,
     pub spec: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
     pub status: CompactionStatus,
+    pub output_ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
 }
 impl<'a> Default for CompactionArgs<'a> {
   #[inline]
@@ -1801,6 +1812,7 @@ impl<'a> Default for CompactionArgs<'a> {
       spec_type: CompactionSpec::NONE,
       spec: None, // required field
       status: CompactionStatus::Submitted,
+      output_ssts: None,
     }
   }
 }
@@ -1825,6 +1837,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_status(&mut self, status: CompactionStatus) {
     self.fbb_.push_slot::<CompactionStatus>(Compaction::VT_STATUS, status, CompactionStatus::Submitted);
+  }
+  #[inline]
+  pub fn add_output_ssts(&mut self, output_ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTable<'b >>>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Compaction::VT_OUTPUT_SSTS, output_ssts);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactionBuilder<'a, 'b, A> {
@@ -1862,6 +1878,7 @@ impl core::fmt::Debug for Compaction<'_> {
         },
       };
       ds.field("status", &self.status());
+      ds.field("output_ssts", &self.output_ssts());
       ds.finish()
   }
 }
