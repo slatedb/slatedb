@@ -54,6 +54,19 @@ impl Db {
         let result = rx.await.map_err(SlateDBError::ReadChannelError)?;
         result.map_err(Into::into)
     }
+
+    /// Restores the db to a checkpoint. The db should be closed after this function is done as the
+    /// in memory state of the db will be stale.
+    pub(crate) async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.inner.memtable_flush_notifier.send_safely(
+            self.inner.state.read().closed_result_reader(),
+            MemtableFlushMsg::RestoreCheckpoint { id, sender: tx },
+        )?;
+
+        let result = rx.await.map_err(SlateDBError::ReadChannelError)?;
+        result.map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
@@ -326,7 +339,6 @@ mod tests {
     async fn test_should_restore_checkpoint(#[case] checkpoint_scope: CheckpointScope) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
 
         db.put(b"key1", b"old_val").await.unwrap();
@@ -341,33 +353,28 @@ mod tests {
             .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
             .await
             .unwrap();
-        db.close().await.unwrap();
 
-        admin
-            .restore_checkpoint(checkpoint_old.id, None)
-            .await
-            .unwrap();
+        db.restore_checkpoint(checkpoint_old.id).await.unwrap();
+        db.close().await.unwrap();
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         assert_eq!(
-            Some(Bytes::from_static(b"old_val")), // previous value should be restored
+            Some(Bytes::from_static(b"old_val")),
             db.get(b"key1").await.unwrap(),
         );
-        assert_eq!(None, db.get(b"key2").await.unwrap()); // key doesn't exist in this checkpoint
+        assert_eq!(None, db.get(b"key2").await.unwrap()); // entry does not exist yet
         db.close().await.unwrap();
 
-        admin
-            .restore_checkpoint(checkpoint_new.id, None)
-            .await
-            .unwrap();
+        db.restore_checkpoint(checkpoint_new.id).await.unwrap();
+        db.close().await.unwrap();
         let db = Db::open(path, object_store).await.unwrap();
         assert_eq!(
-            Some(Bytes::from_static(b"new_val")), // future value should be restored
+            Some(Bytes::from_static(b"new_val")),
             db.get(b"key1").await.unwrap(),
         );
         assert_eq!(
             Some(Bytes::from_static(b"new_key")),
             db.get(b"key2").await.unwrap()
-        ); // new key should be restored
+        ); // entry should be restored
         db.close().await.unwrap();
     }
 

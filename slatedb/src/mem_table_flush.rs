@@ -4,7 +4,9 @@ use crate::db::DbInner;
 use crate::db_state::SsTableId;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
+use crate::flush::WalToL0Result;
 use crate::manifest::store::FenceableManifest;
+use crate::manifest::ManifestCore;
 use crate::utils::IdGenerator;
 use async_trait::async_trait;
 use fail_parallel::fail_point;
@@ -16,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot::Sender;
 use tracing::instrument;
+use uuid::Uuid;
 
 pub(crate) const MEMTABLE_FLUSHER_TASK_NAME: &str = "memtable_writer";
 
@@ -27,6 +30,10 @@ pub(crate) enum MemtableFlushMsg {
     CreateCheckpoint {
         options: CheckpointOptions,
         sender: Sender<Result<CheckpointCreateResult, SlateDBError>>,
+    },
+    RestoreCheckpoint {
+        id: Uuid,
+        sender: Sender<Result<(), SlateDBError>>,
     },
     PollManifest,
 }
@@ -233,6 +240,97 @@ impl MemtableFlusher {
         }
         result
     }
+
+    /// Restores the checkpoint by restoring the checkpointed manifest and replaying it's
+    /// referenced WALs to new l0 ssts.
+    async fn restore_checkpoint(&mut self, checkpoint_id: Uuid) -> Result<(), SlateDBError> {
+        let fencing_wal_id = self.fence_with_wal().await?;
+
+        let checkpoint = match self
+            .db_inner
+            .state
+            .read()
+            .state()
+            .core()
+            .find_checkpoint(checkpoint_id)
+        {
+            Some(found_checkpoint) => found_checkpoint.clone(),
+            None => return Err(SlateDBError::CheckpointMissing(checkpoint_id)),
+        };
+
+        let manifest_to_restore = self
+            .db_inner
+            .manifest_store
+            .read_manifest(checkpoint.manifest_id)
+            .await?;
+
+        // flush the refrenced WALs as l0 SSTs
+        let WalToL0Result {
+            sst_handles,
+            last_tick,
+            last_seq,
+        } = self
+            .db_inner
+            .replay_wal_to_l0(
+                manifest_to_restore.core.replay_after_wal_id + 1
+                    ..manifest_to_restore.core.next_wal_sst_id,
+                &manifest_to_restore.core,
+            )
+            .await?;
+
+        // the restored state will have the original referenced l0 SSTs and the newly flushed l0 SSTs
+        let mut merged_l0s = manifest_to_restore.core.l0;
+        merged_l0s.reserve(sst_handles.len());
+        for sst_handle in sst_handles.iter().rev() {
+            merged_l0s.push_front(sst_handle.clone());
+        }
+
+        let mut dirty = {
+            let rguard_state = self.db_inner.state.read();
+            rguard_state.state().manifest.clone()
+        };
+        let merged_core = ManifestCore {
+            initialized: manifest_to_restore.core.initialized,
+            l0_last_compacted: manifest_to_restore.core.l0_last_compacted,
+            l0: merged_l0s,
+            compacted: manifest_to_restore.core.compacted,
+            // no wal id's to replay as they should be flushed to l0 already.
+            next_wal_sst_id: fencing_wal_id,
+            replay_after_wal_id: fencing_wal_id,
+            last_l0_clock_tick: last_tick.unwrap_or(manifest_to_restore.core.last_l0_clock_tick),
+            last_l0_seq: last_seq.unwrap_or(manifest_to_restore.core.last_l0_seq),
+            recent_snapshot_min_seq: last_seq.unwrap_or(manifest_to_restore.core.last_l0_seq),
+            sequence_tracker: manifest_to_restore.core.sequence_tracker,
+            // Current checkpoints are presisted as the checkpoints in the manifest to restore may
+            // be invalid at this point in time. This also enables restoring to future checkpoints.
+            checkpoints: dirty.value.core.checkpoints,
+            wal_object_store_uri: manifest_to_restore.core.wal_object_store_uri,
+        };
+
+        dirty.value.core = merged_core;
+        dirty.value.compactor_epoch += 1; // fence any compactors that might still be running
+
+        self.manifest.update(dirty).await?;
+        Ok(())
+    }
+
+    async fn fence_with_wal(&mut self) -> Result<u64, SlateDBError> {
+        let wal_id_last_compacted = self
+            .db_inner
+            .state
+            .read()
+            .state()
+            .core()
+            .replay_after_wal_id;
+        let next_wal_id = self
+            .db_inner
+            .table_store
+            .next_wal_sst_id(wal_id_last_compacted)
+            .await?;
+        self.db_inner
+            .fence_writers(&mut self.manifest, next_wal_id)
+            .await
+    }
 }
 
 #[async_trait]
@@ -267,6 +365,13 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
                 }
                 write_result.map(|_| ())
             }
+            MemtableFlushMsg::RestoreCheckpoint { id, sender } => {
+                let result = self.restore_checkpoint(id).await;
+                if let Err(Err(e)) = sender.send(result.clone()) {
+                    error!("Failed to send restore_checkpoint error [error={:?}]", e);
+                }
+                result
+            }
         }
     }
 
@@ -285,6 +390,9 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
                 MemtableFlushMsg::FlushImmutableMemtables {
                     sender: Some(sender),
                 } => {
+                    let _ = sender.send(Err(error.clone()));
+                }
+                MemtableFlushMsg::RestoreCheckpoint { id: _, sender } => {
                     let _ = sender.send(Err(error.clone()));
                 }
                 _ => (),

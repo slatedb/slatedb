@@ -6,9 +6,11 @@ use slatedb::compactor::{
     CompactionRequest, CompactionSchedulerSupplier, SizeTieredCompactionSchedulerSupplier,
 };
 use slatedb::config::{
-    CheckpointOptions, CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    CheckpointOptions, CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions,
+    GarbageCollectorOptions,
 };
 use slatedb::seq_tracker::FindOption;
+use slatedb::SstBlockSize;
 use std::error::Error;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -65,8 +67,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         CliCommands::DeleteCheckpoint { id } => exec_delete_checkpoint(&admin, id).await?,
         CliCommands::ListCheckpoints { name } => exec_list_checkpoints(&admin, name).await?,
-        CliCommands::RestoreCheckpoint { id, sst_size } => {
-            exec_restore_checkpoint(&admin, id, sst_size).await?
+        CliCommands::RestoreCheckpoint {
+            id,
+            l0_sst_size_bytes,
+            sst_block_size,
+            compression_codec,
+        } => {
+            exec_restore_checkpoint(
+                &admin,
+                id,
+                l0_sst_size_bytes,
+                sst_block_size,
+                compression_codec,
+            )
+            .await?
         }
         CliCommands::RunGarbageCollection { resource, min_age } => {
             exec_gc_once(&admin, resource, min_age).await?
@@ -227,9 +241,16 @@ async fn exec_delete_checkpoint(admin: &Admin, id: Uuid) -> Result<(), Box<dyn E
 async fn exec_restore_checkpoint(
     admin: &Admin,
     id: Uuid,
-    sst_size: Option<usize>,
+    l0_sst_size_bytes: Option<usize>,
+    sst_block_size: Option<SstBlockSize>,
+    compression_codec: Option<CompressionCodec>,
 ) -> Result<(), Box<dyn Error>> {
-    println!("{:?}", admin.restore_checkpoint(id, sst_size).await?);
+    println!(
+        "{:?}",
+        admin
+            .restore_checkpoint(id, l0_sst_size_bytes, sst_block_size, compression_codec)
+            .await?
+    );
     Ok(())
 }
 

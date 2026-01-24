@@ -2,34 +2,26 @@ use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
 use crate::compactor_state_protocols::CompactorStateReader;
-use crate::config::{CheckpointOptions, GarbageCollectorOptions};
+use crate::config::{CheckpointOptions, CompressionCodec, GarbageCollectorOptions};
 use crate::db::builder::GarbageCollectorBuilder;
-use crate::db_state::{ManifestCore, SsTableHandle, SsTableId};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::garbage_collector::GC_TASK_NAME;
-use crate::iter::KeyValueIterator;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::sst::SsTableFormat;
-use crate::tablestore::TableStore;
 use slatedb_common::clock::SystemClock;
 
-use crate::clone;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::rand::DbRand;
-use crate::seq_tracker::{FindOption, SequenceTracker, TrackedSeq};
+use crate::seq_tracker::FindOption;
 use crate::utils::{IdGenerator, WatchableOnceCell};
-use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use crate::{clone, Db, Settings, SstBlockSize};
 use chrono::{DateTime, Utc};
 use fail_parallel::FailPointRegistry;
-use log::debug;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use std::collections::VecDeque;
 use std::env;
 use std::env::VarError;
 use std::error::Error;
-use std::ops::Range;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,13 +33,6 @@ use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
 use slatedb_txn_obj::TransactionalObject;
-
-pub struct WalToL0Result {
-    sst_handles: VecDeque<SsTableHandle>,
-    last_tick: Option<i64>,
-    last_seq: Option<u64>,
-    sequence_tracker: SequenceTracker,
-}
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -465,89 +450,40 @@ impl Admin {
             .map_err(Into::into)
     }
 
-    /// Restores the checkpoint by duplicating the checkpointed manifest as the latest and replays
-    /// the necessary WALs to new l0 ssts.
-    ///
-    /// sst_size (bytes) defaults to 64MB if None.
-    ///
-    /// Prevents concurrent operations by:
-    /// - Fencing writers through uploading a fencing WAL at the start of the operation
-    /// - Fencing other clients through advancing the new manifest's epochs
-    ///
-    /// This function preserves checkpoints from the current (latest) manifest rather than
-    /// restoring checkpoints from the checkpointed manifest, as those historical checkpoints
-    /// may no longer be valid at the current point in time.
     pub async fn restore_checkpoint(
         &self,
         id: Uuid,
-        sst_size: Option<usize>,
+        l0_sst_size_bytes: Option<usize>,
+        sst_block_size: Option<SstBlockSize>,
+        compression_codec: Option<CompressionCodec>,
     ) -> Result<(), crate::Error> {
-        let manifest_store = Arc::new(self.manifest_store());
-        let wal_store = Arc::new(self.table_store());
-        let fencing_wal = self.fence_writers(&wal_store).await?;
+        let mut db_builder = Db::builder(
+            self.path.clone(),
+            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+        )
+        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.seed());
 
-        let mut current_manifest =
-            StoredManifest::load(manifest_store.clone(), self.system_clock.clone()).await?;
-        let checkpoint = match current_manifest.db_state().find_checkpoint(id) {
-            Some(found_checkpoint) => found_checkpoint.clone(),
-            None => return Err(SlateDBError::CheckpointMissing(id).into()),
+        let mut settings = Settings::default();
+        settings.l0_sst_size_bytes = l0_sst_size_bytes.unwrap_or(settings.l0_sst_size_bytes);
+        settings.compression_codec = compression_codec;
+        db_builder = db_builder.with_settings(settings);
+
+        if let Some(sst_block_size) = sst_block_size {
+            db_builder = db_builder.with_sst_block_size(sst_block_size);
+        }
+
+        let db = db_builder.build().await?;
+        let result = db.restore_checkpoint(id).await;
+        let close_result = db.close().await;
+
+        if result.is_err() {
+            log::error!("error closing db");
+            return result;
         };
 
-        let manifest_to_restore = manifest_store.read_manifest(checkpoint.manifest_id).await?;
-
-        let WalToL0Result {
-            sst_handles,
-            last_tick,
-            last_seq,
-            sequence_tracker,
-        } = self
-            .replay_wal_to_l0(
-                manifest_to_restore.core.replay_after_wal_id + 1
-                    ..manifest_to_restore.core.next_wal_sst_id,
-                &manifest_to_restore.core,
-                wal_store.clone(),
-                sst_size,
-            )
-            .await?;
-
-        current_manifest
-            .maybe_apply_update(|stored_manifest| {
-                let mut dirty = stored_manifest.prepare_dirty()?;
-                dirty.value = manifest_to_restore.clone();
-
-                // do not restore old checkpoints as they can be invalid at this point in time.
-                // instead keep the checkpoints of the current manifest which should all still be
-                // valid.
-                dirty.value.core.checkpoints = stored_manifest.object().core.checkpoints.clone();
-
-                dirty.value.core.l0.reserve(sst_handles.len());
-                for sst_handle in sst_handles.iter().rev() {
-                    dirty.value.core.l0.push_front(sst_handle.clone());
-                }
-
-                if let Some(last_tick) = last_tick {
-                    dirty.value.core.last_l0_clock_tick = last_tick;
-                }
-                if let Some(last_seq) = last_seq {
-                    dirty.value.core.last_l0_seq = last_seq;
-                }
-                dirty
-                    .value
-                    .core
-                    .sequence_tracker
-                    .extend_from(&sequence_tracker);
-                dirty.value.core.replay_after_wal_id = fencing_wal;
-                dirty.value.core.next_wal_sst_id = fencing_wal + 1;
-
-                // advance epochs to fence any other clients that might still be running
-                dirty.value.writer_epoch = stored_manifest.object().writer_epoch + 1;
-                dirty.value.compactor_epoch = stored_manifest.object().compactor_epoch + 1;
-
-                Ok(Some(dirty))
-            })
-            .await?;
-
-        Ok(())
+        close_result
     }
 
     /// Returns the timestamp or sequence from the latest manifest's sequence tracker.
@@ -594,115 +530,10 @@ impl Admin {
         Ok(manifest.core.sequence_tracker.find_seq(ts, opt))
     }
 
-    // Writes an empty WAL SST to storage to fence other writers. Returns the id of the WAL
-    // uploaded.
-    async fn fence_writers(&self, wal_store: &TableStore) -> Result<u64, SlateDBError> {
-        let mut empty_wal_id = wal_store.last_seen_wal_id().await?;
-
-        loop {
-            let empty_sst = wal_store.table_builder().build().await?;
-            match wal_store
-                .write_sst(&SsTableId::Wal(empty_wal_id), empty_sst, false)
-                .await
-            {
-                Ok(_) => return Ok(empty_wal_id),
-                Err(SlateDBError::Fenced) => empty_wal_id += 1,
-                Err(e) => return Err(e),
-            }
-        }
-    }
-
-    // Replays WALs in the id range into SSTs and flushes them to l0.
-    // Returns the handles of the newly generated and flushed SSTs, a sequence_tracker tracking the
-    // sequence numbers inserted, and the latest sequence number and creation timestamp
-    async fn replay_wal_to_l0(
-        &self,
-        wal_id_range: Range<u64>,
-        core: &ManifestCore,
-        table_store: Arc<TableStore>,
-        l0_sst_size: Option<usize>,
-    ) -> Result<WalToL0Result, crate::Error> {
-        let mut result = WalToL0Result {
-            sst_handles: VecDeque::new(),
-            last_tick: None,
-            last_seq: None,
-            sequence_tracker: SequenceTracker::new(),
-        };
-
-        if wal_id_range.is_empty() {
-            return Ok(result);
-        }
-
-        debug!("replaying wal_id_range {:?} to l0", &wal_id_range);
-
-        let wal_replay_options = match l0_sst_size {
-            Some(min_memtable_bytes) => WalReplayOptions {
-                min_memtable_bytes,
-                ..WalReplayOptions::default()
-            },
-            None => WalReplayOptions::default(),
-        };
-        let mut replay_iter = WalReplayIterator::range(
-            wal_id_range,
-            core,
-            wal_replay_options,
-            Arc::clone(&table_store),
-        )
-        .await?;
-
-        while let Some(replayed_table) = replay_iter.next().await? {
-            if replayed_table.table.is_empty() {
-                continue;
-            }
-
-            let id = SsTableId::Compacted(self.rand.rng().gen_ulid(self.system_clock.as_ref()));
-            let mut sst_builder = table_store.table_builder();
-            let mut iter = replayed_table.table.table().iter();
-            while let Some(entry) = iter.next_entry().await? {
-                sst_builder.add(entry).await?;
-            }
-            let encoded_sst = sst_builder.build().await?;
-
-            // TODO: This might need a configurable l0_max_ssts check, and if check fails, running
-            // a compaction job (or return error).
-            let handle = table_store.write_sst(&id, encoded_sst, false).await?;
-            result.sst_handles.push_front(handle);
-
-            result.last_seq = Some(std::cmp::max(
-                result.last_seq.unwrap_or(replayed_table.last_seq),
-                replayed_table.last_seq,
-            ));
-            result.last_tick = Some(std::cmp::max(
-                result.last_tick.unwrap_or(replayed_table.last_tick),
-                replayed_table.last_tick,
-            ));
-
-            // Insert sequence numbers at table-level granularity instead of per-entry to reduce complexity
-            // and overhead. This is acceptable given SequenceTracker's approximate nature.
-            result.sequence_tracker.insert(TrackedSeq {
-                seq: replayed_table.last_seq,
-                ts: self.system_clock.now(),
-            });
-        }
-
-        debug!("Replayed WALs to new L0 SSTs: {:?}", result.sst_handles);
-
-        Ok(result)
-    }
-
     fn manifest_store(&self) -> ManifestStore {
         ManifestStore::new(
             &self.path,
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        )
-    }
-
-    fn table_store(&self) -> TableStore {
-        TableStore::new(
-            self.object_stores.clone(),
-            SsTableFormat::default(),
-            self.path.clone(),
-            None,
         )
     }
 
@@ -867,7 +698,6 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
     use object_store::aws::S3ConditionalPut;
 
     let builder = object_store::aws::AmazonS3Builder::from_env()
-        .with_allow_http(true)
         .with_conditional_put(S3ConditionalPut::ETagMatch);
 
     Ok(Arc::new(builder.build()?) as Arc<dyn ObjectStore>)
@@ -929,20 +759,13 @@ pub fn load_opendal() -> Result<Arc<dyn ObjectStore>, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use crate::admin::{load_object_store_from_env, AdminBuilder};
-    use crate::admin::{Admin, WalToL0Result};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
-    use crate::db_state::SsTableId;
-    use crate::iter::KeyValueIterator;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::types::RowEntry;
-    use crate::Db;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use std::sync::Arc;
     use ulid::Ulid;
 
     #[test]
@@ -1119,98 +942,5 @@ mod tests {
         assert_eq!(compaction.spec().destination(), 3);
         assert_eq!(compaction.spec().sources(), &vec![SourceId::SortedRun(3)]);
         assert_eq!(compaction.status(), CompactionStatus::Submitted);
-    }
-
-    #[tokio::test]
-    async fn test_admin_fence_writers() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_kv_store";
-
-        // open db and assert that it can write.
-        let db = Db::builder(path, object_store.clone())
-            .build()
-            .await
-            .unwrap();
-        db.put(b"1", b"1").await.unwrap();
-
-        let admin = Admin::builder(path, object_store).build();
-
-        let table_store = admin.table_store();
-        let wal_id = admin.fence_writers(&table_store).await.unwrap();
-
-        assert_eq!(table_store.last_seen_wal_id().await.unwrap(), wal_id);
-
-        // assert that db can no longer write.
-        let err = db.put(b"1", b"1").await.unwrap_err();
-        assert_eq!(err.to_string(), "Closed error: detected newer DB client");
-    }
-
-    #[tokio::test]
-    async fn test_admin_replay_wal_to_l0() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = "/tmp/test_kv_store";
-        let admin = Admin::builder(path, object_store.clone()).build();
-        let table_store = Arc::new(admin.table_store());
-        let manifest_store = admin.manifest_store();
-
-        // initialize a db to create a manifest
-        let db = Db::builder(path, object_store).build().await.unwrap();
-        db.close().await.unwrap();
-
-        let row_entries = vec![
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(11),
-            RowEntry::new_value(b"key2", b"value2", 2).with_create_ts(12), // last_seq
-            RowEntry::new_value(b"key3", b"value3", 3).with_create_ts(13),
-        ];
-
-        // setup wals
-        let mut writer = table_store.table_writer(SsTableId::Wal(100));
-        writer.add(row_entries[0].clone()).await.unwrap();
-        writer.add(row_entries[1].clone()).await.unwrap();
-        writer.close().await.unwrap();
-        let mut writer = table_store.table_writer(SsTableId::Wal(101));
-        writer.add(row_entries[2].clone()).await.unwrap();
-        writer.close().await.unwrap();
-
-        // replay the wal entries to l0. Do not include the last WAL to test that it is left out of
-        // the replay results.
-        let (_, manifest) = manifest_store
-            .try_read_latest_manifest()
-            .await
-            .unwrap()
-            .unwrap();
-        let WalToL0Result {
-            sst_handles,
-            last_seq,
-            last_tick,
-            sequence_tracker,
-        } = admin
-            .replay_wal_to_l0(100..101, &manifest.core, table_store.clone(), None)
-            .await
-            .unwrap();
-
-        // check that entries in wals are added to l0
-        let mut row_entry_iter = row_entries.into_iter();
-        for sst_handle in sst_handles.iter() {
-            let mut actual_row_entry_iter = SstIterator::new_borrowed_initialized(
-                ..,
-                sst_handle,
-                table_store.clone(),
-                SstIteratorOptions::default(),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-
-            while let Some(entry) = actual_row_entry_iter.next_entry().await.unwrap() {
-                assert_eq!(row_entry_iter.next().unwrap(), entry)
-            }
-        }
-
-        assert_eq!(2, last_seq.unwrap());
-        assert_eq!(12, last_tick.unwrap());
-        assert!(sequence_tracker
-            .find_ts(1, crate::seq_tracker::FindOption::RoundUp)
-            .is_some(),);
     }
 }

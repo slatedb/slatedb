@@ -1,11 +1,23 @@
+use std::collections::VecDeque;
+use std::ops::Range;
+use std::sync::Arc;
+
+use log::{debug, warn};
 use parking_lot::RwLockWriteGuard;
 
 use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
+use crate::manifest::{ManifestCore, SsTableHandle, SsTableId};
 use crate::mem_table_flush::MemtableFlushMsg;
-use crate::utils::SendSafely;
-use crate::wal_replay::ReplayedMemtable;
+use crate::utils::{IdGenerator, SendSafely};
+use crate::wal_replay::{ReplayedMemtable, WalReplayIterator, WalReplayOptions};
+
+pub(crate) struct WalToL0Result {
+    pub(crate) sst_handles: VecDeque<SsTableHandle>,
+    pub(crate) last_tick: Option<i64>,
+    pub(crate) last_seq: Option<u64>,
+}
 
 impl DbInner {
     pub(crate) fn maybe_freeze_memtable(
@@ -75,5 +87,72 @@ impl DbInner {
 
         // replace the memtable
         guard.replace_memtable(replayed_memtable.table)
+    }
+
+    // Replays WALs in the id range into SSTs and flushes them to l0.
+    // Returns the handles of the newly generated and flushed SSTs, a sequence_tracker tracking the
+    // sequence numbers inserted, and the latest sequence number and creation timestamp
+    pub(crate) async fn replay_wal_to_l0(
+        &self,
+        wal_id_range: Range<u64>,
+        core: &ManifestCore,
+    ) -> Result<WalToL0Result, SlateDBError> {
+        let mut result = WalToL0Result {
+            sst_handles: VecDeque::new(),
+            last_tick: None,
+            last_seq: None,
+        };
+
+        if wal_id_range.is_empty() {
+            return Ok(result);
+        }
+
+        debug!("replaying wal_id_range {:?} to l0", &wal_id_range);
+
+        let wal_replay_options = WalReplayOptions {
+            min_memtable_bytes: self.settings.l0_sst_size_bytes,
+            ..WalReplayOptions::default()
+        };
+
+        let mut replay_iter = WalReplayIterator::range(
+            wal_id_range,
+            core,
+            wal_replay_options,
+            Arc::clone(&self.table_store),
+        )
+        .await?;
+
+        while let Some(replayed_table) = replay_iter.next().await? {
+            if replayed_table.table.is_empty() {
+                continue;
+            }
+
+            let id = SsTableId::Compacted(self.rand.rng().gen_ulid(self.system_clock.as_ref()));
+            let l0_len = self.state.read().state().core().l0.len();
+            if l0_len + 1 >= self.settings.l0_max_ssts {
+                warn!(
+                    "too many l0 files [l0_len={}, l0_max_ssts={}]. flushing of replayed_table to l0 sst (id={}) will still run.",
+                    l0_len,
+                    self.settings.l0_max_ssts,
+                    id.unwrap_compacted_id(),
+                );
+            }
+            let iter = replayed_table.table.table().iter();
+            let handle = self.flush_table_iter(&id, iter, false).await?;
+            result.sst_handles.push_front(handle);
+
+            result.last_seq = Some(std::cmp::max(
+                result.last_seq.unwrap_or(replayed_table.last_seq),
+                replayed_table.last_seq,
+            ));
+            result.last_tick = Some(std::cmp::max(
+                result.last_tick.unwrap_or(replayed_table.last_tick),
+                replayed_table.last_tick,
+            ));
+        }
+
+        debug!("Replayed WALs to new L0 SSTs: {:?}", result.sst_handles);
+
+        Ok(result)
     }
 }

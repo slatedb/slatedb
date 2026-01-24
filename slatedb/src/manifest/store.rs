@@ -6,7 +6,7 @@ use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestTransactionalObjectVersionMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, SsTableHandle};
 use crate::rand::DbRand;
 use chrono::Utc;
 use log::debug;
@@ -19,7 +19,7 @@ use slatedb_txn_obj::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
     SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
