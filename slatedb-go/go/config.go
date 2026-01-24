@@ -109,6 +109,7 @@ type DbReaderOptions struct {
 	ManifestPollInterval uint64 // How often to poll for updates (in milliseconds). Default: 10000 (10s) if 0
 	CheckpointLifetime   uint64 // How long checkpoints should live (in milliseconds). Default: 600000 (10m) if 0
 	MaxMemtableBytes     uint64 // Max size of in-memory table for WAL buffering. Default: 67108864 (64MB) if 0
+	SkipWalReplay        bool   // When true, skip WAL replay entirely (only see compacted data). Default: false
 }
 
 // Settings represents SlateDB configuration that mirrors Rust's Settings struct exactly
@@ -486,5 +487,6 @@ func convertToCReaderOptions(opts *DbReaderOptions) *C.CSdbReaderOptions {
 		manifest_poll_interval_ms: C.uint64_t(opts.ManifestPollInterval),
 		checkpoint_lifetime_ms:    C.uint64_t(opts.CheckpointLifetime),
 		max_memtable_bytes:        C.uint64_t(opts.MaxMemtableBytes),
+		skip_wal_replay:           C.bool(opts.SkipWalReplay),
 	}
 }
