@@ -480,6 +480,37 @@ pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usiz
     total_ssts.min(cap).max(1)
 }
 
+/// Estimate the total number of bytes before `key` across sorted runs.
+///
+/// This is a best-effort estimate based on SST boundaries and metadata-only
+/// size estimates; it does not read SST contents. For exmple, if we have:
+///
+/// - Run 1: SSTs [a (10 bytes), k (20 bytes), z (30 bytes)]
+/// - Run 2: SSTs [b (40 bytes), f (50 bytes)]
+///
+/// and we call `estimate_bytes_before_key` with `key = "m"`, the result will be:
+///
+/// - From Run 1: SST "a" (10 bytes) is before "m", SST "k" and "z" are after because
+///   k < m < z.
+/// - From Run 2: SST "b" (40 bytes) is before "m", SST "f" is after because
+///   f < m and it's the last SST.
+pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) -> u64 {
+    sorted_runs
+        .iter()
+        .map(|sorted_run| {
+            let Some(idx) = sorted_run.find_sst_with_range_covering_key_idx(key) else {
+                return 0;
+            };
+            sorted_run
+                .ssts
+                .iter()
+                .take(idx)
+                .map(|sst| sst.estimate_size())
+                .sum::<u64>()
+        })
+        .sum()
+}
+
 /// Concurrently build items with a bounded level of parallelism.
 ///
 /// This function maps each input to an async task using the provided factory `f`,
@@ -663,13 +694,13 @@ mod tests {
     use slatedb_common::MockSystemClock;
 
     use crate::clock::MonotonicClock;
-    use crate::db_state::SsTableId;
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
     use crate::types::RowEntry;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, format_bytes_si, last_written_key_and_seq, panic_string,
-        spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
+        compute_max_parallel, estimate_bytes_before_key, format_bytes_si, last_written_key_and_seq,
+        panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
     use crate::Db;
     use bytes::{BufMut, Bytes, BytesMut};
@@ -702,6 +733,16 @@ mod tests {
         fn captured(&self) -> Option<Result<T, SlateDBError>> {
             self.error.lock().clone()
         }
+    }
+
+    fn make_compacted_sst(start_key: &str, size: u64) -> SsTableHandle {
+        let info = SsTableInfo {
+            first_key: Some(Bytes::from(start_key.as_bytes().to_vec())),
+            index_offset: size.saturating_sub(1),
+            index_len: 1,
+            ..Default::default()
+        };
+        SsTableHandle::new_compacted(SsTableId::Compacted(Ulid::new()), info, None)
     }
 
     #[test]
@@ -1138,6 +1179,28 @@ mod tests {
         assert_eq!(compute_max_parallel(10, &[], 8), 8);
         // Clamp to at least 1 even when cap = 0
         assert_eq!(compute_max_parallel(0, &[], 0), 1);
+    }
+
+    #[test]
+    fn test_estimate_bytes_before_key() {
+        let run1 = SortedRun {
+            id: 1,
+            ssts: vec![
+                make_compacted_sst("a", 10),
+                make_compacted_sst("k", 20), // k < m < z, so only "a" counts
+                make_compacted_sst("z", 30),
+            ],
+        };
+        let run2 = SortedRun {
+            id: 2,
+            // f < m < ..., so only "b" counts
+            ssts: vec![make_compacted_sst("b", 40), make_compacted_sst("f", 50)],
+        };
+
+        let key = Bytes::from("m");
+        let total = estimate_bytes_before_key(&[run1, run2], &key);
+
+        assert_eq!(total, 10 + 40);
     }
 
     // Filters out None; collects only Some(T)

@@ -30,7 +30,8 @@ use slatedb_common::clock::SystemClock;
 
 use crate::compactor::stats::CompactionStats;
 use crate::utils::{
-    build_concurrent, compute_max_parallel, last_written_key_and_seq, spawn_bg_task, IdGenerator,
+    build_concurrent, compute_max_parallel, estimate_bytes_before_key, last_written_key_and_seq,
+    spawn_bg_task, IdGenerator,
 };
 use log::{debug, error};
 use tracing::instrument;
@@ -87,6 +88,7 @@ impl std::fmt::Debug for StartCompactionJobArgs {
 /// Iterator adapter that can resume after a persisted compaction output SST.
 struct ResumingIterator<T: KeyValueIterator> {
     iterator: PeekingIterator<T>,
+    start: Option<(Bytes, u64)>,
 }
 
 impl<T: KeyValueIterator> ResumingIterator<T> {
@@ -113,6 +115,7 @@ impl<T: KeyValueIterator> ResumingIterator<T> {
     async fn new(iterator: T, resume_cursor: Option<(Bytes, u64)>) -> Result<Self, SlateDBError> {
         let mut resuming_iter = Self {
             iterator: PeekingIterator::new(iterator),
+            start: resume_cursor.clone(),
         };
         if let Some((key, seq)) = resume_cursor {
             resuming_iter.iterator.seek(key.as_ref()).await?;
@@ -138,6 +141,12 @@ impl<T: KeyValueIterator> ResumingIterator<T> {
     /// - `&T`: the wrapped iterator.
     fn inner(&self) -> &T {
         self.iterator.inner()
+    }
+
+    /// Returns the resume start cursor, if any. This is the (key, seq) tuple
+    /// used to initialize the iterator.
+    fn start(&self) -> Option<&(Bytes, u64)> {
+        self.start.as_ref()
     }
 }
 
@@ -353,6 +362,10 @@ impl TokioCompactionExecutorInner {
         ));
         let mut bytes_written = 0usize;
         let mut last_progress_report = self.clock.now();
+        // Estimate bytes processed before the resume point, if any.
+        let start_bytes_processed = all_iter.start().map_or(0, |(k, _s)| {
+            estimate_bytes_before_key(args.sorted_runs.as_slice(), k)
+        });
 
         while let Some(kv) = all_iter.next_entry().await? {
             let duration_since_last_report =
@@ -360,7 +373,7 @@ impl TokioCompactionExecutorInner {
             if duration_since_last_report > TimeDelta::seconds(1) {
                 self.send_compaction_progress(
                     args.id,
-                    all_iter.inner().total_bytes_processed(),
+                    start_bytes_processed + all_iter.inner().total_bytes_processed(),
                     &output_ssts,
                 );
                 last_progress_report = self.clock.now();
@@ -384,7 +397,7 @@ impl TokioCompactionExecutorInner {
                 bytes_written = 0;
                 self.send_compaction_progress(
                     args.id,
-                    all_iter.inner().total_bytes_processed(),
+                    start_bytes_processed + all_iter.inner().total_bytes_processed(),
                     &output_ssts,
                 );
                 last_progress_report = self.clock.now();
