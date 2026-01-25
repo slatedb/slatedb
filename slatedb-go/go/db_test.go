@@ -358,6 +358,7 @@ var _ = Describe("DB Builder", func() {
 			customSettings := defaults
 			customSettings.FlushInterval = "200ms" // Override flush interval
 			customSettings.MinFilterKeys = 1500    // Override min filter keys
+			customSettings.ObjectStoreCacheOptions.PreloadDiskCacheOnStartup = slatedb.AllSst
 
 			db, err := builder.
 				WithEnvFile(envFile).
