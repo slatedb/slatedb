@@ -6,7 +6,6 @@ use crate::db_state::SsTableId;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
-use crate::manifest::ManifestCore;
 use crate::utils::IdGenerator;
 use async_trait::async_trait;
 use fail_parallel::fail_point;
@@ -101,6 +100,18 @@ impl MemtableFlusher {
     pub(crate) async fn write_manifest_safely(&mut self) -> Result<(), SlateDBError> {
         loop {
             let result = self.write_manifest().await;
+            if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
+                debug!("conflicting manifest version. updating and retrying write again.");
+                self.load_manifest().await?;
+            } else {
+                return result;
+            }
+        }
+    }
+
+    pub(crate) async fn restore_checkpoint_safely(&mut self, id: Uuid) -> Result<(), SlateDBError> {
+        loop {
+            let result = self.restore_checkpoint(id).await;
             if matches!(result, Err(SlateDBError::TransactionalObjectVersionExists)) {
                 debug!("conflicting manifest version. updating and retrying write again.");
                 self.load_manifest().await?;
@@ -279,45 +290,49 @@ impl MemtableFlusher {
             .await?;
 
         // the restored state will have the original referenced l0 SSTs and the newly flushed l0 SSTs
+        // TODO: pop off <= l0_last_compacted
         let mut merged_l0s = manifest_to_restore.core.l0;
         merged_l0s.reserve(sst_handles.len());
         for sst_handle in sst_handles.iter().rev() {
             merged_l0s.push_front(sst_handle.clone());
         }
 
-        let mut dirty = {
-            let rguard_state = self.db_inner.state.read();
-            rguard_state.state().manifest.clone()
-        };
-        let merged_core = ManifestCore {
-            initialized: manifest_to_restore.core.initialized,
-            l0_last_compacted: manifest_to_restore.core.l0_last_compacted,
-            l0: merged_l0s,
-            compacted: manifest_to_restore.core.compacted,
-            // no wal id's to replay as they should be flushed to l0 already.
-            next_wal_sst_id: fencing_wal_id,
-            replay_after_wal_id: fencing_wal_id,
-            last_l0_clock_tick: last_tick.unwrap_or(manifest_to_restore.core.last_l0_clock_tick),
-            last_l0_seq: last_seq.unwrap_or(manifest_to_restore.core.last_l0_seq),
-            recent_snapshot_min_seq: last_seq.unwrap_or(manifest_to_restore.core.last_l0_seq),
-            sequence_tracker: manifest_to_restore.core.sequence_tracker,
-            // Current checkpoints are presisted as the checkpoints in the manifest to restore may
-            // be invalid at this point in time. This also enables restoring to future checkpoints.
-            checkpoints: dirty.value.core.checkpoints,
-            wal_object_store_uri: manifest_to_restore.core.wal_object_store_uri,
-        };
+        {
+            let mut guard = self.db_inner.state.write();
+            guard.modify(|modifier| {
+                let core = &mut modifier.state.manifest.value.core;
+                core.initialized = manifest_to_restore.core.initialized;
+                core.l0_last_compacted = manifest_to_restore.core.l0_last_compacted;
+                core.l0 = merged_l0s;
+                core.compacted = manifest_to_restore.core.compacted;
+                // no wal id's to replay as they should be flushed to l0 already.
+                core.next_wal_sst_id = fencing_wal_id;
+                core.replay_after_wal_id = fencing_wal_id;
+                core.last_l0_clock_tick =
+                    last_tick.unwrap_or(manifest_to_restore.core.last_l0_clock_tick);
+                core.last_l0_seq = last_seq.unwrap_or(manifest_to_restore.core.last_l0_seq);
+                core.recent_snapshot_min_seq =
+                    last_seq.unwrap_or(manifest_to_restore.core.last_l0_seq);
+                core.sequence_tracker = manifest_to_restore.core.sequence_tracker;
+                core.wal_object_store_uri = manifest_to_restore.core.wal_object_store_uri;
+                // core.checkpoints is intentionally untouched. Current checkpoints are presisted as the
+                // checkpoints in the manifest to restore may be invalid at this point in time.
+                // This also enables restoring to future checkpoints.
 
-        dirty.value.core = merged_core;
-        dirty.value.compactor_epoch += 1; // fence any compactors that might still be running
+                modifier.state.manifest.value.compactor_epoch += 1; // fence any compactors that might still be running
+            });
+        }
 
         debug!(
             "updating manifest with checkpoint {} state from manifest: {}",
             checkpoint.id, checkpoint.manifest_id
         );
-        self.manifest.update(dirty).await?;
+        self.write_manifest_safely().await?;
+        dbg!(self.db_inner.manifest_store.list_manifests(4..).await?);
         Ok(())
     }
 
+    // flushes an empty WAL and returns its WAL id.
     async fn fence_with_wal(&mut self) -> Result<u64, SlateDBError> {
         let wal_id_last_compacted = self
             .db_inner
@@ -370,7 +385,7 @@ impl MessageHandler<MemtableFlushMsg> for MemtableFlusher {
                 write_result.map(|_| ())
             }
             MemtableFlushMsg::RestoreCheckpoint { id, sender } => {
-                let result = self.restore_checkpoint(id).await;
+                let result = self.restore_checkpoint_safely(id).await;
                 if let Err(Err(e)) = sender.send(result.clone()) {
                     error!("Failed to send restore_checkpoint error [error={:?}]", e);
                 }

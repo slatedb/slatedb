@@ -978,10 +978,15 @@ mod tests {
             .unwrap();
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         assert_eq!(
-            Some(Bytes::from_static(b"old_val")), // previous value should be restored
+            Some(Bytes::from_static(b"old_val")),
             db.get(b"key1").await.unwrap(),
+            "previous value should be restored"
         );
-        assert_eq!(None, db.get(b"key2").await.unwrap()); // entry doesn't exist in this checkpoint
+        assert_eq!(
+            None,
+            db.get(b"key2").await.unwrap(),
+            "entry should not exist in this checkpoint"
+        );
         db.close().await.unwrap();
 
         admin
@@ -990,13 +995,15 @@ mod tests {
             .unwrap();
         let db = Db::open(path, object_store).await.unwrap();
         assert_eq!(
-            Some(Bytes::from_static(b"new_val")), // future value should be restored
+            Some(Bytes::from_static(b"new_val")),
             db.get(b"key1").await.unwrap(),
+            "future value should be restored"
         );
         assert_eq!(
             Some(Bytes::from_static(b"new_key")),
-            db.get(b"key2").await.unwrap()
-        ); // entry exists in this checkpoint
+            db.get(b"key2").await.unwrap(),
+            "entry should exist in this checkpoint"
+        );
         db.close().await.unwrap();
     }
 }

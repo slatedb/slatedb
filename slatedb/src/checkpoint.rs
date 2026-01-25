@@ -55,8 +55,8 @@ impl Db {
         result.map_err(Into::into)
     }
 
-    /// Restores the db to a checkpoint. The db should be closed after this function is done as the
-    /// in memory state of the db will be stale.
+    /// Restores the db to a checkpoint and closes the db.
+    /// A new instance of the db should be opened to start using it at the restored state.
     pub(crate) async fn restore_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner.memtable_flush_notifier.send_safely(
@@ -64,8 +64,10 @@ impl Db {
             MemtableFlushMsg::RestoreCheckpoint { id, sender: tx },
         )?;
 
-        let result = rx.await.map_err(SlateDBError::ReadChannelError)?;
-        result.map_err(Into::into)
+        rx.await.map_err(SlateDBError::ReadChannelError)??;
+
+        // The db should be closed here as the in-memory states (active txns, snapshots, oracle etc) might be stale.
+        self.close().await
     }
 }
 
@@ -330,52 +332,6 @@ mod tests {
         let manifest_store = ManifestStore::new(&path, object_store.clone());
         let (_, manifest) = manifest_store.read_latest_manifest().await.unwrap();
         assert!(!manifest.core.checkpoints.iter().any(|c| c.id == id));
-    }
-
-    #[tokio::test]
-    #[rstest]
-    #[case(CheckpointScope::All)]
-    #[case(CheckpointScope::Durable)]
-    async fn test_should_restore_checkpoint(#[case] checkpoint_scope: CheckpointScope) {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_kv_store");
-        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
-
-        db.put(b"key1", b"old_val").await.unwrap();
-        let checkpoint_old = db
-            .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
-            .await
-            .unwrap();
-
-        db.put(b"key1", b"new_val").await.unwrap();
-        db.put(b"key2", b"new_key").await.unwrap();
-        let checkpoint_new = db
-            .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
-            .await
-            .unwrap();
-
-        db.restore_checkpoint(checkpoint_old.id).await.unwrap();
-        db.close().await.unwrap();
-        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
-        assert_eq!(
-            Some(Bytes::from_static(b"old_val")),
-            db.get(b"key1").await.unwrap(),
-        );
-        assert_eq!(None, db.get(b"key2").await.unwrap()); // entry does not exist yet
-        db.close().await.unwrap();
-
-        db.restore_checkpoint(checkpoint_new.id).await.unwrap();
-        db.close().await.unwrap();
-        let db = Db::open(path, object_store).await.unwrap();
-        assert_eq!(
-            Some(Bytes::from_static(b"new_val")),
-            db.get(b"key1").await.unwrap(),
-        );
-        assert_eq!(
-            Some(Bytes::from_static(b"new_key")),
-            db.get(b"key2").await.unwrap()
-        ); // entry should be restored
-        db.close().await.unwrap();
     }
 
     #[tokio::test]
