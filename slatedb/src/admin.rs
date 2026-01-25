@@ -457,11 +457,11 @@ impl Admin {
         sst_block_size: Option<SstBlockSize>,
         compression_codec: Option<CompressionCodec>,
     ) -> Result<(), crate::Error> {
+        // TODO: handle .with_wal_object_store()
         let mut db_builder = Db::builder(
             self.path.clone(),
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
-        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_system_clock(self.system_clock.clone())
         .with_seed(self.rand.seed());
 
@@ -762,9 +762,13 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
+    use crate::config::{CheckpointOptions, CheckpointScope};
+    use crate::Db;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use rstest::rstest;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -942,5 +946,57 @@ mod tests {
         assert_eq!(compaction.spec().destination(), 3);
         assert_eq!(compaction.spec().sources(), &vec![SourceId::SortedRun(3)]);
         assert_eq!(compaction.status(), CompactionStatus::Submitted);
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(CheckpointScope::All)]
+    #[case(CheckpointScope::Durable)]
+    async fn test_admin_should_restore_checkpoint(#[case] checkpoint_scope: CheckpointScope) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
+
+        db.put(b"key1", b"old_val").await.unwrap();
+        let checkpoint_old = db
+            .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        db.put(b"key1", b"new_val").await.unwrap();
+        db.put(b"key2", b"new_key").await.unwrap();
+        let checkpoint_new = db
+            .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+
+        admin
+            .restore_checkpoint(checkpoint_old.id, None, None, None)
+            .await
+            .unwrap();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
+        assert_eq!(
+            Some(Bytes::from_static(b"old_val")), // previous value should be restored
+            db.get(b"key1").await.unwrap(),
+        );
+        assert_eq!(None, db.get(b"key2").await.unwrap()); // entry doesn't exist in this checkpoint
+        db.close().await.unwrap();
+
+        admin
+            .restore_checkpoint(checkpoint_new.id, None, None, None)
+            .await
+            .unwrap();
+        let db = Db::open(path, object_store).await.unwrap();
+        assert_eq!(
+            Some(Bytes::from_static(b"new_val")), // future value should be restored
+            db.get(b"key1").await.unwrap(),
+        );
+        assert_eq!(
+            Some(Bytes::from_static(b"new_key")),
+            db.get(b"key2").await.unwrap()
+        ); // entry exists in this checkpoint
+        db.close().await.unwrap();
     }
 }

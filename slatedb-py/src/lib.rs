@@ -29,6 +29,7 @@ use ::slatedb::Error;
 use ::slatedb::IsolationLevel;
 use ::slatedb::MergeOperator;
 use ::slatedb::MergeOperatorError;
+use ::slatedb::SstBlockSize;
 use chrono::{DateTime, Utc};
 use once_cell::sync::OnceCell;
 use pyo3::create_exception;
@@ -2794,33 +2795,65 @@ impl PySlateDBAdmin {
         })
     }
 
-    #[pyo3(signature = (id, sst_size = None))]
-    fn restore_checkpoint(&self, id: String, sst_size: Option<usize>) -> PyResult<()> {
+    #[pyo3(signature = (id, l0_sst_size= None, sst_block_size= None, compression_codec = None))]
+    fn restore_checkpoint(
+        &self,
+        id: String,
+        l0_sst_size: Option<usize>,
+        sst_block_size: Option<usize>,
+        compression_codec: Option<String>,
+    ) -> PyResult<()> {
         let admin = self.inner.clone();
         let rt = get_runtime();
-        let uuid = Uuid::parse_str(&id)
+        let id = Uuid::parse_str(&id)
             .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
+        let sst_block_size = sst_block_size
+            .map(|b| {
+                SstBlockSize::new(b)
+                    .map_err(|e| InvalidError::new_err(format!("invalid sst block size: {e}")))
+            })
+            .transpose()?;
+        let compression_codec = compression_codec
+            .map(|c| {
+                c.parse()
+                    .map_err(|e| InvalidError::new_err(format!("invalid compression codec: {e}")))
+            })
+            .transpose()?;
         rt.block_on(async move {
             admin
-                .restore_checkpoint(uuid, sst_size)
+                .restore_checkpoint(id, l0_sst_size, sst_block_size, compression_codec)
                 .await
                 .map_err(map_error)
         })
     }
 
-    #[pyo3(signature = (id, sst_size = None))]
+    #[pyo3(signature = (id, l0_sst_size_bytes = None, sst_block_size_bytes = None, compression_codec = None))]
     fn restore_checkpoint_async<'py>(
         &self,
         py: Python<'py>,
         id: String,
-        sst_size: Option<usize>,
+        l0_sst_size_bytes: Option<usize>,
+        sst_block_size_bytes: Option<usize>,
+        compression_codec: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let admin = self.inner.clone();
-        let uuid = Uuid::parse_str(&id)
+        let id = Uuid::parse_str(&id)
             .map_err(|e| InvalidError::new_err(format!("invalid checkpoint UUID: {e}")))?;
+        let sst_block_size = sst_block_size_bytes
+            .map(|b| {
+                SstBlockSize::new(b)
+                    .map_err(|e| InvalidError::new_err(format!("invalid sst block size: {e}")))
+            })
+            .transpose()?;
+        let compression_codec = compression_codec
+            .map(|c| {
+                c.parse()
+                    .map_err(|e| InvalidError::new_err(format!("invalid compression codec: {e}")))
+            })
+            .transpose()?;
         future_into_py(py, async move {
             admin
-                .restore_checkpoint(uuid, sst_size)
+                .restore_checkpoint(id, l0_sst_size_bytes, sst_block_size, compression_codec)
                 .await
                 .map_err(map_error)
         })

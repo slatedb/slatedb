@@ -151,7 +151,7 @@ impl DbInner {
             ));
         }
 
-        debug!("Replayed WALs to new L0 SSTs: {:?}", result.sst_handles);
+        debug!("replayed WALs to new L0 SSTs: {:?}", result.sst_handles);
 
         Ok(result)
     }

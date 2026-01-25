@@ -121,6 +121,13 @@ async fn test_all_block_sizes(
     // Verify the enum returns the correct byte value
     assert_eq!(block_size_enum.as_bytes(), expected_bytes);
 
+    // Verify the enum can be formed from the byte value
+    assert_eq!(
+        SstBlockSize::new(expected_bytes)
+            .expect("should be able to build SstBlockSize from byte value"),
+        block_size_enum
+    );
+
     // Verify we can create a DB with each size
     let db = Db::builder(
         format!("/tmp/test_block_size_{}", expected_bytes),

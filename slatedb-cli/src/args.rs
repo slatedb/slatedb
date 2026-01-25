@@ -311,17 +311,11 @@ fn parse_compaction_request(s: &str) -> Result<CompactionRequest, String> {
     serde_json::from_str(s).map_err(|e| format!("Invalid compaction request JSON: {e}"))
 }
 
-fn parse_sst_block_size(size_bytes: &str) -> Result<Option<SstBlockSize>, String> {
-    match size_bytes {
-        "1024" => Ok(Some(SstBlockSize::Block1Kib)),
-        "2048" => Ok(Some(SstBlockSize::Block2Kib)),
-        "4096" => Ok(Some(SstBlockSize::Block4Kib)),
-        "8192" => Ok(Some(SstBlockSize::Block8Kib)),
-        "16384" => Ok(Some(SstBlockSize::Block16Kib)),
-        "32768" => Ok(Some(SstBlockSize::Block32Kib)),
-        "65536" => Ok(Some(SstBlockSize::Block64Kib)),
-        _ => Err(format!("Invalid block size: {}. Must be one of: 1024, 2048, 4096, 8192, 16384, 32768, or 65536", size_bytes)),
-        }
+fn parse_sst_block_size(bytes: &str) -> Result<Option<SstBlockSize>, String> {
+    let size: usize = bytes
+        .parse()
+        .map_err(|e| format!("could not parse sst_block_size to usize: {}", e))?;
+    Ok(Some(SstBlockSize::new(size).map_err(|e| e.to_string())?))
 }
 
 fn parse_find_option(s: &str) -> Result<FindOption, String> {

@@ -229,6 +229,22 @@ pub enum SstBlockSize {
 }
 
 impl SstBlockSize {
+    pub fn new(bytes: usize) -> Result<SstBlockSize, crate::Error> {
+        match bytes {
+            1024 => Ok(SstBlockSize::Block1Kib),
+            2048 => Ok(SstBlockSize::Block2Kib),
+            4096 => Ok(SstBlockSize::Block4Kib),
+            8192 => Ok(SstBlockSize::Block8Kib),
+            16384 => Ok(SstBlockSize::Block16Kib),
+            32768 => Ok(SstBlockSize::Block32Kib),
+            65536 => Ok(SstBlockSize::Block64Kib),
+            #[cfg(test)]
+            other => Ok(SstBlockSize::Other(other)),
+            #[cfg(not(test))]
+            invalid => Err(SlateDBError::InvalidSSTBlockSize(invalid).into()),
+        }
+    }
+
     /// Get the block size in bytes
     pub fn as_bytes(&self) -> usize {
         match self {

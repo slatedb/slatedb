@@ -1,10 +1,10 @@
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
+use crate::db_common::WalToL0Result;
 use crate::db_state::SsTableId;
 use crate::dispatcher::{MessageFactory, MessageHandler};
 use crate::error::SlateDBError;
-use crate::flush::WalToL0Result;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::ManifestCore;
 use crate::utils::IdGenerator;
@@ -310,6 +310,10 @@ impl MemtableFlusher {
         dirty.value.core = merged_core;
         dirty.value.compactor_epoch += 1; // fence any compactors that might still be running
 
+        debug!(
+            "updating manifest with checkpoint {} state from manifest: {}",
+            checkpoint.id, checkpoint.manifest_id
+        );
         self.manifest.update(dirty).await?;
         Ok(())
     }
