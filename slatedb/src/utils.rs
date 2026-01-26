@@ -1,10 +1,10 @@
-use crate::block_iterator::BlockIterator;
 use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
+use crate::format::block_iterator::BlockIterator;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;

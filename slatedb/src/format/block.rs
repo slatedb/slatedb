@@ -1,5 +1,5 @@
 use crate::error::SlateDBError;
-use crate::row_codec::{SstRowCodecV0, SstRowEntry};
+use crate::format::row_codec::{SstRowCodecV0, SstRowEntry};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -204,7 +204,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::block_iterator::BlockIterator;
+    use crate::format::block_iterator::BlockIterator;
     use crate::test_utils::assert_iterator;
     use crate::{
         test_utils::{assert_debug_snapshot, decode_codec_entries},

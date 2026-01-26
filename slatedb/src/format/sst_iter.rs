@@ -13,9 +13,9 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter::{self, BloomFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
+use crate::format::block::Block;
+use crate::format::block_iterator::BlockIterator;
 use crate::{
-    block::Block,
-    block_iterator::BlockIterator,
     iter::{init_optional_iterator, KeyValueIterator},
     partitioned_keyspace,
     tablestore::TableStore,
@@ -842,8 +842,8 @@ mod tests {
     use crate::db_state::SsTableId;
     use crate::db_stats::DbStats;
     use crate::filter;
+    use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
-    use crate::sst::SsTableFormat;
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::{assert_kv, gen_attrs};
     use crate::types::ValueDeletable;
