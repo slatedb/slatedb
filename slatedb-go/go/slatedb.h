@@ -113,6 +113,8 @@ typedef struct CSdbReaderOptions {
     uint64_t checkpoint_lifetime_ms;
     // Max size of in-memory table for WAL buffering
     uint64_t max_memtable_bytes;
+    // When true, skip WAL replay entirely (only see compacted data)
+    bool skip_wal_replay;
 } CSdbReaderOptions;
 
 typedef struct CSdbKeyValue {
