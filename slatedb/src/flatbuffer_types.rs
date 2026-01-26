@@ -118,12 +118,12 @@ impl SsTableInfoCodec for FlatBufferSsTableInfoCodec {
 
 impl FlatBufferSsTableInfoCodec {
     pub(crate) fn sst_info(info: &FbSsTableInfo) -> SsTableInfo {
-        let first_key: Option<Bytes> = info
-            .first_key()
-            .map(|key| Bytes::copy_from_slice(key.bytes()));
+        let first_entry: Option<Bytes> = info
+            .first_entry()
+            .map(|entry| Bytes::copy_from_slice(entry.bytes()));
 
         SsTableInfo {
-            first_key,
+            first_entry,
             index_offset: info.index_offset(),
             index_len: info.index_len(),
             filter_offset: info.filter_offset(),
@@ -405,15 +405,15 @@ impl<'b> DbFlatBufferBuilder<'b> {
     }
 
     fn add_sst_info(&mut self, info: &SsTableInfo) -> WIPOffset<FbSsTableInfo<'b>> {
-        let first_key = match info.first_key.as_ref() {
+        let first_entry = match info.first_entry.as_ref() {
             None => None,
-            Some(first_key_vector) => Some(self.builder.create_vector(first_key_vector)),
+            Some(first_entry_vector) => Some(self.builder.create_vector(first_entry_vector)),
         };
 
         FbSsTableInfo::create(
             &mut self.builder,
             &SsTableInfoArgs {
-                first_key,
+                first_entry,
                 index_offset: info.index_offset,
                 index_len: info.index_len,
                 filter_offset: info.filter_offset,
@@ -876,11 +876,11 @@ mod tests {
 
     #[test]
     fn test_should_encode_decode_ssts_with_visible_ranges() {
-        fn new_sst_handle(first_key: &[u8], visible_range: Option<BytesRange>) -> SsTableHandle {
+        fn new_sst_handle(first_entry: &[u8], visible_range: Option<BytesRange>) -> SsTableHandle {
             SsTableHandle::new_compacted(
                 SsTableId::Compacted(ulid::Ulid::new()),
                 SsTableInfo {
-                    first_key: Some(Bytes::copy_from_slice(first_key)),
+                    first_entry: Some(Bytes::copy_from_slice(first_entry)),
                     ..Default::default()
                 },
                 visible_range,
