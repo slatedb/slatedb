@@ -737,7 +737,7 @@ mod tests {
 
     fn make_compacted_sst(start_key: &str, size: u64) -> SsTableHandle {
         let info = SsTableInfo {
-            first_key: Some(Bytes::from(start_key.as_bytes().to_vec())),
+            first_entry: Some(Bytes::from(start_key.as_bytes().to_vec())),
             index_offset: size.saturating_sub(1),
             index_len: 1,
             ..Default::default()
