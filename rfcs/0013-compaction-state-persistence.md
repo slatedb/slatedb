@@ -243,7 +243,7 @@ table Compaction {
     // ID of compaction
     id: Ulid (required);
 
-    // Specificaiton defining the work to be done for this compaction
+    // Specification defining the work to be done for this compaction
     spec: CompactionSpec (required);
 
     // Current lifecycle status for this compaction
