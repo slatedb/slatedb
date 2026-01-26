@@ -235,6 +235,7 @@ impl BlockBuilderV2 {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn restart_interval(&self) -> usize {
         self.restart_interval
     }

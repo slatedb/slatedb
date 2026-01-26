@@ -71,6 +71,13 @@ impl<B: BlockLike> BlockIteratorV2<B> {
         Self::new(block, IterationOrder::Ascending)
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        match &self.inner {
+            BlockIteratorInner::Ascending(state) => state.is_empty(),
+            BlockIteratorInner::Descending(state) => state.is_empty(),
+        }
+    }
+
     /// Decode the first key at a given restart point.
     fn decode_first_key_at_restart(block: &B, restart_idx: usize) -> Bytes {
         let restart_offset = block.offsets()[restart_idx] as usize;
@@ -347,6 +354,10 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
         }
 
         iter
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.exhausted
     }
 
     /// Load all entries from a restart region into the cache using the ascending iterator.

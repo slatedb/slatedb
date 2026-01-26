@@ -299,6 +299,16 @@ impl TableStore {
         Ok(SsTableHandle::new(*id, info))
     }
 
+    pub(crate) async fn read_sst_version(
+        &self,
+        handle: &SsTableHandle,
+    ) -> Result<u16, SlateDBError> {
+        let object_store = self.object_stores.store_for(&handle.id);
+        let path = self.path(&handle.id);
+        let obj = ReadOnlyObject { object_store, path };
+        self.sst_format.read_version(&obj).await
+    }
+
     /// Reads the Bloom filter of an SSTable.
     ///
     /// ## Arguments

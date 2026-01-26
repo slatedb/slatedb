@@ -68,12 +68,18 @@ use crate::flatbuffer_types::{
     SsTableIndexOwned,
 };
 use crate::format::block::{Block, BlockBuilder};
+use crate::format::block_v2::BlockBuilderV2;
 use crate::format::row_codec;
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 
 pub(crate) const SST_FORMAT_VERSION: u16 = 1;
+pub(crate) const SST_FORMAT_VERSION_V2: u16 = 2;
+
+fn is_supported_version(version: u16) -> bool {
+    matches!(version, SST_FORMAT_VERSION | SST_FORMAT_VERSION_V2)
+}
 
 // 8 bytes for the metadata offset + 2 bytes for the version
 const NUM_FOOTER_BYTES: usize = 10;
@@ -153,32 +159,47 @@ impl Default for SsTableFormat {
 }
 
 impl SsTableFormat {
-    pub(crate) async fn read_info(
+    async fn read_footer_header(
         &self,
         obj: &impl ReadOnlyBlob,
-    ) -> Result<SsTableInfo, SlateDBError> {
+    ) -> Result<(u64, u16), SlateDBError> {
         let obj_len = obj.len().await?;
         if obj_len <= NUM_FOOTER_BYTES_LONG {
             return Err(SlateDBError::EmptySSTable);
         }
-        // Get the size of the metadata
         let header = obj
             .read_range((obj_len - NUM_FOOTER_BYTES_LONG)..obj_len)
             .await?;
         assert!(header.len() == NUM_FOOTER_BYTES);
 
-        // Last 2 bytes of the header represent the version
         let version = header.slice(8..NUM_FOOTER_BYTES).get_u16();
-        // TODO: Support older and newer versions
-        if version != SST_FORMAT_VERSION {
+        let sst_metadata_offset = header.slice(0..8).get_u64();
+        Ok((sst_metadata_offset, version))
+    }
+
+    fn validate_version(&self, version: u16) -> Result<(), SlateDBError> {
+        if !is_supported_version(version) {
             return Err(SlateDBError::InvalidVersion {
                 expected_version: SST_FORMAT_VERSION,
                 actual_version: version,
             });
         }
+        Ok(())
+    }
 
-        // First 8 bytes of the header represent the metadata offset
-        let sst_metadata_offset = header.slice(0..8).get_u64();
+    pub(crate) async fn read_version(&self, obj: &impl ReadOnlyBlob) -> Result<u16, SlateDBError> {
+        let (_, version) = self.read_footer_header(obj).await?;
+        self.validate_version(version)?;
+        Ok(version)
+    }
+
+    pub(crate) async fn read_info(
+        &self,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<SsTableInfo, SlateDBError> {
+        let (sst_metadata_offset, version) = self.read_footer_header(obj).await?;
+        self.validate_version(version)?;
+        let obj_len = obj.len().await?;
         let sst_metadata_bytes = obj
             .read_range(sst_metadata_offset..obj_len - NUM_FOOTER_BYTES_LONG)
             .await?;
@@ -535,10 +556,60 @@ impl EncodedSsTableBlock {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BlockFormat {
+    V1,
+    #[allow(dead_code)]
+    V2,
+}
+
+enum BlockBuilderImpl {
+    // TODO: temporary during migration; eventually write V2 only while still reading legacy V1.
+    V1(BlockBuilder),
+    V2(BlockBuilderV2),
+}
+
+impl BlockBuilderImpl {
+    fn new(block_format: BlockFormat, block_size: usize) -> Self {
+        match block_format {
+            BlockFormat::V1 => Self::V1(BlockBuilder::new(block_size)),
+            BlockFormat::V2 => Self::V2(BlockBuilderV2::new(block_size)),
+        }
+    }
+
+    fn would_fit(&self, entry: &RowEntry) -> bool {
+        match self {
+            Self::V1(builder) => builder.would_fit(entry),
+            Self::V2(builder) => builder.would_fit(entry),
+        }
+    }
+
+    fn add(&mut self, entry: RowEntry) -> bool {
+        match self {
+            Self::V1(builder) => builder.add(entry),
+            Self::V2(builder) => builder.add(entry),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::V1(builder) => builder.is_empty(),
+            Self::V2(builder) => builder.is_empty(),
+        }
+    }
+
+    fn build(self) -> Result<Block, SlateDBError> {
+        match self {
+            Self::V1(builder) => builder.build(),
+            Self::V2(builder) => builder.build(),
+        }
+    }
+}
+
 /// Builder for encoding a single SST block with compression and transformation.
 pub(crate) struct EncodedSsTableBlockBuilder {
     /// builder for data blocks
-    block_builder: BlockBuilder,
+    block_builder: BlockBuilderImpl,
     /// offset of the block within the SST
     offset: u64,
     /// codec for compressing the data block
@@ -548,7 +619,11 @@ pub(crate) struct EncodedSsTableBlockBuilder {
 }
 
 impl EncodedSsTableBlockBuilder {
-    pub(crate) fn new(block_builder: BlockBuilder, offset: u64) -> Self {
+    pub(crate) fn new_v1(block_builder: BlockBuilder, offset: u64) -> Self {
+        Self::new(BlockBuilderImpl::V1(block_builder), offset)
+    }
+
+    fn new(block_builder: BlockBuilderImpl, offset: u64) -> Self {
         Self {
             block_builder,
             offset,
@@ -602,6 +677,8 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     blocks_size: u64,
     /// first entry in the SST, key for compacted data, sequence number for WAL
     first_entry: Option<Bytes>,
+    /// format version for the SST footer
+    sst_format_version: u16,
     /// codec for compressing data blocks, index blocks, and filter blocks
     compression_codec: Option<CompressionCodec>,
     /// transformer for transforming data blocks, index blocks, and filter blocks
@@ -620,6 +697,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
     pub(crate) fn new(
         blocks_len: u64,
         sst_first_entry: Option<Bytes>,
+        sst_format_version: u16,
         sst_codec: &'a dyn SsTableInfoCodec,
         index_builder: flatbuffers::FlatBufferBuilder<'b, DefaultAllocator>,
         block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
@@ -627,6 +705,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         Self {
             blocks_size: blocks_len,
             first_entry: sst_first_entry,
+            sst_format_version,
             compression_codec: None,
             block_transformer: None,
             sst_info_codec: sst_codec,
@@ -705,7 +784,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         SsTableInfo::encode(&info, &mut buf, self.sst_info_codec);
 
         buf.put_u64(meta_offset);
-        buf.put_u16(SST_FORMAT_VERSION);
+        buf.put_u16(self.sst_format_version);
 
         Ok(EncodedSsTableFooter {
             info,
@@ -822,7 +901,7 @@ async fn transform(
 
 /// Builds an SSTable from key-value pairs.
 pub(crate) struct EncodedSsTableBuilder<'a> {
-    builder: BlockBuilder,
+    builder: BlockBuilderImpl,
     index_builder: flatbuffers::FlatBufferBuilder<'a, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     sst_first_entry: Option<Bytes>,
@@ -831,6 +910,8 @@ pub(crate) struct EncodedSsTableBuilder<'a> {
     current_len: u64,
     blocks: VecDeque<EncodedSsTableBlock>,
     block_size: usize,
+    block_format: BlockFormat,
+    sst_format_version: u16,
     min_filter_keys: u32,
     num_keys: u32,
     filter_builder: BloomFilterBuilder,
@@ -855,7 +936,9 @@ impl EncodedSsTableBuilder<'_> {
             sst_first_entry: None,
             current_block_max_key: None,
             block_size,
-            builder: BlockBuilder::new(block_size),
+            block_format: BlockFormat::V1,
+            builder: BlockBuilderImpl::new(BlockFormat::V1, block_size),
+            sst_format_version: SST_FORMAT_VERSION,
             min_filter_keys,
             num_keys: 0,
             filter_builder: BloomFilterBuilder::new(filter_bits_per_key),
@@ -876,6 +959,23 @@ impl EncodedSsTableBuilder<'_> {
     fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_block_format(mut self, block_format: BlockFormat) -> Self {
+        self.block_format = block_format;
+        self.builder = BlockBuilderImpl::new(block_format, self.block_size);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_sst_format_version(mut self, version: u16) -> Self {
+        self.sst_format_version = version;
+        self
+    }
+
+    fn new_block_builder(&self) -> BlockBuilderImpl {
+        BlockBuilderImpl::new(self.block_format, self.block_size)
     }
 
     /// Adds an entry to the SSTable and returns the size of the block that was finished if any.
@@ -938,7 +1038,7 @@ impl EncodedSsTableBuilder<'_> {
             return Ok(None);
         }
 
-        let new_builder = BlockBuilder::new(self.block_size);
+        let new_builder = self.new_block_builder();
         let builder = std::mem::replace(&mut self.builder, new_builder);
         let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
         if let Some(codec) = self.compression_codec {
@@ -1003,6 +1103,7 @@ impl EncodedSsTableBuilder<'_> {
         let mut footer_builder = EncodedSsTableFooterBuilder::new(
             self.current_len,
             self.sst_first_entry,
+            self.sst_format_version,
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,

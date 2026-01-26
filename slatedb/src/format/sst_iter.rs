@@ -14,7 +14,9 @@ use crate::error::SlateDBError;
 use crate::filter::{self, BloomFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
-use crate::format::block_iterator::BlockIterator;
+use crate::format::block_iterator::{BlockIterator, BlockLike};
+use crate::format::block_iterator_v2::BlockIteratorV2;
+use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::{
     iter::{init_optional_iterator, KeyValueIterator},
     partitioned_keyspace,
@@ -25,6 +27,45 @@ use crate::{
 enum FetchTask {
     InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
     Finished(VecDeque<Arc<Block>>),
+}
+
+enum DataBlockIterator<B: BlockLike> {
+    V1(BlockIterator<B>),
+    V2(BlockIteratorV2<B>),
+}
+
+impl<B: BlockLike> DataBlockIterator<B> {
+    fn new_ascending(block: B, sst_version: u16) -> Result<Self, SlateDBError> {
+        match sst_version {
+            SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new_ascending(block))),
+            SST_FORMAT_VERSION_V2 => Ok(Self::V2(BlockIteratorV2::new_ascending(block))),
+            _ => Err(SlateDBError::InvalidVersion {
+                expected_version: SST_FORMAT_VERSION,
+                actual_version: sst_version,
+            }),
+        }
+    }
+
+    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        match self {
+            Self::V1(iter) => iter.next_entry().await,
+            Self::V2(iter) => iter.next_entry().await,
+        }
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        match self {
+            Self::V1(iter) => iter.seek(next_key).await,
+            Self::V2(iter) => iter.seek(next_key).await,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::V1(iter) => iter.is_empty(),
+            Self::V2(iter) => iter.is_empty(),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -102,7 +143,7 @@ impl SstView<'_> {
 
 struct IteratorState {
     initialized: bool,
-    current_iter: Option<BlockIterator<Arc<Block>>>,
+    current_iter: Option<DataBlockIterator<Arc<Block>>>,
 }
 
 impl IteratorState {
@@ -121,7 +162,7 @@ impl IteratorState {
         self.initialized
     }
 
-    fn advance(&mut self, iterator: BlockIterator<Arc<Block>>) {
+    fn advance(&mut self, iterator: DataBlockIterator<Arc<Block>>) {
         self.initialized = true;
         self.current_iter = Some(iterator);
     }
@@ -221,6 +262,7 @@ pub(crate) struct InternalSstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
+    sst_version: Option<u16>,
 }
 
 impl<'a> InternalSstIterator<'a> {
@@ -241,6 +283,7 @@ impl<'a> InternalSstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
+            sst_version: None,
         })
     }
 
@@ -401,10 +444,13 @@ impl<'a> InternalSstIterator<'a> {
     async fn next_iter(
         &mut self,
         spawn_fetches: bool,
-    ) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
+    ) -> Result<Option<DataBlockIterator<Arc<Block>>>, SlateDBError> {
         if self.index.is_none() {
             return Ok(None);
         }
+        let sst_version = self
+            .sst_version
+            .expect("sst version should be loaded before iterating blocks");
         loop {
             if spawn_fetches {
                 self.spawn_fetches();
@@ -417,7 +463,7 @@ impl<'a> InternalSstIterator<'a> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(BlockIterator::new_ascending(block)));
+                            return Ok(Some(DataBlockIterator::new_ascending(block, sst_version)?));
                         } else {
                             self.fetch_tasks.pop_front();
                         }
@@ -457,6 +503,13 @@ impl<'a> InternalSstIterator<'a> {
 
     async fn fetch_index(&mut self) -> Result<(), SlateDBError> {
         if self.index.is_none() {
+            if self.sst_version.is_none() {
+                let version = self
+                    .table_store
+                    .read_sst_version(self.view.table_as_ref())
+                    .await?;
+                self.sst_version = Some(version);
+            }
             let index = self
                 .table_store
                 .read_index(self.view.table_as_ref(), self.options.cache_blocks)
@@ -1541,5 +1594,110 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+    use crate::db_state::SsTableId;
+    use crate::format::sst::{BlockFormat, SsTableFormat, SST_FORMAT_VERSION_V2};
+    use crate::object_stores::ObjectStores;
+    use crate::test_utils::gen_attrs;
+    use object_store::path::Path;
+    use object_store::{memory::InMemory, ObjectStore};
+    use std::sync::Arc;
+
+    fn v2_builder(table_store: &Arc<TableStore>) -> crate::format::sst::EncodedSsTableBuilder<'_> {
+        table_store
+            .table_builder()
+            .with_sst_format_version(SST_FORMAT_VERSION_V2)
+            .with_block_format(BlockFormat::V2)
+    }
+
+    async fn build_v2_sst(table_store: &Arc<TableStore>) -> SsTableHandle {
+        let mut builder = v2_builder(table_store);
+        builder
+            .add_value(b"key1", b"value1", gen_attrs(1))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key2", b"value2", gen_attrs(2))
+            .await
+            .unwrap();
+        builder
+            .add_value(b"key3", b"value3", gen_attrs(3))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::Wal(0);
+        table_store.write_sst(&id, encoded, false).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_v2_sst_iter_scan() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        ));
+
+        let sst_handle = build_v2_sst(&table_store).await;
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_handle,
+            table_store,
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"key1".as_slice());
+        assert_eq!(kv.value, b"value1".as_slice());
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"key2".as_slice());
+        assert_eq!(kv.value, b"value2".as_slice());
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"key3".as_slice());
+        assert_eq!(kv.value, b"value3".as_slice());
+        let kv = iter.next().await.unwrap();
+        assert!(kv.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_v2_sst_iter_for_key() {
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            format,
+            root_path,
+            None,
+        ));
+
+        let sst_handle = build_v2_sst(&table_store).await;
+        let mut iter = SstIterator::for_key_with_stats_initialized(
+            &sst_handle,
+            b"key2",
+            table_store,
+            SstIteratorOptions::default(),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("Expected Some(iter) but got None");
+
+        let kv = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv.key, b"key2".as_slice());
+        assert_eq!(kv.value.as_bytes().as_deref(), Some(b"value2".as_slice()));
+        let kv = iter.next_entry().await.unwrap();
+        assert!(kv.is_none());
     }
 }
