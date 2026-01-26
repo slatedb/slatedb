@@ -465,9 +465,13 @@ impl Admin {
         .with_system_clock(self.system_clock.clone())
         .with_seed(self.rand.seed());
 
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            compression_codec,
+            compactor_options: None,
+            garbage_collector_options: None,
+            ..Default::default()
+        };
         settings.l0_sst_size_bytes = l0_sst_size_bytes.unwrap_or(settings.l0_sst_size_bytes);
-        settings.compression_codec = compression_codec;
         db_builder = db_builder.with_settings(settings);
 
         if let Some(sst_block_size) = sst_block_size {
