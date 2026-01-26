@@ -70,8 +70,7 @@ thread_local = { workspace = true }
 url = "2.5.4"
 
 [build-dependencies]
-ureq = "2.12"
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
+cmake = "0.1.57"
 
 [dev-dependencies]
 backtrace = "0.3"
