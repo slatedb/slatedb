@@ -669,6 +669,31 @@ impl CompactorEventHandler {
             return Err(SlateDBError::InvalidCompaction);
         }
 
+        // Validate compaction sources exist in DB state
+        let db_state = self.state().db_state();
+        let l0_ids = db_state
+            .l0
+            .iter()
+            .filter_map(|sst| match sst.id {
+                crate::db_state::SsTableId::Compacted(id) => Some(id),
+                crate::db_state::SsTableId::Wal(_) => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let sr_ids = db_state
+            .compacted
+            .iter()
+            .map(|sr| sr.id)
+            .collect::<std::collections::HashSet<_>>();
+
+        if let Some(missing) = compaction.sources().iter().find(|source| match source {
+            SourceId::Sst(id) => !l0_ids.contains(id),
+            SourceId::SortedRun(id) => !sr_ids.contains(id),
+        }) {
+            warn!("compaction source missing from db state: {:?}", missing);
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+        // Validate L0-only compactions create a new SR with id > highest existing
         let has_only_l0 = compaction
             .sources()
             .iter()
@@ -3433,10 +3458,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_compaction_rejects_missing_l0_source() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.handler.handle_ticker().await.unwrap();
+        let c = CompactionSpec::new(vec![SourceId::Sst(Ulid::new())], 0);
+        let err = fixture.handler.validate_compaction(&c).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    #[tokio::test]
+    async fn test_validate_compaction_rejects_missing_sr_source() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.handler.handle_ticker().await.unwrap();
+        let c = CompactionSpec::new(vec![SourceId::SortedRun(42)], 42);
+        let err = fixture.handler.validate_compaction(&c).unwrap_err();
+        assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    #[tokio::test]
     async fn test_validate_compaction_l0_only_ok_when_no_sr() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         // ensure at least one L0 exists
         fixture.write_l0().await;
+        fixture.handler.handle_ticker().await.unwrap();
         let c = fixture.build_l0_compaction().await;
         fixture.handler.validate_compaction(&c).unwrap();
     }
@@ -3467,6 +3511,7 @@ mod tests {
 
         // now highest_id should be 1; build L0-only compaction with dest 0 (below highest)
         fixture.write_l0().await;
+        fixture.handler.handle_ticker().await.unwrap();
         let c2 = fixture.build_l0_compaction().await; // destination 0
         let err = fixture.handler.validate_compaction(&c2).unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
@@ -3498,6 +3543,7 @@ mod tests {
 
         // prepare a mixed compaction: one SR source and one L0 source
         fixture.write_l0().await;
+        fixture.handler.handle_ticker().await.unwrap();
         let state = fixture.latest_db_state().await;
         let sr_id = state.compacted.first().unwrap().id;
         let l0_ulid = state.l0.front().unwrap().id.unwrap_compacted_id();
