@@ -113,7 +113,7 @@ impl Display for CompactionSpec {
 ///
 /// State transitions:
 /// ```text
-/// Submitted --> Running --> Completed
+/// Submitted <-> Running --> Completed
 ///     |             |
 ///     |             v
 ///     +----------> Failed
