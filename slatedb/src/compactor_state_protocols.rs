@@ -590,7 +590,7 @@ mod tests {
             SsTableHandle::new_compacted(
                 SsTableId::Compacted(Ulid::from_parts(10, 0)),
                 SsTableInfo {
-                    first_key: Some(Bytes::copy_from_slice(b"a")),
+                    first_entry: Some(Bytes::copy_from_slice(b"a")),
                     ..Default::default()
                 },
                 None,
@@ -598,7 +598,7 @@ mod tests {
             SsTableHandle::new_compacted(
                 SsTableId::Compacted(Ulid::from_parts(11, 0)),
                 SsTableInfo {
-                    first_key: Some(Bytes::copy_from_slice(b"m")),
+                    first_entry: Some(Bytes::copy_from_slice(b"m")),
                     ..Default::default()
                 },
                 None,

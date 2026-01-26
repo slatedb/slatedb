@@ -319,26 +319,30 @@ mod tests {
 
     struct SstEntry {
         sst_alias: &'static str,
-        first_key: Bytes,
+        first_entry: Bytes,
         visible_range: Option<BytesRange>,
     }
 
     impl SstEntry {
-        fn regular(sst_alias: &'static str, first_key: &'static str) -> Self {
+        fn regular(sst_alias: &'static str, first_entry: &'static str) -> Self {
             Self {
                 sst_alias,
-                first_key: Bytes::copy_from_slice(first_key.as_bytes()),
+                first_entry: Bytes::copy_from_slice(first_entry.as_bytes()),
                 visible_range: None,
             }
         }
 
-        fn projected<T>(sst_alias: &'static str, first_key: &'static str, visible_range: T) -> Self
+        fn projected<T>(
+            sst_alias: &'static str,
+            first_entry: &'static str,
+            visible_range: T,
+        ) -> Self
         where
             T: RangeBounds<&'static str>,
         {
             Self {
                 sst_alias,
-                first_key: Bytes::copy_from_slice(first_key.as_bytes()),
+                first_entry: Bytes::copy_from_slice(first_entry.as_bytes()),
                 visible_range: Some(BytesRange::from_ref(visible_range)),
             }
         }
@@ -542,7 +546,7 @@ mod tests {
             core.l0.push_back(SsTableHandle::new_compacted(
                 sst_id_fn(entry.sst_alias),
                 SsTableInfo {
-                    first_key: Some(entry.first_key.clone()),
+                    first_entry: Some(entry.first_entry.clone()),
                     ..SsTableInfo::default()
                 },
                 entry.visible_range.clone(),
@@ -557,7 +561,7 @@ mod tests {
                         SsTableHandle::new_compacted(
                             sst_id_fn(entry.sst_alias),
                             SsTableInfo {
-                                first_key: Some(entry.first_key.clone()),
+                                first_entry: Some(entry.first_entry.clone()),
                                 ..SsTableInfo::default()
                             },
                             entry.visible_range.clone(),
@@ -587,9 +591,9 @@ mod tests {
                     .map(|a| a.as_str())
                     .unwrap_or("UNKNOWN");
 
-                let first_key = handle
+                let first_entry = handle
                     .info
-                    .first_key
+                    .first_entry
                     .as_ref()
                     .map(|k| format!("{:?}", k))
                     .unwrap();
@@ -607,10 +611,10 @@ mod tests {
                 };
 
                 error_msg.push_str(&format!(
-                    "{}. {} (first_key: {}, visible_range: {}){}\n",
+                    "{}. {} (first_entry: {}, visible_range: {}){}\n",
                     idx + 1,
                     id_str,
-                    first_key,
+                    first_entry,
                     visible_range,
                     result
                 ));
@@ -622,9 +626,9 @@ mod tests {
             for (idx, handle) in expected.core.l0.iter().enumerate() {
                 let id_str = sst_aliases.get(&handle.id).unwrap();
 
-                let first_key = handle
+                let first_entry = handle
                     .info
-                    .first_key
+                    .first_entry
                     .as_ref()
                     .map(|k| format!("{:?}", k))
                     .unwrap();
@@ -636,10 +640,10 @@ mod tests {
                     .unwrap_or_else(|| "None".to_string());
 
                 error_msg.push_str(&format!(
-                    "{}. {} (first_key: {}, visible_range: {})\n",
+                    "{}. {} (first_entry: {}, visible_range: {})\n",
                     idx + 1,
                     id_str,
-                    first_key,
+                    first_entry,
                     visible_range
                 ));
             }

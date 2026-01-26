@@ -108,7 +108,7 @@ impl DbReaderInner {
             Self::get_or_create_checkpoint(&mut manifest, checkpoint_id, &options, rand.clone())
                 .await?;
 
-        let replay_new_wals = checkpoint_id.is_none();
+        let replay_new_wals = checkpoint_id.is_none() && !options.skip_wal_replay;
         let initial_state = Arc::new(
             Self::build_initial_checkpoint_state(
                 Arc::clone(&manifest_store),
@@ -238,6 +238,9 @@ impl DbReaderInner {
     }
 
     async fn maybe_replay_new_wals(&self) -> Result<(), SlateDBError> {
+        if self.options.skip_wal_replay {
+            return Ok(());
+        }
         let last_seen_wal_id = self.table_store.last_seen_wal_id().await?;
         let last_replayed_wal_id = self.state.read().last_wal_id;
         if last_seen_wal_id > last_replayed_wal_id {
@@ -1232,6 +1235,109 @@ mod tests {
         let result = reader.get(b"key").await.unwrap_err();
         dbg!(&result);
         assert_eq!(result.to_string(), "Unavailable error: io error (oops)");
+    }
+
+    #[tokio::test]
+    async fn skip_wal_replay_should_not_see_wal_only_writes() {
+        use crate::config::{FlushOptions, FlushType};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        // Create a DB and write some data, then flush memtable to L0 SSTs
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let flushed_key = b"flushed_key";
+        let flushed_value = b"flushed_value";
+        db.put(flushed_key, flushed_value).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Write more data that stays in WAL (not flushed to L0)
+        let wal_only_key = b"wal_only_key";
+        let wal_only_value = b"wal_only_value";
+        db.put(wal_only_key, wal_only_value).await.unwrap();
+        // Only flush to WAL, not to L0 SSTs
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+
+        // Open a reader with skip_wal_replay=true
+        let reader_options = DbReaderOptions {
+            skip_wal_replay: true,
+            ..DbReaderOptions::default()
+        };
+        let reader = test_provider
+            .new_db_reader(reader_options.clone(), None)
+            .await
+            .unwrap();
+
+        // Should see the L0 flushed data
+        assert_eq!(
+            reader.get(flushed_key).await.unwrap(),
+            Some(Bytes::from_static(flushed_value))
+        );
+
+        // Should NOT see the WAL-only data
+        assert_eq!(reader.get(wal_only_key).await.unwrap(), None);
+
+        // After flushing memtable to L0, a NEW reader should see the data
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Open a new reader - it should see the newly flushed data
+        let reader2 = test_provider
+            .new_db_reader(reader_options, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            reader2.get(wal_only_key).await.unwrap(),
+            Some(Bytes::from_static(wal_only_value))
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_wal_replay_should_see_l0_data() {
+        use crate::config::{FlushOptions, FlushType};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        // Create a DB and write data, then flush memtable to L0 SSTs
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let key = b"test_key";
+        let value = b"test_value";
+        db.put(key, value).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Open a reader with skip_wal_replay=true
+        let reader_options = DbReaderOptions {
+            skip_wal_replay: true,
+            ..DbReaderOptions::default()
+        };
+        let reader = test_provider
+            .new_db_reader(reader_options, None)
+            .await
+            .unwrap();
+
+        // Should see the L0 data
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(value))
+        );
     }
 
     struct TestProvider {

@@ -126,6 +126,8 @@ mod test_utils;
 mod transaction_manager;
 mod types;
 mod utils;
+
+mod wal;
 mod wal_buffer;
 mod wal_id;
 mod wal_replay;
