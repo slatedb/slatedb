@@ -90,8 +90,8 @@ impl DbInner {
     }
 
     // Replays WALs in the id range into SSTs and flushes them to l0.
-    // Returns the handles of the newly generated and flushed SSTs, a sequence_tracker tracking the
-    // sequence numbers inserted, and the latest sequence number and creation timestamp
+    // Returns the handles of the newly generated and flushed SSTs,
+    // the latest sequence number and latest creation timestamp of the entries
     pub(crate) async fn replay_wal_to_l0(
         &self,
         wal_id_range: Range<u64>,
