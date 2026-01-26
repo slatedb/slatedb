@@ -17,7 +17,7 @@ include = [
     "CSdbKeyValue",
     "CSdbScanResult",
     "CSdbWriteOptions",
-    "CSdbPutOptions", 
+    "CSdbPutOptions",
     "CSdbReadOptions",
     "CSdbScanOptions",
     "CSdbIterator",
@@ -30,3 +30,6 @@ include = [
 [parse]
 parse_deps = true
 include = ["slatedb"]
+# Exclude flatbuffer_types module - cbindgen can't resolve include!() macros
+# and the flatbuffer types are internal implementation details
+exclude = ["flatbuffer_types"]
