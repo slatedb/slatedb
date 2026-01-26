@@ -944,7 +944,7 @@ impl<'a> flatbuffers::Follow<'a> for SsTableInfo<'a> {
 }
 
 impl<'a> SsTableInfo<'a> {
-  pub const VT_FIRST_KEY: flatbuffers::VOffsetT = 4;
+  pub const VT_FIRST_ENTRY: flatbuffers::VOffsetT = 4;
   pub const VT_INDEX_OFFSET: flatbuffers::VOffsetT = 6;
   pub const VT_INDEX_LEN: flatbuffers::VOffsetT = 8;
   pub const VT_FILTER_OFFSET: flatbuffers::VOffsetT = 10;
@@ -965,18 +965,18 @@ impl<'a> SsTableInfo<'a> {
     builder.add_filter_offset(args.filter_offset);
     builder.add_index_len(args.index_len);
     builder.add_index_offset(args.index_offset);
-    if let Some(x) = args.first_key { builder.add_first_key(x); }
+    if let Some(x) = args.first_entry { builder.add_first_entry(x); }
     builder.add_compression_format(args.compression_format);
     builder.finish()
   }
 
 
   #[inline]
-  pub fn first_key(&self) -> Option<flatbuffers::Vector<'a, u8>> {
+  pub fn first_entry(&self) -> Option<flatbuffers::Vector<'a, u8>> {
     // Safety:
     // Created from valid Table for this object
     // which contains a valid value in this slot
-    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(SsTableInfo::VT_FIRST_KEY, None)}
+    unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(SsTableInfo::VT_FIRST_ENTRY, None)}
   }
   #[inline]
   pub fn index_offset(&self) -> u64 {
@@ -1022,7 +1022,7 @@ impl flatbuffers::Verifiable for SsTableInfo<'_> {
   ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
     use self::flatbuffers::Verifiable;
     v.visit_table(pos)?
-     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("first_key", Self::VT_FIRST_KEY, false)?
+     .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, u8>>>("first_entry", Self::VT_FIRST_ENTRY, false)?
      .visit_field::<u64>("index_offset", Self::VT_INDEX_OFFSET, false)?
      .visit_field::<u64>("index_len", Self::VT_INDEX_LEN, false)?
      .visit_field::<u64>("filter_offset", Self::VT_FILTER_OFFSET, false)?
@@ -1033,7 +1033,7 @@ impl flatbuffers::Verifiable for SsTableInfo<'_> {
   }
 }
 pub struct SsTableInfoArgs<'a> {
-    pub first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
+    pub first_entry: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, u8>>>,
     pub index_offset: u64,
     pub index_len: u64,
     pub filter_offset: u64,
@@ -1044,7 +1044,7 @@ impl<'a> Default for SsTableInfoArgs<'a> {
   #[inline]
   fn default() -> Self {
     SsTableInfoArgs {
-      first_key: None,
+      first_entry: None,
       index_offset: 0,
       index_len: 0,
       filter_offset: 0,
@@ -1060,8 +1060,8 @@ pub struct SsTableInfoBuilder<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> {
 }
 impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SsTableInfoBuilder<'a, 'b, A> {
   #[inline]
-  pub fn add_first_key(&mut self, first_key: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
-    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SsTableInfo::VT_FIRST_KEY, first_key);
+  pub fn add_first_entry(&mut self, first_entry: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(SsTableInfo::VT_FIRST_ENTRY, first_entry);
   }
   #[inline]
   pub fn add_index_offset(&mut self, index_offset: u64) {
@@ -1101,7 +1101,7 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SsTableInfoBuilder<'a, 'b, A> {
 impl core::fmt::Debug for SsTableInfo<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut ds = f.debug_struct("SsTableInfo");
-      ds.field("first_key", &self.first_key());
+      ds.field("first_entry", &self.first_entry());
       ds.field("index_offset", &self.index_offset());
       ds.field("index_len", &self.index_len());
       ds.field("filter_offset", &self.filter_offset());

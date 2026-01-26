@@ -65,6 +65,8 @@ pub struct CSdbReaderOptions {
     pub checkpoint_lifetime_ms: u64,
     /// Max size of in-memory table for WAL buffering
     pub max_memtable_bytes: u64,
+    /// When true, skip WAL replay entirely (only see compacted data)
+    pub skip_wal_replay: bool,
 }
 
 impl Default for CSdbReaderOptions {
@@ -74,6 +76,7 @@ impl Default for CSdbReaderOptions {
             manifest_poll_interval_ms: defaults.manifest_poll_interval.as_millis() as u64,
             checkpoint_lifetime_ms: defaults.checkpoint_lifetime.as_millis() as u64,
             max_memtable_bytes: defaults.max_memtable_bytes,
+            skip_wal_replay: defaults.skip_wal_replay,
         }
     }
 }

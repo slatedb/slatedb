@@ -113,6 +113,8 @@ typedef struct CSdbReaderOptions {
     uint64_t checkpoint_lifetime_ms;
     // Max size of in-memory table for WAL buffering
     uint64_t max_memtable_bytes;
+    // When true, skip WAL replay entirely (only see compacted data)
+    bool skip_wal_replay;
 } CSdbReaderOptions;
 
 typedef struct CSdbKeyValue {
@@ -139,7 +141,7 @@ typedef struct CSdbScanResult {
 
 #define BytesRange_VT_END_BOUND 6
 
-#define SsTableInfo_VT_FIRST_KEY 4
+#define SsTableInfo_VT_FIRST_ENTRY 4
 
 #define SsTableInfo_VT_INDEX_OFFSET 6
 
@@ -152,6 +154,8 @@ typedef struct CSdbScanResult {
 #define SsTableInfo_VT_COMPRESSION_FORMAT 14
 
 #define BlockMeta_VT_OFFSET 4
+
+#define BlockMeta_VT_FIRST_KEY 6
 
 #define SsTableIndex_VT_BLOCK_META 4
 
