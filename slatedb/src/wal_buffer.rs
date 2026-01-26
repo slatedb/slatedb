@@ -492,10 +492,10 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 mod tests {
     use super::*;
     use crate::clock::MonotonicClock;
+    use crate::format::sst::SsTableFormat;
+    use crate::format::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::object_stores::ObjectStores;
-    use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::types::{RowEntry, ValueDeletable};

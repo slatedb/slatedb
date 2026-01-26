@@ -81,11 +81,11 @@ impl DbInner {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_iterator::BlockIterator;
     use crate::db::Db;
     use crate::db_state::{SsTableHandle, SsTableId};
     use crate::error::SlateDBError;
     use crate::error::SlateDBError::MergeOperatorMissing;
+    use crate::format::block_iterator::BlockIterator;
     use crate::iter::KeyValueIterator;
     use crate::mem_table::WritableKVTable;
     use crate::object_store::memory::InMemory;

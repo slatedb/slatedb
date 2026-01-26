@@ -20,10 +20,9 @@ use log::{debug, error, trace};
 use parking_lot::Mutex;
 
 use crate::db_cache::stats::DbCacheStats;
+use crate::format::block::Block;
 use crate::stats::StatRegistry;
-use crate::{
-    block::Block, db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned,
-};
+use crate::{db_state::SsTableId, filter::BloomFilter, flatbuffer_types::SsTableIndexOwned};
 use slatedb_common::clock::SystemClock;
 
 #[cfg(feature = "foyer")]
@@ -615,16 +614,16 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
 
-    use crate::block::BlockBuilder;
     use crate::db_cache::{CachedEntry, CachedKey, DbCache, DbCacheWrapper, SplitCache};
     use crate::db_state::SsTableId;
     use crate::filter::BloomFilterBuilder;
+    use crate::format::block::BlockBuilder;
     use slatedb_common::clock::DefaultSystemClock;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
 
     use crate::db_cache::test_utils::TestCache;
-    use crate::sst::{EncodedSsTable, SsTableFormat};
+    use crate::format::sst::{EncodedSsTable, SsTableFormat};
     use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::build_test_sst;
     use crate::types::RowEntry;

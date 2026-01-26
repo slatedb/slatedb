@@ -14,6 +14,7 @@ use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::format::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::iter::KeyValueIterator;
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
@@ -24,7 +25,6 @@ use crate::peeking_iterator::PeekingIterator;
 use crate::rand::DbRand;
 use crate::retention_iterator::RetentionIterator;
 use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use slatedb_common::clock::SystemClock;
 
@@ -501,10 +501,10 @@ mod tests {
     use super::*;
     use crate::bytes_range::BytesRange;
     use crate::db_state::ManifestCore;
+    use crate::format::sst::SsTableFormat;
+    use crate::format::sst_iter::SstView;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
-    use crate::sst::SsTableFormat;
-    use crate::sst_iter::SstView;
     use crate::stats::StatRegistry;
     use crate::test_utils::StringConcatMergeOperator;
     use crate::test_utils::{build_row_entries, build_sorted_runs, write_ssts};

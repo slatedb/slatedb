@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use crate::format::block::Block;
+use crate::format::row_codec::SstRowCodecV0;
 use crate::iter::IterationOrder;
 use crate::iter::IterationOrder::Ascending;
-use crate::row_codec::SstRowCodecV0;
-use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
+use crate::{error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use IterationOrder::Descending;
@@ -175,9 +176,9 @@ impl<B: BlockLike> BlockIterator<B> {
 
 #[cfg(test)]
 mod tests {
-    use crate::block::BlockBuilder;
-    use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
+    use crate::format::block::BlockBuilder;
+    use crate::format::block_iterator::BlockIterator;
     use crate::iter::KeyValueIterator;
     use crate::proptest_util::{arbitrary, sample};
     use crate::test_utils::{assert_iterator, assert_next_entry, gen_attrs, gen_empty_attrs};

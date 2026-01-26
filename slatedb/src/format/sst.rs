@@ -60,18 +60,18 @@ use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 
-use crate::block::Block;
 use crate::db_state::{SsTableInfo, SsTableInfoCodec};
+use crate::error::SlateDBError;
 use crate::filter::{BloomFilter, BloomFilterBuilder};
 use crate::flatbuffer_types::{
     BlockMeta, BlockMetaArgs, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs,
     SsTableIndexOwned,
 };
-use crate::row_codec;
+use crate::format::block::{Block, BlockBuilder};
+use crate::format::row_codec;
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
-use crate::{block::BlockBuilder, error::SlateDBError};
 
 pub(crate) const SST_FORMAT_VERSION: u16 = 1;
 
@@ -1050,13 +1050,13 @@ mod tests {
     use object_store::ObjectStore;
 
     use super::*;
-    use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
+    use crate::format::block_iterator::BlockIterator;
+    use crate::format::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::iter::IterationOrder::Ascending;
     use crate::object_stores::ObjectStores;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils::{assert_iterator, build_test_sst, gen_attrs, gen_empty_attrs};
 

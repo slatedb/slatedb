@@ -54,6 +54,7 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
+use crate::format::sst_iter::SstIteratorOptions;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::Manifest;
 use crate::mem_table::WritableKVTable;
@@ -62,7 +63,6 @@ use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
-use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
@@ -1526,6 +1526,8 @@ mod tests {
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
+    use crate::format::sst::SsTableFormat;
+    use crate::format::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
@@ -1533,8 +1535,6 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
     use crate::seq_tracker::FindOption;
-    use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
         assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };

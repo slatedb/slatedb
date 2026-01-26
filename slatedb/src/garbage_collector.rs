@@ -299,11 +299,11 @@ mod tests {
     use crate::types::RowEntry;
     use slatedb_common::clock::DefaultSystemClock;
 
+    use crate::format::sst::SsTableFormat;
     use crate::utils::WatchableOnceCell;
     use crate::{
         db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId},
         manifest::store::{ManifestStore, StoredManifest},
-        sst::SsTableFormat,
         tablestore::TableStore,
     };
 
