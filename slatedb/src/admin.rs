@@ -762,8 +762,9 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
-    use crate::config::{CheckpointOptions, CheckpointScope};
-    use crate::Db;
+    use crate::config::CheckpointScope;
+    use crate::error::SlateDBError;
+    use crate::{Db, Settings};
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -956,18 +957,30 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
-        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                l0_sst_size_bytes: 4096,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
 
-        db.put(b"key1", b"old_val").await.unwrap();
+        // write entry to memtable and another to WAL
+        db.put(b"key1", b"old_val_1").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+        db.put(b"key2", b"old_val_2").await.unwrap();
         let checkpoint_old = db
-            .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
+            .create_checkpoint(checkpoint_scope, &Default::default())
             .await
             .unwrap();
 
         db.put(b"key1", b"new_val").await.unwrap();
-        db.put(b"key2", b"new_key").await.unwrap();
+        db.inner.flush_memtables().await.unwrap();
+        db.delete(b"key2").await.unwrap();
+        db.put(b"key3", b"new_key").await.unwrap();
         let checkpoint_new = db
-            .create_checkpoint(checkpoint_scope, &CheckpointOptions::default())
+            .create_checkpoint(checkpoint_scope, &Default::default())
             .await
             .unwrap();
         db.close().await.unwrap();
@@ -978,13 +991,18 @@ mod tests {
             .unwrap();
         let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
         assert_eq!(
-            Some(Bytes::from_static(b"old_val")),
             db.get(b"key1").await.unwrap(),
+            Some(Bytes::from_static(b"old_val_1")),
             "previous value should be restored"
         );
         assert_eq!(
-            None,
             db.get(b"key2").await.unwrap(),
+            Some(Bytes::from_static(b"old_val_2")),
+            "previous value should be restored"
+        );
+        assert_eq!(
+            db.get(b"key3").await.unwrap(),
+            None,
             "entry should not exist in this checkpoint"
         );
         db.close().await.unwrap();
@@ -995,15 +1013,87 @@ mod tests {
             .unwrap();
         let db = Db::open(path, object_store).await.unwrap();
         assert_eq!(
-            Some(Bytes::from_static(b"new_val")),
             db.get(b"key1").await.unwrap(),
+            Some(Bytes::from_static(b"new_val")),
             "future value should be restored"
         );
         assert_eq!(
-            Some(Bytes::from_static(b"new_key")),
             db.get(b"key2").await.unwrap(),
+            None,
+            "entry should not exist in this checkpoint"
+        );
+        assert_eq!(
+            db.get(b"key3").await.unwrap(),
+            Some(Bytes::from_static(b"new_key")),
             "entry should exist in this checkpoint"
         );
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(CheckpointScope::All)]
+    #[case(CheckpointScope::Durable)]
+    async fn test_admin_restore_checkpoint_does_not_restore_deleted_checkpoints(
+        #[case] checkpoint_scope: CheckpointScope,
+    ) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
+
+        let checkpoint_old = db
+            .create_checkpoint(checkpoint_scope, &Default::default())
+            .await
+            .unwrap();
+
+        let checkpoint_new = db
+            .create_checkpoint(checkpoint_scope, &Default::default())
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+
+        admin.delete_checkpoint(checkpoint_old.id).await.unwrap();
+
+        admin
+            .restore_checkpoint(checkpoint_new.id, None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            admin
+                .restore_checkpoint(checkpoint_old.id, None, None, None)
+                .await
+                .unwrap_err()
+                .to_string(),
+            crate::Error::from(SlateDBError::CheckpointMissing(checkpoint_old.id)).to_string(),
+            "checkpoint should still be deleted after restoring another checkpoint made before deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_restore_checkpoint_closes_db() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let admin = AdminBuilder::new(path.clone(), object_store.clone()).build();
+        let db = Db::open(path.clone(), object_store.clone()).await.unwrap();
+
+        let checkpoint = db
+            .create_checkpoint(CheckpointScope::All, &Default::default())
+            .await
+            .unwrap();
+
+        let txn = db.begin(Default::default()).await.unwrap();
+        txn.put("dummy", "").unwrap();
+        let snapshot = db.snapshot().await.unwrap();
+
+        admin
+            .restore_checkpoint(checkpoint.id, None, None, None)
+            .await
+            .unwrap();
+
+        assert!(db.put("dummy", "").await.is_err());
+        assert!(txn.commit().await.is_err());
+        assert!(snapshot.get("dummy").await.is_err());
     }
 }

@@ -93,7 +93,6 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
-    use rstest::rstest;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
     use std::sync::Arc;
