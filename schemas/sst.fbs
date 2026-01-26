@@ -10,8 +10,10 @@ enum CompressionFormat: byte {
 
 // Has metadata about a SST file.
 table SsTableInfo {
-    // First key in the SST file.
-    first_key: [ubyte];
+    // First entry in the SST file.
+    // The first entry is a key in an SST for compacted data
+    // and it is a sequence number in a WAL SST.
+    first_entry: [ubyte];
 
     // Offset of the index block.
     index_offset: ulong;
