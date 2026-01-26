@@ -661,6 +661,7 @@ impl CompactorEventHandler {
     /// checked in this function:
     ///
     /// - Compaction has sources
+    /// - Compaction sources exist in DB state
     /// - Compactions with only L0 sources must have a destination > highest existing SR ID
     fn validate_compaction(&self, compaction: &CompactionSpec) -> Result<(), SlateDBError> {
         // Validate compaction sources exist
