@@ -143,12 +143,12 @@ impl CompactorStateWriter {
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
         let mut dirty_compactions = compactions.prepare_dirty()?;
-        // Mark running compactions as failed so we don't resume them after restart.
+        // Move running compactions back to submitted so we can resume them after restart.
         // Submitted compactions are left intact for future scheduling.
         // Keep only the most recent finished compaction for GC safety (#1044).
         dirty_compactions.value.iter_mut().for_each(|c| {
             if matches!(c.status(), CompactionStatus::Running) {
-                c.set_status(CompactionStatus::Failed);
+                c.set_status(CompactionStatus::Submitted);
             }
         });
         dirty_compactions.value.retain_active_and_last_finished();
@@ -325,10 +325,11 @@ mod tests {
     use crate::compactor_state::{
         Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState,
     };
-    use crate::db_state::ManifestCore;
+    use crate::db_state::{ManifestCore, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -483,7 +484,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new_marks_running_failed_and_preserves_submitted() {
+    async fn test_new_resets_running_to_submitted_and_preserves_submitted() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
@@ -530,7 +531,7 @@ mod tests {
         );
         stored_compactions.update(dirty).await.unwrap();
 
-        // Initialize a new writer (restart) which should flip Running -> Failed and trim.
+        // Initialize a new writer (restart) which should flip Running -> Submitted and trim.
         let options = CompactorOptions::default();
         let rand = Arc::new(DbRand::new(7));
 
@@ -544,7 +545,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Submitted should remain; Running should become Failed; older finished should be trimmed.
+        // Submitted should remain; Running should become Submitted; older finished should be trimmed.
         let compactions = &writer.state.compactions().value;
         assert_eq!(
             compactions
@@ -558,10 +559,85 @@ mod tests {
                 .get(&running_id)
                 .expect("missing running compaction")
                 .status(),
-            CompactionStatus::Failed
+            CompactionStatus::Submitted
         );
         assert!(!compactions.contains(&failed_old_id));
-        assert!(!compactions.contains(&completed_old_id));
+        assert!(compactions.contains(&completed_old_id));
+    }
+
+    #[tokio::test]
+    async fn test_new_resets_running_to_submitted_and_preserves_output_ssts() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let output_ssts = vec![
+            SsTableHandle::new_compacted(
+                SsTableId::Compacted(Ulid::from_parts(10, 0)),
+                SsTableInfo {
+                    first_key: Some(Bytes::copy_from_slice(b"a")),
+                    ..Default::default()
+                },
+                None,
+            ),
+            SsTableHandle::new_compacted(
+                SsTableId::Compacted(Ulid::from_parts(11, 0)),
+                SsTableInfo {
+                    first_key: Some(Bytes::copy_from_slice(b"m")),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ];
+
+        let mut stored_compactions = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        let running_id = Ulid::from_parts(4, 0);
+        let mut dirty = stored_compactions.prepare_dirty().unwrap();
+        dirty.value.insert(
+            Compaction::new(running_id, CompactionSpec::new(vec![], 0))
+                .with_status(CompactionStatus::Running)
+                .with_output_ssts(output_ssts.clone()),
+        );
+        stored_compactions.update(dirty).await.unwrap();
+
+        let options = CompactorOptions::default();
+        let rand = Arc::new(DbRand::new(7));
+
+        let writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store,
+            system_clock,
+            &options,
+            rand,
+        )
+        .await
+        .unwrap();
+
+        let compaction = writer
+            .state
+            .compactions()
+            .value
+            .get(&running_id)
+            .expect("missing running compaction");
+        assert_eq!(compaction.status(), CompactionStatus::Submitted);
+        assert_eq!(compaction.output_ssts(), &output_ssts);
     }
 
     #[tokio::test]

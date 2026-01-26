@@ -161,6 +161,8 @@ pub struct Compaction {
     ///
     /// This is tracked only in memory at the moment.
     status: CompactionStatus,
+    /// Output SSTs produced by this compaction, if any.
+    output_ssts: Vec<SsTableHandle>,
 }
 
 impl Compaction {
@@ -170,11 +172,17 @@ impl Compaction {
             spec,
             bytes_processed: 0,
             status: CompactionStatus::Submitted,
+            output_ssts: Vec::new(),
         }
     }
 
     pub(crate) fn with_status(mut self, status: CompactionStatus) -> Self {
         self.status = status;
+        self
+    }
+
+    pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
+        self.output_ssts = output_ssts;
         self
     }
 
@@ -236,6 +244,20 @@ impl Compaction {
     /// Returns the current status of this compaction.
     pub fn status(&self) -> CompactionStatus {
         self.status
+    }
+
+    /// Sets the output SSTs produced by this compaction.
+    pub(crate) fn set_output_ssts(&mut self, output_ssts: Vec<SsTableHandle>) {
+        assert!(
+            output_ssts.starts_with(self.output_ssts.as_slice()),
+            "new output SSTs must always extend previous output SSTs"
+        );
+        self.output_ssts = output_ssts;
+    }
+
+    /// Returns the output SSTs produced by this compaction.
+    pub fn output_ssts(&self) -> &Vec<SsTableHandle> {
+        &self.output_ssts
     }
 
     /// Sets the current status of this compaction.

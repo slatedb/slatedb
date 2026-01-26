@@ -108,6 +108,7 @@ mod object_stores;
 mod oracle;
 mod partitioned_keyspace;
 mod paths;
+mod peeking_iterator;
 #[cfg(test)]
 mod proptest_util;
 mod rand;

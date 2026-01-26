@@ -1,8 +1,12 @@
+use crate::block_iterator::BlockIterator;
 use crate::clock::MonotonicClock;
 use crate::config::DurabilityLevel;
 use crate::config::DurabilityLevel::{Memory, Remote};
 use crate::db_state::SortedRun;
+use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
+use crate::iter::{IterationOrder, KeyValueIterator};
+use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use bytes::{BufMut, Bytes};
 use futures::FutureExt;
@@ -156,6 +160,45 @@ pub(crate) fn merge_options<T>(
         (None, next) => next,
         (current, None) => current,
     }
+}
+
+/// Determines the last key and sequence number written by an output SST.
+///
+/// ## Arguments
+/// - `table_store`: Table store for reading the SST index and blocks.
+/// - `output_sst`: Output SST already written for a compaction being resumed.
+///
+/// ## Returns
+/// - `Ok(Some((Bytes, u64)))`: last key and sequence number from the final block.
+/// - `Ok(None)`: when the SST contains no data blocks.
+///
+/// ## Errors
+/// - `SlateDBError`: if reading the index or blocks fails.
+pub(crate) async fn last_written_key_and_seq(
+    table_store: Arc<TableStore>,
+    output_sst: &SsTableHandle,
+) -> Result<Option<(Bytes, u64)>, SlateDBError> {
+    let index = table_store.read_index(output_sst, false).await?;
+    let num_blocks = index.borrow().block_meta().len();
+    if num_blocks == 0 {
+        return Ok(None);
+    }
+    let last_block_idx = num_blocks - 1;
+    let mut blocks = table_store
+        .read_blocks_using_index(output_sst, index, last_block_idx..last_block_idx + 1, false)
+        .await?;
+    let Some(block) = blocks.pop_front() else {
+        return Ok(None);
+    };
+
+    // Sort descending so we get the last row from the last block, which
+    // should be the last written key/seq.
+    let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
+    block_iter.init().await?;
+    Ok(block_iter
+        .next_entry()
+        .await?
+        .map(|entry| (entry.key, entry.seq)))
 }
 
 fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
@@ -437,6 +480,37 @@ pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usiz
     total_ssts.min(cap).max(1)
 }
 
+/// Estimate the total number of bytes before `key` across sorted runs.
+///
+/// This is a best-effort estimate based on SST boundaries and metadata-only
+/// size estimates; it does not read SST contents. For exmple, if we have:
+///
+/// - Run 1: SSTs [a (10 bytes), k (20 bytes), z (30 bytes)]
+/// - Run 2: SSTs [b (40 bytes), f (50 bytes)]
+///
+/// and we call `estimate_bytes_before_key` with `key = "m"`, the result will be:
+///
+/// - From Run 1: SST "a" (10 bytes) is before "m", SST "k" and "z" are after because
+///   k < m < z.
+/// - From Run 2: SST "b" (40 bytes) is before "m", SST "f" is after because
+///   f < m and it's the last SST.
+pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) -> u64 {
+    sorted_runs
+        .iter()
+        .map(|sorted_run| {
+            let Some(idx) = sorted_run.find_sst_with_range_covering_key_idx(key) else {
+                return 0;
+            };
+            sorted_run
+                .ssts
+                .iter()
+                .take(idx)
+                .map(|sst| sst.estimate_size())
+                .sum::<u64>()
+        })
+        .sum()
+}
+
 /// Concurrently build items with a bounded level of parallelism.
 ///
 /// This function maps each input to an async task using the provided factory `f`,
@@ -620,19 +694,24 @@ mod tests {
     use slatedb_common::MockSystemClock;
 
     use crate::clock::MonotonicClock;
+    use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
+    use crate::types::RowEntry;
     use crate::utils::{
         build_concurrent, bytes_into_minimal_vec, clamp_allocated_size_bytes, compute_index_key,
-        compute_max_parallel, format_bytes_si, panic_string, spawn_bg_task, BitReader, BitWriter,
-        WatchableOnceCell,
+        compute_max_parallel, estimate_bytes_before_key, format_bytes_si, last_written_key_and_seq,
+        panic_string, spawn_bg_task, BitReader, BitWriter, WatchableOnceCell,
     };
+    use crate::Db;
     use bytes::{BufMut, Bytes, BytesMut};
+    use object_store::memory::InMemory;
     use parking_lot::Mutex;
     use std::any::Any;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+    use ulid::Ulid;
 
     struct ResultCaptor<T: Clone> {
         error: Mutex<Option<Result<T, SlateDBError>>>,
@@ -654,6 +733,16 @@ mod tests {
         fn captured(&self) -> Option<Result<T, SlateDBError>> {
             self.error.lock().clone()
         }
+    }
+
+    fn make_compacted_sst(start_key: &str, size: u64) -> SsTableHandle {
+        let info = SsTableInfo {
+            first_key: Some(Bytes::from(start_key.as_bytes().to_vec())),
+            index_offset: size.saturating_sub(1),
+            index_len: 1,
+            ..Default::default()
+        };
+        SsTableHandle::new_compacted(SsTableId::Compacted(Ulid::new()), info, None)
     }
 
     #[test]
@@ -893,6 +982,56 @@ mod tests {
         assert_ne!(clamped.as_ptr(), slice.as_ptr());
     }
 
+    #[tokio::test]
+    async fn test_last_written_key_and_seq_from_output_sst() {
+        let os = Arc::new(InMemory::new());
+        let path = "testdb-last-written".to_string();
+        let clock = Arc::new(MockSystemClock::new());
+        let db = Db::builder(path, os.clone())
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+        let table_store = db.inner.table_store.clone();
+
+        let mut sst_builder = table_store.table_builder();
+        sst_builder
+            .add(RowEntry::new_value(b"a", b"1", 1))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"b", b"2", 2))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let _sst1 = table_store
+            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
+            .await
+            .unwrap();
+
+        let mut sst_builder = table_store.table_builder();
+        sst_builder
+            .add(RowEntry::new_value(b"m", b"3", 3))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"z", b"4", 4))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let sst2 = table_store
+            .write_sst(&SsTableId::Compacted(Ulid::new()), encoded_sst, false)
+            .await
+            .unwrap();
+
+        let (last_key, last_seq) = last_written_key_and_seq(table_store.clone(), &sst2)
+            .await
+            .unwrap()
+            .expect("missing last entry");
+        assert_eq!(last_key, Bytes::from(b"z".as_slice()));
+        assert_eq!(last_seq, 4);
+    }
+
     #[rstest]
     #[case("alternating_bits", vec![true, false, true, false, true, false, true, false], vec![], vec![], vec![0xAA])]
     #[case("u64_value", vec![], vec![(0xAB, 8)], vec![], vec![0xAB])]
@@ -1040,6 +1179,28 @@ mod tests {
         assert_eq!(compute_max_parallel(10, &[], 8), 8);
         // Clamp to at least 1 even when cap = 0
         assert_eq!(compute_max_parallel(0, &[], 0), 1);
+    }
+
+    #[test]
+    fn test_estimate_bytes_before_key() {
+        let run1 = SortedRun {
+            id: 1,
+            ssts: vec![
+                make_compacted_sst("a", 10),
+                make_compacted_sst("k", 20), // k < m < z, so only "a" counts
+                make_compacted_sst("z", 30),
+            ],
+        };
+        let run2 = SortedRun {
+            id: 2,
+            // f < m < ..., so only "b" counts
+            ssts: vec![make_compacted_sst("b", 40), make_compacted_sst("f", 50)],
+        };
+
+        let key = Bytes::from("m");
+        let total = estimate_bytes_before_key(&[run1, run2], &key);
+
+        assert_eq!(total, 10 + 40);
     }
 
     // Filters out None; collects only Some(T)

@@ -171,6 +171,8 @@ typedef struct CSdbScanResult {
 
 #define Compaction_VT_STATUS 10
 
+#define Compaction_VT_OUTPUT_SSTS 12
+
 #define CompactionsV1_VT_COMPACTOR_EPOCH 4
 
 #define CompactionsV1_VT_RECENT_COMPACTIONS 6
