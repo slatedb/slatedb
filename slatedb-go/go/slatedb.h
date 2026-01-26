@@ -139,7 +139,7 @@ typedef struct CSdbScanResult {
 
 #define BytesRange_VT_END_BOUND 6
 
-#define SsTableInfo_VT_FIRST_KEY 4
+#define SsTableInfo_VT_FIRST_ENTRY 4
 
 #define SsTableInfo_VT_INDEX_OFFSET 6
 
@@ -152,6 +152,8 @@ typedef struct CSdbScanResult {
 #define SsTableInfo_VT_COMPRESSION_FORMAT 14
 
 #define BlockMeta_VT_OFFSET 4
+
+#define BlockMeta_VT_FIRST_KEY 6
 
 #define SsTableIndex_VT_BLOCK_META 4
 

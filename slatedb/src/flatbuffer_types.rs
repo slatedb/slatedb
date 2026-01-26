@@ -1045,7 +1045,7 @@ mod tests {
             SsTableHandle::new_compacted(
                 SsTableId::Compacted(ulid::Ulid::new()),
                 SsTableInfo {
-                    first_key: Some(Bytes::copy_from_slice(first_key)),
+                    first_entry: Some(Bytes::copy_from_slice(first_key)),
                     ..Default::default()
                 },
                 visible_range,

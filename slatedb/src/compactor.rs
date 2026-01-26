@@ -2911,7 +2911,7 @@ mod tests {
         fixture.handler.maybe_start_compactions().await.unwrap();
 
         let sst_info = SsTableInfo {
-            first_key: Some(Bytes::from_static(b"a")),
+            first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
         let output_sst = SsTableHandle::new(SsTableId::Compacted(Ulid::new()), sst_info);
