@@ -26,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: cargo install cargo-hack
         run: cargo +stable install cargo-hack --locked
       - name: cargo check
@@ -35,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: cargo install cargo-hack
         run: cargo +stable install cargo-hack --locked
       - name: cargo clippy
@@ -46,6 +50,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: cargo fmt
         run: cargo fmt -- --check
 
@@ -54,6 +60,8 @@ jobs:
     name: typos
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Check spelling
         uses: crate-ci/typos@v1
         with:
@@ -67,6 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          submodules: true
           # Allow script to fetch base ref/commits if needed
           fetch-depth: 0
 
@@ -85,6 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest@0.9.98
@@ -111,6 +122,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest@0.9.98
@@ -124,6 +137,8 @@ jobs:
     needs: tests
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v4
@@ -164,6 +179,8 @@ jobs:
     needs: tests
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Set up Go 1.24.x
         uses: actions/setup-go@v5
@@ -191,6 +208,8 @@ jobs:
     needs: tests
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Run benchmark
         run: cargo bench -- --output-format bencher | tee output.txt
@@ -218,6 +237,8 @@ jobs:
     needs: tests
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Get changed files
         id: changed-website-files
         uses: tj-actions/changed-files@6cb76d07bee4c9772c6882c06c37837bf82a04d3 # v46
