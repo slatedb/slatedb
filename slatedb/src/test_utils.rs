@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::BoxStream;
 use futures::{stream, StreamExt};
+use log::error;
 use object_store::path::Path;
 use object_store::{
     GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutOptions as OS_PutOptions,
@@ -26,6 +27,8 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Once};
+use std::thread;
+use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 use ulid::Ulid;
@@ -414,6 +417,7 @@ impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
 
 // A flag so we only initialize logging once.
 static INIT_LOGGING: Once = Once::new();
+static INIT_DEADLOCK_DETECTOR: Once = Once::new();
 
 /// Initialize logging for tests so we get log output. Uses `RUST_LOG` environment
 /// variable to set the log level, or defaults to `debug` if not set.
@@ -427,6 +431,37 @@ fn init_tracing() {
             .with_test_writer()
             .init();
     });
+}
+
+/// Periodically checks for parking_lot deadlocks during tests.
+fn start_deadlock_detector() {
+    INIT_DEADLOCK_DETECTOR.call_once(|| {
+        thread::spawn(|| loop {
+            thread::sleep(Duration::from_secs(10));
+            let deadlocks = parking_lot::deadlock::check_deadlock();
+            if deadlocks.is_empty() {
+                continue;
+            }
+
+            error!("parking_lot detected {} deadlock(s)", deadlocks.len());
+            for (i, threads) in deadlocks.iter().enumerate() {
+                error!("deadlock #{}", i + 1);
+                for t in threads {
+                    error!("thread_id={:?}\n{:?}", t.thread_id(), t.backtrace());
+                }
+            }
+        });
+    });
+}
+
+/// Ensure the parking_lot deadlock detector is running for tests.
+pub(crate) fn init_deadlock_detector_for_tests() {
+    start_deadlock_detector();
+}
+
+#[ctor::ctor]
+fn init_deadlock_detector() {
+    start_deadlock_detector();
 }
 
 /// An ObjectStore wrapper that injects a transient timeout on the first N `put_opts` calls

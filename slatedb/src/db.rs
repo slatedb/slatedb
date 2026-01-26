@@ -4696,6 +4696,7 @@ mod tests {
     }
 
     async fn do_test_should_read_compacted_db(options: Settings) {
+        crate::test_utils::init_deadlock_detector_for_tests();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let should_compact_l0 = Arc::new(AtomicBool::new(false));

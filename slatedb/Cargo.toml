@@ -77,6 +77,7 @@ fail-parallel = { workspace = true, features = ["failpoints"] }
 figment = { workspace = true, features = ["test"] }
 filetime = { workspace = true }
 insta = { workspace = true }
+parking_lot = { workspace = true, features = ["deadlock_detection"] }
 proptest = { workspace = true }
 rstest = { workspace = true }
 slatedb-common = { workspace = true, features = ["test-util"] }
