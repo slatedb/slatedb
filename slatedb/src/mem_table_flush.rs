@@ -290,45 +290,28 @@ impl MemtableFlusher {
             .await?;
 
         // the restored state will have the original referenced l0 SSTs and the newly flushed l0 SSTs
-        // TODO: pop off <= l0_last_compacted
-        let mut merged_l0s = manifest_to_restore.core.l0;
-        merged_l0s.reserve(sst_handles.len());
+        let mut merged_l0 = manifest_to_restore.core.l0.clone();
+        merged_l0.reserve(sst_handles.len());
         for sst_handle in sst_handles.iter().rev() {
-            merged_l0s.push_front(sst_handle.clone());
+            merged_l0.push_front(sst_handle.clone());
         }
 
-        {
-            let mut guard = self.db_inner.state.write();
-            guard.modify(|modifier| {
-                let core = &mut modifier.state.manifest.value.core;
-                core.initialized = manifest_to_restore.core.initialized;
-                core.l0_last_compacted = manifest_to_restore.core.l0_last_compacted;
-                core.l0 = merged_l0s;
-                core.compacted = manifest_to_restore.core.compacted;
-                // no wal id's to replay as they should be flushed to l0 already.
-                core.next_wal_sst_id = fencing_wal_id;
-                core.replay_after_wal_id = fencing_wal_id;
-                core.last_l0_clock_tick =
-                    last_tick.unwrap_or(manifest_to_restore.core.last_l0_clock_tick);
-                core.last_l0_seq = last_seq.unwrap_or(manifest_to_restore.core.last_l0_seq);
-                core.recent_snapshot_min_seq =
-                    last_seq.unwrap_or(manifest_to_restore.core.last_l0_seq);
-                core.sequence_tracker = manifest_to_restore.core.sequence_tracker;
-                core.wal_object_store_uri = manifest_to_restore.core.wal_object_store_uri;
-                // core.checkpoints is intentionally untouched. Current checkpoints are presisted as the
-                // checkpoints in the manifest to restore may be invalid at this point in time.
-                // This also enables restoring to future checkpoints.
-
-                modifier.state.manifest.value.compactor_epoch += 1; // fence any compactors that might still be running
-            });
-        }
+        let last_seq = last_seq.unwrap_or(manifest_to_restore.core.last_l0_seq);
+        let last_tick = last_tick.unwrap_or(manifest_to_restore.core.last_l0_clock_tick);
+        self.db_inner.state.write().restore_checkpoint(
+            manifest_to_restore.core,
+            fencing_wal_id,
+            merged_l0,
+            last_seq,
+            last_tick,
+        );
 
         debug!(
             "updating manifest with checkpoint {} state from manifest: {}",
             checkpoint.id, checkpoint.manifest_id
         );
         self.write_manifest_safely().await?;
-        dbg!(self.db_inner.manifest_store.list_manifests(4..).await?);
+
         Ok(())
     }
 
