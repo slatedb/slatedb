@@ -56,20 +56,20 @@ use std::sync::Arc;
 use bytes::Bytes;
 use flatbuffers::DefaultAllocator;
 
-use crate::block::BlockBuilder;
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableInfoCodec;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilterBuilder;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
-use crate::sst_format::{
+use crate::format::block::BlockBuilder;
+use crate::format::sst::{
     EncodedSsTableBlock, EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder,
 };
 use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 
 // Re-export for backwards compatibility
-pub(crate) use crate::sst_format::{BlockTransformer, EncodedSsTable, SsTableFormat};
+pub(crate) use crate::format::sst::{BlockTransformer, EncodedSsTable, SsTableFormat};
 
 impl SsTableFormat {
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder<'_> {
@@ -321,11 +321,11 @@ mod tests {
 
     use super::*;
     use crate::blob::ReadOnlyBlob;
-    use crate::block::Block;
     use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
+    use crate::format::block::Block;
     use crate::iter::IterationOrder::Ascending;
     use crate::object_stores::ObjectStores;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};

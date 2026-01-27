@@ -1,6 +1,6 @@
 use crate::error::SlateDBError;
-use crate::row_codec::{SstRowCodecV0, SstRowEntry};
-use crate::sst_format::{CHECKSUM_SIZE, OFFSET_SIZE};
+use crate::format::row_codec::{SstRowCodecV0, SstRowEntry};
+use crate::format::sst::{CHECKSUM_SIZE, OFFSET_SIZE};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};

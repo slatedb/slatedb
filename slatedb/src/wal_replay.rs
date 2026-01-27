@@ -284,11 +284,11 @@ mod tests {
     use super::{WalReplayIterator, WalReplayOptions};
     use crate::bytes_range::BytesRange;
     use crate::db_state::{ManifestCore, SsTableId};
+    use crate::format::sst::SsTableFormat;
     use crate::iter::{IterationOrder, KeyValueIterator};
     use crate::mem_table::WritableKVTable;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
-    use crate::sst_format::SsTableFormat;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::{error::SlateDBError, test_utils};

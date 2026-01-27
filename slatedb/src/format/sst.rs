@@ -1,17 +1,4 @@
-use std::collections::VecDeque;
-#[cfg(any(feature = "zlib", feature = "zstd"))]
-use std::io::Read;
-#[cfg(feature = "zlib")]
-use std::io::Write;
-use std::ops::Range;
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use bytes::{Buf, BufMut, Bytes};
-use flatbuffers::DefaultAllocator;
-
 use crate::blob::ReadOnlyBlob;
-use crate::block::{Block, BlockBuilder};
 use crate::config::CompressionCodec;
 use crate::db_state::{SsTableInfo, SsTableInfoCodec};
 use crate::error::SlateDBError;
@@ -19,7 +6,18 @@ use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{
     BlockMeta, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
 };
-use crate::row_codec;
+use crate::format::block::{Block, BlockBuilder};
+use crate::format::row_codec;
+use async_trait::async_trait;
+use bytes::{Buf, BufMut, Bytes};
+use flatbuffers::DefaultAllocator;
+use std::collections::VecDeque;
+#[cfg(any(feature = "zlib", feature = "zstd"))]
+use std::io::Read;
+#[cfg(feature = "zlib")]
+use std::io::Write;
+use std::ops::Range;
+use std::sync::Arc;
 
 // 8 bytes for the metadata offset + 2 bytes for the version
 const NUM_FOOTER_BYTES: usize = 10;

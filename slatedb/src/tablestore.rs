@@ -13,17 +13,18 @@ use object_store::{ObjectStore, PutMode, PutOptions};
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
+use crate::blob::ReadOnlyBlob;
 use crate::db_cache::{CachedEntry, DbCache};
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
+use crate::format::block::Block;
+use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst::EncodedSsTableBuilder;
-use crate::sst_format::{EncodedSsTable, SsTableFormat};
 use crate::types::RowEntry;
-use crate::{blob::ReadOnlyBlob, block::Block};
 
 pub(crate) struct TableStore {
     object_stores: ObjectStores,
@@ -623,19 +624,18 @@ mod tests {
     use crate::db_cache::SplitCache;
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
+    use crate::format::block::Block;
+    use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
     use crate::rand::DbRand;
     use crate::retrying_object_store::RetryingObjectStore;
-    use crate::sst_format::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::FlakyObjectStore;
     use crate::test_utils::{assert_iterator, build_test_sst};
     use crate::types::{RowEntry, ValueDeletable};
-    use crate::{
-        block::Block, block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator,
-    };
+    use crate::{block_iterator::BlockIterator, db_state::SsTableId, iter::KeyValueIterator};
     use slatedb_common::clock::DefaultSystemClock;
 
     const ROOT: &str = "/root";

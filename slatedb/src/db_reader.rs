@@ -920,6 +920,7 @@ mod tests {
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db_reader::{DbReader, DbReaderOptions};
     use crate::db_state::ManifestCore;
+    use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
@@ -927,7 +928,6 @@ mod tests {
     use crate::proptest_util::rng::new_test_rng;
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
-    use crate::sst_format::SsTableFormat;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::{error::SlateDBError, test_utils, Db};

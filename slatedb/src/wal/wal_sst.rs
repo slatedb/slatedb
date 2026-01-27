@@ -51,12 +51,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::block::BlockBuilder;
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableInfoCodec;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
-use crate::sst_format::{
+use crate::format::block::BlockBuilder;
+use crate::format::sst::{
     BlockTransformer, EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder,
     EncodedSsTableFooterBuilder,
 };
@@ -268,9 +268,9 @@ impl EncodedWalSsTableBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::Block;
     use crate::block_iterator::BlockIterator;
     use crate::flatbuffer_types::FlatBufferSsTableInfoCodec;
+    use crate::format::block::Block;
     use crate::iter::IterationOrder::Ascending;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
@@ -682,7 +682,7 @@ mod tests {
     #[cfg(feature = "snappy")]
     #[tokio::test]
     async fn should_compress_blocks_with_snappy() {
-        use crate::sst_format::CHECKSUM_SIZE;
+        use crate::format::sst::CHECKSUM_SIZE;
 
         // Given
         let mut builder =
@@ -724,7 +724,7 @@ mod tests {
     #[cfg(feature = "lz4")]
     #[tokio::test]
     async fn should_compress_blocks_with_lz4() {
-        use crate::sst_format::CHECKSUM_SIZE;
+        use crate::format::sst::CHECKSUM_SIZE;
 
         // Given
         let mut builder =
@@ -761,7 +761,7 @@ mod tests {
     #[cfg(feature = "zstd")]
     #[tokio::test]
     async fn should_compress_blocks_with_zstd() {
-        use crate::sst_format::CHECKSUM_SIZE;
+        use crate::format::sst::CHECKSUM_SIZE;
 
         // Given
         let mut builder =
@@ -798,7 +798,7 @@ mod tests {
     #[cfg(feature = "zlib")]
     #[tokio::test]
     async fn should_compress_blocks_with_zlib() {
-        use crate::sst_format::CHECKSUM_SIZE;
+        use crate::format::sst::CHECKSUM_SIZE;
         use std::io::Read;
 
         // Given

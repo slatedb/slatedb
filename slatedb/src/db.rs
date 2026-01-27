@@ -1544,6 +1544,7 @@ mod tests {
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
+    use crate::format::sst::SsTableFormat;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
@@ -1551,7 +1552,6 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
     use crate::seq_tracker::FindOption;
-    use crate::sst_format::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
         assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
