@@ -99,12 +99,28 @@ impl<T: Send + Sync> TransactionalStorageProtocol<T, MonotonicId>
     }
 
     async fn try_read_latest(&self) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
-        let files = self.list(Unbounded, Unbounded).await?;
-        if let Some(file) = files.last() {
-            return self
-                .try_read(file.id)
-                .await
-                .map(|opt| opt.map(|v| (file.id, v)));
+        loop {
+            let files = self.list(Unbounded, Unbounded).await?;
+            if let Some(file) = files.last() {
+                let result = self
+                    .try_read(file.id)
+                    .await
+                    .map(|opt| opt.map(|v| (file.id, v)));
+                match result {
+                    // File listed but not found. Probably deleted by GC. Retry list/read.
+                    // See https://github.com/slatedb/slatedb/issues/1215 for more details.
+                    Ok(None) => {
+                        warn!(
+                            "listed file missing on read, retrying [location={}]",
+                            file.location,
+                        );
+                    }
+                    _ => return result,
+                }
+            } else {
+                // No files found, so return None
+                break;
+            }
         }
         Ok(None)
     }
