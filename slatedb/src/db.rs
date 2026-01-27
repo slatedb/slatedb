@@ -1485,6 +1485,20 @@ impl Db {
         };
         Ok(object_store)
     }
+
+    /// Check the status of the database.
+    ///
+    /// The status is updated at least every [`Settings::manifest_poll_interval`], but
+    /// might also be updated based on other internal events or user-facing operations.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the DB is still open.
+    /// - `Err(ErrorKind::Closed)` if the DB was closed normally.
+    /// - `Err(e)` if the DB was closed with an error, where `e` is the error that caused
+    ///    the closure.
+    pub fn status(&self) -> Result<(), crate::Error> {
+        self.inner.check_closed().map_err(|e| e.into())
+    }
 }
 
 #[async_trait::async_trait]
