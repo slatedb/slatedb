@@ -9,13 +9,14 @@ use std::process::Command;
 fn main() {
     let out_dir = PathBuf::from(require_env("OUT_DIR"));
     let manifest_dir = PathBuf::from(require_env("CARGO_MANIFEST_DIR"));
-    let schemas_dir = match manifest_dir.parent() {
-        Some(parent) => parent.join("schemas"),
+    let repo_root = match manifest_dir.parent() {
+        Some(parent) => parent,
         None => {
             println!("cargo::error=Failed to get parent directory of CARGO_MANIFEST_DIR");
             return;
         }
     };
+    let schemas_dir = repo_root.join("schemas");
 
     // Rerun if any schema file changes
     println!("cargo:rerun-if-changed={}", schemas_dir.display());
@@ -28,7 +29,7 @@ fn main() {
         }
     }
 
-    let flatc_path = build_flatc();
+    let flatc_path = build_flatc(repo_root);
 
     if !generate_flatbuffers(&flatc_path, &schemas_dir, &out_dir) {
         return;
@@ -50,8 +51,8 @@ fn require_env(name: &str) -> String {
 
 /// Build flatc from the git submodule `flatbuffers` using cmake and
 /// return the path to the executable.
-fn build_flatc() -> PathBuf {
-    let mut config = Config::new("../flatbuffers");
+fn build_flatc(repo_dir: &std::path::Path) -> PathBuf {
+    let mut config = Config::new(repo_dir.join("flatbuffers"));
 
     // warning C4530: C++ exception handler used, but unwind semantics are not enabled. Specify /EHsc
     let target = require_env("TARGET");
