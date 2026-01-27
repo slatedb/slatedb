@@ -915,3 +915,45 @@ pub(crate) fn init_test_infrastructure() {
     init_logging();
     init_deadlock_detector();
 }
+
+#[cfg(test)]
+mod tests {
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// Test to verify the deadlock detector is working.
+    /// This test intentionally creates a deadlock and is ignored by default.
+    /// Run with: cargo test --package slatedb test_deadlock_detector -- --ignored --nocapture
+    /// The deadlock detector should print deadlock info after ~10 seconds.
+    #[test]
+    #[ignore]
+    fn test_deadlock_detector_should_detect_deadlock() {
+        let lock_a = Arc::new(Mutex::new(()));
+        let lock_b = Arc::new(Mutex::new(()));
+
+        let lock_a_clone = lock_a.clone();
+        let lock_b_clone = lock_b.clone();
+
+        // Thread 1: acquire lock_a, then try to acquire lock_b
+        let thread1 = thread::spawn(move || {
+            let _guard_a = lock_a_clone.lock();
+            thread::sleep(Duration::from_millis(100)); // Give thread2 time to acquire lock_b
+            let _guard_b = lock_b_clone.lock(); // This will deadlock
+        });
+
+        // Thread 2: acquire lock_b, then try to acquire lock_a
+        let thread2 = thread::spawn(move || {
+            let _guard_b = lock_b.lock();
+            thread::sleep(Duration::from_millis(100)); // Give thread1 time to acquire lock_a
+            let _guard_a = lock_a.lock(); // This will deadlock
+        });
+
+        // Wait for the deadlock detector to report (it checks every 10 seconds)
+        // This test will hang indefinitely due to the deadlock - that's expected.
+        // The deadlock detector should print the deadlock info to the logs.
+        thread1.join().unwrap();
+        thread2.join().unwrap();
+    }
+}
