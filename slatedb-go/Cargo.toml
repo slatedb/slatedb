@@ -15,8 +15,7 @@ doc = false
 bench = false
 
 [dependencies]
-slatedb = { workspace = true }
-object_store = { workspace = true, features = ["aws"] }
+slatedb = { workspace = true, features = ["all"] }
 tokio = { workspace = true, features = ["fs", "macros", "sync", "rt", "rt-multi-thread", "signal"] }
 once_cell = { workspace = true }
 log = { workspace = true }
