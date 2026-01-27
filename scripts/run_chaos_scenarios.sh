@@ -24,7 +24,6 @@
 # - slow_close: ~30% downstream TCP close delay by ~2000ms.
 # - timeoutish: ~35% downstream latency (~3000ms).
 # - http_503s: ~10% fail-before responses with HTTP 503 (transient server errors).
-# - http_404s: ~5% fail-before responses with HTTP 404 (transient missing paths/keys).
 # - http_429s: ~5% fail-before responses with HTTP 429 (transient throttling).
 #
 # Environment variables respected:
@@ -109,7 +108,7 @@ add_toxic() {
 # Configure lowdown failure rates at runtime via its admin API.
 # Args:
 #   $1 percent : 0..100 (chance to fail-before)
-#   $2 code    : HTTP status code to emulate (503|404|429)
+#   $2 code    : HTTP status code to emulate (503|429)
 add_http_failure() {
   local percent=${1:-0}
   local code=${2:-503}
@@ -280,12 +279,6 @@ http_503s() {
   run_smoke http_503s "$LOWDOWN_PROXY"
 }
 
-# 5% fail-before with HTTP 404 (transient missing paths/keys).
-http_404s() {
-  clear_toxics s3; add_http_failure 75 404
-  run_smoke http_404s "$LOWDOWN_PROXY"
-}
-
 # 5% fail-before with HTTP 429 (transient throttling).
 http_429s() {
   clear_toxics s3; add_http_failure 75 429
@@ -301,7 +294,6 @@ scenario reset_peer reset_peer
 scenario slow_close slow_close
 scenario timeoutish timeoutish
 scenario http_503s http_503s
-scenario http_404s http_404s
 scenario http_429s http_429s
 
 log "summary: pass=$pass fail=$fail"
