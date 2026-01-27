@@ -42,8 +42,7 @@ This design could also unify internal TTL handling (`RetentionIterator`) with us
 
 - Provide a user-friendly API following established SlateDB patterns (`CompactionSchedulerSupplier`).
 - Zero overhead when no filter is configured. Existing users are unaffected.
-- Design that can potentially be extended to enable internal TTL filtering
-refactoring.
+- Design that can potentially be extended to enable internal TTL filtering.
 
 ## Non-Goals
 
@@ -193,8 +192,19 @@ pub enum CompactionFilterError {
 
 ### Configuration
 
+The `CompactionFilterSupplier` is configured on the component that runs compaction:
+
 ```rust
-// In DbBuilder (db/builder.rs)
+// In DbBuilder (db/builder.rs) - for embedded compactor
+pub fn with_compaction_filter_supplier(
+    mut self,
+    supplier: Arc<dyn CompactionFilterSupplier>,
+) -> Self {
+    self.compaction_filter_supplier = Some(supplier);
+    self
+}
+
+// In CompactorBuilder (db/builder.rs) - for standalone compactor
 pub fn with_compaction_filter_supplier(
     mut self,
     supplier: Arc<dyn CompactionFilterSupplier>,
@@ -203,6 +213,9 @@ pub fn with_compaction_filter_supplier(
     self
 }
 ```
+
+When running a standalone compactor (separate from the DB writer), user needs
+to ensure the `CompactorBuilder` is configured with the same `CompactionFilterSupplier` as the `DbBuilder`.
 
 ### Background: How SlateDB Compaction Works
 
