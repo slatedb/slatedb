@@ -35,6 +35,11 @@ pub use object_store;
 pub use batch::WriteBatch;
 pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
+#[cfg(feature = "compaction_filters")]
+pub use compaction_filter::{
+    CompactionFilter, CompactionFilterDecision, CompactionFilterError, CompactionFilterSupplier,
+    CompactionJobContext,
+};
 pub use compactor::CompactorBuilder;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder};
@@ -52,6 +57,7 @@ pub use rand::DbRand;
 pub use sst::BlockTransformer;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
+pub use types::{RowEntry, ValueDeletable};
 
 pub mod admin;
 pub mod cached_object_store;
@@ -77,6 +83,10 @@ mod bytes_generator;
 mod bytes_range;
 mod checkpoint;
 mod clone;
+#[cfg(feature = "compaction_filters")]
+mod compaction_filter;
+#[cfg(feature = "compaction_filters")]
+mod compaction_filter_iterator;
 mod compactions_store;
 mod compactor_executor;
 mod compactor_state;

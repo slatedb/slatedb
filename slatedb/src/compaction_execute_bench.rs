@@ -19,6 +19,7 @@ use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorMessage;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
+    TokioCompactionExecutorOptions,
 };
 use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::config::{CompactorOptions, CompressionCodec};
@@ -325,17 +326,19 @@ impl CompactionExecuteBench {
 
         let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
 
-        let executor = TokioCompactionExecutor::new(
-            Handle::current(),
-            Arc::new(compactor_options),
-            tx,
-            table_store.clone(),
-            self.rand.clone(),
-            stats.clone(),
-            self.system_clock.clone(),
-            manifest_store.clone(),
-            None,
-        );
+        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+            handle: Handle::current(),
+            options: Arc::new(compactor_options),
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: self.rand.clone(),
+            stats: stats.clone(),
+            clock: self.system_clock.clone(),
+            manifest_store: manifest_store.clone(),
+            merge_operator: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
+        });
 
         let manifest = StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
 

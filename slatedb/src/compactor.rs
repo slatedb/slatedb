@@ -65,10 +65,13 @@ use tokio::runtime::Handle;
 use tracing::instrument;
 use ulid::Ulid;
 
+#[cfg(feature = "compaction_filters")]
+use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_executor::{
     CompactionExecutor, StartCompactionJobArgs, TokioCompactionExecutor,
+    TokioCompactionExecutorOptions,
 };
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
@@ -261,9 +264,12 @@ pub struct Compactor {
     stats: Arc<CompactionStats>,
     system_clock: Arc<dyn SystemClock>,
     merge_operator: Option<MergeOperatorType>,
+    #[cfg(feature = "compaction_filters")]
+    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 impl Compactor {
+    #[cfg_attr(not(feature = "compaction_filters"), allow(clippy::too_many_arguments))]
     pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
@@ -276,6 +282,9 @@ impl Compactor {
         system_clock: Arc<dyn SystemClock>,
         closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
         merge_operator: Option<MergeOperatorType>,
+        #[cfg(feature = "compaction_filters")] compaction_filter_supplier: Option<
+            Arc<dyn CompactionFilterSupplier>,
+        >,
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
@@ -294,6 +303,8 @@ impl Compactor {
             stats,
             system_clock,
             merge_operator,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier,
         }
     }
 
@@ -309,15 +320,19 @@ impl Compactor {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let executor = Arc::new(TokioCompactionExecutor::new(
-            self.compactor_runtime.clone(),
-            self.options.clone(),
-            tx,
-            self.table_store.clone(),
-            self.rand.clone(),
-            self.stats.clone(),
-            self.system_clock.clone(),
-            self.manifest_store.clone(),
-            self.merge_operator.clone(),
+            TokioCompactionExecutorOptions {
+                handle: self.compactor_runtime.clone(),
+                options: self.options.clone(),
+                worker_tx: tx,
+                table_store: self.table_store.clone(),
+                rand: self.rand.clone(),
+                stats: self.stats.clone(),
+                clock: self.system_clock.clone(),
+                manifest_store: self.manifest_store.clone(),
+                merge_operator: self.merge_operator.clone(),
+                #[cfg(feature = "compaction_filters")]
+                compaction_filter_supplier: self.compaction_filter_supplier.clone(),
+            },
         ));
         let handler = CompactorEventHandler::new(
             self.manifest_store.clone(),
@@ -1027,7 +1042,9 @@ mod tests {
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
     use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
-    use crate::compactor_executor::{CompactionExecutor, TokioCompactionExecutor};
+    use crate::compactor_executor::{
+        CompactionExecutor, TokioCompactionExecutor, TokioCompactionExecutorOptions,
+    };
     use crate::compactor_state::CompactionStatus;
     use crate::compactor_state::SourceId;
     use crate::config::{
@@ -2634,15 +2651,19 @@ mod tests {
             let stats_registry = Arc::new(StatRegistry::new());
             let compactor_stats = Arc::new(CompactionStats::new(stats_registry.clone()));
             let real_executor = Arc::new(TokioCompactionExecutor::new(
-                Handle::current(),
-                compactor_options.clone(),
-                real_executor_tx,
-                table_store,
-                rand.clone(),
-                compactor_stats.clone(),
-                Arc::new(DefaultSystemClock::new()),
-                manifest_store.clone(),
-                options.merge_operator.clone(),
+                TokioCompactionExecutorOptions {
+                    handle: Handle::current(),
+                    options: compactor_options.clone(),
+                    worker_tx: real_executor_tx,
+                    table_store,
+                    rand: rand.clone(),
+                    stats: compactor_stats.clone(),
+                    clock: Arc::new(DefaultSystemClock::new()),
+                    manifest_store: manifest_store.clone(),
+                    merge_operator: options.merge_operator.clone(),
+                    #[cfg(feature = "compaction_filters")]
+                    compaction_filter_supplier: options.compaction_filter_supplier.clone(),
+                },
             ));
             let handler = CompactorEventHandler::new(
                 manifest_store.clone(),
