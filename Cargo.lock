@@ -3284,6 +3284,7 @@ dependencies = [
  "async-trait",
  "atomic",
  "backon",
+ "backtrace",
  "bincode",
  "bitflags 2.9.1",
  "bytemuck",

@@ -70,6 +70,7 @@ thread_local = { workspace = true }
 url = "2.5.4"
 
 [dev-dependencies]
+backtrace = "0.3"
 bincode = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
 ctor = { workspace = true }
