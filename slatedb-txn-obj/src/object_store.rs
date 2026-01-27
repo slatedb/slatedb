@@ -232,4 +232,13 @@ mod tests {
         assert_eq!(3, left_bounded[0].id);
         assert_eq!(4, left_bounded[1].id);
     }
+
+    #[tokio::test]
+    async fn test_try_read_missing_returns_none() {
+        let store = new_store();
+
+        let missing = store.try_read(1.into()).await.unwrap();
+
+        assert!(missing.is_none());
+    }
 }
