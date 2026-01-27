@@ -561,7 +561,7 @@ mod tests {
         Arc::new(TableStore::new(
             ObjectStores::new(object_store.clone(), None),
             SsTableFormat::default(),
-            path.clone(),
+            path,
             None,
         ))
     }

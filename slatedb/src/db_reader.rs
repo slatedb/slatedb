@@ -137,7 +137,7 @@ impl DbReaderInner {
         let state = RwLock::new(initial_state);
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: db_stats.clone(),
+            db_stats,
             mono_clock: Arc::clone(&mono_clock),
             oracle: oracle.clone(),
             merge_operator: options.merge_operator.clone(),
@@ -455,7 +455,7 @@ impl DbReaderInner {
         if let Some(result) = closed_result_reader.read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e.clone()),
+                Err(e) => Err(e),
             };
         }
         Ok(())

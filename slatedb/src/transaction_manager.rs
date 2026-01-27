@@ -1270,7 +1270,7 @@ mod tests {
                     TxnOperation::TrackReadRange {
                         txn_id,
                         start_key: start_key.clone().min(end_key.clone()),
-                        end_key: start_key.max(end_key).to_string(),
+                        end_key: start_key.max(end_key),
                     }
                 }),
             // recycle

@@ -666,7 +666,7 @@ impl CompactorState {
                 }
             }
             if !inserted {
-                new_compacted.push(output_sr.clone());
+                new_compacted.push(output_sr);
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
             let first_source = spec
@@ -885,12 +885,12 @@ mod tests {
         // when:
         let compaction = Compaction::new(compaction_id, spec.clone());
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
 
         // then:
         let mut compactions = state.active_compactions();
-        let expected = Compaction::new(compaction_id, spec.clone());
+        let expected = Compaction::new(compaction_id, spec);
         assert_eq!(compactions.next().expect("compaction not found"), &expected);
         assert!(compactions.next().is_none());
     }
@@ -905,7 +905,7 @@ mod tests {
         let spec = build_l0_compaction(&before_compaction.l0, 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
 
         // when:
@@ -954,7 +954,7 @@ mod tests {
         let spec = build_l0_compaction(&before_compaction.l0, 0);
         let compaction = Compaction::new(compaction_id, spec);
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
 
         // when:
@@ -963,7 +963,7 @@ mod tests {
             id: 0,
             ssts: compacted_ssts,
         };
-        state.finish_compaction(compaction_id, sr.clone());
+        state.finish_compaction(compaction_id, sr);
 
         // then:
         assert_eq!(state.active_compactions().count(), 0)
@@ -1015,7 +1015,7 @@ mod tests {
         );
         let compaction = Compaction::new(compaction_id, spec);
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
         state.finish_compaction(
             compaction_id,
@@ -1085,7 +1085,7 @@ mod tests {
         );
         let compaction = Compaction::new(compaction_id, spec);
         state
-            .add_compaction(compaction.clone())
+            .add_compaction(compaction)
             .expect("failed to add compaction");
         state.finish_compaction(
             compaction_id,
@@ -1166,7 +1166,7 @@ mod tests {
             0,
         );
         let compaction = Compaction::new(compaction_id, spec);
-        let result = state.add_compaction(compaction.clone());
+        let result = state.add_compaction(compaction);
 
         // then:
         assert!(result.is_ok());
@@ -1197,7 +1197,7 @@ mod tests {
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let spec = CompactionSpec::new(sources, 0);
         let compaction = Compaction::new(compaction_id, spec);
-        let result = state.add_compaction(compaction.clone());
+        let result = state.add_compaction(compaction);
 
         // or simply:
         assert!(result.is_ok());

@@ -1494,7 +1494,7 @@ mod tests {
         ) {
             let os = Arc::new(InMemory::new());
             let format = SsTableFormat { block_size, ..SsTableFormat::default() };
-            let ts = Arc::new(TableStore::new(ObjectStores::new(os.clone(), None),
+            let ts = Arc::new(TableStore::new(ObjectStores::new(os, None),
                 format, Path::from(ROOT), None));
             if let Some(bytes) = block_size.checked_mul(num_blocks) {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));

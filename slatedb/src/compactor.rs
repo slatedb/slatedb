@@ -279,7 +279,7 @@ impl Compactor {
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            closed_result.clone(),
+            closed_result,
             system_clock.clone(),
         ));
         Self {
@@ -2562,7 +2562,7 @@ mod tests {
         };
         core.l0 = VecDeque::from(vec![
             SsTableHandle::new(SsTableId::Compacted(l0_first), l0_info.clone()),
-            SsTableHandle::new(SsTableId::Compacted(l0_second), l0_info.clone()),
+            SsTableHandle::new(SsTableId::Compacted(l0_second), l0_info),
         ]);
         core.compacted = vec![
             SortedRun {
@@ -2576,7 +2576,7 @@ mod tests {
                 id: 2,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
-                    sr_info.clone(),
+                    sr_info,
                 )],
             },
         ];

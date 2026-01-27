@@ -508,7 +508,7 @@ impl SsTableInfo {
         if raw_info.len() <= 4 {
             return Err(SlateDBError::EmptyBlockMeta);
         }
-        let data = raw_info.slice(..raw_info.len() - 4).clone();
+        let data = raw_info.slice(..raw_info.len() - 4);
         let checksum = raw_info.slice(raw_info.len() - 4..).get_u32();
         if checksum != crc32fast::hash(&data) {
             return Err(SlateDBError::ChecksumMismatch);

@@ -224,7 +224,7 @@ mod tests {
 
         // Test positive timestamp
         let positive_ts = 1625097600000i64; // 2021-07-01T00:00:00Z in milliseconds
-        clock.clone().set(positive_ts);
+        clock.set(positive_ts);
         assert_eq!(
             clock.now().timestamp_millis(),
             positive_ts,
@@ -233,7 +233,7 @@ mod tests {
 
         // Test negative timestamp (before Unix epoch)
         let negative_ts = -1625097600000; // Before Unix epoch
-        clock.clone().set(negative_ts);
+        clock.set(negative_ts);
         assert_eq!(
             clock.now().timestamp_millis(),
             negative_ts,

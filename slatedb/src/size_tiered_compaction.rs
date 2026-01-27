@@ -601,7 +601,7 @@ mod tests {
         let compactor_job = Compaction::new(job_id, request);
 
         state
-            .add_compaction(compactor_job.clone())
+            .add_compaction(compactor_job)
             .expect("failed to add job");
 
         // when:
@@ -686,7 +686,7 @@ mod tests {
         let request = create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]);
         let compactor_job = Compaction::new(compaction_id, request);
         state
-            .add_compaction(compactor_job.clone())
+            .add_compaction(compactor_job)
             .expect("failed to add job");
 
         // when:
@@ -723,7 +723,7 @@ mod tests {
             create_sr_compaction(vec![7, 6, 5, 4, 3, 2, 1, 0]),
         );
         state
-            .add_compaction(compactor_job.clone())
+            .add_compaction(compactor_job)
             .expect("failed to add job");
 
         // when:
@@ -775,7 +775,7 @@ mod tests {
         let l0 = VecDeque::from(vec![create_sst(1), create_sst(1), create_sst(1)]);
         let state = &create_compactor_state(create_db_state(l0.clone(), Vec::new()));
 
-        let mut l0_sst = l0.clone();
+        let mut l0_sst = l0;
         let last_sst = l0_sst.pop_back();
         l0_sst.push_front(last_sst.unwrap());
         // when:
@@ -793,7 +793,7 @@ mod tests {
         let l0 = VecDeque::from(vec![create_sst(1), create_sst(1), create_sst(1)]);
         let state = &create_compactor_state(create_db_state(l0.clone(), Vec::new()));
 
-        let mut l0_sst = l0.clone();
+        let mut l0_sst = l0;
         let last_sst = l0_sst.pop_back().unwrap();
         l0_sst.push_front(last_sst);
         l0_sst.pop_back();

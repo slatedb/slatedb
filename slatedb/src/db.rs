@@ -556,7 +556,7 @@ impl DbInner {
         if let Some(result) = closed_result_reader.read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e.clone()),
+                Err(e) => Err(e),
             };
         }
         Ok(())

@@ -772,7 +772,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
-                retrying_main_object_store.clone(),
+                retrying_main_object_store,
                 retrying_wal_object_store.clone(),
             ),
             SsTableFormat::default(), // read only SSTs can use default
@@ -899,7 +899,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(retrying_main_object_store.clone(), None),
+            ObjectStores::new(retrying_main_object_store, None),
             sst_format,
             path,
             None, // no need for cache in GC
