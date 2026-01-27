@@ -123,6 +123,55 @@ mod store_provider;
 mod tablestore;
 #[cfg(test)]
 mod test_utils;
+
+// Initialize test infrastructure (deadlock detector, tracing) for all tests.
+// This ctor runs at crate load time, ensuring these are set up even for tests
+// that don't explicitly use test_utils.
+#[cfg(test)]
+mod test_init {
+    use log::error;
+    use std::sync::Once;
+    use std::thread;
+    use std::time::Duration;
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::EnvFilter;
+
+    static INIT_LOGGING: Once = Once::new();
+    static INIT_DEADLOCK_DETECTOR: Once = Once::new();
+
+    #[ctor::ctor]
+    fn init_test_infrastructure() {
+        // Initialize tracing/logging
+        INIT_LOGGING.call_once(|| {
+            let filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+                .with_test_writer()
+                .init();
+        });
+
+        // Initialize deadlock detector
+        INIT_DEADLOCK_DETECTOR.call_once(|| {
+            thread::spawn(|| loop {
+                thread::sleep(Duration::from_secs(10));
+                let deadlocks = parking_lot::deadlock::check_deadlock();
+                if deadlocks.is_empty() {
+                    continue;
+                }
+
+                error!("parking_lot detected {} deadlock(s)", deadlocks.len());
+                for (i, threads) in deadlocks.iter().enumerate() {
+                    error!("deadlock #{}", i + 1);
+                    for t in threads {
+                        error!("thread_id={:?}\n{:?}", t.thread_id(), t.backtrace());
+                    }
+                }
+            });
+        });
+    }
+}
 mod transaction_manager;
 mod types;
 mod utils;
