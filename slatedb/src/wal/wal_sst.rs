@@ -61,7 +61,7 @@ use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::block::BlockBuilder;
 use crate::format::sst::{
     BlockTransformer, EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder,
-    EncodedSsTableFooterBuilder, SST_FORMAT_VERSION,
+    EncodedSsTableFooterBuilder, SST_FORMAT_VERSION_V1,
 };
 use crate::types::RowEntry;
 
@@ -234,7 +234,7 @@ impl EncodedWalSsTableBuilder<'_> {
         let mut footer_builder = EncodedSsTableFooterBuilder::new(
             self.current_len,
             self.sst_first_seq,
-            SST_FORMAT_VERSION,
+            SST_FORMAT_VERSION_V1,
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,

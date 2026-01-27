@@ -74,11 +74,12 @@ use crate::types::RowEntry;
 use crate::utils::compute_index_key;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 
-pub(crate) const SST_FORMAT_VERSION: u16 = 1;
-pub(crate) const SST_FORMAT_VERSION_V2: u16 = 2;
+pub(crate) const SST_FORMAT_VERSION_V1: u16 = 1;
+pub(crate) const SST_FORMAT_VERSION: u16 = 2;
+pub(crate) const SST_FORMAT_VERSION_V2: u16 = SST_FORMAT_VERSION;
 
 fn is_supported_version(version: u16) -> bool {
-    matches!(version, SST_FORMAT_VERSION | SST_FORMAT_VERSION_V2)
+    matches!(version, SST_FORMAT_VERSION_V1 | SST_FORMAT_VERSION_V2)
 }
 
 // 8 bytes for the metadata offset + 2 bytes for the version
@@ -558,8 +559,8 @@ impl EncodedSsTableBlock {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BlockFormat {
-    V1,
     #[allow(dead_code)]
+    V1,
     V2,
 }
 
@@ -936,8 +937,8 @@ impl EncodedSsTableBuilder<'_> {
             sst_first_entry: None,
             current_block_max_key: None,
             block_size,
-            block_format: BlockFormat::V1,
-            builder: BlockBuilderImpl::new(BlockFormat::V1, block_size),
+            block_format: BlockFormat::V2,
+            builder: BlockBuilderImpl::new(BlockFormat::V2, block_size),
             sst_format_version: SST_FORMAT_VERSION,
             min_filter_keys,
             num_keys: 0,
@@ -1154,7 +1155,7 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
     use crate::filter::filter_hash;
-    use crate::format::block_iterator::BlockIterator;
+    use crate::format::block_iterator_v2::BlockIteratorV2;
     use crate::format::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::iter::IterationOrder::Ascending;
     use crate::object_stores::ObjectStores;
@@ -1190,11 +1191,11 @@ mod tests {
         assert!(size_with_filter > size_without_filter); // Should be larger due to bloom filter
     }
 
-    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIterator<Block> {
+    fn next_block_to_iter(builder: &mut EncodedSsTableBuilder) -> BlockIteratorV2<Block> {
         let block = builder.next_block();
         assert!(block.is_some());
         let block = block.unwrap().block;
-        BlockIterator::new(block, Ascending)
+        BlockIteratorV2::new(block, Ascending)
     }
 
     #[tokio::test]
@@ -1296,7 +1297,7 @@ mod tests {
             .read_block_raw(&encoded.info, &index, 0, &raw_sst)
             .await
             .unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIteratorV2::new_ascending(block);
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'a'; 8], &[b'1'; 8], 0).with_create_ts(1)],
@@ -1306,7 +1307,7 @@ mod tests {
             .read_block_raw(&encoded.info, &index, 1, &raw_sst)
             .await
             .unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIteratorV2::new_ascending(block);
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'b'; 8], &[b'2'; 8], 0).with_create_ts(2)],
@@ -1316,7 +1317,7 @@ mod tests {
             .read_block_raw(&encoded.info, &index, 2, &raw_sst)
             .await
             .unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = BlockIteratorV2::new_ascending(block);
         assert_iterator(
             &mut iter,
             vec![RowEntry::new_value(&[b'c'; 8], &[b'3'; 8], 0).with_create_ts(3)],
@@ -1633,7 +1634,7 @@ mod tests {
 
         // then:
         for expected_entries in expected_blocks {
-            let mut iter = BlockIterator::new(blocks.pop_front().unwrap(), Ascending);
+            let mut iter = BlockIteratorV2::new(blocks.pop_front().unwrap(), Ascending);
             assert_iterator(&mut iter, expected_entries).await;
         }
         assert!(blocks.is_empty())

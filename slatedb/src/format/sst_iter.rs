@@ -16,7 +16,7 @@ use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
 use crate::format::block_iterator::{BlockIterator, BlockLike};
 use crate::format::block_iterator_v2::BlockIteratorV2;
-use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
+use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V1, SST_FORMAT_VERSION_V2};
 use crate::{
     iter::{init_optional_iterator, KeyValueIterator},
     partitioned_keyspace,
@@ -37,7 +37,7 @@ enum DataBlockIterator<B: BlockLike> {
 impl<B: BlockLike> DataBlockIterator<B> {
     fn new_ascending(block: B, sst_version: u16) -> Result<Self, SlateDBError> {
         match sst_version {
-            SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new_ascending(block))),
+            SST_FORMAT_VERSION_V1 => Ok(Self::V1(BlockIterator::new_ascending(block))),
             SST_FORMAT_VERSION_V2 => Ok(Self::V2(BlockIteratorV2::new_ascending(block))),
             _ => Err(SlateDBError::InvalidVersion {
                 expected_version: SST_FORMAT_VERSION,
@@ -1236,7 +1236,7 @@ mod tests {
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        assert_eq!(index.borrow().block_meta().len(), 10);
+        assert_eq!(index.borrow().block_meta().len(), 8);
 
         // TODO: verify cache_blocks=true is intended
         let sst_iter_options = SstIteratorOptions {

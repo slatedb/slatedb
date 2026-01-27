@@ -85,7 +85,7 @@ mod tests {
     use crate::db_state::{SsTableHandle, SsTableId};
     use crate::error::SlateDBError;
     use crate::error::SlateDBError::MergeOperatorMissing;
-    use crate::format::block_iterator::BlockIterator;
+    use crate::format::block_iterator_v2::BlockIteratorV2;
     use crate::iter::KeyValueIterator;
     use crate::mem_table::WritableKVTable;
     use crate::object_store::memory::InMemory;
@@ -135,7 +135,7 @@ mod tests {
             .unwrap();
         let mut found_entries = Vec::new();
         for block in blocks {
-            let mut block_iter = BlockIterator::new_ascending(block);
+            let mut block_iter = BlockIteratorV2::new_ascending(block);
             block_iter.init().await.unwrap();
 
             while let Some(entry) = block_iter.next_entry().await.unwrap() {

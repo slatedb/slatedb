@@ -1,6 +1,4 @@
 #![allow(dead_code)]
-use std::cmp::Ordering;
-
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 
@@ -148,7 +146,8 @@ impl<B: BlockLike> AscendingState<B> {
     }
 
     /// Find the restart point that contains or precedes the target key.
-    /// Returns the largest restart index where the key at that restart point is <= target.
+    /// Returns the earliest restart index with key >= target, or the previous restart if the
+    /// target falls between restart keys.
     fn find_restart_for_key(&self, target: &[u8]) -> usize {
         let restarts = self.block.offsets();
         if restarts.is_empty() {
@@ -162,25 +161,48 @@ impl<B: BlockLike> AscendingState<B> {
             let mid = low + (high - low) / 2;
             let restart_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, mid);
 
-            match restart_key.as_ref().cmp(target) {
-                Ordering::Less => {
-                    low = mid + 1;
-                }
-                Ordering::Equal => {
-                    return mid;
-                }
-                Ordering::Greater => {
-                    high = mid;
-                }
+            if restart_key.as_ref() < target {
+                low = mid + 1;
+            } else {
+                high = mid;
             }
         }
 
-        // low is now the first restart point with key > target
-        // We want the previous one (if any)
-        if low > 0 {
-            low - 1
-        } else {
+        // low is now the first restart point with key >= target.
+        // Step back one restart to ensure we include any entries for target that
+        // started in the previous restart region.
+        if low == 0 {
             0
+        } else {
+            low - 1
+        }
+    }
+
+    /// Find the last restart point with key <= target (used for descending seeks).
+    fn find_restart_at_or_before_key(&self, target: &[u8]) -> usize {
+        let restarts = self.block.offsets();
+        if restarts.is_empty() {
+            return 0;
+        }
+
+        let mut low = 0;
+        let mut high = restarts.len();
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let restart_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, mid);
+
+            if restart_key.as_ref() <= target {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        if low == 0 {
+            0
+        } else {
+            low - 1
         }
     }
 
@@ -406,7 +428,7 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
 
     /// Find the restart point that contains or precedes the target key.
     fn find_restart_for_key(&self, target: &[u8]) -> usize {
-        self.ascending.find_restart_for_key(target)
+        self.ascending.find_restart_at_or_before_key(target)
     }
 }
 
@@ -509,6 +531,17 @@ mod tests {
         builder.build().expect("build failed")
     }
 
+    fn build_test_block_with_seqs(
+        entries: &[(&[u8], &[u8], u64)],
+        restart_interval: usize,
+    ) -> Block {
+        let mut builder = BlockBuilderV2::new_with_restart_interval(4096, restart_interval);
+        for (key, value, seq) in entries.iter() {
+            let _ = builder.add(make_entry(key, value, *seq));
+        }
+        builder.build().expect("build failed")
+    }
+
     #[tokio::test]
     async fn should_iterate_all_entries() {
         // given: a block with entries
@@ -595,6 +628,31 @@ mod tests {
         // then: finds the correct entry
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"e");
+    }
+
+    #[tokio::test]
+    async fn should_seek_to_first_duplicate_across_restart_boundary() {
+        // given: duplicate keys spanning restart boundaries
+        let block = build_test_block_with_seqs(
+            &[
+                (b"dup", b"v4", 4), // restart 0
+                (b"dup", b"v3", 3),
+                (b"dup", b"v2", 2), // restart 1
+                (b"dup", b"v1", 1),
+                (b"next", b"v0", 0), // restart 2
+            ],
+            2,
+        );
+
+        let mut iter = BlockIteratorV2::new_ascending(&block);
+
+        // when: seeking to a key that has duplicates across restarts
+        iter.seek(b"dup").await.unwrap();
+
+        // then: returns the first duplicate entry (highest seq) without skipping
+        let kv = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"dup");
+        assert_eq!(kv.seq, 4);
     }
 
     #[tokio::test]
@@ -935,6 +993,31 @@ mod tests {
         // and continues descending
         let kv = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(kv.key.as_ref(), b"banana");
+    }
+
+    #[tokio::test]
+    async fn should_seek_descending_with_duplicate_keys_across_restart_boundary() {
+        // given: duplicate keys spanning restart boundaries
+        let block = build_test_block_with_seqs(
+            &[
+                (b"dup", b"v4", 4), // restart 0
+                (b"dup", b"v3", 3),
+                (b"dup", b"v2", 2), // restart 1
+                (b"dup", b"v1", 1),
+                (b"next", b"v0", 0), // restart 2
+            ],
+            2,
+        );
+
+        let mut iter = DescendingBlockIteratorV2::new(&block);
+
+        // when: seeking to the duplicate key in descending mode
+        iter.seek(b"dup").await.unwrap();
+
+        // then: returns the last duplicate entry (lowest seq) in descending order
+        let kv = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"dup");
+        assert_eq!(kv.seq, 1);
     }
 
     #[tokio::test]

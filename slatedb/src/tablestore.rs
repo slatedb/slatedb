@@ -625,7 +625,7 @@ mod tests {
     use crate::db_cache::{DbCache, DbCacheWrapper};
     use crate::error;
     use crate::format::block::Block;
-    use crate::format::block_iterator::BlockIterator;
+    use crate::format::block_iterator_v2::BlockIteratorV2;
     use crate::format::sst::SsTableFormat;
     use crate::format::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::object_stores::ObjectStores;
@@ -1200,7 +1200,7 @@ mod tests {
         let mut expected_iter = expected.iter();
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
-            let mut iter = BlockIterator::new_ascending(block.clone());
+            let mut iter = BlockIteratorV2::new_ascending(block.clone());
             let kv = iter.next().await.unwrap().unwrap();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);

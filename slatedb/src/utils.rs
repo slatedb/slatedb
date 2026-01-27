@@ -5,6 +5,8 @@ use crate::db_state::SortedRun;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::format::block_iterator::BlockIterator;
+use crate::format::block_iterator_v2::BlockIteratorV2;
+use crate::format::sst::{SST_FORMAT_VERSION_V1, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -193,12 +195,29 @@ pub(crate) async fn last_written_key_and_seq(
 
     // Sort descending so we get the last row from the last block, which
     // should be the last written key/seq.
-    let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
-    block_iter.init().await?;
-    Ok(block_iter
-        .next_entry()
-        .await?
-        .map(|entry| (entry.key, entry.seq)))
+    let sst_version = table_store.read_sst_version(output_sst).await?;
+    match sst_version {
+        SST_FORMAT_VERSION_V1 => {
+            let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
+            block_iter.init().await?;
+            Ok(block_iter
+                .next_entry()
+                .await?
+                .map(|entry| (entry.key, entry.seq)))
+        }
+        SST_FORMAT_VERSION_V2 => {
+            let mut block_iter = BlockIteratorV2::new(block, IterationOrder::Descending);
+            block_iter.init().await?;
+            Ok(block_iter
+                .next_entry()
+                .await?
+                .map(|entry| (entry.key, entry.seq)))
+        }
+        _ => Err(SlateDBError::InvalidVersion {
+            expected_version: SST_FORMAT_VERSION_V2,
+            actual_version: sst_version,
+        }),
+    }
 }
 
 fn bytes_into_minimal_vec(bytes: &Bytes) -> Vec<u8> {
