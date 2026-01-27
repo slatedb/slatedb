@@ -20,10 +20,6 @@ impl<T: KeyValueIterator> PeekingIterator<T> {
         }
     }
 
-    pub(crate) fn inner(&self) -> &T {
-        &self.iterator
-    }
-
     /// Peek at the next entry without advancing the iterator.
     ///
     /// Multiple calls to `peek` will return the same entry until `next_entry` is called.
