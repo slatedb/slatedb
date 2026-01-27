@@ -189,13 +189,133 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
 
 #[cfg(test)]
 mod tests {
-    use crate::tests::{new_store, TestVal};
+    use super::ObjectStoreSequencedStorageProtocol;
+    use crate::tests::{new_store, TestVal, TestValCodec};
     use crate::{
-        MonotonicId, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
-        TransactionalStorageProtocol,
+        MonotonicId, ObjectCodec, SequencedStorageProtocol, SimpleTransactionalObject,
+        TransactionalObject, TransactionalStorageProtocol,
+    };
+    use chrono::Utc;
+    use futures::stream::{self, BoxStream};
+    use futures::StreamExt;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::{
+        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
     };
     use std::collections::Bound::{Excluded, Included, Unbounded};
+    use std::fmt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// A flaky object store that simulates a missing file on the first list() call.
+    /// On the first call to list(), it returns a file with `missing_id`. On subsequent
+    /// calls, it returns a file with `present_id`. This allows testing retry logic in
+    /// `try_read_latest` when a listed file is missing on read. This can happen if the
+    /// garbage collector deletes a file between the list and get calls.
+    #[derive(Debug)]
+    struct FlakyListStore {
+        inner: InMemory,
+        list_calls: AtomicUsize,
+        missing_id: u64,
+        present_id: u64,
+        file_suffix: &'static str,
+    }
+
+    impl FlakyListStore {
+        fn new(
+            inner: InMemory,
+            missing_id: u64,
+            present_id: u64,
+            file_suffix: &'static str,
+        ) -> Self {
+            Self {
+                inner,
+                list_calls: AtomicUsize::new(0),
+                missing_id,
+                present_id,
+                file_suffix,
+            }
+        }
+
+        fn path_for(&self, id: u64) -> Path {
+            Path::from(format!("{:020}.{}", id, self.file_suffix))
+        }
+    }
+
+    impl fmt::Display for FlakyListStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "FlakyListStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for FlakyListStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> ObjectStoreResult<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: PutMultipartOptions,
+        ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> ObjectStoreResult<GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
+            self.inner.delete(location).await
+        }
+
+        fn list(
+            &self,
+            _prefix: Option<&Path>,
+        ) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+            let call = self.list_calls.fetch_add(1, Ordering::SeqCst);
+            let id = if call == 0 {
+                self.missing_id
+            } else {
+                self.present_id
+            };
+            let meta = ObjectMeta {
+                location: self.path_for(id),
+                last_modified: Utc::now(),
+                size: 0,
+                e_tag: None,
+                version: None,
+            };
+            stream::iter(vec![Ok(meta)]).boxed()
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> ObjectStoreResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
 
     #[tokio::test]
     async fn test_list_ranges_sorted() {
@@ -240,5 +360,43 @@ mod tests {
         let missing = store.try_read(1.into()).await.unwrap();
 
         assert!(missing.is_none());
+    }
+
+    /// Validate that try_read_latest retries when a listed file is missing on read.
+    #[tokio::test]
+    async fn test_try_read_latest_retries_missing_listed_file() {
+        let expected = TestVal {
+            epoch: 7,
+            payload: 42,
+        };
+        let missing_id = 1u64;
+        let present_id = 2u64;
+
+        let inner = InMemory::new();
+        let codec = TestValCodec;
+        let present_path = Path::from(format!("{:020}.val", present_id));
+        inner
+            .put(
+                &present_path,
+                PutPayload::from_bytes(codec.encode(&expected)),
+            )
+            .await
+            .unwrap();
+
+        let flaky_store = Arc::new(FlakyListStore::new(inner, missing_id, present_id, "val"));
+        let object_store: Arc<dyn ObjectStore> = flaky_store.clone();
+        let store = ObjectStoreSequencedStorageProtocol {
+            object_store: Box::new(object_store),
+            codec: Box::new(TestValCodec),
+            file_suffix: "val",
+        };
+
+        let latest = store.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(present_id, latest.0.id());
+        assert_eq!(expected, latest.1);
+        assert!(
+            flaky_store.list_calls.load(Ordering::SeqCst) >= 2,
+            "expected try_read_latest to retry after a missing read"
+        );
     }
 }
