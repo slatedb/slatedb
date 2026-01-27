@@ -28,10 +28,11 @@
 //!
 //! # Key Components
 //!
-//! - [`SsTableFormat`]: Configuration for SSTable format (block size, compression, etc.)
-//! - [`EncodedSsTableBuilder`]: Main builder for constructing SSTables from entries. Internally uses:
-//!     - [`EncodedSsTableBlockBuilder`]: Builder for encoding individual data blocks
-//!     - [`EncodedSsTableFooterBuilder`]: Builder for the footer (filter, index, metadata, metadata offset, version)
+//! - [`EncodedSsTableBuilder`]: Builder for constructing SSTables from entries
+//!
+//! The builder reuses shared components from the [`crate::format::sst`] module:
+//! - [`EncodedSsTableBlockBuilder`]: For encoding data blocks
+//! - [`EncodedSsTableFooterBuilder`]: For encoding the footer
 //! - [`BlockTransformer`]: Trait for custom block transformations (e.g., encryption)
 //!
 //! # Compression

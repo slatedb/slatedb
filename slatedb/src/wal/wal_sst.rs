@@ -32,9 +32,10 @@
 //!
 //! - [`EncodedWalSsTableBuilder`]: Builder for constructing WAL SSTables from entries
 //!
-//! The builder reuses shared components from the [`crate::sst`] module:
-//! - [`EncodedSsTableBlockBuilder`](crate::sst::EncodedSsTableBlockBuilder): For encoding data blocks
-//! - [`EncodedSsTableFooterBuilder`](crate::sst::EncodedSsTableFooterBuilder): For encoding the footer
+//! The builder reuses shared components from the [`crate::format::sst`] module:
+//! - [`EncodedSsTableBlockBuilder`]: For encoding data blocks
+//! - [`EncodedSsTableFooterBuilder`]: For encoding the footer
+//! - [`BlockTransformer`]: Trait for custom block transformations (e.g., encryption)
 //!
 //! # Why No Bloom Filter?
 //!
