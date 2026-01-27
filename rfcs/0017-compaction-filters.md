@@ -16,7 +16,7 @@ Table of Contents:
 - [Open Questions](#open-questions)
 - [References](#references)
 
-Status: Draft
+Status: Accepted
 
 Authors:
 
