@@ -1486,16 +1486,20 @@ impl Db {
         Ok(object_store)
     }
 
-    /// Check the status of the database.
+    /// Check the database status.
     ///
-    /// The status is updated at least every [`Settings::manifest_poll_interval`], but
-    /// might also be updated based on other internal events or user-facing operations.
+    /// This is a passive check that does not perform any I/O. The status is checked at
+    /// least every [`Settings::manifest_poll_interval`], but might also be updated based
+    /// on other internal events or user-facing operations.
+    ///
+    /// Once a database is closed, either normally or due to an error, it can't be reopened.
+    /// A new `Db` instance must be created to access the database again.
     ///
     /// ## Returns
     /// - `Ok(())` if the DB is still open.
     /// - `Err(ErrorKind::Closed)` if the DB was closed normally.
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error that caused
-    ///    the closure.
+    ///   the closure.
     pub fn status(&self) -> Result<(), crate::Error> {
         self.inner.status().map_err(|e| e.into())
     }
