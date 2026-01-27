@@ -131,3 +131,12 @@ mod wal;
 mod wal_buffer;
 mod wal_id;
 mod wal_replay;
+
+// Initialize test infrastructure (deadlock detector, tracing) for all tests.
+// This ctor runs at crate load time, ensuring these are set up even for tests
+// that don't explicitly use test_utils.
+#[cfg(test)]
+#[ctor::ctor]
+fn init_test_infrastructure() {
+    crate::test_utils::init_test_infrastructure();
+}

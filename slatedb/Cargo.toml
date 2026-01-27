@@ -70,6 +70,7 @@ thread_local = { workspace = true }
 url = "2.5.4"
 
 [dev-dependencies]
+backtrace = "0.3"
 bincode = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
 ctor = { workspace = true }
@@ -77,6 +78,7 @@ fail-parallel = { workspace = true, features = ["failpoints"] }
 figment = { workspace = true, features = ["test"] }
 filetime = { workspace = true }
 insta = { workspace = true }
+parking_lot = { workspace = true, features = ["deadlock_detection"] }
 proptest = { workspace = true }
 rstest = { workspace = true }
 slatedb-common = { workspace = true, features = ["test-util"] }
