@@ -38,11 +38,7 @@ impl<'a> SortedRunView<'a> {
         sst_iterator_options: SstIteratorOptions,
     ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
         let next_iter = if let Some(view) = self.pop_sst() {
-            Some(SstIterator::new(
-                view,
-                table_store.clone(),
-                sst_iterator_options,
-            )?)
+            Some(SstIterator::new(view, table_store, sst_iterator_options)?)
         } else {
             None
         };

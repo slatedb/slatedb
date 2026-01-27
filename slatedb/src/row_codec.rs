@@ -446,7 +446,7 @@ mod tests {
                 test_case.key_prefix_len,
                 Bytes::from(test_case.key_suffix),
                 test_case.seq,
-                value.clone(),
+                value,
                 test_case.create_ts,
                 test_case.expire_ts,
             ),

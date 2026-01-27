@@ -256,10 +256,7 @@ fn parse_gc_schedule(s: &str) -> Result<GcSchedule, String> {
         .ok_or_else(|| "Missing or invalid 'min_age'".to_string())
         .and_then(|v| {
             humantime::parse_duration(v).map_err(|e| {
-                "Could not parse min_age as duration: "
-                    .to_string()
-                    .to_owned()
-                    + e.to_string().as_str()
+                "Could not parse min_age as duration: ".to_string() + e.to_string().as_str()
             })
         })?;
     let period = parts

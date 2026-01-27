@@ -309,7 +309,7 @@ mod tests {
     fn test_block(#[case] test_case: BlockTestCase) {
         let block = build_block(&test_case);
         let encoded = block.encode();
-        let decoded = Block::decode(encoded.clone());
+        let decoded = Block::decode(encoded);
         let block_data = &block.data;
         let block_offsets = &block.offsets;
         // Decode the block data using offsets and validate each decoded entry

@@ -484,7 +484,7 @@ mod tests {
 
     fn new_memory_compactions_store() -> Arc<CompactionsStore> {
         let os = Arc::new(InMemory::new());
-        Arc::new(CompactionsStore::new(&Path::from(ROOT), os.clone()))
+        Arc::new(CompactionsStore::new(&Path::from(ROOT), os))
     }
 
     fn new_compaction() -> Compaction {

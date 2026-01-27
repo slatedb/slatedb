@@ -231,7 +231,7 @@ pub(crate) mod tests {
             suffix in arbitrary::bytes(8)
         )| {
             let range = BytesRange::from_prefix(&prefix);
-            let mut combined = prefix.clone().to_vec();
+            let mut combined = prefix.to_vec();
             combined.extend_from_slice(&suffix);
             let key = Bytes::from(combined);
             prop_assert!(range.contains(&key));
@@ -255,13 +255,13 @@ pub(crate) mod tests {
             let range = BytesRange::from_prefix(&prefix);
 
             // Any key starting with the prefix should be contained.
-            let mut prefixed = prefix.clone().to_vec();
+            let mut prefixed = prefix.to_vec();
             prefixed.extend_from_slice(&suffix);
             let prefixed = Bytes::from(prefixed);
             prop_assert!(range.contains(&prefixed));
 
             // A key with a different first byte should be rejected.
-            let mut non_prefixed = prefix.clone().to_vec();
+            let mut non_prefixed = prefix.to_vec();
             non_prefixed[0] = non_prefixed[0].wrapping_add(1);
             let non_prefixed = Bytes::from(non_prefixed);
             prop_assert!(!range.contains(&non_prefixed));
