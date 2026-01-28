@@ -90,7 +90,7 @@ pub struct CompactionJobContext {
     pub is_dest_last_run: bool,
     /// The logical clock tick representing the logical time the compaction occurs.
     /// This is used to make decisions about retention of expiring records.
-    pub compaction_logical_clock_tick: i64,
+    pub compaction_clock_tick: i64,
     /// Optional minimum sequence number to retain.
     ///
     /// Entries with sequence numbers at or above this threshold are protected by
@@ -115,19 +115,17 @@ pub enum CompactionFilterDecision {
     /// there are no older versions that could resurface, or when that behavior is
     /// acceptable for your use case.
     Drop,
-    /// Convert the entry to a tombstone.
+    /// Modify the entry's value.
     ///
-    /// Use this instead of Drop when you need to shadow older versions of the same
-    /// key in lower levels. The tombstone will prevent "resurrection" of deleted data.
+    /// Pass `ValueDeletable::Tombstone` to convert the entry to a tombstone.
+    /// When converting to a tombstone, the entry's `expire_ts` is automatically cleared.
     ///
-    /// Note: For merge operands, Tombstone behaves the same as Drop (the operand is
-    /// simply removed without creating a tombstone marker).
-    Tombstone,
-    /// Modify the entry's value. Key and metadata remain unchanged.
+    /// Pass `ValueDeletable::Value(bytes)` to change the value. Key and other
+    /// metadata remain unchanged.
     ///
-    /// Note: If applied to a tombstone, the entry becomes a regular value with
-    /// the tombstone's sequence number, effectively resurrecting the key with a new value.
-    Modify(Bytes),
+    /// Note: If `Value` is applied to a tombstone, the entry becomes a regular value
+    /// with the tombstone's sequence number, effectively resurrecting the key.
+    Modify(ValueDeletable),
 }
 ```
 
@@ -141,10 +139,19 @@ pub enum CompactionFilterDecision {
 /// to satisfy iterator trait requirements.
 #[async_trait]
 pub trait CompactionFilter: Send + Sync {
-    /// Filter a single entry. Should be fast (synchronous, no I/O).
+    /// Filter a single entry.
     ///
-    /// The method is infallible to keep it simple and fast.
-    fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision;
+    /// Return `Ok(decision)` to keep, drop, or modify the entry.
+    /// Return `Err(FilterError)` to abort the compaction job.
+    ///
+    /// This method is async to allow I/O operations (e.g., checking external
+    /// services, loading configuration). However, for best performance, prefer
+    /// doing I/O in `create_compaction_filter()` or `on_compaction_end()` when
+    /// possible, since this method is called for every entry.
+    async fn filter(
+        &mut self,
+        entry: &RowEntry,
+    ) -> Result<CompactionFilterDecision, FilterError>;
 
     /// Called after processing all entries.
     ///
@@ -174,21 +181,37 @@ pub trait CompactionFilterSupplier: Send + Sync {
     async fn create_compaction_filter(
         &self,
         context: &CompactionJobContext,
-    ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError>;
+    ) -> Result<Box<dyn CompactionFilter>, CreationError>;
 }
 ```
 
-### Error Type
+### Error Types
 
 ```rust
-/// Errors that can occur during compaction filter operations.
-#[derive(Debug, Clone, Error)]
+/// Error returned by `create_compaction_filter`. Aborts the compaction job.
+#[derive(Debug, Error)]
+#[error("filter creation failed: {0}")]
+pub struct CreationError(#[source] pub Box<dyn std::error::Error + Send + Sync>);
+
+/// Error returned by `filter`. Aborts the compaction job.
+#[derive(Debug, Error)]
+#[error("filter error: {0}")]
+pub struct FilterError(#[source] pub Box<dyn std::error::Error + Send + Sync>);
+
+/// Container for all compaction filter errors.
+///
+/// Used internally by the compactor to handle errors from both
+/// filter creation and per-entry filtering.
+#[derive(Debug, Error)]
 pub enum CompactionFilterError {
-    /// Filter creation failed in `create_compaction_filter`. This aborts the compaction.
-    #[error("filter creation failed: {0}")]
-    CreationError(String),
+    #[error(transparent)]
+    Creation(#[from] CreationError),
+    #[error(transparent)]
+    Filter(#[from] FilterError),
 }
 ```
+
+These error types wrap the underlying cause, preserving error chains for debugging. The `#[source]` attribute enables `std::error::Error::source()` to return the wrapped error. The `CompactionFilterError` enum provides a unified type for the compactor to handle all filter-related errors.
 
 ### Configuration
 
@@ -337,11 +360,11 @@ at once.
 
 ### Error Handling
 
-| Method                       | Error Behavior                                     |
-|------------------------------|----------------------------------------------------|
-| `create_compaction_filter()` | Returns `Result` - errors abort compaction job     |
-| `filter()`                   | Infallible - filters must handle errors internally |
-| `on_compaction_end()`        | Infallible - cleanup cannot fail compaction        |
+| Method                       | Error Type      | Behavior                          |
+|------------------------------|-----------------|-----------------------------------|
+| `create_compaction_filter()` | `CreationError` | Aborts compaction job             |
+| `filter()`                   | `FilterError`   | Aborts compaction job             |
+| `on_compaction_end()`        | Infallible      | Cleanup cannot fail compaction    |
 
 Creating a fresh filter instance per compaction provides:
 
@@ -354,42 +377,41 @@ all entries in a compaction.
 
 ### Performance Considerations
 
-The `filter()` method is called for every entry during compaction, so it should
-be fast with minimal overhead possible.
+The `filter()` method is called for every entry during compaction. While the
+method is async to allow I/O when needed, frequent I/O per entry can significantly
+impact compaction throughput. For best performance:
+
+- **Prefer batching I/O**: Load configuration or external state in
+  `create_compaction_filter()` rather than per-entry in `filter()`.
+- **Cache decisions**: If checking an external service, cache results to avoid
+  repeated calls for similar entries.
 
 **For CPU-intensive filters:**
 
-If your filter requires expensive computation (e.g., complex parsing, or
-decoding), consider one of these approaches:
+If your filter performs expensive synchronous computation (e.g., complex parsing,
+cryptographic operations), consider using a dedicated compaction runtime to prevent
+blocking your application's main runtime:
 
-1. **Use a dedicated compaction runtime**: Configure SlateDB to run compaction
-   on a separate async runtime using `DbBuilder::with_compaction_runtime()`.
-   This prevents filter work from blocking your application's main runtime.
+```rust
+let compaction_runtime = tokio::runtime::Builder::new_multi_thread()
+    .worker_threads(2)
+    .thread_name("compaction")
+    .build()?;
 
-   ```rust
-   let compaction_runtime = tokio::runtime::Builder::new_multi_thread()
-       .worker_threads(2)
-       .thread_name("compaction")
-       .build()?;
+let db = Db::builder("mydb", object_store)
+    .with_compaction_runtime(compaction_runtime.handle().clone())
+    .with_compaction_filter_supplier(Arc::new(MyCpuIntensiveFilter))
+    .build()
+    .await?;
+```
 
-   let db = Db::builder("mydb", object_store)
-       .with_compaction_runtime(compaction_runtime.handle().clone())
-       .with_compaction_filter_supplier(Arc::new(MyExpensiveFilter))
-       .build()
-       .await?;
-   ```
-
-2. **Use `spawn_blocking` for heavy computation**: If only some entries require
-   expensive processing, you can offload that work to a blocking thread pool.
-   However, note that `filter()` is synchronous, so you'd need to restructure
-   your approach (e.g., batch processing in `on_compaction_end`).
 
 ### Usage Example
 
 ```rust
 use slatedb::{
     CompactionFilter, CompactionFilterSupplier, CompactionJobContext,
-    CompactionFilterDecision, CompactionFilterError, RowEntry,
+    CompactionFilterDecision, CreationError, FilterError, RowEntry, ValueDeletable,
 };
 use bytes::Bytes;
 use std::sync::Arc;
@@ -403,14 +425,17 @@ struct PrefixDroppingFilter {
 
 #[async_trait]
 impl CompactionFilter for PrefixDroppingFilter {
-    fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision {
+    async fn filter(
+        &mut self,
+        entry: &RowEntry,
+    ) -> Result<CompactionFilterDecision, FilterError> {
         if entry.key.starts_with(&self.prefix) {
             self.dropped_count += 1;
             // Use Tombstone to shadow older versions in lower levels
-            return CompactionFilterDecision::Tombstone;
+            return Ok(CompactionFilterDecision::Modify(ValueDeletable::Tombstone));
         }
 
-        CompactionFilterDecision::Keep
+        Ok(CompactionFilterDecision::Keep)
     }
 
     async fn on_compaction_end(&mut self) {
@@ -431,7 +456,7 @@ impl CompactionFilterSupplier for PrefixDroppingFilterSupplier {
     async fn create_compaction_filter(
         &self,
         _context: &CompactionJobContext,
-    ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
+    ) -> Result<Box<dyn CompactionFilter>, CreationError> {
         Ok(Box::new(PrefixDroppingFilter {
             prefix: self.prefix.clone(),
             dropped_count: 0,
@@ -508,10 +533,10 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-- **Latency**: `filter()` is synchronous in hot path - implementations must be fast
-- **Throughput**: Async supplier allows I/O for setup/teardown without blocking compaction
-- **Object-store requests**: No impact; filters operate on in-memory data
-- **Space amplification**: `Drop`/`Tombstone` decisions reduce space; `Modify` may increase or decrease.
+- **Latency**: `filter()` is async but called per-entry - minimize I/O in hot path
+- **Throughput**: For best performance, batch I/O in `create_compaction_filter()` or cache decisions
+- **Object-store requests**: No direct impact; filters operate on in-memory data
+- **Space amplification**: `Drop`/`Modify(Tombstone)` decisions reduce space; `Modify(Value)` may increase or decrease.
 - **Zero overhead when disabled**: Users who do not configure a filter are not impacted.
 
 Well-implemented filters have minimal overhead on compaction throughput.
@@ -556,15 +581,11 @@ See [Limitations](#limitations) for why this is behind a feature flag.
 
 ## Alternatives
 
-### 1. Async `filter()` method
-
-Adds per-entry overhead. Users needing I/O should batch in `create_compaction_filter()`.
-
-### 2. Replace RetentionIterator entirely
+### 1. Replace RetentionIterator entirely
 
 **Deferred**: Built-in retention handles subtle edge cases (snapshot barriers, merge operand expiration). Could be unified in future.
 
-### 3. Batched filter API (all versions of a key at once)
+### 2. Batched filter API (all versions of a key at once)
 
 Instead of `filter(entry) -> Decision`, provide `filter(Vec<RowEntry>) -> Vec<Decision>` where all versions of a key are passed together. This would:
 - Enable look-ahead logic (matching `RetentionIterator`'s current implementation)
@@ -572,15 +593,15 @@ Instead of `filter(entry) -> Decision`, provide `filter(Vec<RowEntry>) -> Vec<De
 
 **Deferred**: Adds API complexity and potential allocations. We're starting simple with entry-at-a-time filtering, which covers most use cases. The API can evolve if batched filtering becomes necessary.
 
-### 4. Single filter instance (no factory/supplier)
+### 3. Single filter instance (no factory/supplier)
 
 Supplier provides isolation between jobs and enables single-threaded execution without synchronization.
 
-### 5. Define custom types instead of using RowEntry
+### 4. Define custom types instead of using RowEntry
 
 Using existing types (`RowEntry`, `CompactionJobContext`) reduces API surface and avoids per-entry allocations for wrapper types.
 
-### 7. Built-in filter chaining
+### 5. Built-in filter chaining
 
 Users who need multiple filters can implement a single `CompactionFilter` that internally chains multiple filters. This keeps SlateDB simpler while still enabling advanced use cases.
 
