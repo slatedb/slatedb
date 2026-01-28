@@ -1,4 +1,3 @@
-use std::collections::vec_deque::Iter;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
