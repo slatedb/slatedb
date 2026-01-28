@@ -493,7 +493,7 @@ mod tests {
     use crate::clock::MonotonicClock;
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::object_stores::ObjectStores;
-    use crate::sst::SsTableFormat;
+    use crate::sst_builder::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;

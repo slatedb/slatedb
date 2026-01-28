@@ -7,12 +7,12 @@ use crate::flatbuffer_types::{
     BlockMeta, FlatBufferSsTableInfoCodec, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
 };
 use crate::format::block::{Block, BlockBuilder};
-use crate::format::row_codec;
+use crate::format::row;
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
 use std::collections::VecDeque;
-#[cfg(any(feature = "zlib", feature = "zstd"))]
+#[cfg(feature = "zlib")]
 use std::io::Read;
 #[cfg(feature = "zlib")]
 use std::io::Write;
@@ -755,7 +755,7 @@ impl SsTableFormat {
         average_first_key_size: usize,
     ) -> usize {
         let entries_size_encoded =
-            row_codec::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
+            row::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
 
         // estimate sum of Block
         let number_of_blocks = usize::div_ceil(entries_size_encoded, self.block_size);

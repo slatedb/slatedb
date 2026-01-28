@@ -116,7 +116,7 @@ mod reader;
 mod retention_iterator;
 mod retrying_object_store;
 mod sorted_run_iterator;
-mod sst;
+mod sst_builder;
 mod sst_iter;
 mod store_provider;
 mod tablestore;

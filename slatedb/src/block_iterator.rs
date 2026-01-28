@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::format::block::Block;
-use crate::format::row_codec::SstRowCodecV0;
+use crate::format::row::SstRowCodecV0;
 use crate::iter::IterationOrder;
 use crate::iter::IterationOrder::Ascending;
 use crate::{error::SlateDBError, iter::KeyValueIterator, types::RowEntry};

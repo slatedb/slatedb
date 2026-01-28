@@ -1,5 +1,5 @@
 use crate::error::SlateDBError;
-use crate::format::row_codec::{SstRowCodecV0, SstRowEntry};
+use crate::format::row::{SstRowCodecV0, SstRowEntry};
 use crate::format::sst::{CHECKSUM_SIZE, OFFSET_SIZE};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;

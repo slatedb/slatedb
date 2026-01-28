@@ -4,7 +4,7 @@ use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::format::row_codec::SstRowCodecV0;
+use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, KeyValueIterator};
 use crate::tablestore::TableStore;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};

@@ -23,7 +23,7 @@ use crate::format::block::Block;
 use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
-use crate::sst::EncodedSsTableBuilder;
+use crate::sst_builder::EncodedSsTableBuilder;
 use crate::types::RowEntry;
 
 pub(crate) struct TableStore {
