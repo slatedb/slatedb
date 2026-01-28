@@ -115,6 +115,7 @@ where
     handle.spawn(wrapped)
 }
 
+#[allow(dead_code)] // unused during DST
 pub(crate) async fn get_now_for_read(
     mono_clock: Arc<MonotonicClock>,
     durability_level: DurabilityLevel,
