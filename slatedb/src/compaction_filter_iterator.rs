@@ -16,12 +16,12 @@ impl<T: KeyValueIterator> CompactionFilterIterator<T> {
         Self { inner, filter }
     }
 
-    fn apply_filter(&mut self, entry: RowEntry) -> Option<RowEntry> {
-        let decision = self.filter.filter(&entry);
+    async fn apply_filter(&mut self, entry: RowEntry) -> Result<Option<RowEntry>, SlateDBError> {
+        let decision = self.filter.filter(&entry).await?;
 
         match decision {
-            CompactionFilterDecision::Keep => Some(entry),
-            CompactionFilterDecision::Drop => None,
+            CompactionFilterDecision::Keep => Ok(Some(entry)),
+            CompactionFilterDecision::Drop => Ok(None),
             CompactionFilterDecision::Modify(new_value) => {
                 // Clear expire_ts for tombstones, preserve for other values
                 let expire_ts = if new_value.is_tombstone() {
@@ -29,13 +29,13 @@ impl<T: KeyValueIterator> CompactionFilterIterator<T> {
                 } else {
                     entry.expire_ts
                 };
-                Some(RowEntry {
+                Ok(Some(RowEntry {
                     key: entry.key,
                     value: new_value,
                     seq: entry.seq,
                     create_ts: entry.create_ts,
                     expire_ts,
-                })
+                }))
             }
         }
     }
@@ -51,7 +51,7 @@ impl<T: KeyValueIterator> KeyValueIterator for CompactionFilterIterator<T> {
         loop {
             match self.inner.next_entry().await? {
                 Some(entry) => {
-                    if let Some(filtered) = self.apply_filter(entry) {
+                    if let Some(filtered) = self.apply_filter(entry).await? {
                         return Ok(Some(filtered));
                     }
                     // Entry was dropped, get next
@@ -73,6 +73,7 @@ impl<T: KeyValueIterator> KeyValueIterator for CompactionFilterIterator<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compaction_filter::CompactionFilterError;
     use crate::types::ValueDeletable;
     use bytes::Bytes;
     use std::collections::VecDeque;
@@ -108,8 +109,11 @@ mod tests {
 
     #[async_trait]
     impl CompactionFilter for KeepAllFilter {
-        fn filter(&mut self, _entry: &RowEntry) -> CompactionFilterDecision {
-            CompactionFilterDecision::Keep
+        async fn filter(
+            &mut self,
+            _entry: &RowEntry,
+        ) -> Result<CompactionFilterDecision, CompactionFilterError> {
+            Ok(CompactionFilterDecision::Keep)
         }
 
         async fn on_compaction_end(&mut self) {}
@@ -121,11 +125,14 @@ mod tests {
 
     #[async_trait]
     impl CompactionFilter for DropPrefixFilter {
-        fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision {
+        async fn filter(
+            &mut self,
+            entry: &RowEntry,
+        ) -> Result<CompactionFilterDecision, CompactionFilterError> {
             if entry.key.starts_with(&self.prefix) {
-                CompactionFilterDecision::Drop
+                Ok(CompactionFilterDecision::Drop)
             } else {
-                CompactionFilterDecision::Keep
+                Ok(CompactionFilterDecision::Keep)
             }
         }
 
@@ -138,13 +145,18 @@ mod tests {
 
     #[async_trait]
     impl CompactionFilter for ModifyValueFilter {
-        fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision {
+        async fn filter(
+            &mut self,
+            entry: &RowEntry,
+        ) -> Result<CompactionFilterDecision, CompactionFilterError> {
             if let Some(v) = entry.value.as_bytes() {
                 let mut new_value = v.to_vec();
                 new_value.extend_from_slice(&self.suffix);
-                CompactionFilterDecision::Modify(ValueDeletable::Value(Bytes::from(new_value)))
+                Ok(CompactionFilterDecision::Modify(ValueDeletable::Value(
+                    Bytes::from(new_value),
+                )))
             } else {
-                CompactionFilterDecision::Keep
+                Ok(CompactionFilterDecision::Keep)
             }
         }
 
@@ -159,11 +171,14 @@ mod tests {
 
     #[async_trait]
     impl CompactionFilter for TombstoneFilter {
-        fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision {
+        async fn filter(
+            &mut self,
+            entry: &RowEntry,
+        ) -> Result<CompactionFilterDecision, CompactionFilterError> {
             if entry.key.starts_with(&self.prefix) {
-                CompactionFilterDecision::Modify(ValueDeletable::Tombstone)
+                Ok(CompactionFilterDecision::Modify(ValueDeletable::Tombstone))
             } else {
-                CompactionFilterDecision::Keep
+                Ok(CompactionFilterDecision::Keep)
             }
         }
 
@@ -370,8 +385,11 @@ mod tests {
 
         #[async_trait]
         impl CompactionFilter for TrackingFilter {
-            fn filter(&mut self, _entry: &RowEntry) -> CompactionFilterDecision {
-                CompactionFilterDecision::Keep
+            async fn filter(
+                &mut self,
+                _entry: &RowEntry,
+            ) -> Result<CompactionFilterDecision, CompactionFilterError> {
+                Ok(CompactionFilterDecision::Keep)
             }
 
             async fn on_compaction_end(&mut self) {
@@ -453,5 +471,51 @@ mod tests {
             ValueDeletable::Value(Bytes::from_static(b"value1_modified"))
         );
         assert_eq!(result.expire_ts, Some(12345)); // expire_ts preserved
+    }
+
+    #[tokio::test]
+    async fn test_filter_error_aborts_iteration() {
+        /// A filter that fails on entries with keys starting with "fail:".
+        struct FailingFilter;
+
+        #[async_trait]
+        impl CompactionFilter for FailingFilter {
+            async fn filter(
+                &mut self,
+                entry: &RowEntry,
+            ) -> Result<CompactionFilterDecision, CompactionFilterError> {
+                if entry.key.starts_with(b"fail:") {
+                    Err(CompactionFilterError::FilterError(
+                        "intentional failure".into(),
+                    ))
+                } else {
+                    Ok(CompactionFilterDecision::Keep)
+                }
+            }
+
+            async fn on_compaction_end(&mut self) {}
+        }
+
+        let entries = vec![
+            make_entry(b"keep:key1", b"value1", 1),
+            make_entry(b"fail:key2", b"value2", 2),
+            make_entry(b"keep:key3", b"value3", 3),
+        ];
+        let mock_iter = MockIterator::new(entries.clone());
+        let mut iter = CompactionFilterIterator::new(mock_iter, Box::new(FailingFilter));
+        iter.init().await.unwrap();
+
+        // First entry should succeed
+        let result1 = iter.next_entry().await.unwrap();
+        assert_eq!(result1, Some(entries[0].clone()));
+
+        // Second entry should fail with filter error
+        let result2 = iter.next_entry().await;
+        assert!(result2.is_err());
+        let err = result2.unwrap_err();
+        assert!(matches!(
+            err,
+            SlateDBError::CompactionFilterError(ref e) if matches!(e.as_ref(), CompactionFilterError::FilterError(_))
+        ));
     }
 }

@@ -26,12 +26,12 @@
 //!
 //! #[async_trait]
 //! impl CompactionFilter for PrefixTombstoneFilter {
-//!     fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision {
+//!     async fn filter(&mut self, entry: &RowEntry) -> Result<CompactionFilterDecision, CompactionFilterError> {
 //!         if entry.key.starts_with(&self.prefix) {
 //!             self.tombstone_count += 1;
-//!             CompactionFilterDecision::Modify(ValueDeletable::Tombstone)
+//!             Ok(CompactionFilterDecision::Modify(ValueDeletable::Tombstone))
 //!         } else {
-//!             CompactionFilterDecision::Keep
+//!             Ok(CompactionFilterDecision::Keep)
 //!         }
 //!     }
 //!
@@ -125,12 +125,16 @@ pub enum CompactionFilterDecision {
 }
 
 /// Errors that can occur during compaction filter operations.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Error)]
 pub enum CompactionFilterError {
     /// Filter creation failed in `create_compaction_filter`. This aborts the
     /// compaction.
     #[error("filter creation failed: {0}")]
-    CreationError(String),
+    CreationError(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Filter failed while processing an entry. This aborts the compaction.
+    #[error("filter error: {0}")]
+    FilterError(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Filter that processes entries during compaction.
@@ -140,8 +144,8 @@ pub enum CompactionFilterError {
 ///
 /// # Performance
 ///
-/// The `filter()` method is called for every entry during compaction, so it
-/// should be fast. Avoid I/O, blocking operations, or CPU-intensive work.
+/// The `filter()` method is called for every entry during compaction. While it
+/// is async to allow I/O operations, frequent I/O will impact compaction throughput.
 ///
 /// If your filter requires expensive computation, configure a dedicated
 /// compaction runtime using [`Db::builder().with_compaction_runtime()`] to
@@ -155,10 +159,14 @@ pub enum CompactionFilterError {
 /// should carefully consider their filter logic.
 #[async_trait]
 pub trait CompactionFilter: Send + Sync {
-    /// Filter a single entry. Should be fast (synchronous, no I/O).
+    /// Filter a single entry.
     ///
-    /// The method is infallible and sync to keep it simple and fast.
-    fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision;
+    /// This method is async to allow I/O operations during filtering.
+    /// Return `Err` to abort compaction with the error.
+    async fn filter(
+        &mut self,
+        entry: &RowEntry,
+    ) -> Result<CompactionFilterDecision, CompactionFilterError>;
 
     /// Called after successfully processing all entries.
     ///

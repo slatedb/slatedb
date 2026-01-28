@@ -1489,11 +1489,14 @@ mod tests {
 
         #[async_trait::async_trait]
         impl CompactionFilter for DropPrefixFilter {
-            fn filter(&mut self, entry: &RowEntry) -> CompactionFilterDecision {
+            async fn filter(
+                &mut self,
+                entry: &RowEntry,
+            ) -> Result<CompactionFilterDecision, CompactionFilterError> {
                 if entry.key.starts_with(b"drop:") {
-                    CompactionFilterDecision::Drop
+                    Ok(CompactionFilterDecision::Drop)
                 } else {
-                    CompactionFilterDecision::Keep
+                    Ok(CompactionFilterDecision::Keep)
                 }
             }
 
@@ -1590,7 +1593,7 @@ mod tests {
                 _context: &CompactionJobContext,
             ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
                 Err(CompactionFilterError::CreationError(
-                    "intentional failure".to_string(),
+                    "intentional failure".into(),
                 ))
             }
         }

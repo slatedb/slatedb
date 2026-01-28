@@ -213,7 +213,7 @@ pub(crate) enum SlateDBError {
 
     #[cfg(feature = "compaction_filters")]
     #[error("compaction filter error: {0}")]
-    CompactionFilterError(#[from] crate::compaction_filter::CompactionFilterError),
+    CompactionFilterError(Arc<crate::compaction_filter::CompactionFilterError>),
 
     #[error("invalid sequence number ordering during merge. expected sequence numbers in descending order, but found {current_seq} followed by {next_seq}")]
     InvalidSequenceOrder { current_seq: u64, next_seq: u64 },
@@ -269,6 +269,13 @@ impl From<object_store::Error> for SlateDBError {
 impl From<foyer::Error> for SlateDBError {
     fn from(value: foyer::Error) -> Self {
         Self::FoyerError(Arc::new(value))
+    }
+}
+
+#[cfg(feature = "compaction_filters")]
+impl From<crate::compaction_filter::CompactionFilterError> for SlateDBError {
+    fn from(value: crate::compaction_filter::CompactionFilterError) -> Self {
+        Self::CompactionFilterError(Arc::new(value))
     }
 }
 
