@@ -503,7 +503,7 @@ mod tests {
     use crate::db_state::ManifestCore;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
-    use crate::sst::SsTableFormat;
+    use crate::sst_builder::SsTableFormat;
     use crate::sst_iter::SstView;
     use crate::stats::StatRegistry;
     use crate::test_utils::StringConcatMergeOperator;

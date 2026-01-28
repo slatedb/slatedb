@@ -4,8 +4,8 @@ use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, KeyValueIterator};
-use crate::row_codec::SstRowCodecV0;
 use crate::tablestore::TableStore;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
@@ -154,7 +154,7 @@ use crate::bytes_generator::OrderedBytesGenerator;
 use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
-use crate::sst::{EncodedSsTable, SsTableFormat};
+use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::{MergeOperator, MergeOperatorError};
 pub(crate) use assert_debug_snapshot;
 

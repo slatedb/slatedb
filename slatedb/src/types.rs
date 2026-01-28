@@ -184,7 +184,7 @@ impl ValueDeletable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::row_codec::SstRowEntry;
+    use crate::format::row::SstRowEntry;
     use rstest::rstest;
 
     // Tombstone encoding:

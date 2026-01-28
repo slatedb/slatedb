@@ -303,7 +303,7 @@ mod tests {
     use crate::{
         db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId},
         manifest::store::{ManifestStore, StoredManifest},
-        sst::SsTableFormat,
+        sst_builder::SsTableFormat,
         tablestore::TableStore,
     };
 

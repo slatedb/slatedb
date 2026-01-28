@@ -224,7 +224,7 @@ impl Debug for SsTableId {
     }
 }
 
-/// Metadata information about an SSTable. See [`crate::sst::EncodedSsTableBuilder`] for
+/// Metadata information about an SSTable. See [`crate::sst_builder::EncodedSsTableBuilder`] for
 /// more information on the format of the SSTable and its metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
 pub struct SsTableInfo {

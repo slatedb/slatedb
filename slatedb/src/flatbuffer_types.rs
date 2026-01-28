@@ -803,7 +803,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
-    use crate::sst::SsTableFormat;
+    use crate::format::sst::SsTableFormat;
     use crate::test_utils::build_test_sst;
     use bytes::{BufMut, Bytes, BytesMut};
     use chrono::{DateTime, Utc};

@@ -192,9 +192,9 @@ mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
+    use crate::format::sst::SsTableFormat;
     use crate::proptest_util;
     use crate::proptest_util::sample;
-    use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, gen_attrs};
 
     use crate::object_stores::ObjectStores;

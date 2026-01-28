@@ -409,9 +409,9 @@ mod tests {
     use crate::batch::WriteBatch;
     use crate::clock::MonotonicClock;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
+    use crate::format::sst::SsTableFormat;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
-    use crate::sst::SsTableFormat;
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use object_store::{memory::InMemory, path::Path, ObjectStore};

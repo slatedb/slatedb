@@ -230,7 +230,7 @@ impl WalReplayIterator<'_> {
 
                     // if the table is full, we'll overflow the row to the next iterator.
                     let meta = table.metadata();
-                    if self.table_store.estimate_encoded_size(
+                    if self.table_store.estimate_encoded_size_compacted(
                         meta.entry_num + 1,
                         meta.entries_size_in_bytes + row_entry.estimated_size(),
                     ) > self.options.max_memtable_bytes
@@ -255,7 +255,7 @@ impl WalReplayIterator<'_> {
                 if table_overflowed
                     || self
                         .table_store
-                        .estimate_encoded_size(meta.entry_num, meta.entries_size_in_bytes)
+                        .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes)
                         > self.options.min_memtable_bytes
                 {
                     break;
@@ -284,11 +284,11 @@ mod tests {
     use super::{WalReplayIterator, WalReplayOptions};
     use crate::bytes_range::BytesRange;
     use crate::db_state::{ManifestCore, SsTableId};
+    use crate::format::sst::SsTableFormat;
     use crate::iter::{IterationOrder, KeyValueIterator};
     use crate::mem_table::WritableKVTable;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
-    use crate::sst::SsTableFormat;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
     use crate::{error::SlateDBError, test_utils};
