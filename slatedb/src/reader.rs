@@ -10,6 +10,7 @@ use crate::oracle::Oracle;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
+#[cfg(not(dst))]
 use crate::utils::get_now_for_read;
 use crate::utils::{build_concurrent, compute_max_parallel};
 use crate::{db_iter::DbIteratorRangeTracker, error::SlateDBError, DbIterator};
@@ -35,6 +36,7 @@ struct IteratorSources {
 pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
+    #[allow(dead_code)] // unused during DST
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) oracle: Arc<dyn Oracle>,
     pub(crate) merge_operator: Option<crate::merge_operator::MergeOperatorType>,
