@@ -4,12 +4,12 @@
 //! of the indirection is to decouple the serialized format from the in-memory representation
 //! used by the rest of the codebase.
 
-use crate::block::Block;
 use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
+use crate::format::block::Block;
 use bytes::Bytes;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -173,14 +173,14 @@ impl<'de> Deserialize<'de> for CachedEntry {
 
 #[cfg(test)]
 mod tests {
-    use crate::block::BlockBuilder;
-    use crate::block_iterator::BlockIterator;
     use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
     use crate::db_state::SsTableId;
     use crate::filter::BloomFilterBuilder;
     use crate::flatbuffer_types::{
         BlockMeta, BlockMetaArgs, SsTableIndex, SsTableIndexArgs, SsTableIndexOwned,
     };
+    use crate::format::block::BlockBuilder;
+    use crate::format::block_iterator::BlockIterator;
     use crate::iter::IterationOrder;
     use crate::test_utils::assert_iterator;
     use crate::types::RowEntry;

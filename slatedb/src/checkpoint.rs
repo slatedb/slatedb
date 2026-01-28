@@ -64,13 +64,13 @@ mod tests {
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
     use crate::db::Db;
     use crate::db_state::SsTableId;
+    use crate::format::sst::SsTableFormat;
+    use crate::format::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
-    use crate::sst::SsTableFormat;
-    use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::TableStore;
     use crate::test_utils;
     use bytes::Bytes;

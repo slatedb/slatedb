@@ -32,9 +32,9 @@
 //!
 //! - [`EncodedWalSsTableBuilder`]: Builder for constructing WAL SSTables from entries
 //!
-//! The builder reuses shared components from the [`crate::sst`] module:
-//! - [`EncodedSsTableBlockBuilder`](crate::sst::EncodedSsTableBlockBuilder): For encoding data blocks
-//! - [`EncodedSsTableFooterBuilder`](crate::sst::EncodedSsTableFooterBuilder): For encoding the footer
+//! The builder reuses shared components from the [`crate::format::sst`] module:
+//! - [`EncodedSsTableBlockBuilder`](crate::format::sst::EncodedSsTableBlockBuilder): For encoding data blocks
+//! - [`EncodedSsTableFooterBuilder`](crate::format::sst::EncodedSsTableFooterBuilder): For encoding the footer
 //!
 //! # Why No Bloom Filter?
 //!
@@ -54,14 +54,14 @@ use std::sync::Arc;
 use bytes::Bytes;
 use flatbuffers::DefaultAllocator;
 
-use crate::block::BlockBuilder;
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableInfoCodec;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
-use crate::sst::{
+use crate::format::block::BlockBuilder;
+use crate::format::sst::{
     BlockTransformer, EncodedSsTable, EncodedSsTableBlock, EncodedSsTableBlockBuilder,
-    EncodedSsTableFooterBuilder,
+    EncodedSsTableFooterBuilder, SST_FORMAT_VERSION_V1,
 };
 use crate::types::RowEntry;
 
@@ -175,7 +175,7 @@ impl EncodedWalSsTableBuilder<'_> {
 
         let new_builder = BlockBuilder::new(self.block_size);
         let builder = std::mem::replace(&mut self.builder, new_builder);
-        let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
+        let mut block_builder = EncodedSsTableBlockBuilder::new_v1(builder, self.current_len);
         if let Some(codec) = self.compression_codec {
             block_builder = block_builder.with_compression_codec(codec);
         }
@@ -234,6 +234,7 @@ impl EncodedWalSsTableBuilder<'_> {
         let mut footer_builder = EncodedSsTableFooterBuilder::new(
             self.current_len,
             self.sst_first_seq,
+            SST_FORMAT_VERSION_V1,
             &*self.sst_codec,
             self.index_builder,
             self.block_meta,
@@ -264,9 +265,9 @@ impl EncodedWalSsTableBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::Block;
-    use crate::block_iterator::BlockIterator;
     use crate::flatbuffer_types::FlatBufferSsTableInfoCodec;
+    use crate::format::block::Block;
+    use crate::format::block_iterator::BlockIterator;
     use crate::iter::IterationOrder::Ascending;
     use crate::test_utils::assert_iterator;
     use crate::types::ValueDeletable;
@@ -678,7 +679,7 @@ mod tests {
     #[cfg(feature = "snappy")]
     #[tokio::test]
     async fn should_compress_blocks_with_snappy() {
-        use crate::sst::CHECKSUM_SIZE;
+        use crate::format::sst::CHECKSUM_SIZE;
 
         // Given
         let mut builder =
@@ -720,7 +721,7 @@ mod tests {
     #[cfg(feature = "lz4")]
     #[tokio::test]
     async fn should_compress_blocks_with_lz4() {
-        use crate::sst::CHECKSUM_SIZE;
+        use crate::format::sst::CHECKSUM_SIZE;
 
         // Given
         let mut builder =
@@ -757,7 +758,7 @@ mod tests {
     #[cfg(feature = "zstd")]
     #[tokio::test]
     async fn should_compress_blocks_with_zstd() {
-        use crate::sst::CHECKSUM_SIZE;
+        use crate::format::sst::CHECKSUM_SIZE;
 
         // Given
         let mut builder =
@@ -794,7 +795,7 @@ mod tests {
     #[cfg(feature = "zlib")]
     #[tokio::test]
     async fn should_compress_blocks_with_zlib() {
-        use crate::sst::CHECKSUM_SIZE;
+        use crate::format::sst::CHECKSUM_SIZE;
         use std::io::Read;
 
         // Given

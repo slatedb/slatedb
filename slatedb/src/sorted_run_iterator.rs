@@ -1,8 +1,8 @@
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableHandle};
 use crate::error::SlateDBError;
+use crate::format::sst_iter::{SstIterator, SstIteratorOptions, SstView};
 use crate::iter::KeyValueIterator;
-use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use async_trait::async_trait;
@@ -192,9 +192,9 @@ mod tests {
     use super::*;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::SsTableId;
+    use crate::format::sst::SsTableFormat;
     use crate::proptest_util;
     use crate::proptest_util::sample;
-    use crate::sst::SsTableFormat;
     use crate::test_utils::{assert_kv, gen_attrs};
 
     use crate::object_stores::ObjectStores;
