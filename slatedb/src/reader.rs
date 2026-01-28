@@ -36,7 +36,7 @@ struct IteratorSources {
 pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // unused during DST
     pub(crate) mono_clock: Arc<MonotonicClock>,
     pub(crate) oracle: Arc<dyn Oracle>,
     pub(crate) merge_operator: Option<crate::merge_operator::MergeOperatorType>,
