@@ -78,6 +78,15 @@ struct WalBufferManagerInner {
     oracle: Arc<DbOracle>,
 }
 
+/// Stores entries to the write-ahead log (WAL) in memory.
+///
+/// In contrast to the [`KVTable`], the `WalBuffer` does not sort the entries according to the key,
+/// but keeps the order in which the entries were added.
+/// The assumption is that the entries are added in order of the sequence number to the WAL.
+/// Ordering by sequence number is sufficient for replaying entries from the WAL in case of a
+/// failure.
+/// Since the `WalBuffer` does not maintain the order by key it saves some CPU cycles compared to
+/// a [`KVTable`].
 pub(crate) struct WalBuffer {
     /// queue for the entries
     entries: VecDeque<RowEntry>,
