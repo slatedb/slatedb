@@ -58,7 +58,7 @@ impl<T: KeyValueIterator> KeyValueIterator for CompactionFilterIterator<T> {
                 }
                 None => {
                     // End of iteration, call cleanup
-                    self.filter.on_compaction_end().await;
+                    self.filter.on_compaction_end().await?;
                     return Ok(None);
                 }
             }
@@ -116,7 +116,9 @@ mod tests {
             Ok(CompactionFilterDecision::Keep)
         }
 
-        async fn on_compaction_end(&mut self) {}
+        async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+            Ok(())
+        }
     }
 
     struct DropPrefixFilter {
@@ -136,7 +138,9 @@ mod tests {
             }
         }
 
-        async fn on_compaction_end(&mut self) {}
+        async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+            Ok(())
+        }
     }
 
     struct ModifyValueFilter {
@@ -160,7 +164,9 @@ mod tests {
             }
         }
 
-        async fn on_compaction_end(&mut self) {}
+        async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+            Ok(())
+        }
     }
 
     /// A filter that converts entries to tombstones based on a condition.
@@ -182,7 +188,9 @@ mod tests {
             }
         }
 
-        async fn on_compaction_end(&mut self) {}
+        async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+            Ok(())
+        }
     }
 
     fn make_entry(key: &[u8], value: &[u8], seq: u64) -> RowEntry {
@@ -392,8 +400,9 @@ mod tests {
                 Ok(CompactionFilterDecision::Keep)
             }
 
-            async fn on_compaction_end(&mut self) {
+            async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
                 self.end_called.store(true, Ordering::SeqCst);
+                Ok(())
             }
         }
 
@@ -493,7 +502,9 @@ mod tests {
                 }
             }
 
-            async fn on_compaction_end(&mut self) {}
+            async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+                Ok(())
+            }
         }
 
         let entries = vec![

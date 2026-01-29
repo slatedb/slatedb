@@ -35,12 +35,13 @@
 //!         }
 //!     }
 //!
-//!     async fn on_compaction_end(&mut self) {
+//!     async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
 //!         println!(
 //!             "Compaction converted {} entries with prefix {:?} to tombstones",
 //!             self.tombstone_count,
 //!             self.prefix
 //!         );
+//!         Ok(())
 //!     }
 //! }
 //!
@@ -135,6 +136,10 @@ pub enum CompactionFilterError {
     /// Filter failed while processing an entry. This aborts the compaction.
     #[error("filter error: {0}")]
     FilterError(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Filter failed during `on_compaction_end`. This aborts the compaction.
+    #[error("compaction end error: {0}")]
+    CompactionEndError(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Filter that processes entries during compaction.
@@ -148,7 +153,7 @@ pub enum CompactionFilterError {
 /// is async to allow I/O operations, frequent I/O will impact compaction throughput.
 ///
 /// If your filter requires expensive computation, configure a dedicated
-/// compaction runtime using [`Db::builder().with_compaction_runtime()`] to
+/// compaction runtime using [`crate::DbBuilder::with_compaction_runtime`] to
 /// prevent blocking your application's main runtime.
 ///
 /// # Snapshot Consistency Warning
@@ -171,11 +176,11 @@ pub trait CompactionFilter: Send + Sync {
     /// Called after successfully processing all entries.
     ///
     /// Use this hook to flush state, log statistics, or clean up resources.
-    /// This method is infallible since compaction output has already been written.
+    /// Return `Err` to abort compaction with the error.
     ///
-    /// Note: This is only called on successful completion. If compaction fails
-    /// due to an error, this method is not invoked.
-    async fn on_compaction_end(&mut self);
+    /// Note: This is only called after all entries have been processed. If compaction
+    /// fails due to an earlier error, this method is not invoked.
+    async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError>;
 }
 
 /// Factory that creates a [`CompactionFilter`] instance per compaction job.
@@ -185,6 +190,12 @@ pub trait CompactionFilter: Send + Sync {
 #[async_trait]
 pub trait CompactionFilterSupplier: Send + Sync {
     /// Creates a filter for a compaction job. Return Err to abort compaction.
+    ///
+    /// This method is called each time a compaction job starts or resumes. If a compaction
+    /// is interrupted (e.g., compactor restarts) and later resumed, this method will be
+    /// called again with a new filter instance. The new filter will only observe entries
+    /// that have not yet been written to output SSTs. Entries already compacted in
+    /// previous attempts will be skipped.
     ///
     /// This is async to allow I/O during initialization (loading config,
     /// connecting to external services, etc.) before the filter processes entries.

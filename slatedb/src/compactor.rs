@@ -2662,7 +2662,7 @@ mod tests {
                     manifest_store: manifest_store.clone(),
                     merge_operator: options.merge_operator.clone(),
                     #[cfg(feature = "compaction_filters")]
-                    compaction_filter_supplier: options.compaction_filter_supplier.clone(),
+                    compaction_filter_supplier: None,
                 },
             ));
             let handler = CompactorEventHandler::new(

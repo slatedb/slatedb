@@ -191,8 +191,6 @@ use uuid::Uuid;
 
 use crate::error::SlateDBError;
 
-#[cfg(feature = "compaction_filters")]
-use crate::compaction_filter::CompactionFilterSupplier;
 use crate::db_cache::DbCache;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 use crate::merge_operator::MergeOperatorType;
@@ -681,15 +679,6 @@ pub struct Settings {
     #[serde(skip)]
     pub merge_operator: Option<MergeOperatorType>,
 
-    /// Optional supplier for creating compaction filters. If set, filters will
-    /// be applied during compaction to inspect, drop, or modify entries.
-    ///
-    /// **Warning:** Enabling compaction filters may affect snapshot consistency.
-    ///
-    /// Requires the `compaction_filters` feature flag.
-    #[serde(skip)]
-    #[cfg(feature = "compaction_filters")]
-    pub compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 // Implement Debug manually for DbOptions.
@@ -726,17 +715,6 @@ impl std::fmt::Debug for Settings {
                     .map(|_| "Some(merge_operator)")
                     .unwrap_or("None"),
             );
-        #[cfg(feature = "compaction_filters")]
-        {
-            data.field(
-                "compaction_filter_supplier",
-                &self
-                    .compaction_filter_supplier
-                    .as_ref()
-                    .map(|_| "Some(compaction_filter_supplier)")
-                    .unwrap_or("None"),
-            );
-        }
         data.finish()
     }
 }
@@ -932,8 +910,6 @@ impl Default for Settings {
             filter_bits_per_key: 10,
             default_ttl: None,
             merge_operator: None,
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: None,
         }
     }
 }

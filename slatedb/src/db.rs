@@ -5431,8 +5431,6 @@ mod tests {
             compactor_options,
             compression_codec: None,
             merge_operator: None,
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             default_ttl: ttl,

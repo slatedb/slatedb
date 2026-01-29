@@ -1500,7 +1500,9 @@ mod tests {
                 }
             }
 
-            async fn on_compaction_end(&mut self) {}
+            async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+                Ok(())
+            }
         }
 
         struct DropPrefixFilterSupplier;

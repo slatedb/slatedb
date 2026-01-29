@@ -331,6 +331,9 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// **Warning:** Enabling compaction filters may affect snapshot consistency.
     /// Use compaction filters only if you know the consequences of using them.
     ///
+    /// See [`crate::CompactionFilter`] for detailed documentation, examples, and the
+    /// filter API.
+    ///
     /// # Arguments
     ///
     /// * `supplier` - An Arc-wrapped compaction filter supplier implementation.
@@ -398,9 +401,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
         #[cfg(feature = "compaction_filters")]
-        let compaction_filter_supplier = self
-            .compaction_filter_supplier
-            .or(self.settings.compaction_filter_supplier.clone());
+        let compaction_filter_supplier = self.compaction_filter_supplier.clone();
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -528,10 +529,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Create the database inner state
         let mut settings = self.settings.clone();
         settings.merge_operator = merge_operator.clone();
-        #[cfg(feature = "compaction_filters")]
-        {
-            settings.compaction_filter_supplier = compaction_filter_supplier.clone();
-        }
         let inner = Arc::new(
             DbInner::new(
                 settings,
@@ -923,9 +920,23 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the compaction filter supplier for the compactor.
+    /// Sets the compaction filter supplier for the compactor. The filter supplier
+    /// creates filter instances that can inspect, drop, or modify entries during
+    /// compaction.
     ///
     /// **Warning:** Enabling compaction filters may affect snapshot consistency.
+    /// Use compaction filters only if you know the consequences of using them.
+    ///
+    /// See [`crate::CompactionFilter`] for detailed documentation, examples, and the
+    /// filter API.
+    ///
+    /// # Arguments
+    ///
+    /// * `supplier` - An Arc-wrapped compaction filter supplier implementation.
+    ///
+    /// # Returns
+    ///
+    /// The builder instance for chaining.
     #[cfg(feature = "compaction_filters")]
     pub fn with_compaction_filter_supplier(
         mut self,
