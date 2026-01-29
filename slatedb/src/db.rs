@@ -426,9 +426,7 @@ impl DbInner {
                 }
             }
             FlushType::MemTable => self.flush_memtables().await,
-        }
-        .map_err(Into::into)
-    }
+        }}
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
