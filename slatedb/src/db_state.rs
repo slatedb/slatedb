@@ -564,6 +564,25 @@ impl DbState {
         self.modify(|modifier| modifier.merge_remote_manifest(remote_manifest));
     }
 
+    pub(crate) fn restore_checkpoint(
+        &mut self,
+        manifest_core_to_restore: ManifestCore,
+        new_wal_id: u64,
+        l0: VecDeque<SsTableHandle>,
+        last_l0_seq: u64,
+        last_l0_clock_tick: i64,
+    ) {
+        self.modify(|modifier| {
+            modifier.restore_checkpoint(
+                manifest_core_to_restore,
+                new_wal_id,
+                l0,
+                last_l0_seq,
+                last_l0_clock_tick,
+            )
+        });
+    }
+
     pub(crate) fn modify<F, R>(&mut self, fun: F) -> R
     where
         F: FnOnce(&mut StateModifier<'_>) -> R,
@@ -623,6 +642,37 @@ impl<'a> StateModifier<'a> {
         self.state.manifest = remote_manifest;
     }
 
+    // restore_checkpoint updates the current manifest state using a checkpointed
+    // manifest core and additional new state, producing a consistent restored state.
+    pub(crate) fn restore_checkpoint(
+        &mut self,
+        manifest_core_to_restore: ManifestCore,
+        new_wal_id: u64,
+        l0: VecDeque<SsTableHandle>,
+        last_l0_seq: u64,
+        last_l0_clock_tick: i64,
+    ) {
+        let core = &mut self.state.manifest.value.core;
+        core.initialized = manifest_core_to_restore.initialized;
+        core.l0_last_compacted = manifest_core_to_restore.l0_last_compacted;
+        core.l0 = l0;
+        core.compacted = manifest_core_to_restore.compacted;
+        // no wal id's to replay as they are assumed to be flushed to l0 already.
+        core.replay_after_wal_id = new_wal_id;
+        core.next_wal_sst_id = new_wal_id;
+        core.last_l0_clock_tick = last_l0_clock_tick;
+        core.last_l0_seq = last_l0_seq;
+        core.recent_snapshot_min_seq = last_l0_seq;
+        core.sequence_tracker = manifest_core_to_restore.sequence_tracker;
+        core.wal_object_store_uri = manifest_core_to_restore.wal_object_store_uri;
+        // core.checkpoints is intentionally left untouched. Checkpoints present in the
+        // restored manifest may be stale or invalid at this point in time.
+        // Preserving the current checkpoints also allows restoring to future checkpoints.
+
+        // Fence any compactors that may still be running against the previous state.
+        self.state.manifest.value.compactor_epoch += 1;
+    }
+
     fn finish(self) {
         self.db_state.state = Arc::new(self.state);
     }
@@ -650,14 +700,17 @@ mod tests {
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::proptest_util::arbitrary;
+    use crate::seq_tracker::SequenceTracker;
     use crate::test_utils;
     use bytes::Bytes;
     use proptest::collection::vec;
     use proptest::proptest;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use std::collections::BTreeSet;
     use std::collections::Bound::Included;
+    use std::collections::{BTreeSet, VecDeque};
     use std::ops::RangeBounds;
+    use ulid::Ulid;
+    use uuid::Uuid;
 
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
@@ -744,6 +797,79 @@ mod tests {
                     imm.recent_flushed_wal_id();
             });
         }
+    }
+
+    #[test]
+    fn test_should_restore_db_state_with_checkpoint_state() {
+        // given:
+        let mut dirty = new_dirty_manifest();
+
+        // Seed existing checkpoints that must be preserved
+        let existing_checkpoint = Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id: 42,
+            expire_time: None,
+            create_time: DefaultSystemClock::default().now(),
+            name: None,
+        };
+        dirty
+            .value
+            .core
+            .checkpoints
+            .push(existing_checkpoint.clone());
+
+        let original_epoch = dirty.value.compactor_epoch;
+
+        let mut core_to_restore = dirty.value.core.clone();
+        core_to_restore.initialized = true;
+        core_to_restore.l0_last_compacted = Some(Ulid::new());
+        core_to_restore.compacted.clear();
+        core_to_restore.sequence_tracker = SequenceTracker::new();
+        core_to_restore.checkpoints = vec![Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id: 70,
+            expire_time: None,
+            create_time: DefaultSystemClock::default().now(),
+            name: None,
+        }];
+        let new_wal_id = 100;
+        let l0: VecDeque<_> = vec![create_compacted_sst_handle(None)].into();
+        let last_l0_seq = 1234;
+        let last_l0_clock_tick = 5678;
+
+        // when:
+        let mut db_state = DbState::new(dirty);
+        db_state.restore_checkpoint(
+            core_to_restore.clone(),
+            new_wal_id,
+            l0.clone(),
+            last_l0_seq,
+            last_l0_clock_tick,
+        );
+
+        // then: restored fields are applied
+        let core = db_state.state.core();
+        assert_eq!(core.initialized, core_to_restore.initialized);
+        assert_eq!(core.l0_last_compacted, core_to_restore.l0_last_compacted);
+        assert_eq!(core.compacted, core_to_restore.compacted);
+        assert_eq!(core.sequence_tracker, core_to_restore.sequence_tracker);
+
+        // WAL and l0 state are replaced
+        assert_eq!(core.replay_after_wal_id, new_wal_id);
+        assert_eq!(core.next_wal_sst_id, new_wal_id);
+        assert_eq!(core.l0, l0);
+        assert_eq!(core.last_l0_seq, last_l0_seq);
+        assert_eq!(core.last_l0_clock_tick, last_l0_clock_tick);
+        assert_eq!(core.recent_snapshot_min_seq, last_l0_seq);
+
+        // checkpoints are preserved
+        assert_eq!(vec![existing_checkpoint], core.checkpoints);
+
+        // compactors are fenced
+        assert_eq!(
+            original_epoch + 1,
+            db_state.state.manifest.value.compactor_epoch
+        );
     }
 
     #[test]
