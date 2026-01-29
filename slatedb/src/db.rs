@@ -257,13 +257,12 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
+        self.db_stats.write_batch_count.inc();
+        self.db_stats.write_ops.add(batch.ops.len() as u64);
         self.status()?;
         if batch.ops.is_empty() {
             return Ok(());
         }
-        // record write batch and number of operations
-        self.db_stats.write_batch_count.inc();
-        self.db_stats.write_ops.add(batch.ops.len() as u64);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let batch_msg = WriteBatchMessage {
@@ -410,6 +409,25 @@ impl DbInner {
         };
 
         self.flush_immutable_memtables().await
+    }
+
+    pub(crate) async fn flush_with_options(
+        &self,
+        options: FlushOptions,
+    ) -> Result<(), SlateDBError> {
+        self.db_stats.flush_requests.inc();
+        self.status()?;
+        match options.flush_type {
+            FlushType::Wal => {
+                if self.wal_enabled {
+                    self.flush_wals().await
+                } else {
+                    Err(SlateDBError::WalDisabled)
+                }
+            }
+            FlushType::MemTable => self.flush_memtables().await,
+        }
+        .map_err(Into::into)
     }
 
     async fn replay_wal(&self) -> Result<(), SlateDBError> {
@@ -1413,17 +1431,10 @@ impl Db {
     /// }
     /// ```
     pub async fn flush_with_options(&self, options: FlushOptions) -> Result<(), crate::Error> {
-        match options.flush_type {
-            FlushType::Wal => {
-                if self.inner.wal_enabled {
-                    self.inner.flush_wals().await
-                } else {
-                    Err(SlateDBError::WalDisabled)
-                }
-            }
-            FlushType::MemTable => self.inner.flush_memtables().await,
-        }
-        .map_err(Into::into)
+        self.inner
+            .flush_with_options(options)
+            .await
+            .map_err(Into::into)
     }
 
     /// Get the metrics registry for the database.
