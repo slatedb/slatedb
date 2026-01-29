@@ -654,6 +654,12 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
+        if self.status().is_ok() {
+            if let Err(e) = self.flush().await {
+                warn!("failed to flush db during close [error={:?}]", e);
+            }
+        }
+
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);
         }
