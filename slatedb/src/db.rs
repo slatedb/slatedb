@@ -677,6 +677,8 @@ impl Db {
             }
         }
 
+        self.inner.state.write().closed_result().write(Ok(()));
+
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);
         }
@@ -705,7 +707,6 @@ impl Db {
             warn!("failed to shutdown memtable writer task [error={:?}]", e);
         }
 
-        self.inner.state.write().closed_result().write(Ok(()));
         info!("db closed");
         Ok(())
     }
