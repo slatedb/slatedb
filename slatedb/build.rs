@@ -1,19 +1,27 @@
 // println! is required in build scripts for cargo directives
 #![allow(clippy::disallowed_macros)]
 
-use cmake::Config;
+use flatcc::Args;
 use std::env::var;
 use std::path::PathBuf;
-use std::process::Command;
+
+type Result<T> = std::result::Result<T, ()>;
 
 fn main() {
-    let out_dir = PathBuf::from(require_env("OUT_DIR"));
-    let manifest_dir = PathBuf::from(require_env("CARGO_MANIFEST_DIR"));
+    let out_dir =
+        PathBuf::from(require_env("OUT_DIR").expect("Environment variable OUT_DIR should exist."));
+    let manifest_dir = PathBuf::from(
+        require_env("CARGO_MANIFEST_DIR")
+            .expect("Environment variable CARGO_MANIFEST_DIR should exist."),
+    );
     let repo_root = match manifest_dir.parent() {
         Some(parent) => parent,
         None => {
             println!("cargo::error=Failed to get parent directory of CARGO_MANIFEST_DIR");
-            return;
+            panic!(
+                "Parent directory of CARGO_MANIFEST_DIR: {} should exist",
+                manifest_dir.display()
+            );
         }
     };
     let schemas_dir = repo_root.join("schemas");
@@ -29,89 +37,43 @@ fn main() {
         }
     }
 
-    let flatc_path = build_flatc(repo_root);
-
-    if !generate_flatbuffers(&flatc_path, &schemas_dir, &out_dir) {
-        return;
-    }
-
-    verify_generated_files_exist(&out_dir);
+    generate_flatbuffers(&schemas_dir, &out_dir)
+        .expect("Flatbuffers code should have been generated");
+    verify_generated_files_exist(&out_dir).expect("Generated flatbuffers files should exist");
 }
 
 /// Get an environment variable or print a cargo error.
-fn require_env(name: &str) -> String {
+fn require_env(name: &str) -> Result<String> {
     match var(name) {
-        Ok(val) => val,
+        Ok(val) => Ok(val),
         Err(_) => {
             println!("cargo::error={} environment variable not set", name);
-            std::process::exit(1);
+            Err(())
         }
     }
 }
 
-/// Build flatc from the git submodule `flatbuffers` using cmake and
-/// return the path to the executable.
-fn build_flatc(repo_dir: &std::path::Path) -> PathBuf {
-    let mut config = Config::new(repo_dir.join("flatbuffers"));
-
-    // warning C4530: C++ exception handler used, but unwind semantics are not enabled. Specify /EHsc
-    let target = require_env("TARGET");
-    let host = require_env("HOST");
-    if target.contains("msvc") && host.contains("windows") {
-        config.cxxflag("/EHsc");
-    }
-
-    let dst = config.build();
-
-    if cfg!(windows) {
-        dst.join("bin").join("flatc.exe")
-    } else {
-        dst.join("bin").join("flatc")
-    }
-}
-
-/// Generate flatbuffers code into `OUT_DIR`. Returns true on success.
-fn generate_flatbuffers(
-    flatc_path: &std::path::Path,
-    schemas_dir: &std::path::Path,
-    out_dir: &std::path::Path,
-) -> bool {
+/// Generate flatbuffers code into `OUT_DIR`.
+fn generate_flatbuffers(schemas_dir: &std::path::Path, out_dir: &std::path::Path) -> Result<()> {
     let root_schema = schemas_dir.join("root.fbs");
 
     if !root_schema.exists() {
         println!("cargo::error=Schema file not found: {:?}", root_schema);
-        return false;
+        return Err(());
     }
 
-    let output = match Command::new(flatc_path)
-        .arg("-o")
-        .arg(out_dir)
-        .arg("--rust")
-        .arg("--gen-all")
-        .arg(&root_schema)
-        .output()
-    {
-        Ok(output) => output,
-        Err(e) => {
-            println!("cargo::error=Failed to run flatc: {}", e);
-            return false;
-        }
-    };
-
-    if !output.status.success() {
-        println!(
-            "cargo::error=flatc failed:\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return false;
-    }
-
-    true
+    flatcc::Builder::new()
+        .run(Args {
+            inputs: &[root_schema.as_ref()],
+            out_dir,
+            extra: &["--gen-all"],
+            ..Default::default()
+        })
+        .map_err(|_| ())
 }
 
 /// Verifies whether the generated file exists
-fn verify_generated_files_exist(out_dir: &std::path::Path) {
+fn verify_generated_files_exist(out_dir: &std::path::Path) -> Result<()> {
     let generated_file = out_dir.join("root_generated.rs");
     if !generated_file.exists() {
         println!(
@@ -123,5 +85,7 @@ fn verify_generated_files_exist(out_dir: &std::path::Path) {
                     .collect::<Vec<_>>())
                 .unwrap_or_default()
         );
+        return Err(());
     }
+    Ok(())
 }

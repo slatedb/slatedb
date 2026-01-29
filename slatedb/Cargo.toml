@@ -70,7 +70,7 @@ thread_local = { workspace = true }
 url = "2.5.4"
 
 [build-dependencies]
-cmake = "0.1.57"
+flatcc = "24.3.25"
 
 [dev-dependencies]
 backtrace = "0.3"
