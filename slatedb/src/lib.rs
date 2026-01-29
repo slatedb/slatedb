@@ -50,11 +50,11 @@ pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
+pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
-pub use sst::BlockTransformer;
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 pub use types::{RowEntry, ValueDeletable};
@@ -76,7 +76,6 @@ pub mod stats;
 mod batch;
 mod batch_write;
 mod blob;
-mod block;
 mod block_iterator;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
@@ -107,6 +106,7 @@ mod filter;
 mod filter_iterator;
 mod flatbuffer_types;
 mod flush;
+mod format;
 mod garbage_collector;
 mod iter;
 mod map_iter;
@@ -125,9 +125,8 @@ mod rand;
 mod reader;
 mod retention_iterator;
 mod retrying_object_store;
-mod row_codec;
 mod sorted_run_iterator;
-mod sst;
+mod sst_builder;
 mod sst_iter;
 mod store_provider;
 mod tablestore;
@@ -141,3 +140,12 @@ mod wal;
 mod wal_buffer;
 mod wal_id;
 mod wal_replay;
+
+// Initialize test infrastructure (deadlock detector, tracing) for all tests.
+// This ctor runs at crate load time, ensuring these are set up even for tests
+// that don't explicitly use test_utils.
+#[cfg(test)]
+#[ctor::ctor]
+fn init_test_infrastructure() {
+    crate::test_utils::init_test_infrastructure();
+}

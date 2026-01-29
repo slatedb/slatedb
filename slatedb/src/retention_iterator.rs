@@ -1113,11 +1113,11 @@ mod tests {
         let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
             versions,
             0,
-            system_clock.clone(),
+            system_clock,
             Some(timeout),
             None,
             false,
-            tracker.clone(),
+            tracker,
         );
 
         let derived_ts = sorted_points

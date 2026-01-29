@@ -115,10 +115,10 @@ impl DbCache for FoyerHybridCache {
 
 #[cfg(test)]
 mod tests {
-    use crate::block::BlockBuilder;
     use crate::db_cache::foyer_hybrid::FoyerHybridCache;
     use crate::db_cache::{CachedEntry, CachedKey, DbCache};
     use crate::db_state::SsTableId;
+    use crate::format::block::BlockBuilder;
     use crate::types::RowAttributes;
     use foyer::{DirectFsDeviceOptions, Engine, HybridCacheBuilder};
     use rand::RngCore;

@@ -288,7 +288,7 @@ impl Compactor {
     ) -> Self {
         let stats = Arc::new(CompactionStats::new(stat_registry));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            closed_result.clone(),
+            closed_result,
             system_clock.clone(),
         ));
         Self {
@@ -1053,13 +1053,13 @@ mod tests {
     use crate::db::Db;
     use crate::db_state::{ManifestCore, SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
+    use crate::format::sst::SsTableFormat;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
-    use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
@@ -2579,7 +2579,7 @@ mod tests {
         };
         core.l0 = VecDeque::from(vec![
             SsTableHandle::new(SsTableId::Compacted(l0_first), l0_info.clone()),
-            SsTableHandle::new(SsTableId::Compacted(l0_second), l0_info.clone()),
+            SsTableHandle::new(SsTableId::Compacted(l0_second), l0_info),
         ]);
         core.compacted = vec![
             SortedRun {
@@ -2593,7 +2593,7 @@ mod tests {
                 id: 2,
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
-                    sr_info.clone(),
+                    sr_info,
                 )],
             },
         ];

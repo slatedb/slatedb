@@ -192,9 +192,9 @@ use uuid::Uuid;
 use crate::error::SlateDBError;
 
 use crate::db_cache::DbCache;
+use crate::format::sst::BlockTransformer;
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 use crate::merge_operator::MergeOperatorType;
-use crate::sst::BlockTransformer;
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]

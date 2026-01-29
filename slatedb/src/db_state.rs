@@ -73,7 +73,7 @@ impl SsTableHandle {
     ) -> Self {
         let mut effective_range = match info.first_entry.clone() {
             Some(physical_first_entry) => {
-                BytesRange::new(Included(physical_first_entry.clone()), Unbounded)
+                BytesRange::new(Included(physical_first_entry), Unbounded)
             }
             None => {
                 unreachable!("SST always has a first entry.")
@@ -224,7 +224,7 @@ impl Debug for SsTableId {
     }
 }
 
-/// Metadata information about an SSTable. See [`crate::sst::EncodedSsTableBuilder`] for
+/// Metadata information about an SSTable. See [`crate::sst_builder::EncodedSsTableBuilder`] for
 /// more information on the format of the SSTable and its metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
 pub struct SsTableInfo {
@@ -529,7 +529,7 @@ impl DbState {
         if let Some(result) = self.closed_result.reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e.clone()),
+                Err(e) => Err(e),
             };
         }
         let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
@@ -552,7 +552,7 @@ impl DbState {
         if let Some(result) = self.closed_result.reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e.clone()),
+                Err(e) => Err(e),
             };
         }
         assert!(self.memtable.is_empty());
@@ -799,7 +799,7 @@ mod tests {
     fn create_compacted_sst_handle(first_entry: Option<Bytes>) -> SsTableHandle {
         let sst_info = create_sst_info(first_entry);
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableHandle::new(sst_id, sst_info.clone())
+        SsTableHandle::new(sst_id, sst_info)
     }
 
     fn create_sst_info(first_entry: Option<Bytes>) -> SsTableInfo {

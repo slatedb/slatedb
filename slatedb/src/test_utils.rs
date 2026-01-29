@@ -4,8 +4,8 @@ use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, KeyValueIterator};
-use crate::row_codec::SstRowCodecV0;
 use crate::tablestore::TableStore;
 use crate::types::{KeyValue, RowAttributes, RowEntry, ValueDeletable};
 use async_trait::async_trait;
@@ -25,7 +25,10 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
+use std::sync::Once;
+use std::thread;
+use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 use ulid::Ulid;
@@ -151,7 +154,7 @@ use crate::bytes_generator::OrderedBytesGenerator;
 use crate::bytes_range::BytesRange;
 use crate::db::Db;
 use crate::db_iter::DbIterator;
-use crate::sst::{EncodedSsTable, SsTableFormat};
+use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::{MergeOperator, MergeOperatorError};
 pub(crate) use assert_debug_snapshot;
 
@@ -410,23 +413,6 @@ impl CompactionSchedulerSupplier for OnDemandCompactionSchedulerSupplier {
     ) -> Box<dyn CompactionScheduler + Send + Sync> {
         Box::new(self.scheduler.clone())
     }
-}
-
-// A flag so we only initialize logging once.
-static INIT_LOGGING: Once = Once::new();
-
-/// Initialize logging for tests so we get log output. Uses `RUST_LOG` environment
-/// variable to set the log level, or defaults to `debug` if not set.
-#[ctor::ctor]
-fn init_tracing() {
-    INIT_LOGGING.call_once(|| {
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-            .with_test_writer()
-            .init();
-    });
 }
 
 /// An ObjectStore wrapper that injects a transient timeout on the first N `put_opts` calls
@@ -752,5 +738,222 @@ impl MergeOperator for StringConcatMergeOperator {
         existing_value.inspect(|v| result.extend_from_slice(v.as_ref()));
         result.extend_from_slice(value.as_ref());
         Ok(result.freeze())
+    }
+}
+
+/// Extract library name from a file path
+/// e.g., "/Users/.../slatedb/src/db.rs" -> "slatedb"
+/// e.g., "/.cargo/registry/.../parking_lot-0.12.1/src/mutex.rs" -> "parking_lot"
+/// e.g., "/rustc/.../library/std/src/sync/mutex.rs" -> "std"
+fn extract_library(path: &str) -> String {
+    // Check for .cargo/registry paths (external crates)
+    if let Some(idx) = path.find(".cargo/registry/") {
+        let after_registry = &path[idx..];
+        // Format: .cargo/registry/src/<hash>/<crate-name>-<version>/...
+        // Split: [".cargo", "registry", "src", "<hash>", "<crate-name-version>", ...]
+        if let Some(crate_start) = after_registry.split('/').nth(4) {
+            // Remove version suffix (e.g., "parking_lot-0.12.1" -> "parking_lot")
+            if let Some(dash_idx) = crate_start.rfind('-') {
+                // Check if what follows the dash looks like a version
+                let after_dash = &crate_start[dash_idx + 1..];
+                if after_dash
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+                {
+                    return crate_start[..dash_idx].to_string();
+                }
+            }
+            return crate_start.to_string();
+        }
+    }
+
+    // Check for rustc paths (std library)
+    if path.contains("/rustc/") {
+        if let Some(idx) = path.find("/library/") {
+            let after_library = &path[idx + 9..];
+            if let Some(lib_name) = after_library.split('/').next() {
+                return lib_name.to_string();
+            }
+        }
+    }
+
+    // Check for local workspace crates (look for /src/ and take the directory before it)
+    if let Some(src_idx) = path.rfind("/src/") {
+        let before_src = &path[..src_idx];
+        if let Some(last_slash) = before_src.rfind('/') {
+            return before_src[last_slash + 1..].to_string();
+        }
+    }
+
+    "-".to_string()
+}
+
+/// Format a backtrace as a table, showing all frames
+pub(crate) fn format_backtrace(bt: &backtrace::Backtrace) -> String {
+    // Collect frame info: (library, filename, line, function_name)
+    let mut frames: Vec<(String, String, String, String)> = Vec::new();
+
+    for frame in bt.frames() {
+        for symbol in frame.symbols() {
+            let name = symbol
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+
+            let (library, filename, line) =
+                if let (Some(f), Some(l)) = (symbol.filename(), symbol.lineno()) {
+                    let path_str = f.to_string_lossy();
+                    let lib = extract_library(&path_str);
+                    let file = f
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    (lib, file, l.to_string())
+                } else {
+                    ("-".to_string(), "-".to_string(), "-".to_string())
+                };
+
+            frames.push((library, filename, line, name));
+        }
+    }
+
+    if frames.is_empty() {
+        return "  (no relevant frames found - try RUST_BACKTRACE=1)\n".to_string();
+    }
+
+    // Calculate column widths
+    let lib_width = frames
+        .iter()
+        .map(|(l, _, _, _)| l.len())
+        .max()
+        .unwrap_or(0)
+        .max(7); // min width for "Library"
+    let file_width = frames
+        .iter()
+        .map(|(_, f, _, _)| f.len())
+        .max()
+        .unwrap_or(0)
+        .max(4); // min width for "File"
+    let line_width = frames
+        .iter()
+        .map(|(_, _, l, _)| l.len())
+        .max()
+        .unwrap_or(0)
+        .max(4); // min width for "Line"
+    let func_width = frames.iter().map(|(_, _, _, f)| f.len()).max().unwrap_or(0);
+
+    let mut output = String::new();
+
+    // Header: Library | File | Line | Function
+    output.push_str(&format!(
+        "  {:<lib_width$} | {:<file_width$} | {:>line_width$} | {:<func_width$}\n",
+        "Library", "File", "Line", "Function"
+    ));
+    output.push_str(&format!(
+        "  {:-<lib_width$}-+-{:-<file_width$}-+-{:->line_width$}-+-{:-<func_width$}\n",
+        "", "", "", ""
+    ));
+
+    // Rows
+    for (library, filename, line, func) in &frames {
+        output.push_str(&format!(
+            "  {:<lib_width$} | {:<file_width$} | {:>line_width$} | {:<func_width$}\n",
+            library, filename, line, func
+        ));
+    }
+
+    output
+}
+
+static INIT_LOGGING: Once = Once::new();
+static INIT_DEADLOCK_DETECTOR: Once = Once::new();
+
+/// Initialize tracing/logging for tests. Uses `RUST_LOG` environment
+/// variable to set the log level, or defaults to `debug` if not set.
+pub(crate) fn init_logging() {
+    INIT_LOGGING.call_once(|| {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_test_writer()
+            .init();
+    });
+}
+
+/// Start the deadlock detector thread that periodically checks for parking_lot deadlocks.
+pub(crate) fn init_deadlock_detector() {
+    INIT_DEADLOCK_DETECTOR.call_once(|| {
+        thread::spawn(|| loop {
+            thread::sleep(Duration::from_secs(10));
+            let deadlocks = parking_lot::deadlock::check_deadlock();
+            if deadlocks.is_empty() {
+                continue;
+            }
+
+            let separator = "=".repeat(60);
+            eprintln!("\n{separator}");
+            eprintln!("DEADLOCK DETECTED: {} deadlock(s) found", deadlocks.len());
+            eprintln!("{separator}\n");
+
+            for (i, threads) in deadlocks.iter().enumerate() {
+                eprintln!("--- Deadlock #{} ({} threads) ---\n", i + 1, threads.len());
+                for (j, t) in threads.iter().enumerate() {
+                    eprintln!("Thread {} (id: {:?}):", j + 1, t.thread_id());
+                    eprintln!("{}", format_backtrace(t.backtrace()));
+                }
+            }
+
+            eprintln!("{separator}\n");
+        });
+    });
+}
+
+/// Initialize all test infrastructure (logging and deadlock detection).
+pub(crate) fn init_test_infrastructure() {
+    init_logging();
+    init_deadlock_detector();
+}
+
+#[cfg(test)]
+mod tests {
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// Test to verify the deadlock detector is working.
+    /// This test intentionally creates a deadlock and is ignored by default.
+    /// Run with: cargo test --package slatedb test_deadlock_detector -- --ignored --nocapture
+    /// The deadlock detector should print deadlock info after ~10 seconds.
+    #[test]
+    #[ignore]
+    fn test_deadlock_detector_should_detect_deadlock() {
+        let lock_a = Arc::new(Mutex::new(()));
+        let lock_b = Arc::new(Mutex::new(()));
+
+        let lock_a_clone = lock_a.clone();
+        let lock_b_clone = lock_b.clone();
+
+        // Thread 1: acquire lock_a, then try to acquire lock_b
+        let thread1 = thread::spawn(move || {
+            let _guard_a = lock_a_clone.lock();
+            thread::sleep(Duration::from_millis(100)); // Give thread2 time to acquire lock_b
+            let _guard_b = lock_b_clone.lock(); // This will deadlock
+        });
+
+        // Thread 2: acquire lock_b, then try to acquire lock_a
+        let thread2 = thread::spawn(move || {
+            let _guard_b = lock_b.lock();
+            thread::sleep(Duration::from_millis(100)); // Give thread1 time to acquire lock_a
+            let _guard_a = lock_a.lock(); // This will deadlock
+        });
+
+        // Wait for the deadlock detector to report (it checks every 10 seconds)
+        // This test will hang indefinitely due to the deadlock - that's expected.
+        // The deadlock detector should print the deadlock info to the logs.
+        thread1.join().unwrap();
+        thread2.join().unwrap();
     }
 }

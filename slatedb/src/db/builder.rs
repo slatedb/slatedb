@@ -138,6 +138,7 @@ use crate::db_cache::{DbCache, DbCacheWrapper};
 use crate::db_state::ManifestCore;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GarbageCollector;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
@@ -148,7 +149,6 @@ use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::sst::{BlockTransformer, SsTableFormat};
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
@@ -810,7 +810,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         ));
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(
-                retrying_main_object_store.clone(),
+                retrying_main_object_store,
                 retrying_wal_object_store.clone(),
             ),
             SsTableFormat::default(), // read only SSTs can use default
@@ -967,7 +967,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(retrying_main_object_store.clone(), None),
+            ObjectStores::new(retrying_main_object_store, None),
             sst_format,
             path,
             None, // no need for cache in GC

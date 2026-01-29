@@ -735,7 +735,7 @@ mod tests {
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
-            test_cache_folder.clone(),
+            test_cache_folder,
             None,
             None,
             stats.clone(),
@@ -825,7 +825,7 @@ mod tests {
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
-            test_cache_folder.clone(),
+            test_cache_folder,
             None,
             None,
             stats.clone(),
@@ -848,7 +848,7 @@ mod tests {
         let stats_registry = StatRegistry::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
-            test_cache_folder.clone(),
+            test_cache_folder,
             None,
             None,
             stats.clone(),

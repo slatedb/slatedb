@@ -115,6 +115,7 @@ where
     handle.spawn(wrapped)
 }
 
+#[allow(dead_code)] // unused during DST
 pub(crate) async fn get_now_for_read(
     mono_clock: Arc<MonotonicClock>,
     durability_level: DurabilityLevel,
@@ -614,7 +615,7 @@ pub(crate) fn split_unwind_result(
     Option<Box<dyn std::any::Any + Send>>,
 ) {
     match unwind_result {
-        Ok(result) => (result.clone(), None),
+        Ok(result) => (result, None),
         Err(payload) => (Err(SlateDBError::BackgroundTaskPanic(name)), Some(payload)),
     }
 }
@@ -643,7 +644,7 @@ pub(crate) fn split_join_result(
     Option<Box<dyn std::any::Any + Send>>,
 ) {
     match join_result {
-        Ok(task_result) => (task_result.clone(), None),
+        Ok(task_result) => (task_result, None),
         Err(join_error) => {
             if join_error.is_cancelled() {
                 (Err(SlateDBError::BackgroundTaskCancelled(name)), None)

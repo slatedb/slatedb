@@ -24,7 +24,7 @@ use slatedb_common::clock::SystemClock;
 const PUT_ID_ATTRIBUTE: &str = "slatedbputid";
 
 /// A thin wrapper around an `ObjectStore` that retries transient errors with
-/// exponential backoff for up to 5 minutes.
+/// exponential backoff forever.
 #[derive(Debug, Clone)]
 pub(crate) struct RetryingObjectStore {
     inner: Arc<dyn ObjectStore>,
@@ -63,6 +63,7 @@ impl RetryingObjectStore {
             err,
             object_store::Error::AlreadyExists { .. }
                 | object_store::Error::Precondition { .. }
+                | object_store::Error::NotFound { .. }
                 | object_store::Error::NotImplemented
                 | object_store::Error::NotSupported { .. }
         );
@@ -87,7 +88,7 @@ impl RetryingObjectStore {
         let result = (|| async { self.inner.get_opts(location, get_opts.clone()).await })
             .retry(Self::retry_builder())
             .notify(Self::notify)
-            .when(Self::should_retry_verification)
+            .when(Self::should_retry)
             .await;
 
         match result {
@@ -105,23 +106,6 @@ impl RetryingObjectStore {
             }
             Err(_) => None,
         }
-    }
-
-    /// Like should_retry, but also excludes NotFound errors.
-    /// Used for verification calls where NotFound means the write definitely failed.
-    fn should_retry_verification(err: &object_store::Error) -> bool {
-        let retry = !matches!(
-            err,
-            object_store::Error::AlreadyExists { .. }
-                | object_store::Error::Precondition { .. }
-                | object_store::Error::NotFound { .. }
-                | object_store::Error::NotImplemented
-                | object_store::Error::NotSupported { .. }
-        );
-        if !retry {
-            debug!("not retrying verification operation [error={:?}]", err);
-        }
-        retry
     }
 
     /// Creates a new Attributes with our ULID attribute merged with existing attributes.

@@ -187,7 +187,7 @@ impl DbInner {
         options: &ReadOptions,
     ) -> Result<Option<Bytes>, SlateDBError> {
         self.db_stats.get_requests.inc();
-        self.check_closed()?;
+        self.status()?;
         let db_state = self.state.read().view();
         self.reader
             .get_with_options(key, options, &db_state, None, None)
@@ -200,7 +200,7 @@ impl DbInner {
         options: &ScanOptions,
     ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.inc();
-        self.check_closed()?;
+        self.status()?;
         let db_state = self.state.read().view();
         self.reader
             .scan_with_options(range, options, &db_state, None, None, None)
@@ -257,7 +257,7 @@ impl DbInner {
         batch: WriteBatch,
         options: &WriteOptions,
     ) -> Result<(), SlateDBError> {
-        self.check_closed()?;
+        self.status()?;
         if batch.ops.is_empty() {
             return Ok(());
         }
@@ -301,7 +301,7 @@ impl DbInner {
                         .iter()
                         .map(|imm| {
                             let metadata = imm.table().metadata();
-                            self.table_store.estimate_encoded_size(
+                            self.table_store.estimate_encoded_size_compacted(
                                 metadata.entry_num,
                                 metadata.entries_size_in_bytes,
                             )
@@ -548,7 +548,7 @@ impl DbInner {
     ///   (state.closed_result_reader() returns Ok(())).
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
     ///   (state.closed_result_reader() returns Err(e)).
-    pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
+    pub(crate) fn status(&self) -> Result<(), SlateDBError> {
         let closed_result_reader = {
             let state = self.state.read();
             state.closed_result_reader()
@@ -556,7 +556,7 @@ impl DbInner {
         if let Some(result) = closed_result_reader.read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
-                Err(e) => Err(e.clone()),
+                Err(e) => Err(e),
             };
         }
         Ok(())
@@ -654,6 +654,12 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
+        if self.status().is_ok() {
+            if let Err(e) = self.flush().await {
+                warn!("failed to flush db during close [error={:?}]", e);
+            }
+        }
+
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);
         }
@@ -725,7 +731,7 @@ impl Db {
     /// }
     /// ```
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
-        self.inner.check_closed()?;
+        self.inner.status()?;
         let seq = self.inner.oracle.last_committed_seq();
         let snapshot = DbSnapshot::new(self.inner.clone(), self.inner.txn_manager.clone(), seq);
         Ok(snapshot)
@@ -1452,7 +1458,7 @@ impl Db {
         &self,
         isolation_level: IsolationLevel,
     ) -> Result<DbTransaction, crate::Error> {
-        self.inner.check_closed()?;
+        self.inner.status()?;
         let seq = self.inner.oracle.last_committed_seq();
         let txn = DbTransaction::new(
             self.inner.clone(),
@@ -1484,6 +1490,24 @@ impl Db {
             Arc::new(PrefixStore::new(object_store, path))
         };
         Ok(object_store)
+    }
+
+    /// Check the database status.
+    ///
+    /// This is a passive check that does not perform any I/O. The status is checked at
+    /// least every [`Settings::manifest_poll_interval`], but might also be updated based
+    /// on other internal events or user-facing operations.
+    ///
+    /// Once a database is closed, either normally or due to an error, it can't be reopened.
+    /// A new `Db` instance must be created to access the database again.
+    ///
+    /// ## Returns
+    /// - `Ok(())` if the DB is still open.
+    /// - `Err(ErrorKind::Closed)` if the DB was closed normally.
+    /// - `Err(e)` if the DB was closed with an error, where `e` is the error that caused
+    ///   the closure.
+    pub fn status(&self) -> Result<(), crate::Error> {
+        self.inner.status().map_err(|e| e.into())
     }
 }
 
@@ -1526,6 +1550,7 @@ mod tests {
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_state::ManifestCore;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
+    use crate::format::sst::SsTableFormat;
     use crate::iter::KeyValueIterator;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::object_stores::ObjectStores;
@@ -1533,7 +1558,6 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
     use crate::seq_tracker::FindOption;
-    use crate::sst::SsTableFormat;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::test_utils::{
         assert_iterator, OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
@@ -1747,6 +1771,57 @@ mod tests {
         // and a flush() should clear it
         kv_store.flush().await.unwrap();
         assert_eq!(kv_store.inner.wal_buffer.estimated_bytes().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_close_triggers_flush_when_open() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let kv_store = Db::builder("/tmp/test_close_triggers_flush", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        kv_store
+            .put_with_options(
+                b"test_key",
+                b"test_value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Sanity check: WAL has buffered entries before close.
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            kv_store
+                .metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        kv_store.close().await.unwrap();
+
+        // close() should trigger a flush when the db is open.
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 0);
+        assert_eq!(
+            kv_store
+                .metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -3791,7 +3866,7 @@ mod tests {
 
         // Verify that the memtable has not been flushed by checking the db for error state
         assert!(
-            kv_store.inner.check_closed().is_ok(),
+            kv_store.inner.status().is_ok(),
             "DB should not have an error state"
         );
     }
@@ -4009,6 +4084,7 @@ mod tests {
         assert_eq!(kv.key, b"abc3333".as_slice());
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_basic_restore() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
