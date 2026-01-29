@@ -1478,23 +1478,39 @@ mod tests {
 
     #[cfg(feature = "compaction_filters")]
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_compaction_job_with_filter_drops_entries() {
+    async fn test_compaction_job_with_filter_success() {
         use crate::compaction_filter::{
             CompactionFilter, CompactionFilterDecision, CompactionFilterError,
             CompactionFilterSupplier, CompactionJobContext,
         };
 
-        /// A filter that drops entries with keys starting with "drop:".
-        struct DropPrefixFilter;
+        /// A filter that tests all decision types:
+        /// - "drop:" prefix -> Drop (remove entry)
+        /// - "modify:" prefix -> Modify (append "_modified" suffix)
+        /// - "tombstone:" prefix -> Modify to Tombstone
+        /// - other prefixes -> Keep (unchanged)
+        struct TestFilter;
 
         #[async_trait::async_trait]
-        impl CompactionFilter for DropPrefixFilter {
+        impl CompactionFilter for TestFilter {
             async fn filter(
                 &mut self,
                 entry: &RowEntry,
             ) -> Result<CompactionFilterDecision, CompactionFilterError> {
                 if entry.key.starts_with(b"drop:") {
                     Ok(CompactionFilterDecision::Drop)
+                } else if entry.key.starts_with(b"modify:") {
+                    if let Some(value) = entry.value.as_bytes() {
+                        let mut new_value = value.to_vec();
+                        new_value.extend_from_slice(b"_modified");
+                        Ok(CompactionFilterDecision::Modify(ValueDeletable::Value(
+                            Bytes::from(new_value),
+                        )))
+                    } else {
+                        Ok(CompactionFilterDecision::Keep)
+                    }
+                } else if entry.key.starts_with(b"tombstone:") {
+                    Ok(CompactionFilterDecision::Modify(ValueDeletable::Tombstone))
                 } else {
                     Ok(CompactionFilterDecision::Keep)
                 }
@@ -1505,40 +1521,58 @@ mod tests {
             }
         }
 
-        struct DropPrefixFilterSupplier;
+        struct TestFilterSupplier;
 
         #[async_trait::async_trait]
-        impl CompactionFilterSupplier for DropPrefixFilterSupplier {
+        impl CompactionFilterSupplier for TestFilterSupplier {
             async fn create_compaction_filter(
                 &self,
                 _context: &CompactionJobContext,
             ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
-                Ok(Box::new(DropPrefixFilter))
+                Ok(Box::new(TestFilter))
             }
         }
 
-        let ctx = TestContextBuilder::new("testdb_filter")
-            .with_compaction_filter_supplier(Arc::new(DropPrefixFilterSupplier))
+        let ctx = TestContextBuilder::new("testdb_filter_all_decisions")
+            .with_compaction_filter_supplier(Arc::new(TestFilterSupplier))
             .build()
             .await;
         let table_store = ctx.table_store.clone();
 
-        // Write entries - some with "drop:" prefix, some with "keep:" prefix
+        // Write entries with different prefixes
+        // Note: entries must be added in sorted key order
+        // Lexicographic order: drop: < keep: < modify: < tombstone:
         let mut sst_builder = table_store.table_builder();
         sst_builder
             .add(RowEntry::new_value(b"drop:key1", b"value1", 1))
             .await
             .unwrap();
         sst_builder
-            .add(RowEntry::new_value(b"keep:key2", b"value2", 2))
+            .add(RowEntry::new_value(b"drop:key2", b"value2", 2))
             .await
             .unwrap();
         sst_builder
-            .add(RowEntry::new_value(b"drop:key3", b"value3", 3))
+            .add(RowEntry::new_value(b"keep:key3", b"value3", 3))
             .await
             .unwrap();
         sst_builder
             .add(RowEntry::new_value(b"keep:key4", b"value4", 4))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"modify:key5", b"value5", 5))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"modify:key6", b"value6", 6))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"tombstone:key7", b"value7", 7))
+            .await
+            .unwrap();
+        sst_builder
+            .add(RowEntry::new_value(b"tombstone:key8", b"value8", 8))
             .await
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
@@ -1550,7 +1584,7 @@ mod tests {
 
         let result = ctx.run_compaction(vec![l0], true, None).await.unwrap();
 
-        // Verify the output SST only contains "keep:" entries
+        // Verify the output SST
         assert_eq!(1, result.ssts.len());
         let sst = result.ssts[0].clone();
         let mut iter = SstIterator::new(
@@ -1561,19 +1595,49 @@ mod tests {
         .unwrap();
         iter.init().await.unwrap();
 
+        // drop:key1 and drop:key2 should be DROPPED (not present)
+
+        // keep:key3 - unchanged (Keep decision)
         let next = iter.next_entry().await.unwrap().unwrap();
-        assert_eq!(next.key, Bytes::from(b"keep:key2".as_slice()));
+        assert_eq!(next.key, Bytes::from(b"keep:key3".as_slice()));
         assert_eq!(
             next.value,
-            ValueDeletable::Value(Bytes::from(b"value2".as_slice()))
+            ValueDeletable::Value(Bytes::from(b"value3".as_slice()))
         );
 
+        // keep:key4 - unchanged (Keep decision)
         let next = iter.next_entry().await.unwrap().unwrap();
         assert_eq!(next.key, Bytes::from(b"keep:key4".as_slice()));
         assert_eq!(
             next.value,
             ValueDeletable::Value(Bytes::from(b"value4".as_slice()))
         );
+
+        // modify:key5 - value modified (Modify decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"modify:key5".as_slice()));
+        assert_eq!(
+            next.value,
+            ValueDeletable::Value(Bytes::from(b"value5_modified".as_slice()))
+        );
+
+        // modify:key6 - value modified (Modify decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"modify:key6".as_slice()));
+        assert_eq!(
+            next.value,
+            ValueDeletable::Value(Bytes::from(b"value6_modified".as_slice()))
+        );
+
+        // tombstone:key7 - converted to tombstone (Modify to Tombstone decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"tombstone:key7".as_slice()));
+        assert!(next.value.is_tombstone());
+
+        // tombstone:key8 - converted to tombstone (Modify to Tombstone decision)
+        let next = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(next.key, Bytes::from(b"tombstone:key8".as_slice()));
+        assert!(next.value.is_tombstone());
 
         // No more entries
         assert!(iter.next_entry().await.unwrap().is_none());
@@ -1625,5 +1689,75 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, SlateDBError::CompactionFilterError(_)));
+    }
+
+    #[cfg(feature = "compaction_filters")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compaction_job_aborts_on_compaction_end_error() {
+        use crate::compaction_filter::{
+            CompactionFilter, CompactionFilterDecision, CompactionFilterError,
+            CompactionFilterSupplier, CompactionJobContext,
+        };
+
+        /// A filter that keeps all entries but fails on on_compaction_end.
+        struct FailOnEndFilter;
+
+        #[async_trait::async_trait]
+        impl CompactionFilter for FailOnEndFilter {
+            async fn filter(
+                &mut self,
+                _entry: &RowEntry,
+            ) -> Result<CompactionFilterDecision, CompactionFilterError> {
+                Ok(CompactionFilterDecision::Keep)
+            }
+
+            async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+                Err(CompactionFilterError::CompactionEndError(
+                    "intentional failure on compaction end".into(),
+                ))
+            }
+        }
+
+        struct FailOnEndFilterSupplier;
+
+        #[async_trait::async_trait]
+        impl CompactionFilterSupplier for FailOnEndFilterSupplier {
+            async fn create_compaction_filter(
+                &self,
+                _context: &CompactionJobContext,
+            ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
+                Ok(Box::new(FailOnEndFilter))
+            }
+        }
+
+        let ctx = TestContextBuilder::new("testdb_filter_end_fail")
+            .with_compaction_filter_supplier(Arc::new(FailOnEndFilterSupplier))
+            .build()
+            .await;
+        let table_store = ctx.table_store.clone();
+
+        // Write a simple entry
+        let mut sst_builder = table_store.table_builder();
+        sst_builder
+            .add(RowEntry::new_value(b"key1", b"value1", 1))
+            .await
+            .unwrap();
+        let encoded_sst = sst_builder.build().await.unwrap();
+        let id = SsTableId::Compacted(Ulid::new());
+        let l0 = table_store
+            .write_sst(&id, encoded_sst, false)
+            .await
+            .unwrap();
+
+        let result = ctx.run_compaction(vec![l0], true, None).await;
+
+        // The compaction should have failed due to on_compaction_end error
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, SlateDBError::CompactionFilterError(_)),
+            "Expected CompactionFilterError, got: {:?}",
+            err
+        );
     }
 }
