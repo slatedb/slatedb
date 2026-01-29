@@ -83,7 +83,7 @@ pub struct CompactionJobContext {
     pub destination: u32,
     /// Whether the destination sorted run is the last (oldest) run after compaction.
     pub is_dest_last_run: bool,
-    /// The clock tick representing the logical time the compaction occurs.
+    /// The clock tick representing the time the compaction occurs.
     /// This is used to make decisions about retention of expiring records.
     pub compaction_clock_tick: i64,
     /// Optional minimum sequence number to retain.
@@ -103,8 +103,14 @@ pub enum CompactionFilterDecision {
     ///
     /// WARNING: Dropping an entry removes it completely without leaving a tombstone.
     /// This means older versions of the same key in lower levels of the LSM tree
-    /// may become visible again ("resurrection"). Only use Drop when behavior is
+    /// may become visible again ("resurrection"). Only use Drop when this behavior is
     /// acceptable for your use case.
+    ///
+    /// NOTE: For merge operand entries (`ValueDeletable::Merge`), prefer `Drop` over
+    /// `Modify(ValueDeletable::Tombstone)`. A tombstone would delete not just the
+    /// current merge operand but also any previous merge operands for the same key.
+    /// Dropping the merge operand simply removes it from the merge chain without
+    /// affecting others.
     Drop,
     /// Replace the entry's value with a new [`ValueDeletable`].
     ///
@@ -121,7 +127,8 @@ pub enum CompactionFilterDecision {
     ///   same key in older sorted runs.
     ///
     /// - `Modify(ValueDeletable::Merge(bytes))`: Replaces the value with a merge operand.
-    ///   The `expire_ts` is preserved from the original entry.
+    ///   The key, sequence number, `create_ts`, and `expire_ts` are preserved from the
+    ///   original entry.
     Modify(ValueDeletable),
 }
 
