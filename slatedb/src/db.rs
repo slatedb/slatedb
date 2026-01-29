@@ -654,6 +654,12 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
+        if self.status().is_ok() {
+            if let Err(e) = self.flush().await {
+                warn!("failed to flush db during close [error={:?}]", e);
+            }
+        }
+
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);
         }
@@ -1765,6 +1771,57 @@ mod tests {
         // and a flush() should clear it
         kv_store.flush().await.unwrap();
         assert_eq!(kv_store.inner.wal_buffer.estimated_bytes().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_close_triggers_flush_when_open() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let kv_store = Db::builder("/tmp/test_close_triggers_flush", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        kv_store
+            .put_with_options(
+                b"test_key",
+                b"test_value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Sanity check: WAL has buffered entries before close.
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            kv_store
+                .metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        kv_store.close().await.unwrap();
+
+        // close() should trigger a flush when the db is open.
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 0);
+        assert_eq!(
+            kv_store
+                .metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            1
+        );
     }
 
     #[tokio::test]
