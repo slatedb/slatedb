@@ -358,7 +358,8 @@ struct CSdbResult slatedb_scan_with_options(struct CSdbHandle handle,
                                             const uint8_t *end_key,
                                             uintptr_t end_key_len,
                                             const struct CSdbScanOptions *scan_options,
-                                            struct CSdbIterator **iterator_ptr);
+                                            struct CSdbIterator **iterator_ptr,
+                                            const uint64_t *timeout);
 
 // # Safety
 //
