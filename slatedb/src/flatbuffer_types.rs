@@ -17,10 +17,11 @@ use crate::compactor_state::{
 use crate::db_state::{self, SsTableInfo, SsTableInfoCodec};
 use crate::db_state::{ManifestCore, SsTableHandle};
 
-#[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods, unreachable_pub)]
 #[rustfmt::skip]
-mod root_generated;
+mod root_generated {
+    include!(concat!(env!("OUT_DIR"), "/root_generated.rs"));
+}
 pub(crate) use root_generated::{
     BlockMeta, BlockMetaArgs, ManifestV1, ManifestV1Args, SsTableIndex, SsTableIndexArgs,
     SsTableInfo as FbSsTableInfo, SsTableInfoArgs,
