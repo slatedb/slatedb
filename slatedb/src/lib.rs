@@ -71,6 +71,7 @@ mod batch;
 mod batch_write;
 mod blob;
 mod block_iterator;
+mod block_iterator_v2;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;

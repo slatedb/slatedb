@@ -689,6 +689,55 @@ pub(crate) fn format_bytes_si(bytes: u64) -> String {
     format!("{:.2} {}", value, UNITS[unit_index])
 }
 
+// ============================================================================
+// Varint encoding (LEB128)
+// ============================================================================
+
+/// Encode a u32 value using LEB128 varint encoding.
+///
+/// LEB128 (Little Endian Base 128) encodes integers in 7-bit groups,
+/// using the high bit as a continuation flag. This allows small values
+/// to be encoded in fewer bytes (e.g., values < 128 use only 1 byte).
+#[allow(dead_code)]
+pub(crate) fn encode_varint(buf: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        buf.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    buf.push(value as u8);
+}
+
+/// Decode a u32 value using LEB128 varint encoding.
+///
+/// Reads bytes from the buffer, advancing the slice, until a byte
+/// without the continuation bit (high bit = 0) is found.
+#[allow(dead_code)]
+pub(crate) fn decode_varint(buf: &mut &[u8]) -> u32 {
+    let mut result = 0u32;
+    let mut shift = 0;
+    loop {
+        let byte = buf[0];
+        *buf = &buf[1..];
+        result |= ((byte & 0x7F) as u32) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    result
+}
+
+/// Calculate the encoded length of a u32 varint without actually encoding it.
+#[allow(dead_code)]
+pub(crate) fn varint_len(mut value: u32) -> usize {
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -1469,5 +1518,136 @@ mod tests {
                 panic!("expected &str, got {:?}", p);
             }
         }
+    }
+
+    // ============================================================================
+    // Varint (LEB128) encoding tests
+    // ============================================================================
+
+    #[rstest]
+    #[case(0, 1)] // 0 fits in 1 byte
+    #[case(1, 1)] // 1 fits in 1 byte
+    #[case(127, 1)] // max value for 1 byte (0x7F)
+    #[case(128, 2)] // min value requiring 2 bytes (0x80)
+    #[case(16383, 2)] // max value for 2 bytes (0x3FFF)
+    #[case(16384, 3)] // min value requiring 3 bytes (0x4000)
+    #[case(2097151, 3)] // max value for 3 bytes (0x1FFFFF)
+    #[case(2097152, 4)] // min value requiring 4 bytes (0x200000)
+    #[case(268435455, 4)] // max value for 4 bytes (0xFFFFFFF)
+    #[case(268435456, 5)] // min value requiring 5 bytes (0x10000000)
+    #[case(u32::MAX, 5)] // max u32 requires 5 bytes
+    fn should_calculate_varint_len(#[case] value: u32, #[case] expected_len: usize) {
+        // when: calculating the varint length
+        let len = super::varint_len(value);
+
+        // then: the length matches expected
+        assert_eq!(len, expected_len);
+    }
+
+    #[rstest]
+    #[case(0, vec![0x00])]
+    #[case(1, vec![0x01])]
+    #[case(127, vec![0x7F])]
+    #[case(128, vec![0x80, 0x01])]
+    #[case(255, vec![0xFF, 0x01])]
+    #[case(300, vec![0xAC, 0x02])]
+    #[case(16384, vec![0x80, 0x80, 0x01])]
+    #[case(u32::MAX, vec![0xFF, 0xFF, 0xFF, 0xFF, 0x0F])]
+    fn should_encode_varint(#[case] value: u32, #[case] expected: Vec<u8>) {
+        // given: an empty buffer
+        let mut buf = Vec::new();
+
+        // when: encoding the value
+        super::encode_varint(&mut buf, value);
+
+        // then: the encoded bytes match expected
+        assert_eq!(buf, expected);
+    }
+
+    #[rstest]
+    #[case(vec![0x00], 0)]
+    #[case(vec![0x01], 1)]
+    #[case(vec![0x7F], 127)]
+    #[case(vec![0x80, 0x01], 128)]
+    #[case(vec![0xFF, 0x01], 255)]
+    #[case(vec![0xAC, 0x02], 300)]
+    #[case(vec![0x80, 0x80, 0x01], 16384)]
+    #[case(vec![0xFF, 0xFF, 0xFF, 0xFF, 0x0F], u32::MAX)]
+    fn should_decode_varint(#[case] bytes: Vec<u8>, #[case] expected: u32) {
+        // given: a buffer with encoded varint
+        let mut buf: &[u8] = &bytes;
+
+        // when: decoding the value
+        let value = super::decode_varint(&mut buf);
+
+        // then: the decoded value matches expected and buffer is consumed
+        assert_eq!(value, expected);
+        assert!(buf.is_empty());
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(127)]
+    #[case(128)]
+    #[case(255)]
+    #[case(16383)]
+    #[case(16384)]
+    #[case(2097151)]
+    #[case(2097152)]
+    #[case(268435455)]
+    #[case(268435456)]
+    #[case(u32::MAX)]
+    fn should_roundtrip_varint(#[case] value: u32) {
+        // given: an encoded varint
+        let mut buf = Vec::new();
+        super::encode_varint(&mut buf, value);
+
+        // when: decoding it back
+        let mut slice: &[u8] = &buf;
+        let decoded = super::decode_varint(&mut slice);
+
+        // then: the value matches and encoded length is correct
+        assert_eq!(decoded, value);
+        assert!(slice.is_empty());
+        assert_eq!(buf.len(), super::varint_len(value));
+    }
+
+    #[test]
+    fn should_decode_varint_with_trailing_data() {
+        // given: a buffer with varint followed by extra data
+        let bytes = vec![0xAC, 0x02, 0xFF, 0xAB, 0xCD];
+        let mut buf: &[u8] = &bytes;
+
+        // when: decoding the varint
+        let value = super::decode_varint(&mut buf);
+
+        // then: only the varint bytes are consumed
+        assert_eq!(value, 300);
+        assert_eq!(buf, &[0xFF, 0xAB, 0xCD]);
+    }
+
+    #[test]
+    fn should_decode_multiple_varints() {
+        // given: a buffer with multiple varints
+        let mut buf = Vec::new();
+        super::encode_varint(&mut buf, 1);
+        super::encode_varint(&mut buf, 300);
+        super::encode_varint(&mut buf, 16384);
+        super::encode_varint(&mut buf, u32::MAX);
+
+        // when: decoding them sequentially
+        let mut slice: &[u8] = &buf;
+        let v1 = super::decode_varint(&mut slice);
+        let v2 = super::decode_varint(&mut slice);
+        let v3 = super::decode_varint(&mut slice);
+        let v4 = super::decode_varint(&mut slice);
+
+        // then: all values are correctly decoded
+        assert_eq!(v1, 1);
+        assert_eq!(v2, 300);
+        assert_eq!(v3, 16384);
+        assert_eq!(v4, u32::MAX);
+        assert!(slice.is_empty());
     }
 }
