@@ -1,6 +1,6 @@
 use crate::compaction_filter::{CompactionFilter, CompactionFilterDecision};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
 use crate::types::RowEntry;
 use async_trait::async_trait;
 
@@ -67,6 +67,12 @@ impl<T: KeyValueIterator> KeyValueIterator for CompactionFilterIterator<T> {
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         self.inner.seek(next_key).await
+    }
+}
+
+impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for CompactionFilterIterator<T> {
+    fn bytes_processed(&self) -> u64 {
+        self.inner.bytes_processed()
     }
 }
 

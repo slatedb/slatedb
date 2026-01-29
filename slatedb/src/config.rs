@@ -678,7 +678,6 @@ pub struct Settings {
     /// during reads and compactions to produce the final result.
     #[serde(skip)]
     pub merge_operator: Option<MergeOperatorType>,
-
 }
 
 // Implement Debug manually for DbOptions.

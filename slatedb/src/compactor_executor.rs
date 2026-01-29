@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::mem;
-use std::sync::atomic::{self, AtomicBool, AtomicU64};
+use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -18,7 +18,7 @@ use crate::compactor::CompactorMessage::CompactionJobFinished;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
@@ -161,6 +161,12 @@ impl<T: KeyValueIterator> KeyValueIterator for ResumingIterator<T> {
     }
 }
 
+impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for ResumingIterator<T> {
+    fn bytes_processed(&self) -> u64 {
+        self.iterator.bytes_processed()
+    }
+}
+
 /// Executes compaction jobs produced by the compactor.
 pub(crate) trait CompactionExecutor {
     /// Starts executing a compaction job asynchronously.
@@ -254,8 +260,7 @@ impl TokioCompactionExecutorInner {
     async fn load_iterators<'a>(
         &self,
         job_args: &'a StartCompactionJobArgs,
-        bytes_processed: &'a AtomicU64,
-    ) -> Result<ResumingIterator<Box<dyn KeyValueIterator + 'a>>, SlateDBError> {
+    ) -> Result<ResumingIterator<Box<dyn TrackedKeyValueIterator + 'a>>, SlateDBError> {
         let resume_cursor = match job_args.output_ssts.last() {
             Some(output_sst) => {
                 last_written_key_and_seq(self.table_store.clone(), output_sst).await?
@@ -290,10 +295,8 @@ impl TokioCompactionExecutorInner {
         let l0_merge_iter = MergeIterator::new(l0_iters)?.with_dedup(false);
         let sr_merge_iter = MergeIterator::new(sr_iters)?.with_dedup(false);
 
-        let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])?
-            .with_dedup(false)
-            .with_bytes_processed(bytes_processed);
-        let merge_iter: Box<dyn KeyValueIterator> =
+        let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])?.with_dedup(false);
+        let merge_iter: Box<dyn TrackedKeyValueIterator> =
             if let Some(merge_operator) = self.merge_operator.clone() {
                 Box::new(MergeOperatorIterator::new(
                     merge_operator,
@@ -332,12 +335,12 @@ impl TokioCompactionExecutorInner {
             };
             let filter = supplier.create_compaction_filter(&context).await?;
             let filter_iter = CompactionFilterIterator::new(retention_iter, filter);
-            let boxed: Box<dyn KeyValueIterator> = Box::new(filter_iter);
+            let boxed: Box<dyn TrackedKeyValueIterator> = Box::new(filter_iter);
             let resuming_iter = ResumingIterator::new(boxed, resume_cursor).await?;
             return Ok(resuming_iter);
         }
 
-        let boxed: Box<dyn KeyValueIterator> = Box::new(retention_iter);
+        let boxed: Box<dyn TrackedKeyValueIterator> = Box::new(retention_iter);
         let resuming_iter = ResumingIterator::new(boxed, resume_cursor).await?;
         Ok(resuming_iter)
     }
@@ -382,8 +385,7 @@ impl TokioCompactionExecutorInner {
         args: StartCompactionJobArgs,
     ) -> Result<SortedRun, SlateDBError> {
         debug!("executing compaction [job_args={:?}]", args);
-        let bytes_processed = AtomicU64::new(0);
-        let mut all_iter = self.load_iterators(&args, &bytes_processed).await?;
+        let mut all_iter = self.load_iterators(&args).await?;
         let mut output_ssts = args.output_ssts.clone();
         let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
@@ -399,8 +401,7 @@ impl TokioCompactionExecutorInner {
             let duration_since_last_report =
                 self.clock.now().signed_duration_since(last_progress_report);
             if duration_since_last_report > TimeDelta::seconds(1) {
-                let total_bytes =
-                    start_bytes_processed + bytes_processed.load(atomic::Ordering::Relaxed);
+                let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 self.send_compaction_progress(args.id, total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
             }
@@ -421,8 +422,7 @@ impl TokioCompactionExecutorInner {
                 self.stats.bytes_compacted.add(sst.info.filter_offset);
                 output_ssts.push(sst);
                 bytes_written = 0;
-                let total_bytes =
-                    start_bytes_processed + bytes_processed.load(atomic::Ordering::Relaxed);
+                let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 self.send_compaction_progress(args.id, total_bytes, &output_ssts);
                 last_progress_report = self.clock.now();
             }
@@ -1057,12 +1057,7 @@ mod tests {
 
         // Verify the resumed iterator yields all remaining rows, starting immediately
         // after the persisted prefix and continuing in sorted order.
-        let bytes_processed = AtomicU64::new(0);
-        let mut iter = executor
-            .inner
-            .load_iterators(&job_args, &bytes_processed)
-            .await
-            .unwrap();
+        let mut iter = executor.inner.load_iterators(&job_args).await.unwrap();
         let mut resumed_entries = Vec::new();
         while let Some(entry) = iter.next_entry().await.unwrap() {
             resumed_entries.push(entry);

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
 use crate::types::RowEntry;
 
 /// An iterator adapter that can peek at the next [`RowEntry`] without advancing.
@@ -58,6 +58,12 @@ impl<T: KeyValueIterator> KeyValueIterator for PeekingIterator<T> {
         self.peeked = None;
         self.has_peeked = false;
         self.iterator.seek(next_key).await
+    }
+}
+
+impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for PeekingIterator<T> {
+    fn bytes_processed(&self) -> u64 {
+        self.iterator.bytes_processed()
     }
 }
 

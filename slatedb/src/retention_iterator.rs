@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
 use crate::seq_tracker::{FindOption, SequenceTracker};
 use crate::types::ValueDeletable::Tombstone;
 use crate::types::{RowEntry, ValueDeletable};
@@ -250,6 +250,12 @@ impl<T: KeyValueIterator> KeyValueIterator for RetentionIterator<T> {
         self.buffer.clear();
         self.inner.seek(next_key).await?;
         Ok(())
+    }
+}
+
+impl<T: TrackedKeyValueIterator> TrackedKeyValueIterator for RetentionIterator<T> {
+    fn bytes_processed(&self) -> u64 {
+        self.inner.bytes_processed()
     }
 }
 

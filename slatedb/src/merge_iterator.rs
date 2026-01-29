@@ -1,11 +1,10 @@
 use async_trait::async_trait;
 
 use crate::error::SlateDBError;
-use crate::iter::KeyValueIterator;
+use crate::iter::{KeyValueIterator, TrackedKeyValueIterator};
 use crate::types::{RowEntry, ValueDeletable};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 struct MergeIteratorHeapEntry<'a> {
     next_kv: RowEntry,
@@ -75,11 +74,8 @@ pub(crate) struct MergeIterator<'a> {
     dedup: bool,
     /// Tracks whether the iterator has performed its heavy initialization step.
     initialized: bool,
-    /// Optional atomic counter to track bytes processed (key + value length) for progress reporting.
-    /// When provided, the iterator will update this counter as entries are consumed.
-    /// Uses AtomicU64 for Sync compatibility even though compaction runs
-    /// single-threaded because KeyValueIterator is Sync
-    bytes_processed: Option<&'a AtomicU64>,
+    /// Counter to track bytes processed (key + value length) for progress reporting.
+    bytes_processed: u64,
 }
 
 impl<'a> MergeIterator<'a> {
@@ -98,18 +94,12 @@ impl<'a> MergeIterator<'a> {
                 .collect(),
             dedup: true,
             initialized: false,
-            bytes_processed: None,
+            bytes_processed: 0,
         })
     }
 
     pub(crate) fn with_dedup(mut self, dedup: bool) -> Self {
         self.dedup = dedup;
-        self
-    }
-
-    /// Sets a counter to track bytes processed (key + value length) for progress reporting.
-    pub(crate) fn with_bytes_processed(mut self, bytes_processed: &'a AtomicU64) -> Self {
-        self.bytes_processed = Some(bytes_processed);
         self
     }
 
@@ -155,10 +145,8 @@ impl<'a> MergeIterator<'a> {
             self.current = self.iterators.pop().map(|r| r.0);
 
             // Track bytes processed for progress reporting
-            if let Some(bytes_processed) = self.bytes_processed {
-                let entry_bytes = current_kv.key.len() as u64 + current_kv.value.len() as u64;
-                bytes_processed.fetch_add(entry_bytes, AtomicOrdering::Relaxed);
-            }
+            let entry_bytes = current_kv.key.len() as u64 + current_kv.value.len() as u64;
+            self.bytes_processed += entry_bytes;
 
             return Ok(Some(current_kv));
         }
@@ -225,6 +213,12 @@ impl KeyValueIterator for MergeIterator<'_> {
 
         self.current = self.iterators.pop().map(|r| r.0);
         Ok(())
+    }
+}
+
+impl TrackedKeyValueIterator for MergeIterator<'_> {
+    fn bytes_processed(&self) -> u64 {
+        self.bytes_processed
     }
 }
 
