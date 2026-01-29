@@ -1774,6 +1774,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_close_triggers_flush_when_open() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let kv_store = Db::builder("/tmp/test_close_triggers_flush", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        kv_store
+            .put_with_options(
+                b"test_key",
+                b"test_value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Sanity check: WAL has buffered entries before close.
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            kv_store
+                .metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        kv_store.close().await.unwrap();
+
+        // close() should trigger a flush when the db is open.
+        assert_eq!(kv_store.inner.wal_buffer.buffered_wal_entries_count(), 0);
+        assert_eq!(
+            kv_store
+                .metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn test_get_with_default_ttl_and_read_uncommitted() {
         let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
