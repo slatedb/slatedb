@@ -480,13 +480,9 @@ impl WalBuffer {
 
     pub(crate) fn append(&mut self, entry: RowEntry) {
         if let Some(ts) = entry.create_ts {
-            if ts > self.last_tick {
-                self.last_tick = ts;
-            }
+            self.last_tick = ts;
         }
-        if entry.seq > self.last_seq {
-            self.last_seq = entry.seq;
-        }
+        self.last_seq = entry.seq;
         self.entries_size += entry.estimated_size();
         self.entries.push_back(entry);
     }
@@ -683,7 +679,7 @@ mod tests {
         let mut buffer = WalBuffer::new();
 
         let entry1 = make_entry("key1", "value1", 10, Some(100));
-        let entry2 = make_entry("key2", "value2", 50, Some(500));
+        let entry2 = make_entry("key2", "value2", 20, Some(200));
         let entry3 = make_entry("key3", "value3", 30, Some(300));
         let entry4 = make_entry("key4", "value4", 40, None);
 
@@ -699,8 +695,8 @@ mod tests {
 
         assert_eq!(buffer.len(), 4);
         assert_eq!(buffer.size(), size1 + size2 + size3 + size4);
-        assert_eq!(buffer.last_seq(), Some(50));
-        assert_eq!(buffer.last_tick(), 500);
+        assert_eq!(buffer.last_seq(), Some(40));
+        assert_eq!(buffer.last_tick(), 300);
     }
 
     #[tokio::test]
