@@ -90,7 +90,7 @@ impl SstRowEntryV2 {
 
     /// Calculate the encoded size of this entry including varint overhead.
     pub(crate) fn encoded_size(&self) -> usize {
-        let shared_bytes_len = varint_len(self.shared_bytes as u32);
+        let shared_bytes_len = varint_len(self.shared_bytes);
         let unshared_bytes_len = varint_len(self.key_suffix.len() as u32);
         let value_len = match &self.value {
             ValueDeletable::Value(v) | ValueDeletable::Merge(v) => v.len(),
@@ -126,7 +126,7 @@ impl SstRowCodecV2 {
     /// Encode a V2 row entry to the output buffer.
     pub(crate) fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntryV2) {
         // Encode varints
-        encode_varint(output, row.shared_bytes as u32);
+        encode_varint(output, row.shared_bytes);
         encode_varint(output, row.key_suffix.len() as u32);
 
         let value_len = match &row.value {
