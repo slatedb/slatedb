@@ -150,7 +150,7 @@ impl DbInner {
             // would violate the guarantee that batches are written atomically. We do
             // this by appending the entire entry batch in a single call to the WAL buffer,
             // which holds a write lock during the append.
-            let wal_watcher = self.wal_buffer.append(&entries)?.read().durable_watcher();
+            let wal_watcher = self.wal_buffer.append(&entries)?;
             self.wal_buffer.maybe_trigger_flush()?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.

@@ -61,10 +61,10 @@ pub(crate) struct WalBufferManager {
 }
 
 struct WalBufferManagerInner {
-    current_wal: Arc<RwLock<WalBuffer>>,
+    current_wal: WalBuffer,
     /// When the current WAL is ready to be flushed, it'll be moved to the `immutable_wals`.
     /// The flusher will try flush all the immutable wals to remote storage.
-    immutable_wals: VecDeque<(u64, Arc<RwLock<WalBuffer>>)>,
+    immutable_wals: VecDeque<(u64, Arc<WalBuffer>)>,
     /// The channel to send the flush work to the background worker.
     flush_tx: Option<mpsc::UnboundedSender<WalFlushWork>>,
     /// task executor for the background worker.
@@ -118,7 +118,7 @@ impl WalBufferManager {
         max_wal_bytes_size: usize,
         max_flush_interval: Option<Duration>,
     ) -> Self {
-        let current_wal = Arc::new(RwLock::new(WalBuffer::new()));
+        let current_wal = WalBuffer::new();
         let immutable_wals = VecDeque::new();
         let inner = WalBufferManagerInner {
             current_wal,
@@ -174,10 +174,9 @@ impl WalBufferManager {
         let flushing_wal_entries_count = guard
             .immutable_wals
             .iter()
-            .map(|(_, wal)| wal.read().len())
+            .map(|(_, wal)| wal.len())
             .sum::<usize>();
-        let current_wal_entries_count = guard.current_wal.read().len();
-        current_wal_entries_count + flushing_wal_entries_count
+        guard.current_wal.len() + flushing_wal_entries_count
     }
 
     pub(crate) fn recent_flushed_wal_id(&self) -> u64 {
@@ -188,22 +187,20 @@ impl WalBufferManager {
     #[cfg(test)] // used in compactor.rs
     pub(crate) fn is_empty(&self) -> bool {
         let inner = self.inner.read();
-        inner.current_wal.read().is_empty() && inner.immutable_wals.is_empty()
+        inner.current_wal.is_empty() && inner.immutable_wals.is_empty()
     }
 
     /// Returns the total size of all unflushed WALs in bytes.
     pub(crate) fn estimated_bytes(&self) -> Result<usize, SlateDBError> {
         let inner = self.inner.read();
-        let current_wal = inner.current_wal.read();
         let current_wal_size = self
             .table_store
-            .estimate_encoded_size_wal(current_wal.len(), current_wal.size());
+            .estimate_encoded_size_wal(inner.current_wal.len(), inner.current_wal.size());
 
         let imm_wal_size = inner
             .immutable_wals
             .iter()
             .map(|(_, wal)| {
-                let wal = wal.read();
                 self.table_store
                     .estimate_encoded_size_wal(wal.len(), wal.size())
             })
@@ -212,46 +209,42 @@ impl WalBufferManager {
         Ok(current_wal_size + imm_wal_size)
     }
 
-    /// Append row entries to the current WAL. Returns the current WAL buffer.
+    /// Append row entries to the current WAL. Returns a watcher for durability notification.
     /// TODO: validate the seq number is always increasing.
     pub(crate) fn append(
         &self,
         entries: &[RowEntry],
-    ) -> Result<Arc<RwLock<WalBuffer>>, SlateDBError> {
+    ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         // TODO: check if the wal buffer is in a fatal error state.
 
-        let inner = self.inner.write();
-        {
-            let mut current_wal = inner.current_wal.write();
-            for entry in entries {
-                current_wal.append(entry.clone());
-            }
+        let mut inner = self.inner.write();
+        for entry in entries {
+            inner.current_wal.append(entry.clone());
         }
-        Ok(inner.current_wal.clone())
+        Ok(inner.current_wal.durable_watcher())
     }
 
     /// Check if we need to flush the wal with considering max_wal_size. the checking over `max_wal_size`
     /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
-    pub(crate) fn maybe_trigger_flush(&self) -> Result<Arc<RwLock<WalBuffer>>, SlateDBError> {
+    pub(crate) fn maybe_trigger_flush(
+        &self,
+    ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, SlateDBError> {
         // check the size of the current wal
-        let (current_wal, need_flush, flush_tx) = {
+        let (durable_watcher, need_flush, flush_tx) = {
             let inner = self.inner.read();
-            let need_flush = {
-                let wal = inner.current_wal.read();
-                let current_wal_size = self
-                    .table_store
-                    .estimate_encoded_size_wal(wal.len(), wal.size());
-                trace!(
-                    "checking flush trigger [current_wal_size={}, max_wal_bytes_size={}]",
-                    format_bytes_si(current_wal_size as u64),
-                    format_bytes_si(self.max_wal_bytes_size as u64),
-                );
-                current_wal_size >= self.max_wal_bytes_size
-            };
+            let current_wal_size = self
+                .table_store
+                .estimate_encoded_size_wal(inner.current_wal.len(), inner.current_wal.size());
+            trace!(
+                "checking flush trigger [current_wal_size={}, max_wal_bytes_size={}]",
+                format_bytes_si(current_wal_size as u64),
+                format_bytes_si(self.max_wal_bytes_size as u64),
+            );
+            let need_flush = current_wal_size >= self.max_wal_bytes_size;
             (
-                inner.current_wal.clone(),
+                inner.current_wal.durable_watcher(),
                 need_flush,
                 inner.flush_tx.clone(),
             )
@@ -270,26 +263,21 @@ impl WalBufferManager {
         self.db_stats
             .wal_buffer_estimated_bytes
             .set(estimated_bytes as i64);
-        Ok(current_wal)
+        Ok(durable_watcher)
     }
 
-    /// Waits for a WAL to be flushed. If there are immutable WALs, it will
-    /// wait for the oldest immutable WAL to be flushed. Otherwise, it will
-    /// wait for the current WAL to be flushed. If both are empty, it will
-    /// still block on the current WAL to ensure that the WAL buffer is not
-    /// empty.
-    pub(crate) fn oldest_unflushed_wal(&self) -> Option<Arc<RwLock<WalBuffer>>> {
-        let (current_wal, oldest_immutable_wal) = {
-            let guard = self.inner.read();
-            let current_wal = guard.current_wal.clone();
-            let maybe_oldest_immutable_wal =
-                guard.immutable_wals.front().map(|(_, wal)| wal).cloned();
-            (current_wal, maybe_oldest_immutable_wal)
-        };
-        if let Some(oldest_immutable_wal) = oldest_immutable_wal {
-            Some(oldest_immutable_wal)
-        } else if !current_wal.read().is_empty() {
-            Some(current_wal)
+    /// Returns a watcher to await durability of the oldest unflushed WAL.
+    /// If there are immutable WALs, it returns a watcher for the oldest immutable WAL.
+    /// Otherwise, it returns a watcher for the current WAL if it's not empty.
+    /// Returns None if there are no unflushed WALs.
+    pub(crate) fn watcher_for_oldest_unflushed_wal(
+        &self,
+    ) -> Option<WatchableOnceCellReader<Result<(), SlateDBError>>> {
+        let guard = self.inner.read();
+        if let Some((_, wal)) = guard.immutable_wals.front() {
+            Some(wal.durable_watcher())
+        } else if !guard.current_wal.is_empty() {
+            Some(guard.current_wal.durable_watcher())
         } else {
             None
         }
@@ -319,7 +307,7 @@ impl WalBufferManager {
 
     /// Returns the list of immutable WALs that need to be flushed.
     /// Used by the handler to determine which WALs to write to storage.
-    fn flushing_wals(&self) -> Vec<(u64, Arc<RwLock<WalBuffer>>)> {
+    fn flushing_wals(&self) -> Vec<(u64, Arc<WalBuffer>)> {
         let inner = self.inner.read();
         let mut flushing_wals = Vec::new();
         for (wal_id, wal) in inner.immutable_wals.iter() {
@@ -353,31 +341,24 @@ impl WalBufferManager {
             {
                 let mut inner = self.inner.write();
                 inner.recent_flushed_wal_id = *wal_id;
-                if let Some(seq) = wal.read().last_seq() {
+                if let Some(seq) = wal.last_seq() {
                     inner.oracle.last_remote_persisted_seq.store_if_greater(seq);
                 }
             }
 
             // notify durable only when the flush is successful.
-            wal.read().notify_durable(result.clone());
+            wal.notify_durable(result.clone());
         }
 
         self.maybe_release_immutable_wals();
         Ok(())
     }
 
-    async fn do_flush_one_wal(
-        &self,
-        wal_id: u64,
-        wal: Arc<RwLock<WalBuffer>>,
-    ) -> Result<(), SlateDBError> {
+    async fn do_flush_one_wal(&self, wal_id: u64, wal: Arc<WalBuffer>) -> Result<(), SlateDBError> {
         self.db_stats.wal_buffer_flushes.inc();
 
         let mut sst_builder = self.table_store.wal_table_builder();
-        let (mut iter, last_tick) = {
-            let wal_guard = wal.read();
-            (wal_guard.iter(), wal_guard.last_tick())
-        };
+        let (mut iter, last_tick) = (wal.iter(), wal.last_tick());
         while let Some(entry) = iter.next() {
             sst_builder.add(entry).await?;
         }
@@ -392,18 +373,17 @@ impl WalBufferManager {
     }
 
     fn freeze_current_wal(&self) -> Result<(), SlateDBError> {
-        let is_empty = self.inner.read().current_wal.read().is_empty();
+        let is_empty = self.inner.read().current_wal.is_empty();
         if is_empty {
             return Ok(());
         }
 
         let next_wal_id = self.wal_id_incrementor.next_wal_id();
         let mut inner = self.inner.write();
-        let current_wal = std::mem::replace(
-            &mut inner.current_wal,
-            Arc::new(RwLock::new(WalBuffer::new())),
-        );
-        inner.immutable_wals.push_back((next_wal_id, current_wal));
+        let current_wal = std::mem::replace(&mut inner.current_wal, WalBuffer::new());
+        inner
+            .immutable_wals
+            .push_back((next_wal_id, Arc::new(current_wal)));
         Ok(())
     }
 
@@ -433,7 +413,6 @@ impl WalBufferManager {
         let mut releaseable_count = 0;
         for (_, wal) in inner.immutable_wals.iter() {
             if wal
-                .read()
                 .last_seq()
                 .map(|seq| seq <= last_applied_seq && seq <= last_flushed_seq)
                 .unwrap_or(false)
@@ -611,7 +590,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 
         let flushing_wals = self.wal_buffer_manager.flushing_wals();
         for (_, wal) in flushing_wals.iter() {
-            wal.read().notify_durable(Err(error.clone()));
+            wal.notify_durable(Err(error.clone()));
         }
         Ok(())
     }
@@ -931,11 +910,7 @@ mod tests {
         while wal_buffer.estimated_bytes().unwrap() < 115 * 10 {
             let entry = make_entry(&format!("key{}", seq), &format!("value{}", seq), seq, None);
             wal_buffer.append(&[entry]).unwrap();
-            let mut reader = wal_buffer
-                .maybe_trigger_flush()
-                .unwrap()
-                .read()
-                .durable_watcher();
+            let mut reader = wal_buffer.maybe_trigger_flush().unwrap();
             reader.await_value().await.unwrap();
             seq += 1;
         }
