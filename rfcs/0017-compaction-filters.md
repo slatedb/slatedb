@@ -13,7 +13,6 @@ Table of Contents:
 - [Testing](#testing)
 - [Rollout](#rollout)
 - [Alternatives](#alternatives)
-- [Open Questions](#open-questions)
 - [References](#references)
 
 Status: Accepted
