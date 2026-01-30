@@ -110,7 +110,11 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
 						<SocialIcons />
 					</div>
 					<div class="copyright-wrapper">
-						Copyright © 2025 SlateDB Authors. All rights reserved.
+            <p>
+                <img src="https://raw.githubusercontent.com/commonhaus/artwork/main/foundation/brand/svg/CF_logo_horizontal_single_default.svg" height="20"/><br />
+                Copyright © <a href="https://slatedb.io">SlateDB</a>. All rights reserved. For details on our trademarks, please visit our <a href="https://www.commonhaus.org/policies/trademark-policy/">Trademark Policy</a> and <a href="https://www.commonhaus.org/trademarks/">Trademark List</a>.<br/>
+                Trademarks of third parties are owned by their respective holders and their mention here does not suggest any endorsement or association.
+            </p>
 					</div>
 				</div>
 			</footer>
@@ -562,7 +566,7 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
 		flex-direction: column;
 		gap: 1rem;
 		align-items: center;
-		height: 100%;
+		height: calc(1.5 * var(--sl-nav-height));
 		width: 100%;
 		max-width: 100%;
 		box-sizing: border-box;
@@ -577,10 +581,13 @@ import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.sv
 	}
 
 	.copyright-wrapper {
-		font-size: 0.875rem;
+		font-size: .75rem;
 		font-family: monospace;
 		order: 2;
 		text-align: center;
+		line-height: 140%;
+		color: #999;
+		a { color: #999; }
 	}
 
 	@media (min-width: 50rem) {
