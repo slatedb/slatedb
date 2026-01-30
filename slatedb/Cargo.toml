@@ -69,6 +69,9 @@ tokio-util = { workspace = true, default-features = false, features = [
 thread_local = { workspace = true }
 url = "2.5.4"
 
+[build-dependencies]
+flatcc = "24.3.25"
+
 [dev-dependencies]
 backtrace = "0.3"
 bincode = { workspace = true }
