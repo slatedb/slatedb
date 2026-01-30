@@ -111,9 +111,10 @@ impl<B: BlockLike> AscendingState<B> {
         let mut data = &self.block.data()[offset..];
         let codec = SstRowCodecV2::new();
         let (shared_bytes, key_suffix) = codec.decode_key_only(&mut data);
+        let shared = shared_bytes as usize;
 
-        let mut full_key = BytesMut::with_capacity(shared_bytes + key_suffix.len());
-        full_key.extend_from_slice(&prev_key[..shared_bytes]);
+        let mut full_key = BytesMut::with_capacity(shared + key_suffix.len());
+        full_key.extend_from_slice(&prev_key[..shared]);
         full_key.extend_from_slice(&key_suffix);
         full_key.freeze()
     }

@@ -81,6 +81,10 @@ pub(crate) struct BlockBuilderV2 {
     block_size: usize,
     restart_interval: usize,
     counter: usize,
+    // NOTE: BlockBuilderV1 needs the first key to compute the prefix
+    // but BlockBuilderV2 needs the most recent key to compute the shared
+    // prefix. If you're comparing the two this field is only used internally
+    // so it does not affect the "Block API" at all
     last_key: Bytes,
 }
 
@@ -122,9 +126,9 @@ impl BlockBuilderV2 {
         let shared_bytes = if self.is_restart_point() {
             0
         } else {
-            compute_prefix(&self.last_key, &entry.key)
+            compute_prefix(&self.last_key, &entry.key) as u32
         };
-        let key_suffix = &entry.key[shared_bytes..];
+        let key_suffix = &entry.key[shared_bytes as usize..];
 
         let temp_entry = SstRowEntryV2::new(
             shared_bytes,
@@ -178,10 +182,10 @@ impl BlockBuilderV2 {
             self.restarts.push(self.data.len() as u16);
             0 // Full key at restart point
         } else {
-            compute_prefix(&self.last_key, &entry.key)
+            compute_prefix(&self.last_key, &entry.key) as u32
         };
 
-        let key_suffix = Bytes::copy_from_slice(&entry.key[shared_bytes..]);
+        let key_suffix = Bytes::copy_from_slice(&entry.key[shared_bytes as usize..]);
 
         let sst_row = SstRowEntryV2::new(
             shared_bytes,
@@ -601,7 +605,7 @@ mod tests {
 
         // Second entry should have large shared_bytes (the 1MB prefix)
         let second_entry = codec.decode(&mut data).expect("decode failed");
-        assert_eq!(second_entry.shared_bytes, prefix_size);
+        assert_eq!(second_entry.shared_bytes, prefix_size as u32);
         assert_eq!(second_entry.key_suffix.len(), suffix_size);
     }
 }

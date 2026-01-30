@@ -36,7 +36,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 #[derive(Debug, Clone)]
 pub(crate) struct SstRowEntryV2 {
     /// Bytes shared with previous key (0 at restart points)
-    pub shared_bytes: usize,
+    pub shared_bytes: u32,
     /// Unshared portion of the key (the key suffix/delta)
     pub key_suffix: Bytes,
     pub seq: u64,
@@ -47,7 +47,7 @@ pub(crate) struct SstRowEntryV2 {
 
 impl SstRowEntryV2 {
     pub(crate) fn new(
-        shared_bytes: usize,
+        shared_bytes: u32,
         key_suffix: Bytes,
         seq: u64,
         value: ValueDeletable,
@@ -81,8 +81,9 @@ impl SstRowEntryV2 {
 
     /// Restore the full key given the previous key.
     pub(crate) fn restore_full_key(&self, previous_key: &[u8]) -> Bytes {
-        let mut full_key = BytesMut::with_capacity(self.shared_bytes + self.key_suffix.len());
-        full_key.extend_from_slice(&previous_key[..self.shared_bytes]);
+        let shared = self.shared_bytes as usize;
+        let mut full_key = BytesMut::with_capacity(shared + self.key_suffix.len());
+        full_key.extend_from_slice(&previous_key[..shared]);
         full_key.extend_from_slice(&self.key_suffix);
         full_key.freeze()
     }
@@ -169,7 +170,7 @@ impl SstRowCodecV2 {
 
     /// Decode a V2 row entry from the data buffer.
     pub(crate) fn decode(&self, data: &mut &[u8]) -> Result<SstRowEntryV2, SlateDBError> {
-        let shared_bytes = decode_varint(data) as usize;
+        let shared_bytes = decode_varint(data);
         let unshared_bytes = decode_varint(data) as usize;
         let value_len = decode_varint(data) as usize;
 
@@ -223,8 +224,8 @@ impl SstRowCodecV2 {
 
     /// Decode only the key portion for seek optimization.
     /// Returns (shared_bytes, key_suffix).
-    pub(crate) fn decode_key_only(&self, data: &mut &[u8]) -> (usize, Bytes) {
-        let shared_bytes = decode_varint(data) as usize;
+    pub(crate) fn decode_key_only(&self, data: &mut &[u8]) -> (u32, Bytes) {
+        let shared_bytes = decode_varint(data);
         let unshared_bytes = decode_varint(data) as usize;
         let _value_len = decode_varint(data);
 
@@ -255,6 +256,7 @@ impl SstRowCodecV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     /// Helper to create ValueDeletable from a tag and optional data
@@ -277,7 +279,7 @@ mod tests {
     #[case("3-byte varints", 20000, vec![b'k'; 20000], 1, "value", Some(vec![b'v'; 20000]), None, None)]
     fn should_encode_decode_round_trip(
         #[case] _name: &str,
-        #[case] shared_bytes: usize,
+        #[case] shared_bytes: u32,
         #[case] key_suffix: Vec<u8>,
         #[case] seq: u64,
         #[case] value_tag: &str,
@@ -323,7 +325,7 @@ mod tests {
     #[case("large key suffix", 0, vec![b'k'; 1000], "value", Some(b"v".to_vec()))]
     fn should_decode_key_only(
         #[case] _name: &str,
-        #[case] shared_bytes: usize,
+        #[case] shared_bytes: u32,
         #[case] key_suffix: Vec<u8>,
         #[case] value_tag: &str,
         #[case] value_data: Option<Vec<u8>>,
@@ -450,5 +452,62 @@ mod tests {
         let mut buf = Vec::new();
         codec.encode(&mut buf, &entry);
         assert_eq!(size, buf.len());
+    }
+
+    /// Strategy to generate arbitrary ValueDeletable
+    fn arb_value_deletable() -> impl Strategy<Value = ValueDeletable> {
+        prop_oneof![
+            prop::collection::vec(any::<u8>(), 0..1024)
+                .prop_map(|v| ValueDeletable::Value(Bytes::from(v))),
+            prop::collection::vec(any::<u8>(), 0..1024)
+                .prop_map(|v| ValueDeletable::Merge(Bytes::from(v))),
+            Just(ValueDeletable::Tombstone),
+        ]
+    }
+
+    /// Strategy to generate arbitrary optional timestamps
+    fn arb_optional_timestamp() -> impl Strategy<Value = Option<i64>> {
+        prop_oneof![Just(None), any::<i64>().prop_map(Some),]
+    }
+
+    proptest! {
+        #[test]
+        fn should_encode_decode_round_trip_proptest(
+            shared_bytes in any::<u32>(),
+            key_suffix in prop::collection::vec(any::<u8>(), 0..1024),
+            seq in any::<u64>(),
+            value in arb_value_deletable(),
+            create_ts in arb_optional_timestamp(),
+            expire_ts in arb_optional_timestamp(),
+        ) {
+            // given: an arbitrary row entry
+            let entry = SstRowEntryV2::new(
+                shared_bytes,
+                Bytes::from(key_suffix.clone()),
+                seq,
+                value.clone(),
+                create_ts,
+                expire_ts,
+            );
+
+            let codec = SstRowCodecV2::new();
+            let mut buf = Vec::new();
+
+            // when: encoding and decoding
+            codec.encode(&mut buf, &entry);
+            let mut slice = buf.as_slice();
+            let decoded = codec.decode(&mut slice).expect("decode failed");
+
+            // then: all fields match
+            prop_assert_eq!(decoded.shared_bytes, shared_bytes);
+            prop_assert_eq!(decoded.key_suffix.as_ref(), key_suffix.as_slice());
+            prop_assert_eq!(decoded.seq, seq);
+            prop_assert_eq!(decoded.value, value);
+            prop_assert_eq!(decoded.create_ts, create_ts);
+            prop_assert_eq!(decoded.expire_ts, expire_ts);
+
+            // and: encoded_size matches actual size
+            prop_assert_eq!(entry.encoded_size(), buf.len());
+        }
     }
 }
