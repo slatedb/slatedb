@@ -295,7 +295,7 @@ Space, read, and write amplification:
 
 ### Observability
 
-- non that I can think of
+- None that I can think of
 
 ### Compatibility
 
