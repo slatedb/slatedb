@@ -200,7 +200,7 @@ the partially overlapping SST if higher accuracy is needed. Without uniform key 
 
 Use `raw_key_size` + `raw_val_size` to get a more accurate uncompressed estimate in workstream 1. Before the SST estimates were purely compressed estimates?
 
-Open Question(s): How to best deal with compressed vs uncompressed in this case? Another option for for `SizeApproximateOptions`? If everything should be using uncompressed
+Open Question(s): How to best deal with compressed vs uncompressed in this case? Another option for `SizeApproximateOptions`? If everything should be using uncompressed
 then one needs to also add `raw_key_size` and `raw_value_size` to `BlockMeta` if the error margin should remain accurate once we do binary search over block indices.
 
 
