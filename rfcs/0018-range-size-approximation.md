@@ -12,7 +12,7 @@ Table of Contents:
    * [API](#api)
    * [Configuration Options for approximate size](#configuration-options-for-approximate-size)
    * [Implementation Phases](#implementation-phases)
-      + [Workstream 1 - `get_approximate_size`](#workstream-1-get_approximate_size)
+      + [Workstream 1 - `estimate_size_with_options`](#workstream-1-estimate_size_with_options)
          - [Phase 1](#phase-1)
          - [Phase 2 - Configurable Options](#phase-2-configurable-options)
          - [Phase 3: Index-Block-Based Refinement](#phase-3-index-block-based-refinement)
@@ -52,7 +52,7 @@ Authors:
 The RFC proposes adding two methods to the `Db` API and adding a stats block to the SST footer to better support these methods.
 
 The two methods added to `Db` API will be:
-- `get_approximate_size(range)` - a method to get a size estimation (compressed or uncompressed) for a given range
+- `estimate_size_with_options(range, options)` - a method to get a size estimation (compressed or uncompressed) for a given range
 - `estimate_key_count(range)` - a method to get a estimate of the key count for a given range
 
 The stats block in the SST footer will contain:
@@ -72,7 +72,7 @@ Users want to understand data distribution and storage usage for specific key ra
 - **Data modeling**: Understanding how data is distributed across the key space
 
 Currently there is no better way then to scan the whole range to get an estimate or approximation of the data size.
-The two methods serve slightly different purposes. `get_approximate_size` is about data size (compressed or uncompressed) and does not say much about key distribution. `estimate_key_count` gives a rough estimate of number of keys in a range. Together they can be used to get an average key size for a range.
+The two methods serve slightly different purposes. `estimate_size_with_options` is about data size (compressed or uncompressed) and does not say much about key distribution. `estimate_key_count` gives a rough estimate of number of keys in a range. Together they can be used to get an average key size for a range.
 
 ## Goals
 
@@ -92,8 +92,8 @@ The two methods serve slightly different purposes. `get_approximate_size` is abo
 The following APIs will be added to `Db`:
 
 ```rust
-/// Get approximate size with configuration options.
-pub async fn get_approximate_size_with_options<K, T>(
+/// Estimate size with configuration options.
+pub async fn estimate_size_with_options<K, T>(
     &self,
     range: T,
     options: &SizeApproximationOptions,
@@ -114,6 +114,12 @@ where
     K: AsRef<[u8]> + Send,
     T: RangeBounds<K> + Send,
 ```
+
+These approximation functions will be exposed in the following locations:
+
+- **`DbReader`**: For programmatic access in applications
+- **`admin.rs`**: For operational tooling (Admin instantiates a reader to call the actual approximation functions)
+- **`slatedb-cli`**: For command-line operational use cases
 
 ### Configuration Options for approximate size
 
@@ -137,21 +143,23 @@ pub struct SizeApproximationOptions {
 ### Implementation Phases
 
 There are essentially two work streams:
-- `get_approximate_size` without stats footer changes (Workstream 1)
-- stats footer changes + `estimate_key_count` + adding the stats for usage in `get_approximate_size` (Workstream 2)
+- `estimate_size_with_options` without stats footer changes (Workstream 1)
+- stats footer changes + `estimate_key_count` + adding the stats for usage in `estimate_size_with_options` (Workstream 2)
 
-#### Workstream 1 - `get_approximate_size`
+#### Workstream 1 - `estimate_size_with_options`
 
-This almost mirrors what RocksDB does for `get_approximate_size`.
+This almost mirrors what RocksDB does for `estimate_size_with_options`.
 
 ##### Phase 1
 
-In the initial implementation, `get_approximate_size` will:
+In the initial implementation, `estimate_size_with_options` will:
 
 1. Iterate through all SSTs (L0 and compacted ones) and identify those overlapping the requested range
 2. Sum the sizes of all overlapping SSTs using `tables_covering_range` + `estimate_size` for compacted SSTs and simply `intersects_range` + `estimate_size` for L0s.
 
 This requires no additional I/O and used in-memory metadata only. It might be a very crude estimate and becomes worse for small ranges.
+
+Note: There is previous work in `estimate_bytes_before_key` (in `utils.rs`) that does something similar for estimating bytes before a key across sorted runs.
 
 
 ##### Phase 2 - Configurable Options
@@ -185,16 +193,18 @@ For consistency these could all become `u64`, as the space saved by the former o
 
 This requires a bit of care as the storage format changes, i.e. the .fbs gets updated.
 
-TBD: Should these changes somehow be backwards compatible?
+For backwards compatibility, the stats block goes at the end of the footer and is optional.
+When estimating, old SSTs are either completely ignored or a best effort with the available
+information is made.
 
 ##### Phase 2
 
 Add `estimate_key_count()` to SST and `estimate_key_count(range)` to `Db`. Use the formula `num_puts + num_merge_ops - num_deletes` to estimate the key count in SST files.
 Here we also use overlapping SST files as crude estimate.
 
-Question: Can this be made more accurate similar to workstream 1 by trading IO for accuracy? To make this work one would need the three `num` stats also at block metadata level (`BlockMeta`)
-another 24 bytes per block. Another option is to use average key size for the range and extrapolate from the first overlapping block a size for
-the partially overlapping SST if higher accuracy is needed. Without uniform key distribution this estimate might be quite wrong.
+Question: Can this be made more accurate similar to workstream 1 by trading IO for accuracy?
+We opted to not include the `num` stats per block as that would be quite the overhead. If higher
+accuracy is needed one can try to extrapolate a better estimate from average key/value size.
 
 ##### Phase 3
 
@@ -266,7 +276,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 Ignoring the cost of the potential memtable scans in the following as they seem negligible.
 
-`get_approximate_size` without stats block changes:
+`estimate_size_with_options` without stats block changes:
 - Phase 1-2: Only reads in-memory SSTableInfo.
 - Phase 3: ~300Kb - 500kb I/O for reading index blocks if refinement kicks in
 
@@ -285,7 +295,7 @@ Latency:
   - As the `error_margin` goes down and the range becomes larger the average latency will go up.
 
 Object store requests:
-- `get_approximate_size` - ~300-500kb per partially overlapping SST and the refinement via `error_margin` kicks in. I think the cost per query are negligible.
+- `estimate_size_with_options` - ~300-500kb per partially overlapping SST and the refinement via `error_margin` kicks in. I think the cost per query are negligible.
 - `estimate_key_count` - currently proposal only uses stats from footer, so no additional cost.
 
 Space, read, and write amplification:
@@ -295,7 +305,7 @@ Space, read, and write amplification:
 
 ### Observability
 
-- None that I can think of
+Users might be interested in exposing these size and count estimates for observability purposes. However, we will not modify `stats.rs` for now. Users can call the approximation methods directly and expose them in their own metrics.
 
 ### Compatibility
 
@@ -345,9 +355,10 @@ data.
 
 - How to best expose compressed and uncompressed data size estimation?
 - How to deal with mixing compressed and uncompressed estimates nicely?
-- How to best approach the unification of the two work streams?
-- How accurate should the API be? For `get_approximate_size` and `estimate_key_count`. Do we just accept that for certain cases even with error_margin we might be off?
+- How accurate should the API be? For `estimate_size_with_options` and `estimate_key_count`. Do we just except that for certain cases even with error_margin we might be off?
+  Yes we don't guarantee the `error_margin`. All the functions are best effort.
 - What should be the recommended default `error_margin` value for users wanting "balanced" accuracy?
+  `error_margin` is None b default, so no I/0 happens.
 
 ## References
 
@@ -357,3 +368,10 @@ data.
 - [RocksDB BlockBasedTable Format](https://github.com/facebook/rocksdb/wiki/Rocksdb-BlockBasedTable-Format)
 
 ## Updates
+
+- **2026-01-30**: Renamed `get_approximate_size_with_options` to `estimate_size_with_options` for consistency with `estimate_key_count` and to avoid autocomplete collision with `get_` methods (PR #1220 review feedback)
+- **2026-01-30**: Added note about previous work in `estimate_bytes_before_key` function that does similar metadata-only estimation
+- **2026-01-30**: Added paragraph about backwards compatibility for stats block implementation
+- **2026-01-30**: Clarified that per-block statistics (24 bytes per block) will not be added; using average extrapolation approach instead to keep block format simple (PR #1220 review feedback)
+- **2026-01-30**: Updated observability section to clarify that `stats.rs` will not be modified; users can expose metrics themselves (PR #1220 review feedback)
+- **2026-01-30**: Added section specifying that approximation functions will be exposed in `DbReader`, `admin.rs`, and `slatedb-cli` (PR #1220 review feedback)
