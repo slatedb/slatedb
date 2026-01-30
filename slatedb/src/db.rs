@@ -1545,7 +1545,7 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::{
         CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-        ObjectStoreCacheOptions, Settings, Ttl,
+        ObjectStoreCacheOptions, PutOptions, Settings, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_state::ManifestCore;
@@ -4084,14 +4084,14 @@ mod tests {
         assert_eq!(kv.key, b"abc3333".as_slice());
     }
 
-    #[ignore]
     #[tokio::test]
     async fn test_basic_restore() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let mut next_wal_id = 1;
         let kv_store = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 128, None))
+            // with l0_sst_size_bytes = 600 all large puts should be flushed in one L0 SST
+            .with_settings(test_db_options(0, 600, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
@@ -4099,17 +4099,34 @@ mod tests {
         // increment wal id for the empty wal
         next_wal_id += 1;
 
+        // do all flushes manually
+        let write_opts = WriteOptions {
+            await_durable: false,
+        };
+
         // do a few writes that will result in l0 flushes
         let l0_count: u64 = 3;
         for i in 0..l0_count {
             kv_store
-                .put(&[b'a' + i as u8; 16], &[b'b' + i as u8; 48])
+                .put_with_options(
+                    &[b'a' + i as u8; 16],
+                    &[b'b' + i as u8; 48],
+                    &PutOptions::default(),
+                    &write_opts,
+                )
                 .await
                 .unwrap();
+            kv_store.flush().await.unwrap();
             kv_store
-                .put(&[b'j' + i as u8; 16], &[b'k' + i as u8; 48])
+                .put_with_options(
+                    &[b'j' + i as u8; 16],
+                    &[b'k' + i as u8; 48],
+                    &PutOptions::default(),
+                    &write_opts,
+                )
                 .await
                 .unwrap();
+            kv_store.flush().await.unwrap();
             next_wal_id += 2;
         }
 
@@ -4117,7 +4134,12 @@ mod tests {
         let sst_count: u64 = 5;
         for i in 0..sst_count {
             kv_store
-                .put(&i.to_be_bytes(), &i.to_be_bytes())
+                .put_with_options(
+                    &i.to_be_bytes(),
+                    &i.to_be_bytes(),
+                    &PutOptions::default(),
+                    &write_opts,
+                )
                 .await
                 .unwrap();
             kv_store.flush().await.unwrap();
