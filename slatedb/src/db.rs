@@ -4090,7 +4090,8 @@ mod tests {
         let path = "/tmp/test_kv_store";
         let mut next_wal_id = 1;
         let kv_store = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 512, None))
+            // with l0_sst_size_bytes = 600 all large puts should be flushed in one L0 SST
+            .with_settings(test_db_options(0, 600, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
@@ -4149,7 +4150,7 @@ mod tests {
 
         // recover and validate that sst files are loaded on recovery.
         let kv_store_restored = Db::builder(path, object_store.clone())
-            .with_settings(test_db_options(0, 512, None))
+            .with_settings(test_db_options(0, 128, None))
             .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
