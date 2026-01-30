@@ -183,7 +183,7 @@ The first piece of work would simply add a stats block with the following fields
 
 For consistency these could all become `u64`, as the space saved by the former ones is quite negligible.
 
-This requires a bit of care as the storage format changes, i.e. the .fsb gets updated.
+This requires a bit of care as the storage format changes, i.e. the .fbs gets updated.
 
 TBD: Should these changes somehow be backwards compatible?
 
