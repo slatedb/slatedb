@@ -163,7 +163,7 @@ more expensive operations for memtables (there are in memory anyway). This will 
 
 Implement the `error_margin` logic for improved accuracy. Here we would be more accurate and do more IO if needed.
 Some SST will be fully overlapping the range, so we only look at their SST metadata (take the full size). Let `partial_sst_size` be the total size of all partially overlapping SST files.
-If `partial_sst_size / total_estimate <= error_margin` we skip further refinement and return what he calculated so far. If the condition doesn't hold we refine the estimate by looking at index block data.
+If `partial_sst_size / total_estimate <= error_margin` we skip further refinement and return what we calculated so far. If the condition doesn't hold we refine the estimate by looking at index block data.
 We binary search the index block where the first key overlaps and take the accumulated size to the left or right (depending on whether we are calculating upper bound or lower bound).
 We are trading IO for accuracy. If this new estimate still below the error margin one could potentially bring in the raw data block where the boundary lies and do full
 scan (or binary search) in that data block, thereby trading even more I/O for accuracy.
