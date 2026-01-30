@@ -8,7 +8,11 @@ import SocialIcons from './SocialIcons.astro';
             <SocialIcons />
         </div>
         <div class="copyright-wrapper sl-flex">
-            Copyright © 2025 SlateDB Authors. All rights reserved.
+            <p>
+                <img src="https://raw.githubusercontent.com/commonhaus/artwork/main/foundation/brand/svg/CF_logo_horizontal_single_default.svg" height="20"/><br />
+                Copyright © <a href="https://slatedb.io">SlateDB</a>. All rights reserved. For details on our trademarks, please visit our <a href="https://www.commonhaus.org/policies/trademark-policy/">Trademark Policy</a> and <a href="https://www.commonhaus.org/trademarks/">Trademark List</a>.<br/>
+                Trademarks of third parties are owned by their respective holders and their mention here does not suggest any endorsement or association.
+            </p>
         </div>
     </div>
 </div>
@@ -18,7 +22,7 @@ import SocialIcons from './SocialIcons.astro';
     .footer {
 		z-index: var(--sl-z-index-navbar);
 		width: 100%;
-		height: var(--sl-nav-height);
+		height: calc(1.5 * var(--sl-nav-height));
 		border-top: 1px solid var(--sl-color-hairline-shade);
 		padding: var(--sl-nav-pad-y) var(--sl-nav-pad-x);
 		padding-inline-end: var(--sl-nav-pad-x);
@@ -43,10 +47,13 @@ import SocialIcons from './SocialIcons.astro';
 	}
 
     .copyright-wrapper {
-        font-size: clamp(var(--sl-text-xs),calc(0.5rem + 1vw),var(--sl-text-xs));
+        font-size: .75rem;
 		font-family: monospace;
 		order: 2;
 		text-align: center;
+		line-height: 140%;
+		color: #999;
+		a { color: #999; }
 	}
 
 	@media (min-width: 50rem) {
