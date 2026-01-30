@@ -346,7 +346,7 @@ data.
 - How to best expose compressed and uncompressed data size estimation?
 - How to deal with mixing compressed and uncompressed estimates nicely?
 - How to best approach the unification of the two work streams?
-- How accurate should the API be? For `get_approximate_size` and `estimate_key_count`. Do we just except that for certain cases even with error_margin we might be off?
+- How accurate should the API be? For `get_approximate_size` and `estimate_key_count`. Do we just accept that for certain cases even with error_margin we might be off?
 - What should be the recommended default `error_margin` value for users wanting "balanced" accuracy?
 
 ## References
