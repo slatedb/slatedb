@@ -4,7 +4,7 @@ Go bindings for [SlateDB](https://slatedb.io) - a cloud-native embedded key-valu
 
 ## Overview
 
-This package provides Go language bindings for SlateDB through a Foreign Function Interface (FFI) layer.
+This package provides Go language bindings for SlateDB through the C FFI layer in `slatedb-c`.
 
 ## Prerequisites
 
@@ -17,33 +17,20 @@ This package provides Go language bindings for SlateDB through a Foreign Functio
 ```
 slatedb-go/
 ├── README.md           # This file
-├── Cargo.toml          # Rust crate configuration  
-├── cbindgen.toml       # C header generation config
-├── build.rs            # Build script for header generation
-├── src/
-│   ├── lib.rs          # Module coordination and re-exports
-│   ├── batch.rs        # WriteBatch FFI functions
-│   ├── config.rs       # helpers to convert types
-│   ├── db.rs           # Main database FFI functions
-│   ├── db_reader.rs    # DbReader FFI implementation
-│   ├── error.rs        # Error handling and conversion
-│   ├── iterator.rs     # Scan and iterator FFI functions
-│   ├── memory.rs       # Memory management utilities
-│   ├── object_store.rs # Object store creation
-│   └── types.rs        # FFI type definitions
-├── go/
-│   ├── go.mod          # Go module
-│   ├── config.go       # Configuration structs and options
-│   ├── db.go           # Main database operations
-│   ├── db_reader.go    # Read-only database access
-│   ├── iterator.go     # Iterator methods (Next, Seek, Close)
-│   ├── batch.go        # WriteBatch operations
-│   ├── slatedb.h       # Generated C header (auto-generated)
-│   ├── db_test.go      # Database operation tests
-│   ├── batch_test.go   # WriteBatch operation tests
-│   ├── iterator_test.go # Iterator method tests
-│   └── suite_test.go   # Test suite setup
+└── go/
+    ├── go.mod          # Go module
+    ├── config.go       # Configuration structs and options
+    ├── db.go           # Main database operations
+    ├── db_reader.go    # Read-only database access
+    ├── iterator.go     # Iterator methods (Next, Seek, Close)
+    ├── batch.go        # WriteBatch operations
+    ├── db_test.go      # Database operation tests
+    ├── batch_test.go   # WriteBatch operation tests
+    ├── iterator_test.go # Iterator method tests
+    └── suite_test.go   # Test suite setup
 ```
+
+The C FFI layer and generated header live in `slatedb-c/` (see that package for details).
 
 ## Building
 
@@ -52,7 +39,7 @@ slatedb-go/
 ```bash
 # From the slatedb root directory
 cd slatedb  # The main slatedb directory
-cargo build --release -p slatedb-go
+cargo build --release -p slatedb-c
 ```
 
 ### 2. Build Go Bindings
@@ -73,7 +60,7 @@ go test -v
 
 ### 3. Runtime Library Path
 
-For running programs that use SlateDB:
+For running programs that use SlateDB (so the dynamic linker can find `libslatedb_c`):
 
 ```bash
 # From the slatedb root directory

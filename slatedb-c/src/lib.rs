@@ -24,7 +24,7 @@ use std::sync::Once;
 
 static INIT_LOGGER: Once = Once::new();
 
-/// Initialize logging for SlateDB Go bindings
+/// Initialize logging for SlateDB C bindings
 /// This should be called once before using any other SlateDB functions
 ///
 /// # Safety
