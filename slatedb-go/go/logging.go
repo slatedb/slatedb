@@ -1,7 +1,6 @@
 package slatedb
 
 /*
-#cgo LDFLAGS: -lslatedb_go
 #include "slatedb.h"
 #include <stdlib.h>
 */
