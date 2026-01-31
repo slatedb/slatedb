@@ -1907,6 +1907,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_close_failed_state_does_not_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder("/tmp/test_close_failed_state_no_flush", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        db.put_with_options(
+            b"test_key",
+            b"test_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Sanity check: WAL has buffered entries before close.
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        // Simulate a failed state (e.g. fenced).
+        db.inner
+            .state
+            .write()
+            .closed_result()
+            .write(Err(crate::error::SlateDBError::Fenced));
+
+        // close() should succeed but not flush when failed.
+        db.close().await.unwrap();
+
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+        let status_err = db.status().unwrap_err();
+        assert_eq!(
+            status_err.kind(),
+            crate::ErrorKind::Closed(CloseReason::Fenced)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clean_close_flushes_pending_wal() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db_options_no_flush_interval = {
+            let mut db_options = test_db_options(0, 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder("/tmp/test_clean_close_flushes_pending_wal", object_store)
+            .with_settings(db_options_no_flush_interval)
+            .build()
+            .await
+            .unwrap();
+
+        db.put_with_options(
+            b"test_key",
+            b"test_value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 1);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            0
+        );
+
+        db.close().await.unwrap();
+
+        assert_eq!(db.inner.wal_buffer.buffered_wal_entries_count(), 0);
+        assert_eq!(
+            db.metrics()
+                .lookup(crate::db_stats::WAL_BUFFER_FLUSHES)
+                .unwrap()
+                .get(),
+            1
+        );
+        let status_err = db.status().unwrap_err();
+        assert_eq!(
+            status_err.kind(),
+            crate::ErrorKind::Closed(CloseReason::Clean)
+        );
+    }
+
+    #[tokio::test]
     async fn test_get_with_default_ttl_and_read_uncommitted() {
         let clock = Arc::new(MockSystemClock::new());
         let ttl = 100;
